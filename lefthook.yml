@@ -1,0 +1,23 @@
+# Three-tier gate ladder: hooks fire at the cheapest stage that still catches
+# the problem. CI re-runs all tiers whole-tree — local hooks are fast feedback,
+# CI is the actual gate. Do not bypass.
+
+pre-commit:
+  commands:
+    format:
+      glob: "*.{go,bzl,bazel,swift}"
+      run: bazel run //tools/format -- {staged_files}
+      stage_fixed: true
+
+commit-msg:
+  commands:
+    commitlint:
+      run: npx --no-install commitlint --edit {1}
+
+pre-push:
+  commands:
+    build:
+      run: bazel build //...
+    test:
+      # Exit 4 = no test targets found; tolerated until the first test lands.
+      run: sh -c 'bazel test //... || test $? -eq 4'

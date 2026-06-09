@@ -8,6 +8,17 @@ bazel_dep(name = "aspect_rules_lint", version = "2.0.0")
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.2")
 
 #########################
+# Swift / Apple (RunnyBar app; daemon entitlement signing)
+# Toolchains resolve only on macOS hosts; Linux builds of Go targets are unaffected.
+bazel_dep(name = "apple_support", version = "2.6.1")
+bazel_dep(name = "rules_swift", version = "3.6.1")
+bazel_dep(name = "rules_apple", version = "4.5.3")
+
+#########################
+# Protobuf (runny.v1 contract, generated in-graph)
+bazel_dep(name = "protobuf", version = "35.0")
+
+#########################
 # Go
 bazel_dep(name = "rules_go", version = "0.61.0")
 bazel_dep(name = "gazelle", version = "0.51.0")

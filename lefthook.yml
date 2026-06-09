@@ -2,22 +2,25 @@
 # the problem. CI re-runs all tiers whole-tree — local hooks are fast feedback,
 # CI is the actual gate. Do not bypass.
 
+# Tools are invoked through `mise x` so hooks work from any context (IDE git
+# clients, non-interactive shells) without relying on an activated mise env.
+
 pre-commit:
   commands:
     format:
       glob: "*.{go,bzl,bazel,swift}"
-      run: bazel run //tools/format -- {staged_files}
+      run: mise x -- bazelisk run //tools/format -- {staged_files}
       stage_fixed: true
 
 commit-msg:
   commands:
     commitlint:
-      run: npx --no-install commitlint --edit {1}
+      run: mise x -- npx --no-install commitlint --edit {1}
 
 pre-push:
   commands:
     build:
-      run: bazel build //...
+      run: mise x -- bazelisk build //...
     test:
       # Exit 4 = no test targets found; tolerated until the first test lands.
-      run: sh -c 'bazel test //... || test $? -eq 4'
+      run: sh -c 'mise x -- bazelisk test //... || test $? -eq 4'

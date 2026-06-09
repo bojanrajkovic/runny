@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # Linux covers format, lint (nogo rides compilation), and all pure-Go
+  # build/test. Darwin-only targets (vz cgo, RunnyBar) get a macOS job in the
+  # Phase 3 expansion.
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/bazel
+          key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel', '.bazelversion') }}
+          restore-keys: bazel-${{ runner.os }}-
+      - name: build
+        run: bazel build --config=ci //...
+      - name: test
+        # Exit 4 = no test targets; tolerated until the first test lands.
+        run: bazel test --config=ci //... || test $? -eq 4
+      - name: format
+        run: |
+          bazel run --config=ci //tools/format
+          git diff --exit-code

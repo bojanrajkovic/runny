@@ -1,0 +1,5 @@
+[tools]
+bazelisk = "1"
+go = "1.26.4"
+node = "24"
+lefthook = "2"

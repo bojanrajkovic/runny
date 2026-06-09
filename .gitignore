@@ -1,0 +1,20 @@
+# User-specific settings file for this repo. May contain secrets such as API tokens.
+user.bazelrc
+.env
+
+# Symlinks created by Bazel into the output tree
+/bazel-*
+
+# macOS
+.DS_Store
+
+# Xcode-adjacent artifacts (Xcode is SDK-vendor only; none of these should ever exist,
+# but guard against editor tooling creating them)
+xcuserdata/
+*.xcodeproj
+*.xcworkspace
+.swiftpm/
+
+# Editor
+.idea/
+.vscode/

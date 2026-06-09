@@ -1,0 +1,13 @@
+# Pick up host-OS-specific config lines (build:linux / build:macos) automatically.
+common --enable_platform_specific_config
+
+# Show test errors inline instead of pointing at log files.
+test --test_output=errors
+
+# CI hardening: announce effective flags, fail on stale module lockfile.
+common:ci --announce_rc
+common:ci --color=yes
+common:ci --lockfile_mode=error
+
+# Per-user overrides (gitignored); keep last so it wins.
+try-import %workspace%/user.bazelrc

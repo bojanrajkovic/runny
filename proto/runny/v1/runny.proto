@@ -1,0 +1,159 @@
+// The runny.v1 control contract, served by runnyd over its unix socket.
+// runnyctl and RunnyBar are sibling clients of this service; anything one can
+// do, the other can, by construction (ADR-0006).
+syntax = "proto3";
+
+package runny.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/bojanrajkovic/runny/proto/runny/v1;runnyv1";
+
+service RunnyService {
+  // Snapshot of every slot.
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+  // Status snapshots pushed on every state transition (plus a periodic tick).
+  rpc WatchStatus(WatchStatusRequest) returns (stream GetStatusResponse);
+  // Follow the daemon's structured log ring buffer.
+  rpc StreamLogs(StreamLogsRequest) returns (stream LogLine);
+  // Inject a teardown into a slot's cycle.
+  rpc Recycle(RecycleRequest) returns (RecycleResponse);
+  // Hold a slot in BACKOFF(paused) after its current cycle drains.
+  rpc Pause(PauseRequest) returns (PauseResponse);
+  rpc Resume(ResumeRequest) returns (ResumeResponse);
+  // Render a slot's most recent cycles: the timeline behind "why is it like this".
+  rpc Why(WhyRequest) returns (WhyResponse);
+  // Re-run startup validation on demand.
+  rpc Doctor(DoctorRequest) returns (DoctorResponse);
+}
+
+// SlotState mirrors internal/statemachine; the FSM is the authority (ADR-0004).
+enum SlotState {
+  SLOT_STATE_UNSPECIFIED = 0;
+  SLOT_STATE_BACKOFF = 1;
+  SLOT_STATE_ENSURE_IMAGE = 2;
+  SLOT_STATE_CLONE = 3;
+  SLOT_STATE_BOOT = 4;
+  SLOT_STATE_AWAIT_IP = 5;
+  SLOT_STATE_AWAIT_SSH = 6;
+  SLOT_STATE_MINT_JIT = 7;
+  SLOT_STATE_PROVISION = 8;
+  SLOT_STATE_LISTENING = 9;
+  SLOT_STATE_JOB = 10;
+  SLOT_STATE_TEARDOWN = 11;
+}
+
+message VMInfo {
+  string mac = 1;
+  string ip = 2;
+}
+
+message JobInfo {
+  string name = 1;
+  google.protobuf.Timestamp started = 2;
+}
+
+message SlotStatus {
+  string slot = 1;
+  SlotState state = 2;
+  google.protobuf.Timestamp state_entered = 3;
+  string cycle_id = 4;
+  bool paused = 5;
+  // Consecutive failed cycles; current backoff if state == BACKOFF.
+  uint32 consecutive_failures = 6;
+  int64 backoff_seconds = 7;
+  VMInfo vm = 8;
+  JobInfo job = 9;
+  // Summary of the last failure, empty after a successful cycle.
+  string last_failure = 10;
+}
+
+message GetStatusRequest {}
+
+message GetStatusResponse {
+  repeated SlotStatus slots = 1;
+  google.protobuf.Timestamp daemon_started = 2;
+  string version = 3;
+}
+
+message WatchStatusRequest {}
+
+message StreamLogsRequest {
+  // Number of buffered lines to replay before following; 0 = follow only.
+  uint32 replay = 1;
+}
+
+message LogLine {
+  google.protobuf.Timestamp time = 1;
+  string level = 2;
+  string message = 3;
+  map<string, string> attrs = 4;
+}
+
+message RecycleRequest {
+  string slot = 1;
+  string reason = 2;
+}
+
+message RecycleResponse {}
+
+message PauseRequest {
+  string slot = 1;
+}
+
+message PauseResponse {}
+
+message ResumeRequest {
+  string slot = 1;
+}
+
+message ResumeResponse {}
+
+message WhyRequest {
+  string slot = 1;
+  // How many recent cycles to return; 0 = just the most recent.
+  uint32 cycles = 2;
+}
+
+// CycleRecord mirrors the on-disk cycle.json artifact.
+message CycleRecord {
+  string cycle_id = 1;
+  string slot = 2;
+  string image_digest = 3;
+  google.protobuf.Timestamp started = 4;
+  google.protobuf.Timestamp finished = 5;
+  // "success" or "failure".
+  string result = 6;
+  repeated StateRecord states = 7;
+  VMInfo vm = 8;
+  JobInfo job = 9;
+  string failure_state = 10;
+  string failure_error = 11;
+  // Paths of retained post-mortem artifacts (failure cycles).
+  repeated string artifacts = 12;
+}
+
+message StateRecord {
+  SlotState state = 1;
+  google.protobuf.Timestamp entered = 2;
+  google.protobuf.Timestamp left = 3;
+  // "ok", "error", or "deadline".
+  string outcome = 4;
+  string error = 5;
+}
+
+message WhyResponse {
+  repeated CycleRecord cycles = 1;
+}
+
+message DoctorRequest {}
+
+message DoctorCheck {
+  string name = 1;
+  bool ok = 2;
+  string detail = 3;
+}
+
+message DoctorResponse {
+  repeated DoctorCheck checks = 1;
+}

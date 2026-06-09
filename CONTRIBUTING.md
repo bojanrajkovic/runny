@@ -19,6 +19,8 @@ The human-developer workflow. Agent-facing guidance and the project-wide index l
 
 **Dependency workflow:** `go mod tidy` → `bazel mod tidy` → `bazel run //:gazelle`. Add Go deps at latest stable; Renovate keeps pins current.
 
+**Known wrinkle:** `go mod tidy` warns `no matching versions` on imports of `proto/runny/v1` — the package is generated in-graph (ADR-0006), so only Bazel can see it. The warning is expected; tidy still updates everything else. gopls likewise can't resolve the generated import.
+
 ## The Linux ↔ ix dev loop
 
 Primary development happens on the Linux box; everything pure-Go builds and tests there. Darwin-only targets (`internal/vm`'s vz code, `cmd/runnyd`'s final binary, `RunnyBar`) need a macOS arm64 host:

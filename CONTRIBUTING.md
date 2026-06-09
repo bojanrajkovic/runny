@@ -17,9 +17,9 @@ The human-developer workflow. Agent-facing guidance and the project-wide index l
 | `bazel run //tools/format` | Format the tree (gofumpt, buildifier; swift-format once Swift lands) |
 | `bazel run //:gazelle` | Regenerate BUILD files after import changes |
 
-**Dependency workflow:** `go mod tidy` → `bazel mod tidy` → `bazel run //:gazelle`. Add Go deps at latest stable; Renovate keeps pins current.
+**Dependency workflow:** `go mod tidy -e` → `bazel run //:gazelle` → `bazel mod tidy`. Add Go deps at latest stable; Renovate keeps pins current.
 
-**Known wrinkle:** `go mod tidy` warns `no matching versions` on imports of `proto/runny/v1` — the package is generated in-graph (ADR-0006), so only Bazel can see it. The warning is expected; tidy still updates everything else. gopls likewise can't resolve the generated import.
+**Known wrinkle (the `-e` and the ordering are load-bearing):** imports of `proto/runny/v1` resolve only in-graph (ADR-0006), so plain `go mod tidy` *aborts mid-attribution* and leaves every dep marked `// indirect` — which makes `bazel mod tidy` strip them from `use_repo` and breaks the build. `-e` tolerates the unresolvable import and attributes correctly. gazelle must run before `bazel mod tidy` so new BUILD references exist when use_repo is recomputed. gopls likewise can't resolve the generated import.
 
 ## The Linux ↔ ix dev loop
 

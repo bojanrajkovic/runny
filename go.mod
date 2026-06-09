@@ -8,4 +8,8 @@ require (
 	golang.org/x/sys v0.46.0
 )
 
-require github.com/golang-jwt/jwt/v5 v5.3.1
+require (
+	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/pierrec/lz4/v4 v4.1.27
+	golang.org/x/sync v0.21.0
+)

@@ -31,6 +31,12 @@ func (s *Stall) Feed(int64) {
 // TCP and goes silent) fails within window.
 func (s *Stall) Watch(ctx context.Context, window time.Duration) (Context, context.CancelFunc) {
 	wctx, cancel := context.WithCancelCause(ctx)
+	if window <= 0 {
+		// A non-positive window is a misconfiguration: fail loudly now
+		// rather than panic in the ticker or watch nothing.
+		cancel(fmt.Errorf("stall window must be positive, got %v", window))
+		return Context{ctx: wctx}, func() { cancel(nil) }
+	}
 	go func() {
 		t := time.NewTicker(window / 4)
 		defer t.Stop()

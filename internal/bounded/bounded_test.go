@@ -50,6 +50,21 @@ func TestStallWatch(t *testing.T) {
 	}
 }
 
+// A non-positive window must fail loudly, not panic in the ticker.
+func TestStallWatchRejectsNonPositiveWindow(t *testing.T) {
+	s := NewStall()
+	ctx, cancel := s.Watch(t.Context(), 0)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("zero window did not fail the context")
+	}
+	if cause := context.Cause(ctx); cause == nil || !strings.Contains(cause.Error(), "positive") {
+		t.Errorf("cause = %v", cause)
+	}
+}
+
 // A stall watch with no progress at all must fire — the bound covers the
 // first byte, not just stalls mid-transfer.
 func TestStallWatchFiresWithoutFirstByte(t *testing.T) {

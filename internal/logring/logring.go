@@ -59,22 +59,27 @@ func (r *Ring) Snapshot(n int) []Entry {
 	return out
 }
 
-// Subscribe returns a channel that replays the last `replay` entries then
-// follows. Call the returned cancel to unsubscribe.
-func (r *Ring) Subscribe(replay int) (<-chan Entry, func()) {
+// Subscribe registers a follower and returns up to the last `replay` entries
+// as a snapshot taken atomically with registration: entries added after the
+// snapshot arrive only on the channel — no gaps, no duplicates. The replay is
+// returned as a slice rather than sent through the channel because `replay`
+// is client-controlled and the ring outsizes the channel buffer: a blocking
+// send here, under r.mu, once let `runnyctl logs -replay N` wedge every slog
+// call in the daemon. Call the returned cancel to unsubscribe.
+func (r *Ring) Subscribe(replay int) ([]Entry, <-chan Entry, func()) {
 	r.mu.Lock()
 	id := r.nextID
 	r.nextID++
 	ch := make(chan Entry, 256)
-	start := max(len(r.buf)-replay, 0)
+	var snap []Entry
 	if replay > 0 {
-		for _, e := range r.buf[start:] {
-			ch <- e
-		}
+		start := max(len(r.buf)-replay, 0)
+		snap = make([]Entry, len(r.buf)-start)
+		copy(snap, r.buf[start:])
 	}
 	r.subs[id] = ch
 	r.mu.Unlock()
-	return ch, func() {
+	return snap, ch, func() {
 		r.mu.Lock()
 		delete(r.subs, id)
 		r.mu.Unlock()

@@ -11,6 +11,15 @@ current=$(svu current 2>/dev/null || echo v0.0.0)
 if [ "$next" = "$current" ] &&
 	[ "$(git rev-list -n 1 "$current" 2>/dev/null || echo none)" = "$(git rev-parse HEAD)" ]; then
 	echo "${next#v}"
-else
-	echo "${next#v}-beta.$(git rev-parse --short=8 HEAD)"
+	exit 0
 fi
+
+# Past the tag with no implied bump (only chore:/docs:/ci: commits): svu
+# returns the released version, and <released>-beta.<sha> would semver-sort
+# BELOW the release it follows. Bump patch so the beta line sorts between
+# this release and the next.
+if [ "$next" = "$current" ]; then
+	IFS=. read -r maj min pat <<<"${next#v}"
+	next="v${maj}.${min}.$((pat + 1))"
+fi
+echo "${next#v}-beta.$(git rev-parse --short=8 HEAD)"

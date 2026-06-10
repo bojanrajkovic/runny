@@ -1,18 +1,25 @@
 # release-please owns versions, CHANGELOG, tags, and GitHub releases
 # (ADR-0010). Artifacts attach via release.yml when the release publishes.
-# Known caveat: GITHUB_TOKEN-created PRs don't trigger CI on themselves.
+# It runs with an App token, not GITHUB_TOKEN: GitHub suppresses workflow
+# triggers for GITHUB_TOKEN-created events, so a GITHUB_TOKEN-published
+# release would never fire release.yml (and release PRs would get no CI).
 name: release-please
 
 on:
   push:
     branches: [main]
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        id: app
+        with:
+          app-id: ${{ vars.RELEASER_APP_ID }}
+          private-key: ${{ secrets.RELEASER_APP_PRIVATE_KEY }}
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
+        with:
+          token: ${{ steps.app.outputs.token }}

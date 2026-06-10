@@ -83,6 +83,11 @@ failure cycles; success cycles keep only the record).
 - **Seed the image cache from tart's** when migrating a host: the bundles are
   clonefile-compatible (`cp -c` the four files into
   `images/<ref>/<digest>/`), avoiding an 80GB+ re-pull.
+- **Seed the cache over LAN when the registry path is bad**: `tools/seedpull`
+  pulls a ref into a runny-layout cache on any box with healthy connectivity
+  (`go run ./tools/seedpull <ref> <dir>` — pure Go, runs on Linux); rsync the
+  bundle to the host's `images/` and the next ENSURE_IMAGE cache-hits.
+  Pause the slot during the copy so a concurrent pull's rename doesn't race.
 
 ## E2E validation (2026-06-09, ix)
 

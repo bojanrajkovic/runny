@@ -72,9 +72,10 @@ failure cycles; success cycles keep only the record).
 - **macOS Local Network privacy (TCC)**: a background-reparented ad-hoc
   runnyd gets silently denied vmnet access — every guest dial fails with
   `connect: no route to host` while the host shell reaches the same port.
-  Foreground children of sshd inherit its exemption. The eventual launchd
-  deployment must own the Local Network grant story; until then, run the
-  daemon under a held session.
+  Foreground children of sshd inherit its exemption. The deployment owns the
+  grant story via a per-user LaunchAgent (`docs/deploy.md`); the
+  `local-network` doctor check reports whether this process can reach the
+  guest subnet. Until installed that way, run the daemon under a held session.
 - **Never trust the image's bundled runner**: cirruslabs images preinstall
   `~/actions-runner`, which rots into broker-rejected versions ("deprecated
   and cannot receive messages") that JIT runners cannot self-update out of.

@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.coderinserepeat.runnyd</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@RUNNYD@</string>
+  </array>
+
+  <!-- A LaunchAgent (in ~/Library/LaunchAgents), NOT a system LaunchDaemon:
+       it runs inside the user's GUI login session, which is what lets the
+       one-time macOS "Local Network" (TCC) prompt appear and the grant
+       persist. A LaunchDaemon or a background-reparented runnyd is silently
+       denied vmnet access — guest dials fail "no route to host". See
+       docs/deploy.md. -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- KeepAlive is load-bearing for the wedge restart (ADR-0012): when a
+       guest survives force-stop, runnyd exits non-zero expecting launchd to
+       cold-start it — process exit is the only thing that reclaims an
+       in-process VM. Stop the daemon with `launchctl bootout`, never by
+       killing it, to avoid an immediate respawn. -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>RUNNY_HOME</key>
+    <string>@RUNNY_HOME@</string>
+  </dict>
+
+  <!-- Pre-log crash output only; the daemon's own structured log rotates
+       under $RUNNY_HOME/logs/runnyd.log. -->
+  <key>StandardOutPath</key>
+  <string>@RUNNY_HOME@/logs/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>@RUNNY_HOME@/logs/launchd.err.log</string>
+
+  <key>ProcessType</key>
+  <string>Interactive</string>
+</dict>
+</plist>

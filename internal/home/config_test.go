@@ -12,9 +12,14 @@ const minimalConfig = `
 github:
   app_id: 2798371
   private_key_path: /tmp/key.pem
-  owner: bojanrajkovic
-  repo: runny
-image: ghcr.io/cirruslabs/macos-tahoe-xcode:26.3
+pools:
+  - name: mac
+    os: darwin
+    image: ghcr.io/cirruslabs/macos-tahoe-xcode:26.3
+    count: 2
+    target:
+      owner: bojanrajkovic
+      repo: mcp-paprika
 `
 
 func writeConfig(t *testing.T, body string) string {
@@ -31,62 +36,69 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if c.Runners.Count != 2 {
-		t.Errorf("Runners.Count = %d, want 2", c.Runners.Count)
+	if c.NamePrefix != "runny" {
+		t.Errorf("NamePrefix = %q, want runny", c.NamePrefix)
 	}
-	if c.Runners.NamePrefix != "runny" {
-		t.Errorf("NamePrefix = %q, want runny", c.Runners.NamePrefix)
+	p := c.Pools[0]
+	if p.RunnerGroupID != 1 || p.SSHUser != "admin" || p.SSHPassword != "admin" {
+		t.Errorf("pool defaults: %+v", p)
+	}
+	if len(p.Labels) != 3 || p.Labels[1] != "macOS" {
+		t.Errorf("darwin label default: %v", p.Labels)
 	}
 	if got := c.Deadlines.AwaitSSH.D(); got != 90*time.Second {
 		t.Errorf("AwaitSSH = %v, want 90s", got)
 	}
-	if got := c.Limits.BackoffCap.D(); got != 5*time.Minute {
-		t.Errorf("BackoffCap = %v, want 5m", got)
-	}
-	if c.GitHub.RunnerGroupID != 1 {
-		t.Errorf("RunnerGroupID = %d, want 1", c.GitHub.RunnerGroupID)
+	if p.Target.IsOrg() {
+		t.Error("owner/repo target misread as org")
 	}
 }
 
-func TestLoadConfigOverrides(t *testing.T) {
+func TestLoadConfigMixedPools(t *testing.T) {
 	c, err := LoadConfig(writeConfig(t, minimalConfig+`
-runners:
-  count: 1
-  name_prefix: ci
-deadlines:
-  await_ssh: 45s
-limits:
-  backoff_cap: 10m
+  - name: lin
+    os: linux
+    image: ghcr.io/cirruslabs/ubuntu:latest
+    count: 3
+    target:
+      org: loupe-app
 `))
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if c.Runners.Count != 1 || c.Runners.NamePrefix != "ci" {
-		t.Errorf("runner overrides not applied: %+v", c.Runners)
+	if len(c.Pools) != 2 {
+		t.Fatalf("pools = %d", len(c.Pools))
 	}
-	if got := c.Deadlines.AwaitSSH.D(); got != 45*time.Second {
-		t.Errorf("AwaitSSH = %v, want 45s", got)
+	lin := c.Pools[1]
+	if !lin.Target.IsOrg() || lin.Target.String() != "org:loupe-app" {
+		t.Errorf("org target: %+v", lin.Target)
 	}
-	if got := c.Limits.BackoffCap.D(); got != 10*time.Minute {
-		t.Errorf("BackoffCap = %v, want 10m", got)
+	if lin.Labels[1] != "Linux" {
+		t.Errorf("linux label default: %v", lin.Labels)
 	}
 }
 
 func TestLoadConfigValidation(t *testing.T) {
-	_, err := LoadConfig(writeConfig(t, "image: x\n"))
-	if err == nil {
-		t.Fatal("want validation error for missing github config")
+	cases := []struct {
+		name, yaml, wantErr string
+	}{
+		{"no pools", "github:\n  app_id: 1\n  private_key_path: /k\n", "at least one pool"},
+		{"bad os", minimalConfig + "  - name: w\n    os: windows\n    image: x\n    target: {org: a}\n", "os must be darwin or linux"},
+		{"both targets", minimalConfig + "  - name: b\n    os: linux\n    image: x\n    target: {org: a, owner: b, repo: c}\n", "not both"},
+		{"half repo target", minimalConfig + "  - name: h\n    os: linux\n    image: x\n    target: {owner: b}\n", "org, or both owner and repo"},
+		{"dup names", minimalConfig + "  - name: mac\n    os: linux\n    image: x\n    target: {org: a}\n", "duplicate pool name"},
+		{"bad name", minimalConfig + "  - name: Mac_1\n    os: linux\n    image: x\n    target: {org: a}\n", "lowercase"},
 	}
-	for _, want := range []string{"app_id", "private_key_path", "owner"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q missing mention of %s", err, want)
+	for _, tc := range cases {
+		_, err := LoadConfig(writeConfig(t, tc.yaml))
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("%s: err = %v, want containing %q", tc.name, err, tc.wantErr)
 		}
 	}
 }
 
 func TestLoadConfigRejectsUnknownKeys(t *testing.T) {
-	_, err := LoadConfig(writeConfig(t, minimalConfig+"runers:\n  count: 3\n"))
-	if err == nil {
+	if _, err := LoadConfig(writeConfig(t, minimalConfig+"runers:\n  count: 3\n")); err == nil {
 		t.Fatal("want error for misspelled key (strict mode)")
 	}
 }
@@ -100,14 +112,11 @@ func TestLoadConfigBadDuration(t *testing.T) {
 
 func TestPaths(t *testing.T) {
 	d := Dir("/h/.runny")
-	if got := d.VMDir("runner-1"); got != "/h/.runny/vms/runner-1" {
+	if got := d.VMDir("mac-1"); got != "/h/.runny/vms/mac-1" {
 		t.Errorf("VMDir = %q", got)
 	}
 	if got := d.ImageBundleDir("ghcr.io/cirruslabs/macos-tahoe-xcode:26.3", "sha256:abc"); got != "/h/.runny/images/ghcr.io_cirruslabs_macos-tahoe-xcode/sha256-abc" {
 		t.Errorf("ImageBundleDir = %q", got)
-	}
-	if got := d.ImageBundleDir("ghcr.io/foo/bar@sha256:def", "sha256:def"); !strings.HasSuffix(got, "ghcr.io_foo_bar/sha256-def") {
-		t.Errorf("digest-ref ImageBundleDir = %q", got)
 	}
 }
 

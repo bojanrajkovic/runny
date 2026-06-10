@@ -23,26 +23,60 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// ErrNoAdminWrite is returned when the App's installation token does not
-// carry administration:write — configured permissions can lag granted ones
-// (per-installation approval), so doctor asserts on a *minted* token.
-var ErrNoAdminWrite = errors.New("installation token lacks administration:write")
+// ErrMissingRunnerPerm is returned when the App's installation token does
+// not carry the runner-administration permission the target requires —
+// configured permissions can lag granted ones (per-installation approval),
+// so doctor asserts on a *minted* token.
+var ErrMissingRunnerPerm = errors.New("installation token lacks the runner-administration permission")
 
 // Config mirrors home.GitHubConfig without importing it (no dependency cycle;
 // the daemon maps one to the other).
 type Config struct {
 	AppID          int64
 	PrivateKeyPath string
-	Owner          string
-	Repo           string
 	APIBase        string
 }
 
-// Client is a minimal GitHub App client scoped to one repo.
+// Target is a registration scope: an org, or an owner/repo pair (ADR-0009).
+type Target struct {
+	Org   string
+	Owner string
+	Repo  string
+}
+
+func (t Target) IsOrg() bool { return t.Org != "" }
+
+// base is the API path prefix this target's runner endpoints live under.
+func (t Target) base() string {
+	if t.IsOrg() {
+		return "/orgs/" + t.Org
+	}
+	return fmt.Sprintf("/repos/%s/%s", t.Owner, t.Repo)
+}
+
+func (t Target) String() string {
+	if t.IsOrg() {
+		return "org:" + t.Org
+	}
+	return t.Owner + "/" + t.Repo
+}
+
+// requiredPerm is the installation-token permission runner administration
+// needs at this scope.
+func (t Target) requiredPerm() string {
+	if t.IsOrg() {
+		return "organization_self_hosted_runners"
+	}
+	return "administration"
+}
+
+// Client is a minimal GitHub App client scoped to one registration target.
+// One Client per distinct target; App credentials are shared.
 type Client struct {
-	cfg Config
-	key *rsa.PrivateKey
-	hc  *http.Client
+	cfg    Config
+	target Target
+	key    *rsa.PrivateKey
+	hc     *http.Client
 
 	mu         sync.Mutex
 	token      string
@@ -51,7 +85,7 @@ type Client struct {
 	instID     int64
 }
 
-func New(cfg Config) (*Client, error) {
+func New(cfg Config, target Target) (*Client, error) {
 	raw, err := os.ReadFile(cfg.PrivateKeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading app private key: %w", err)
@@ -80,7 +114,7 @@ func New(cfg Config) (*Client, error) {
 	if cfg.APIBase == "" {
 		cfg.APIBase = "https://api.github.com"
 	}
-	return &Client{cfg: cfg, key: key, hc: &http.Client{Timeout: 30 * time.Second}}, nil
+	return &Client{cfg: cfg, target: target, key: key, hc: &http.Client{Timeout: 30 * time.Second}}, nil
 }
 
 // appJWT mints the short-lived RS256 App JWT (iss=app_id, ≤10min).
@@ -112,11 +146,10 @@ func (c *Client) installationToken(ctx context.Context) (string, error) {
 		var inst struct {
 			ID int64 `json:"id"`
 		}
-		err := c.do(ctx, http.MethodGet,
-			fmt.Sprintf("/repos/%s/%s/installation", c.cfg.Owner, c.cfg.Repo),
+		err := c.do(ctx, http.MethodGet, c.target.base()+"/installation",
 			"Bearer "+jwtStr, nil, &inst)
 		if err != nil {
-			return "", fmt.Errorf("resolving installation: %w", err)
+			return "", fmt.Errorf("resolving installation for %s: %w", c.target, err)
 		}
 		c.instID = inst.ID
 	}
@@ -136,19 +169,24 @@ func (c *Client) installationToken(ctx context.Context) (string, error) {
 	return c.token, nil
 }
 
-// CheckAdminWrite mints (or reuses) a token and asserts administration:write
-// is actually present — the doctor check ADR-0003 calls for.
-func (c *Client) CheckAdminWrite(ctx context.Context) error {
+// CheckRunnerPerm mints (or reuses) a token and asserts the target-scoped
+// runner-administration permission is actually present — the doctor check
+// ADR-0003 calls for, target-aware per ADR-0009.
+func (c *Client) CheckRunnerPerm(ctx context.Context) error {
 	if _, err := c.installationToken(ctx); err != nil {
 		return err
 	}
+	perm := c.target.requiredPerm()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.tokenPerms["administration"] != "write" {
-		return fmt.Errorf("%w (got %q)", ErrNoAdminWrite, c.tokenPerms["administration"])
+	if c.tokenPerms[perm] != "write" {
+		return fmt.Errorf("%w: %s needs %s:write (got %q)", ErrMissingRunnerPerm, c.target, perm, c.tokenPerms[perm])
 	}
 	return nil
 }
+
+// Target returns the client's registration scope.
+func (c *Client) Target() Target { return c.target }
 
 // JITRunner is the result of generate-jitconfig: a registered (offline)
 // runner and the encoded blob the guest's run.sh consumes.
@@ -178,7 +216,7 @@ func (c *Client) GenerateJITConfig(ctx context.Context, name string, labels []st
 		EncodedJITConfig string `json:"encoded_jit_config"`
 	}
 	err = c.doRetry(ctx, http.MethodPost,
-		fmt.Sprintf("/repos/%s/%s/actions/runners/generate-jitconfig", c.cfg.Owner, c.cfg.Repo),
+		c.target.base()+"/actions/runners/generate-jitconfig",
 		"token "+tok, body, &resp)
 	if err != nil {
 		return nil, fmt.Errorf("generate-jitconfig: %w", err)
@@ -191,7 +229,11 @@ func (c *Client) GenerateJITConfig(ctx context.Context, name string, labels []st
 // actions/runner repo's "latest" release can lag what the broker accepts,
 // and JIT runners cannot self-update (learned from a live Forbidden:
 // "Runner version vX is deprecated and cannot receive messages").
-func (c *Client) RunnerDownload(ctx context.Context) (filename, url string, err error) {
+func (c *Client) RunnerDownload(ctx context.Context, goos string) (filename, url string, err error) {
+	apiOS := map[string]string{"darwin": "osx", "linux": "linux"}[goos]
+	if apiOS == "" {
+		return "", "", fmt.Errorf("unsupported guest os %q", goos)
+	}
 	tok, err := c.installationToken(ctx)
 	if err != nil {
 		return "", "", err
@@ -203,17 +245,17 @@ func (c *Client) RunnerDownload(ctx context.Context) (filename, url string, err 
 		Filename     string `json:"filename"`
 	}
 	err = c.doRetry(ctx, http.MethodGet,
-		fmt.Sprintf("/repos/%s/%s/actions/runners/downloads", c.cfg.Owner, c.cfg.Repo),
+		c.target.base()+"/actions/runners/downloads",
 		"token "+tok, nil, &downloads)
 	if err != nil {
 		return "", "", fmt.Errorf("listing runner downloads: %w", err)
 	}
 	for _, d := range downloads {
-		if d.OS == "osx" && d.Architecture == "arm64" {
+		if d.OS == apiOS && d.Architecture == "arm64" {
 			return d.Filename, d.DownloadURL, nil
 		}
 	}
-	return "", "", fmt.Errorf("no osx/arm64 runner build in downloads list (%d entries)", len(downloads))
+	return "", "", fmt.Errorf("no %s/arm64 runner build in downloads list (%d entries)", apiOS, len(downloads))
 }
 
 // Runner is a registered self-hosted runner, as the reconcile loop sees it.
@@ -237,7 +279,7 @@ func (c *Client) ListRunners(ctx context.Context) ([]Runner, error) {
 			Runners    []Runner `json:"runners"`
 		}
 		err := c.doRetry(ctx, http.MethodGet,
-			fmt.Sprintf("/repos/%s/%s/actions/runners?per_page=100&page=%d", c.cfg.Owner, c.cfg.Repo, page),
+			fmt.Sprintf("%s/actions/runners?per_page=100&page=%d", c.target.base(), page),
 			"token "+tok, nil, &resp)
 		if err != nil {
 			return nil, fmt.Errorf("listing runners: %w", err)
@@ -257,7 +299,7 @@ func (c *Client) DeleteRunner(ctx context.Context, id int64) error {
 		return err
 	}
 	err = c.doRetry(ctx, http.MethodDelete,
-		fmt.Sprintf("/repos/%s/%s/actions/runners/%d", c.cfg.Owner, c.cfg.Repo, id),
+		fmt.Sprintf("%s/actions/runners/%d", c.target.base(), id),
 		"token "+tok, nil, nil)
 	var se *statusError
 	if errors.As(err, &se) && se.code == http.StatusNotFound {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/goccy/go-yaml"
@@ -12,35 +13,58 @@ import (
 // Config is runnyd's one configuration file (~/.runny/config.yaml). The Zod
 // of this repo: parse, default, validate here — nothing downstream re-checks.
 type Config struct {
-	GitHub    GitHubConfig  `yaml:"github"`
-	Image     string        `yaml:"image"`
-	Runners   RunnersConfig `yaml:"runners"`
-	Deadlines Deadlines     `yaml:"deadlines"`
-	Limits    Limits        `yaml:"limits"`
-	Retention Retention     `yaml:"retention"`
+	GitHub    GitHubConfig `yaml:"github"`
+	Pools     []PoolConfig `yaml:"pools"`
+	Deadlines Deadlines    `yaml:"deadlines"`
+	Limits    Limits       `yaml:"limits"`
+	Retention Retention    `yaml:"retention"`
+	// NamePrefix prefixes runner names globally: <prefix>-<slot>-<cycle8>.
+	NamePrefix string `yaml:"name_prefix"`
 }
 
+// GitHubConfig is App credentials only; registration targets live on pools
+// (ADR-0009).
 type GitHubConfig struct {
-	// App authentication (ADR-0003): the App must hold administration:write
-	// on the target repo; doctor asserts it on a minted token.
 	AppID          int64  `yaml:"app_id"`
 	PrivateKeyPath string `yaml:"private_key_path"`
-	Owner          string `yaml:"owner"`
-	Repo           string `yaml:"repo"`
-	// Labels the JIT runners register with.
-	Labels []string `yaml:"labels"`
-	// Runner group; 1 is the default group for repo-level runners.
-	RunnerGroupID int64 `yaml:"runner_group_id"`
 	// APIBase overrides the GitHub API endpoint (tests, GHES).
 	APIBase string `yaml:"api_base"`
 }
 
-type RunnersConfig struct {
-	Count      int    `yaml:"count"`
-	NamePrefix string `yaml:"name_prefix"`
-	// Guest credentials; cirruslabs images use admin/admin.
+// PoolConfig is one homogeneous group of runner slots (ADR-0009).
+type PoolConfig struct {
+	// Name becomes the slot prefix: <name>-1, <name>-2, ...
+	Name string `yaml:"name"`
+	// OS of the guest image: "darwin" or "linux". Declared (not inferred)
+	// because the macOS guest-cap check and tarball priming run pre-pull.
+	OS    string `yaml:"os"`
+	Image string `yaml:"image"`
+	Count int    `yaml:"count"`
+	// Target is the registration scope: an org, or an owner/repo pair.
+	Target TargetConfig `yaml:"target"`
+	Labels []string     `yaml:"labels"`
+	// Runner group; 1 is the default group.
+	RunnerGroupID int64 `yaml:"runner_group_id"`
+	// Guest credentials; cirruslabs images use admin/admin for both OSes.
 	SSHUser     string `yaml:"ssh_user"`
 	SSHPassword string `yaml:"ssh_password"`
+}
+
+// TargetConfig holds exactly one of: Org, or Owner+Repo.
+type TargetConfig struct {
+	Org   string `yaml:"org"`
+	Owner string `yaml:"owner"`
+	Repo  string `yaml:"repo"`
+}
+
+// IsOrg reports whether the target is org-scoped.
+func (t TargetConfig) IsOrg() bool { return t.Org != "" }
+
+func (t TargetConfig) String() string {
+	if t.IsOrg() {
+		return "org:" + t.Org
+	}
+	return t.Owner + "/" + t.Repo
 }
 
 // Deadlines are the per-state budgets of ADR-0004, calibrated from spike
@@ -118,26 +142,34 @@ func (c *Config) applyDefaults() {
 			*d = Duration(v)
 		}
 	}
-	if c.Runners.Count == 0 {
-		c.Runners.Count = 2
-	}
-	if c.Runners.NamePrefix == "" {
-		c.Runners.NamePrefix = "runny"
-	}
-	if c.Runners.SSHUser == "" {
-		c.Runners.SSHUser = "admin"
-	}
-	if c.Runners.SSHPassword == "" {
-		c.Runners.SSHPassword = "admin"
-	}
-	if c.GitHub.RunnerGroupID == 0 {
-		c.GitHub.RunnerGroupID = 1
+	if c.NamePrefix == "" {
+		c.NamePrefix = "runny"
 	}
 	if c.GitHub.APIBase == "" {
 		c.GitHub.APIBase = "https://api.github.com"
 	}
-	if len(c.GitHub.Labels) == 0 {
-		c.GitHub.Labels = []string{"self-hosted", "macOS", "ARM64"}
+	for i := range c.Pools {
+		p := &c.Pools[i]
+		if p.Count == 0 {
+			p.Count = 1
+		}
+		if p.RunnerGroupID == 0 {
+			p.RunnerGroupID = 1
+		}
+		if p.SSHUser == "" {
+			p.SSHUser = "admin"
+		}
+		if p.SSHPassword == "" {
+			p.SSHPassword = "admin"
+		}
+		if len(p.Labels) == 0 {
+			switch p.OS {
+			case "darwin":
+				p.Labels = []string{"self-hosted", "macOS", "ARM64"}
+			case "linux":
+				p.Labels = []string{"self-hosted", "Linux", "ARM64"}
+			}
+		}
 	}
 	def(&c.Deadlines.Clone, 10*time.Second)
 	def(&c.Deadlines.Boot, 30*time.Second)
@@ -160,6 +192,8 @@ func (c *Config) applyDefaults() {
 	}
 }
 
+var poolNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+
 func (c *Config) validate() error {
 	var errs []error
 	if c.GitHub.AppID == 0 {
@@ -168,14 +202,35 @@ func (c *Config) validate() error {
 	if c.GitHub.PrivateKeyPath == "" {
 		errs = append(errs, errors.New("github.private_key_path is required"))
 	}
-	if c.GitHub.Owner == "" || c.GitHub.Repo == "" {
-		errs = append(errs, errors.New("github.owner and github.repo are required"))
+	if len(c.Pools) == 0 {
+		errs = append(errs, errors.New("at least one pool is required"))
 	}
-	if c.Image == "" {
-		errs = append(errs, errors.New("image is required"))
-	}
-	if c.Runners.Count < 1 {
-		errs = append(errs, errors.New("runners.count must be >= 1"))
+	seen := map[string]bool{}
+	for i, p := range c.Pools {
+		at := fmt.Sprintf("pools[%d]", i)
+		if !poolNameRE.MatchString(p.Name) {
+			errs = append(errs, fmt.Errorf("%s: name %q must be lowercase alphanumeric/hyphen", at, p.Name))
+		}
+		if seen[p.Name] {
+			errs = append(errs, fmt.Errorf("%s: duplicate pool name %q", at, p.Name))
+		}
+		seen[p.Name] = true
+		if p.OS != "darwin" && p.OS != "linux" {
+			errs = append(errs, fmt.Errorf("%s: os must be darwin or linux, got %q", at, p.OS))
+		}
+		if p.Image == "" {
+			errs = append(errs, fmt.Errorf("%s: image is required", at))
+		}
+		if p.Count < 1 {
+			errs = append(errs, fmt.Errorf("%s: count must be >= 1", at))
+		}
+		hasOrg, hasRepo := p.Target.Org != "", p.Target.Owner != "" || p.Target.Repo != ""
+		switch {
+		case hasOrg && hasRepo:
+			errs = append(errs, fmt.Errorf("%s: target must be an org OR owner/repo, not both", at))
+		case !hasOrg && (p.Target.Owner == "" || p.Target.Repo == ""):
+			errs = append(errs, fmt.Errorf("%s: target needs org, or both owner and repo", at))
+		}
 	}
 	// The Virtualization.framework 2-macOS-guest cap is checked by doctor and
 	// startup validation, not here — config parsing stays platform-agnostic.

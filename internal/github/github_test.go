@@ -23,32 +23,39 @@ import (
 // fakeGitHub stubs the five endpoints the client touches, verifying the App
 // JWT signature against the test keypair on the way.
 type fakeGitHub struct {
-	t          *testing.T
-	pub        *rsa.PublicKey
-	adminPerm  string
-	tokenMints atomic.Int32
-	jitCalls   atomic.Int32
-	failJITN   int32 // first N generate-jitconfig calls answer 503
-	runners    []Runner
-	deleted    []int64
+	t             *testing.T
+	pub           *rsa.PublicKey
+	adminPerm     string
+	orgRunnerPerm string
+	tokenMints    atomic.Int32
+	jitCalls      atomic.Int32
+	failJITN      int32 // first N generate-jitconfig calls answer 503
+	runners       []Runner
+	deleted       []int64
 }
 
 func (f *fakeGitHub) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /repos/o/r/installation", func(w http.ResponseWriter, r *http.Request) {
+	installation := func(w http.ResponseWriter, r *http.Request) {
 		f.verifyJWT(r)
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": 77})
-	})
+	}
+	mux.HandleFunc("GET /repos/o/r/installation", installation)
+	mux.HandleFunc("GET /orgs/myorg/installation", installation)
 	mux.HandleFunc("POST /app/installations/77/access_tokens", func(w http.ResponseWriter, r *http.Request) {
 		f.verifyJWT(r)
 		f.tokenMints.Add(1)
+		perms := map[string]string{"administration": f.adminPerm, "contents": "read"}
+		if f.orgRunnerPerm != "" {
+			perms["organization_self_hosted_runners"] = f.orgRunnerPerm
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token":       "ghs_testtoken",
 			"expires_at":  time.Now().Add(time.Hour).Format(time.RFC3339),
-			"permissions": map[string]string{"administration": f.adminPerm, "contents": "read"},
+			"permissions": perms,
 		})
 	})
-	mux.HandleFunc("POST /repos/o/r/actions/runners/generate-jitconfig", func(w http.ResponseWriter, r *http.Request) {
+	jitconfig := func(w http.ResponseWriter, r *http.Request) {
 		f.requireToken(r)
 		if f.jitCalls.Add(1) <= f.failJITN {
 			http.Error(w, "upstream wobble", http.StatusServiceUnavailable)
@@ -69,7 +76,19 @@ func (f *fakeGitHub) handler() http.Handler {
 			"runner":             map[string]any{"id": 4242, "name": body.Name},
 			"encoded_jit_config": "ZmFrZS1qaXQ=",
 		})
-	})
+	}
+	mux.HandleFunc("POST /repos/o/r/actions/runners/generate-jitconfig", jitconfig)
+	mux.HandleFunc("POST /orgs/myorg/actions/runners/generate-jitconfig", jitconfig)
+	downloads := func(w http.ResponseWriter, r *http.Request) {
+		f.requireToken(r)
+		_ = json.NewEncoder(w).Encode([]map[string]string{
+			{"os": "osx", "architecture": "arm64", "filename": "actions-runner-osx-arm64-2.334.0.tar.gz", "download_url": "https://example/osx"},
+			{"os": "linux", "architecture": "arm64", "filename": "actions-runner-linux-arm64-2.334.0.tar.gz", "download_url": "https://example/linux"},
+			{"os": "linux", "architecture": "x64", "filename": "actions-runner-linux-x64-2.334.0.tar.gz", "download_url": "https://example/x64"},
+		})
+	}
+	mux.HandleFunc("GET /repos/o/r/actions/runners/downloads", downloads)
+	mux.HandleFunc("GET /orgs/myorg/actions/runners/downloads", downloads)
 	mux.HandleFunc("GET /repos/o/r/actions/runners", func(w http.ResponseWriter, r *http.Request) {
 		f.requireToken(r)
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -111,6 +130,10 @@ func (f *fakeGitHub) requireToken(r *http.Request) {
 }
 
 func newTestClient(t *testing.T, f *fakeGitHub) *Client {
+	return newTestClientTarget(t, f, Target{Owner: "o", Repo: "r"})
+}
+
+func newTestClientTarget(t *testing.T, f *fakeGitHub, target Target) *Client {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -127,7 +150,7 @@ func newTestClient(t *testing.T, f *fakeGitHub) *Client {
 	}
 	srv := httptest.NewServer(f.handler())
 	t.Cleanup(srv.Close)
-	c, err := New(Config{AppID: 2798371, PrivateKeyPath: keyPath, Owner: "o", Repo: "r", APIBase: srv.URL})
+	c, err := New(Config{AppID: 2798371, PrivateKeyPath: keyPath, APIBase: srv.URL}, target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,14 +194,47 @@ func TestJITRetryOn5xx(t *testing.T) {
 	}
 }
 
-func TestCheckAdminWrite(t *testing.T) {
+func TestCheckRunnerPerm(t *testing.T) {
 	c := newTestClient(t, &fakeGitHub{adminPerm: "write"})
-	if err := c.CheckAdminWrite(t.Context()); err != nil {
-		t.Errorf("CheckAdminWrite with write perm: %v", err)
+	if err := c.CheckRunnerPerm(t.Context()); err != nil {
+		t.Errorf("repo target with administration:write: %v", err)
 	}
 	c2 := newTestClient(t, &fakeGitHub{adminPerm: "read"})
-	if err := c2.CheckAdminWrite(t.Context()); !errors.Is(err, ErrNoAdminWrite) {
-		t.Errorf("want ErrNoAdminWrite, got %v", err)
+	if err := c2.CheckRunnerPerm(t.Context()); !errors.Is(err, ErrMissingRunnerPerm) {
+		t.Errorf("want ErrMissingRunnerPerm, got %v", err)
+	}
+	// Org target needs the ORG permission; administration alone is not enough.
+	org := Target{Org: "myorg"}
+	c3 := newTestClientTarget(t, &fakeGitHub{adminPerm: "write", orgRunnerPerm: "write"}, org)
+	if err := c3.CheckRunnerPerm(t.Context()); err != nil {
+		t.Errorf("org target with org runner perm: %v", err)
+	}
+	c4 := newTestClientTarget(t, &fakeGitHub{adminPerm: "write"}, org)
+	if err := c4.CheckRunnerPerm(t.Context()); !errors.Is(err, ErrMissingRunnerPerm) {
+		t.Errorf("org target without org perm: want ErrMissingRunnerPerm, got %v", err)
+	}
+}
+
+func TestOrgTargetJITConfig(t *testing.T) {
+	c := newTestClientTarget(t, &fakeGitHub{}, Target{Org: "myorg"})
+	jit, err := c.GenerateJITConfig(t.Context(), "runny-lin-1-abcd1234", []string{"self-hosted"}, 1)
+	if err != nil || jit.RunnerID != 4242 {
+		t.Fatalf("org jitconfig: %+v, %v", jit, err)
+	}
+}
+
+func TestRunnerDownloadPerOS(t *testing.T) {
+	c := newTestClient(t, &fakeGitHub{})
+	name, url, err := c.RunnerDownload(t.Context(), "darwin")
+	if err != nil || !strings.Contains(name, "osx-arm64") || url != "https://example/osx" {
+		t.Errorf("darwin: %s %s %v", name, url, err)
+	}
+	name, url, err = c.RunnerDownload(t.Context(), "linux")
+	if err != nil || !strings.Contains(name, "linux-arm64") || url != "https://example/linux" {
+		t.Errorf("linux: %s %s %v", name, url, err)
+	}
+	if _, _, err := c.RunnerDownload(t.Context(), "windows"); err == nil {
+		t.Error("windows should be rejected")
 	}
 }
 

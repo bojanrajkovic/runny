@@ -30,7 +30,11 @@ rsync -a --exclude bazel-\* --exclude node_modules . brajkovic@ix:~/src/runny/
 ssh brajkovic@ix 'cd ~/src/runny && bazel test //...'
 ```
 
-The daemon binary must be codesigned with the `com.apple.security.virtualization` entitlement to boot VMs (ad-hoc signing is fine locally; see ADR-0008).
+The daemon binary must be codesigned with the `com.apple.security.virtualization` entitlement to boot VMs (ad-hoc signing is fine locally; see ADR-0008):
+
+```
+codesign -s - --entitlements tools/sign/runnyd.entitlements --force bazel-bin/cmd/runnyd/runnyd_/runnyd
+```
 
 ## Code conventions
 

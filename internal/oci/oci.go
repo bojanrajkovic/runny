@@ -10,8 +10,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -167,22 +169,34 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 
 	// disk.img: reserve the full uncompressed size, then decompress each
 	// layer at its running offset, concurrently (cap 4 — ghcr is
-	// throughput-bound, more streams don't help).
+	// throughput-bound, more streams don't help). The annotated sizes are
+	// registry-supplied: validate them here and enforce them during decode —
+	// they decide file offsets, so a layer that decodes past its annotation
+	// would silently overwrite its neighbor while every digest still checks
+	// out (digests cover the compressed stream, not the decoded bytes).
 	diskPath := filepath.Join(destDir, "disk.img")
 	var total int64
 	offsets := make([]int64, len(diskLayers))
+	sizes := make([]int64, len(diskLayers))
 	for i, l := range diskLayers {
 		offsets[i] = total
 		n, err := l.uncompressedSize()
 		if err != nil {
 			return "", err
 		}
+		if n <= 0 {
+			return "", fmt.Errorf("disk layer %s declares non-positive uncompressed size %d", l.Digest, n)
+		}
+		if total > math.MaxInt64-n {
+			return "", fmt.Errorf("disk layer sizes overflow the total image size")
+		}
+		sizes[i] = n
 		total += n
 	}
 	// Refuse a doomed pull up front: the decompressed image must fit. Hours
 	// of download ending in ENOSPC is the silent-failure shape this daemon
 	// exists to kill (and these images are large — 80GB+ uncompressed).
-	if free, err := freeBytes(filepath.Dir(destDir)); err == nil && uint64(total) > free-(2<<30) {
+	if free, err := freeBytes(filepath.Dir(destDir)); err == nil && uint64(total)+(2<<30) > free {
 		return "", fmt.Errorf("image %s needs %s uncompressed but only %s is free — refusing to start a pull that cannot complete",
 			ref, human(total), human(int64(free)))
 	}
@@ -193,7 +207,7 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 	g.SetLimit(4)
 	for i := range diskLayers {
 		g.Go(func() error {
-			return c.pullDiskLayer(gctx, ref, diskLayers[i], diskPath, offsets[i])
+			return c.pullDiskLayer(gctx, ref, diskLayers[i], diskPath, offsets[i], sizes[i])
 		})
 	}
 	if err := g.Wait(); err != nil {
@@ -264,7 +278,15 @@ func (c *Client) fetchManifest(ctx context.Context, ref Ref) (*manifest, string,
 	return &m, digest, nil
 }
 
+// maxSmallBlobSize caps config.json / nvram.bin downloads. tart's are a few
+// KB; 64 MiB is generous headroom. The manifest is the only thing declaring
+// blob sizes, so a hostile registry must not get to declare unbounded ones.
+const maxSmallBlobSize = 64 << 20
+
 func (c *Client) pullBlobToFile(ctx context.Context, ref Ref, d descriptor, path string) error {
+	if d.Size <= 0 || d.Size > maxSmallBlobSize {
+		return fmt.Errorf("blob %s declares implausible size %d", d.Digest, d.Size)
+	}
 	resp, err := c.get(ctx, ref, blobURL(ref, d.Digest), "")
 	if err != nil {
 		return fmt.Errorf("pulling %s: %w", d.Digest, err)
@@ -276,13 +298,23 @@ func (c *Client) pullBlobToFile(ctx context.Context, ref Ref, d descriptor, path
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(f, h, c.progressWriter()), resp.Body); err != nil {
+	// Read at most the declared size: an endless body must fail here, not
+	// after it has filled the disk. Stall detection cannot catch it (bytes
+	// keep arriving) and digest verification would only fire afterwards.
+	n, err := io.Copy(io.MultiWriter(f, h, c.progressWriter()), io.LimitReader(resp.Body, d.Size))
+	if err != nil {
 		return fmt.Errorf("downloading %s: %w", d.Digest, err)
+	}
+	if n != d.Size {
+		return fmt.Errorf("blob %s: got %d bytes, manifest says %d", d.Digest, n, d.Size)
 	}
 	return verifyDigest(d.Digest, h.Sum(nil))
 }
 
-func (c *Client) pullDiskLayer(ctx context.Context, ref Ref, d descriptor, diskPath string, offset int64) error {
+func (c *Client) pullDiskLayer(ctx context.Context, ref Ref, d descriptor, diskPath string, offset, expected int64) error {
+	if d.Size <= 0 {
+		return fmt.Errorf("disk layer %s declares non-positive size %d", d.Digest, d.Size)
+	}
 	resp, err := c.get(ctx, ref, blobURL(ref, d.Digest), "")
 	if err != nil {
 		return fmt.Errorf("pulling disk layer %s: %w", d.Digest, err)
@@ -297,11 +329,38 @@ func (c *Client) pullDiskLayer(ctx context.Context, ref Ref, d descriptor, diskP
 		return err
 	}
 	h := sha256.New()
-	body := io.TeeReader(io.TeeReader(resp.Body, h), c.progressWriter())
-	if _, err := appleLZ4Decode(f, body); err != nil {
+	// Bound both directions of the decode: read at most the declared
+	// compressed size, write at most the annotated uncompressed size, and
+	// demand the output land exactly on the annotation — it determined this
+	// layer's slot in disk.img, and the digest (which covers the compressed
+	// stream, not the decoded bytes) cannot catch an overrun into the
+	// neighboring layer or a decode that quietly fell short.
+	body := io.TeeReader(io.TeeReader(io.LimitReader(resp.Body, d.Size), h), c.progressWriter())
+	written, err := appleLZ4Decode(&boundedWriter{w: f, remain: expected}, body)
+	if err != nil {
 		return fmt.Errorf("disk layer %s: %w", d.Digest, err)
 	}
+	if written != expected {
+		return fmt.Errorf("disk layer %s decoded to %d bytes, annotation says %d", d.Digest, written, expected)
+	}
 	return verifyDigest(d.Digest, h.Sum(nil))
+}
+
+// boundedWriter refuses writes past its budget — the guard that turns a
+// decompression bomb into an immediate error instead of a full disk or a
+// silently corrupted neighbor layer.
+type boundedWriter struct {
+	w      io.Writer
+	remain int64
+}
+
+func (b *boundedWriter) Write(p []byte) (int, error) {
+	if int64(len(p)) > b.remain {
+		return 0, errors.New("layer decodes past its declared uncompressed size")
+	}
+	n, err := b.w.Write(p)
+	b.remain -= int64(n)
+	return n, err
 }
 
 // get performs one GET with bearer auth, handling the 401 token challenge.

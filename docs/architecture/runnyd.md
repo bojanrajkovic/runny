@@ -28,10 +28,11 @@ tested with fakes on any OS while the darwin-only implementations stay thin.
 
 | Package | Owns |
 | --- | --- |
+| `internal/bounded` | `bounded.Context` — the no-unbounded-operations invariant as a type (ADR-0011); wall-clock and progress-stall bounds |
 | `internal/home` | the `~/.runny` layout and the config schema (parse/default/validate once, at the boundary) |
 | `internal/cycle` | cycle.json records: write/read/prune, retention |
 | `internal/tart` | tart bundle format: config.json parse, validation, clonefile |
-| `internal/oci` | tart-format image pull: registry auth, manifest, Apple-LZ4 disk assembly, stall detection |
+| `internal/oci` | tart-format image pull: registry auth, manifest, Apple-LZ4 disk assembly; declared sizes enforced on every blob and decode |
 | `internal/sshx` | the only constructor of SSH clients (deadline recipe) |
 | `internal/guest` | what to *do* over SSH: stage runner from the virtiofs share, run.sh, diag pull |
 | `internal/github` | App JWT → installation token → JIT config; list/delete for reconcile |

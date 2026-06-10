@@ -270,5 +270,93 @@ func TestPinnedDigestMismatch(t *testing.T) {
 	}
 }
 
+// tamperManifest re-marshals the registry's manifest after mut edits it.
+// Refs in these tests are tag-addressed, so no digest pin breaks.
+func (f *fakeRegistry) tamperManifest(t *testing.T, mut func(*manifest)) {
+	t.Helper()
+	var m manifest
+	if err := json.Unmarshal(f.manifest, &m); err != nil {
+		t.Fatal(err)
+	}
+	mut(&m)
+	f.manifest, _ = json.Marshal(m)
+}
+
+// A layer that decodes past its annotated uncompressed size is a
+// decompression bomb and an overwrite of the neighboring layer's region —
+// and the blob digest cannot catch it (it covers the compressed stream).
+// The decode must refuse at the annotation boundary.
+func TestPullRejectsBombLayer(t *testing.T) {
+	disk := bytes.Repeat([]byte("D"), 8192)
+	f := newFakeRegistry(t, []byte("{}"), []byte("n"), disk)
+	f.tamperManifest(t, func(m *manifest) {
+		for i := range m.Layers {
+			if m.Layers[i].MediaType == mediaTypeDiskV2 {
+				m.Layers[i].Annotations[annotationUncompressedSize] = "1024" // truly 4096
+				return
+			}
+		}
+	})
+	_, ref := f.start()
+	_, err := NewClient().PullTo(testCtx(t), ref, filepath.Join(t.TempDir(), "b"))
+	if err == nil || !strings.Contains(err.Error(), "declared uncompressed size") {
+		t.Fatalf("want over-decode rejection, got %v", err)
+	}
+}
+
+// A layer that decodes SHORT of its annotation leaves a hole of zeros in
+// disk.img that every digest check still passes — it must fail the pull.
+func TestPullRejectsShortDecode(t *testing.T) {
+	disk := bytes.Repeat([]byte("D"), 8192)
+	f := newFakeRegistry(t, []byte("{}"), []byte("n"), disk)
+	f.tamperManifest(t, func(m *manifest) {
+		for i := range m.Layers {
+			if m.Layers[i].MediaType == mediaTypeDiskV2 {
+				m.Layers[i].Annotations[annotationUncompressedSize] = "9000" // truly 4096
+				return
+			}
+		}
+	})
+	_, ref := f.start()
+	_, err := NewClient().PullTo(testCtx(t), ref, filepath.Join(t.TempDir(), "b"))
+	if err == nil || !strings.Contains(err.Error(), "annotation says") {
+		t.Fatalf("want short-decode rejection, got %v", err)
+	}
+}
+
+func TestPullRejectsImplausibleBlobSize(t *testing.T) {
+	f := newFakeRegistry(t, []byte(`{"os":"darwin"}`), []byte("n"), bytes.Repeat([]byte("D"), 4096))
+	f.tamperManifest(t, func(m *manifest) {
+		for i := range m.Layers {
+			if m.Layers[i].MediaType == mediaTypeConfig {
+				m.Layers[i].Size = 0
+				return
+			}
+		}
+	})
+	_, ref := f.start()
+	_, err := NewClient().PullTo(testCtx(t), ref, filepath.Join(t.TempDir(), "b"))
+	if err == nil || !strings.Contains(err.Error(), "implausible size") {
+		t.Fatalf("want implausible-size rejection, got %v", err)
+	}
+}
+
+func TestPullRejectsNegativeUncompressedSize(t *testing.T) {
+	f := newFakeRegistry(t, []byte("{}"), []byte("n"), bytes.Repeat([]byte("D"), 4096))
+	f.tamperManifest(t, func(m *manifest) {
+		for i := range m.Layers {
+			if m.Layers[i].MediaType == mediaTypeDiskV2 {
+				m.Layers[i].Annotations[annotationUncompressedSize] = "-1"
+				return
+			}
+		}
+	})
+	_, ref := f.start()
+	_, err := NewClient().PullTo(testCtx(t), ref, filepath.Join(t.TempDir(), "b"))
+	if err == nil || !strings.Contains(err.Error(), "non-positive uncompressed size") {
+		t.Fatalf("want non-positive-size rejection, got %v", err)
+	}
+}
+
 // Silence unused-import lint in case of build-tag pruning.
 var _ = url.Values{}

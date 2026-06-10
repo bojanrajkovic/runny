@@ -147,8 +147,9 @@ func run() error {
 				Runner: func(c bounded.Context) (string, string, error) {
 					return gh.RunnerDownload(c, osName)
 				},
-				StallBudget: cfg.Deadlines.PullStall.D(),
-				Log:         logger,
+				StallBudget:   cfg.Deadlines.PullStall.D(),
+				ResolveBudget: cfg.Deadlines.Resolve.D(),
+				Log:           logger,
 			},
 			Clone: func(src tart.Bundle, dst string) error {
 				_, err := tart.Clone(src, tart.Bundle(dst))
@@ -158,7 +159,7 @@ func run() error {
 			Dial: guest.Dialer{SSH: sshx.Config{
 				User:     p.SSHUser,
 				Password: p.SSHPassword,
-				Timeout:  3 * time.Second,
+				Timeout:  p.SSHTimeout.D(),
 			}},
 			Log: logger,
 		}

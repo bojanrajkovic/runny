@@ -21,10 +21,10 @@ import (
 	"github.com/bojanrajkovic/runny/internal/tart"
 )
 
-// resolveTimeout bounds the quick metadata round-trips (manifest resolve,
-// runner-download resolve) that precede a stall-watched transfer; 60s
-// matches the doctor's and seedpull's convention.
-const resolveTimeout = 60 * time.Second
+// defaultResolveTimeout is the fallback bound for the quick metadata
+// round-trips (manifest resolve, runner-download resolve) that precede a
+// stall-watched transfer; the configured value is Deadlines.Resolve.
+const defaultResolveTimeout = 60 * time.Second
 
 // Ensurer resolves and caches the configured image (ENSURE_IMAGE's work).
 type Ensurer struct {
@@ -39,14 +39,24 @@ type Ensurer struct {
 	// StallBudget: the progress-based deadline — no layer bytes for this long
 	// means stuck (slow ≠ silent).
 	StallBudget time.Duration
-	Log         *slog.Logger
+	// ResolveBudget bounds the metadata round-trips that precede the pull
+	// (Deadlines.Resolve); zero takes the default.
+	ResolveBudget time.Duration
+	Log           *slog.Logger
+}
+
+func (e *Ensurer) resolveBudget() time.Duration {
+	if e.ResolveBudget > 0 {
+		return e.ResolveBudget
+	}
+	return defaultResolveTimeout
 }
 
 func (e *Ensurer) Ensure(ctx context.Context, report func(string)) (string, tart.Bundle, error) {
 	// Runner tarball first: small, fails fast, and shared across slots
 	// (per-file locking inside).
 	if e.Runner != nil {
-		if _, err := EnsureRunnerTarball(ctx, e.Home.RunnerCacheDir(), e.Runner, e.StallBudget, report, e.log()); err != nil {
+		if _, err := EnsureRunnerTarball(ctx, e.Home.RunnerCacheDir(), e.Runner, e.resolveBudget(), e.StallBudget, report, e.log()); err != nil {
 			return "", "", fmt.Errorf("ensuring runner tarball: %w", err)
 		}
 	}
@@ -56,7 +66,7 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string)) (string, tart
 	// unknowable), so this quick metadata round-trip needs its own wall-clock
 	// bound — without one, a registry that accepts TCP and goes silent hangs
 	// the slot forever.
-	rctx, rcancel := bounded.WithTimeout(ctx, resolveTimeout)
+	rctx, rcancel := bounded.WithTimeout(ctx, e.resolveBudget())
 	digest, err := client.Resolve(rctx, e.Ref)
 	rcancel()
 	if err != nil {
@@ -233,8 +243,11 @@ var tarballLocks sync.Map // filename -> *sync.Mutex
 // network reads anywhere (a startup-time version of this dead-stalled on a
 // hung GitHub download with no timeout). Superseded same-OS tarballs are
 // removed so guests (which pick by name) never stage a deprecated build.
-func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerResolver, stallBudget time.Duration, report func(string), log *slog.Logger) (string, error) {
-	rctx, rcancel := bounded.WithTimeout(ctx, resolveTimeout)
+func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerResolver, resolveBudget, stallBudget time.Duration, report func(string), log *slog.Logger) (string, error) {
+	if resolveBudget <= 0 {
+		resolveBudget = defaultResolveTimeout
+	}
+	rctx, rcancel := bounded.WithTimeout(ctx, resolveBudget)
 	assetName, assetURL, err := resolve(rctx)
 	rcancel()
 	if err != nil {

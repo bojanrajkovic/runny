@@ -49,6 +49,12 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if got := c.Deadlines.AwaitSSH.D(); got != 90*time.Second {
 		t.Errorf("AwaitSSH = %v, want 90s", got)
 	}
+	if got := c.Deadlines.Resolve.D(); got != 60*time.Second {
+		t.Errorf("Resolve = %v, want 60s", got)
+	}
+	if got := p.SSHTimeout.D(); got != 3*time.Second {
+		t.Errorf("SSHTimeout = %v, want 3s", got)
+	}
 	if p.Target.IsOrg() {
 		t.Error("owner/repo target misread as org")
 	}
@@ -88,6 +94,9 @@ func TestLoadConfigValidation(t *testing.T) {
 		{"half repo target", minimalConfig + "  - name: h\n    os: linux\n    image: x\n    target: {owner: b}\n", "org, or both owner and repo"},
 		{"dup names", minimalConfig + "  - name: mac\n    os: linux\n    image: x\n    target: {org: a}\n", "duplicate pool name"},
 		{"bad name", minimalConfig + "  - name: Mac_1\n    os: linux\n    image: x\n    target: {org: a}\n", "lowercase"},
+		{"negative deadline", minimalConfig + "deadlines:\n  pull_stall: -30s\n", "must be positive"},
+		{"negative limit", minimalConfig + "limits:\n  max_idle: -1h\n", "must be positive"},
+		{"negative ssh timeout", strings.Replace(minimalConfig, "count: 2", "count: 2\n    ssh_timeout: -3s", 1), "ssh_timeout must be positive"},
 	}
 	for _, tc := range cases {
 		_, err := LoadConfig(writeConfig(t, tc.yaml))

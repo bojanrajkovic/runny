@@ -48,6 +48,11 @@ type PoolConfig struct {
 	// Guest credentials; cirruslabs images use admin/admin for both OSes.
 	SSHUser     string `yaml:"ssh_user"`
 	SSHPassword string `yaml:"ssh_password"`
+	// SSHTimeout bounds each SSH operation attempt against this pool's
+	// guests: TCP connect, banner+auth, channel open, exec start. Per-pool
+	// because guest responsiveness varies by image and load; a guest under
+	// teardown pressure may need more headroom than the 3s default.
+	SSHTimeout Duration `yaml:"ssh_timeout"`
 }
 
 // TargetConfig holds exactly one of: Org, or Owner+Repo.
@@ -80,6 +85,10 @@ type Deadlines struct {
 	// PullStall is the progress-based budget for ENSURE_IMAGE: no layer bytes
 	// for this long = stuck (a slow pull is expected, a silent one is not).
 	PullStall Duration `yaml:"pull_stall"`
+	// Resolve bounds the quick metadata round-trips (registry manifest
+	// resolve, runner-download resolve) that precede a stall-watched
+	// transfer. Shaped by registry/GHES latency, not by runny's internals.
+	Resolve Duration `yaml:"resolve"`
 }
 
 type Limits struct {
@@ -162,6 +171,7 @@ func (c *Config) applyDefaults() {
 		if p.SSHPassword == "" {
 			p.SSHPassword = "admin"
 		}
+		def(&p.SSHTimeout, 3*time.Second)
 		if len(p.Labels) == 0 {
 			switch p.OS {
 			case "darwin":
@@ -179,6 +189,7 @@ func (c *Config) applyDefaults() {
 	def(&c.Deadlines.Provision, 180*time.Second)
 	def(&c.Deadlines.Teardown, 60*time.Second)
 	def(&c.Deadlines.PullStall, 3*time.Minute)
+	def(&c.Deadlines.Resolve, 60*time.Second)
 	def(&c.Limits.MaxJobDuration, 2*time.Hour)
 	def(&c.Limits.MaxIdle, 24*time.Hour)
 	def(&c.Limits.BackoffBase, 5*time.Second)
@@ -232,6 +243,37 @@ func (c *Config) validate() error {
 			errs = append(errs, fmt.Errorf("%s: target needs org, or both owner and repo", at))
 		}
 	}
+	// Durations: defaults have been applied (zero = take the default), so
+	// anything non-positive here was set negative explicitly. A negative
+	// budget would fail every operation instantly — or, before this check,
+	// panicked the stall watcher's ticker.
+	for name, d := range map[string]Duration{
+		"deadlines.clone":           c.Deadlines.Clone,
+		"deadlines.boot":            c.Deadlines.Boot,
+		"deadlines.await_ip":        c.Deadlines.AwaitIP,
+		"deadlines.await_ssh":       c.Deadlines.AwaitSSH,
+		"deadlines.mint_jit":        c.Deadlines.MintJIT,
+		"deadlines.provision":       c.Deadlines.Provision,
+		"deadlines.teardown":        c.Deadlines.Teardown,
+		"deadlines.pull_stall":      c.Deadlines.PullStall,
+		"deadlines.resolve":         c.Deadlines.Resolve,
+		"limits.max_job_duration":   c.Limits.MaxJobDuration,
+		"limits.max_idle":           c.Limits.MaxIdle,
+		"limits.backoff_base":       c.Limits.BackoffBase,
+		"limits.backoff_cap":        c.Limits.BackoffCap,
+		"limits.reconcile_interval": c.Limits.ReconcileInterval,
+		"retention.max_age":         c.Retention.MaxAge,
+	} {
+		if d <= 0 {
+			errs = append(errs, fmt.Errorf("%s must be positive, got %v", name, d.D()))
+		}
+	}
+	for i, p := range c.Pools {
+		if p.SSHTimeout <= 0 {
+			errs = append(errs, fmt.Errorf("pools[%d]: ssh_timeout must be positive, got %v", i, p.SSHTimeout.D()))
+		}
+	}
+
 	// The Virtualization.framework 2-macOS-guest cap is checked by doctor and
 	// startup validation, not here — config parsing stays platform-agnostic.
 	return errors.Join(errs...)

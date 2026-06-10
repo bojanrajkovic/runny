@@ -77,16 +77,21 @@ experiment — it decides whether #10 blocks the cutover or not.
 
 ## Production install (via the tap)
 
-Once the grant story holds, install through the Homebrew tap (formula lives in
-the tap repo, installs the binary to `$(brew --prefix)/bin/runnyd`):
+Once the grant story holds, install through the Homebrew tap (the formula
+installs both `runnyd` and `runnyctl`, and its `service` block is the
+LaunchAgent — same shape as `tools/deploy/`):
 
 ```sh
-brew install bojanrajkovic/tap/runnyd
-RUNNYD="$(brew --prefix)/bin/runnyd" ~/path/to/tools/deploy/install.sh
+brew install bojanrajkovic/tap/runny
+# write ~/.runny/config.yaml, then from a GUI login session, WITHOUT sudo
+# (sudo would install a Local-Network-denied LaunchDaemon):
+brew services start runny
 ```
 
-(The formula can ship and bootstrap the LaunchAgent directly; until the tap
-formula exists, `install.sh` is the path.)
+The release workflow regenerates the formula from `tools/deploy/runny.rb.tmpl`
+on every release and pushes it to the tap when the `TAP_PUSH_TOKEN` secret is
+set (a PAT with Contents:write on the tap repo). `tools/deploy/install.sh`
+remains the path for running a from-checkout build.
 
 ## sand cutover (#9)
 

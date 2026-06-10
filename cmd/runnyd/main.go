@@ -238,7 +238,8 @@ func makeDoctor(dir home.Dir, cfg *home.Config, clients map[home.TargetConfig]*g
 		} else {
 			add("macos-guest-cap", false, fmt.Sprintf(
 				"darwin pools total %d slots, exceeding Virtualization.framework's %d-macOS-guest cap; the extra slots could never boot",
-				darwinCount, macOSGuestCap))
+				darwinCount, macOSGuestCap,
+			))
 		}
 
 		for target, gh := range clients {

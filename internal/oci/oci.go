@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
+	"github.com/bojanrajkovic/runny/internal/tart"
 )
 
 const (
@@ -245,12 +247,16 @@ func (c *Client) PullTo(ctx bounded.Context, ref Ref, destDir string) (string, e
 	mu.Lock()
 	defer mu.Unlock()
 
-	if raw, err := os.ReadFile(filepath.Join(destDir, "manifest.json")); err == nil {
-		// Already complete (possibly by the slot we just waited on). The
-		// digest is the hash of the manifest bytes stored at pull time —
-		// read it from disk rather than re-asking the registry: waiters
-		// arrive here with their stall budgets already spent waiting for
-		// the winner, and a cache hit must not depend on the network.
+	// A cache hit must pass the same completeness bar the consumer applies
+	// (tart.Bundle.Verify), not just "manifest.json exists" — a manifest
+	// next to a missing or empty disk.img once wedged the slot in a
+	// permanent fail loop with no self-heal: Ensure's Verify rejected the
+	// bundle, PullTo kept declaring it complete. The digest is the hash of
+	// the manifest bytes stored at pull time — read from disk rather than
+	// re-asking the registry: waiters arrive here with their stall budgets
+	// already spent waiting for the winner, and a cache hit must not depend
+	// on the network.
+	if raw, err := os.ReadFile(filepath.Join(destDir, "manifest.json")); err == nil && tart.Bundle(destDir).Verify() == nil {
 		sum := sha256.Sum256(raw)
 		digest := "sha256:" + hex.EncodeToString(sum[:])
 		if ref.Digest == "" || ref.Digest == digest {
@@ -449,6 +455,14 @@ func (c *Client) fetchToken(ctx context.Context, ref Ref, challenge string) erro
 	if realm == "" {
 		return fmt.Errorf("registry challenge missing realm: %q", challenge)
 	}
+	// The realm is registry-controlled and the minted token flows back in
+	// our requests: refuse to chase it over plaintext (loopback excepted,
+	// matching the registry scheme convention above).
+	if u, err := url.Parse(realm); err != nil {
+		return fmt.Errorf("registry challenge realm %q: %w", realm, err)
+	} else if u.Scheme != "https" && !isLoopbackHost(u.Host) {
+		return fmt.Errorf("registry challenge realm %q is not https", realm)
+	}
 	q := url.Values{}
 	if s := params["service"]; s != "" {
 		q.Set("service", s)
@@ -496,12 +510,26 @@ func blobURL(ref Ref, digest string) string {
 }
 
 // scheme: loopback registries (httptest, local dev) speak plain HTTP — the
-// same convention container tooling uses for localhost.
+// same convention container tooling uses for localhost. The check is exact,
+// not a prefix match: localhost.evil.com and 127.0.0.10 must not earn a
+// plaintext downgrade.
 func scheme(host string) string {
-	if strings.HasPrefix(host, "127.0.0.1") || strings.HasPrefix(host, "localhost") {
+	if isLoopbackHost(host) {
 		return "http"
 	}
 	return "https"
+}
+
+func isLoopbackHost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func verifyDigest(want string, sum []byte) error {

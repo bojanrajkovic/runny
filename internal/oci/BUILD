@@ -11,6 +11,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/bounded",
+        "//internal/tart",
         "@com_github_pierrec_lz4_v4//:lz4",
         "@org_golang_x_sync//errgroup",
     ] + select({

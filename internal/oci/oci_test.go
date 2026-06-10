@@ -313,6 +313,57 @@ func TestPullToConcurrentSameDest(t *testing.T) {
 	}
 }
 
+// The plaintext-HTTP convention is loopback-exact: lookalike hosts must not
+// earn a downgrade.
+func TestSchemeLoopbackExact(t *testing.T) {
+	for host, want := range map[string]string{
+		"127.0.0.1":             "http",
+		"127.0.0.1:5000":        "http",
+		"localhost:5000":        "http",
+		"[::1]:5000":            "http",
+		"127.0.0.10:5000":       "http", // still loopback: 127.0.0.0/8
+		"localhost.evil.com":    "https",
+		"127.0.0.1.evil.com":    "https",
+		"ghcr.io":               "https",
+		"localhost-registry.io": "https",
+	} {
+		if got := scheme(host); got != want {
+			t.Errorf("scheme(%q) = %s, want %s", host, got, want)
+		}
+	}
+}
+
+// A cached bundle must pass the consumer's completeness bar, not just have a
+// manifest.json — a manifest next to a missing disk.img once wedged the slot
+// in a permanent fail loop (cache declared complete, Verify rejected it).
+func TestPullToHealsCorruptCache(t *testing.T) {
+	config := []byte(`{"os":"darwin"}`)
+	disk := bytes.Repeat([]byte("D"), 8192)
+	f := newFakeRegistry(t, config, []byte("nvram"), disk)
+	_, ref := f.start()
+
+	dest := filepath.Join(t.TempDir(), "bundle")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A corrupt cache: manifest present, disk.img missing.
+	if err := os.WriteFile(filepath.Join(dest, "manifest.json"), f.manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	digest, err := NewClient().PullTo(testCtx(t), ref, dest)
+	if err != nil {
+		t.Fatalf("PullTo did not heal the corrupt cache: %v", err)
+	}
+	if digest != f.digest {
+		t.Errorf("digest = %s, want %s", digest, f.digest)
+	}
+	gotDisk, err := os.ReadFile(filepath.Join(dest, "disk.img"))
+	if err != nil || !bytes.Equal(gotDisk, disk) {
+		t.Fatalf("disk.img not re-pulled: %d bytes, err %v", len(gotDisk), err)
+	}
+}
+
 // tamperManifest re-marshals the registry's manifest after mut edits it.
 // Refs in these tests are tag-addressed, so no digest pin breaks.
 func (f *fakeRegistry) tamperManifest(t *testing.T, mut func(*manifest)) {

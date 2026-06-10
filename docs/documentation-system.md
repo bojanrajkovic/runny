@@ -14,7 +14,7 @@ Concretely: the state machine, the on-disk layout, and the system shape live in 
 
 **`docs/architecture-decisions/`** holds durable decisions, one per file, each with the alternatives that were weighed. Write an ADR when both hold: a **real fork** existed (a different reasonable engineer could have chosen otherwise, with lasting consequences) and the decision **constrains the built artifact** — code, tests, repo layout, or an enforced convention. Mechanical process stays in `CONTRIBUTING.md` even when it had a fork. Amendments are graded: a dated **Amended:** banner for substance changes, a light note for framing shifts, nothing for renames; supersede/superseded back-pointers land on both ADRs in the same commit.
 
-**`docs/design-plans/`** holds committed plans for multi-phase work that spans working contexts. A plan whose durable decisions have graduated into ADRs/architecture is done serving its purpose.
+Pre-implementation planning is not a tracked genre. Decisions worth keeping graduate into an ADR (or the architecture docs); the working notes that produced them stay outside the repo. The bootstrap-era design plan was retired (2026-06-09) once its durable content had graduated — git history keeps the text.
 
 **`CONTRIBUTING.md`** is the human dev workflow. **Root `CLAUDE.md`** is the agent index, including the planning protocol — agent-facing process guidance lives there deliberately, not here.
 

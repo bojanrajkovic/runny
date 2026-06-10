@@ -38,7 +38,6 @@ For per-directory detail, read that directory's `CLAUDE.md` if present. For curr
 | --- | --- |
 | How it works (current architecture) | `docs/architecture/` |
 | Decisions, and why | `docs/architecture-decisions/` |
-| Design plans (multi-phase work) | `docs/design-plans/` |
 | Doc-system governance | `docs/documentation-system.md` |
 | Human dev workflow | `CONTRIBUTING.md` |
 

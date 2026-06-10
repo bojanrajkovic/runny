@@ -10,8 +10,10 @@ permissions:
 
 jobs:
   # Linux covers format, lint (nogo rides compilation), and all pure-Go
-  # build/test. Darwin-only targets (vz cgo, RunnyBar) need a macOS job,
-  # which doesn't exist yet.
+  # build/test fast; macOS covers the darwin-only targets (vz cgo) and
+  # produces an ad-hoc-signed daemon artifact. GitHub's macOS runners are
+  # themselves VMs (no nested virtualization), so CI never boots guests —
+  # that remains an ix job.
   linux:
     runs-on: ubuntu-latest
     steps:
@@ -31,3 +33,31 @@ jobs:
         run: |
           mise x -- bazel run --config=ci //tools/format
           git diff --exit-code
+
+  macos:
+    # macos-26 matches the deployment host (ix) and guest image generation.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/bazel
+          key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel', '.mise.toml') }}
+          restore-keys: bazel-${{ runner.os }}-
+      - name: build
+        run: mise x -- bazel build --config=ci //...
+      - name: test
+        run: mise x -- bazel test --config=ci //... || test $? -eq 4
+      - name: sign runnyd (ad-hoc, virtualization entitlement)
+        # Ad-hoc signatures honor the virtualization entitlement on any host;
+        # Developer ID signing waits on cert secrets (see CONTRIBUTING.md).
+        run: |
+          cp bazel-bin/cmd/runnyd/runnyd_/runnyd runnyd
+          chmod +w runnyd
+          codesign -s - --entitlements tools/sign/runnyd.entitlements --force runnyd
+          codesign -dv runnyd
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runnyd-darwin-arm64
+          path: runnyd

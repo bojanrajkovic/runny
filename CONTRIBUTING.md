@@ -53,7 +53,12 @@ codesign -s - --entitlements tools/sign/runnyd.entitlements --force bazel-bin/cm
 
 ## CI
 
-GitHub Actions gate every PR and push to `main`: `ci.yml` (build, test, format — Linux; macOS job covers darwin targets) and `pr-title.yml`. All checks must pass before merge.
+GitHub Actions gate every PR and push to `main`: `ci.yml` (Linux: build/test/format; macOS: darwin targets + an ad-hoc-signed `runnyd` artifact) and `pr-title.yml`. All checks must pass before merge. CI never boots guests — GitHub's macOS runners are VMs themselves, so VM-touching verification happens on a real host.
+
+### Codesigning tiers
+
+- **Ad-hoc (current)**: CI signs `runnyd` with `codesign -s -` plus the virtualization entitlement; the artifact boots VMs on any host. No setup required.
+- **Developer ID (when distribution matters)**: requires an Apple Developer Program membership. Export the Developer ID Application certificate as `.p12` and add repo secrets `BUILD_CERTIFICATE_BASE64`, `P12_PASSWORD`, `KEYCHAIN_PASSWORD`; for notarization add an App Store Connect API key (`.p8` content, key ID, issuer ID). The signing workflow upgrade lands once those secrets exist.
 
 ## Boundaries
 

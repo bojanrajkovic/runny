@@ -25,8 +25,9 @@ type fakeImages struct {
 	bundle tart.Bundle
 	err    error
 	// maxCalls > 0: calls beyond it block until ctx ends, so tests control
-	// exactly how many cycles run.
+	// exactly how many cycles run. blockAll blocks every call (a stuck pull).
 	maxCalls int
+	blockAll bool
 	calls    int
 	mu       sync.Mutex
 }
@@ -37,7 +38,7 @@ func (f *fakeImages) Ensure(ctx context.Context, report func(string)) (string, t
 	}
 	f.mu.Lock()
 	f.calls++
-	blocked := f.maxCalls > 0 && f.calls > f.maxCalls
+	blocked := f.blockAll || (f.maxCalls > 0 && f.calls > f.maxCalls)
 	f.mu.Unlock()
 	if blocked {
 		<-ctx.Done()
@@ -539,12 +540,48 @@ func TestOperatorRecycle(t *testing.T) {
 		t.Fatal("command rejected")
 	}
 	h.waitState(t, StateTeardown)
-	h.waitState(t, StateBackoff)
+	st := h.waitState(t, StateBackoff)
+	if st.ConsecutiveFailures != 0 {
+		t.Errorf("failures = %d after operator recycle; an operator action is not a health signal", st.ConsecutiveFailures)
+	}
 	cancel()
 
 	recs := h.records(t)
 	if !strings.Contains(recs[0].Failure.Error, "recycled by operator") {
 		t.Errorf("failure = %+v", recs[0].Failure)
+	}
+}
+
+// A recycle issued mid-state must interrupt the cycle now — it once sat
+// queued until LISTENING, hours later, then killed whatever healthy runner
+// had come up in the meantime.
+func TestRecycleInterruptsStuckPull(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.blockAll = true // the pull never finishes on its own
+	cancel := h.start(t)
+	_ = cancel
+
+	h.waitState(t, StateEnsureImage)
+	if !h.slot.Command(Command{Kind: CmdRecycle, Reason: "stuck pull"}) {
+		t.Fatal("command rejected")
+	}
+	h.waitState(t, StateTeardown)
+	st := h.waitState(t, StateBackoff)
+	if st.ConsecutiveFailures != 0 {
+		t.Errorf("failures = %d, want 0: operator recycle is benign", st.ConsecutiveFailures)
+	}
+	cancel()
+	<-h.runDone
+
+	recs := h.records(t)
+	var found bool
+	for _, r := range recs {
+		if r.Failure != nil && strings.Contains(r.Failure.Error, "recycled by operator: stuck pull") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no record names the operator recycle; records: %+v", recs)
 	}
 }
 

@@ -46,6 +46,11 @@ const (
 	markerJobCompleted = "completed with result:"
 )
 
+// errOperatorRecycle marks a cycle ended on purpose by `runnyctl recycle`.
+// Cycles it ends are recorded as failures (the timeline is truthful) but are
+// benign for backoff accounting: an operator action is not a health signal.
+var errOperatorRecycle = errors.New("recycled by operator")
+
 // ImageEnsurer makes sure the configured image is cached locally and returns
 // its digest and bundle dir (ENSURE_IMAGE's work). report receives live
 // progress annotations ("2.1 GiB at 41 MiB/s") — pull progress must be
@@ -227,8 +232,8 @@ func (s *Slot) Run(ctx context.Context) {
 		if err := s.backoffWait(ctx); err != nil {
 			return // daemon shutdown
 		}
-		rec, wedged := s.runCycle(ctx)
-		s.finishCycle(ctx, rec)
+		rec, wedged, benign := s.runCycle(ctx)
+		s.finishCycle(rec, benign)
 		if wedged {
 			// The guest survived force-stop: it still occupies one of the
 			// host's Virtualization.framework guest slots, so every further
@@ -349,9 +354,10 @@ type cycleErr struct {
 func (e *cycleErr) Error() string { return fmt.Sprintf("%s: %v", e.state, e.err) }
 
 // runCycle executes states 1..9, always handing off to TEARDOWN, and returns
-// the cycle record (teardown fills the tail) plus whether teardown wedged
-// (force-stop failed with the guest still running).
-func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool) {
+// the cycle record (teardown fills the tail), whether teardown wedged
+// (force-stop failed with the guest still running), and whether the cycle
+// ended benignly (operator recycle, daemon shutdown) rather than by failure.
+func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	cfg := s.deps.Config
 	rec := &cycle.Record{
 		CycleID: cycle.NewID(),
@@ -359,6 +365,46 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool) {
 		Started: time.Now(),
 	}
 	runnerName := fmt.Sprintf("%s-%s-%s", cfg.NamePrefix, s.name, rec.CycleID)
+
+	// Operator commands must be able to interrupt ANY state, not just
+	// LISTENING: a recycle issued mid-pull once sat queued for hours, then
+	// fired on whatever healthy runner came up next. The watcher cancels the
+	// cycle context with a typed cause; it hands command duty to LISTENING
+	// (which has its own select) and is joined before that handoff so the
+	// two never consume from cmds concurrently.
+	cctx, ccancel := context.WithCancelCause(ctx)
+	defer ccancel(nil)
+	stopWatch := make(chan struct{})
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		for {
+			select {
+			case <-stopWatch:
+				return
+			case <-cctx.Done():
+				return
+			case cmd := <-s.cmds:
+				switch cmd.Kind {
+				case CmdRecycle:
+					ccancel(fmt.Errorf("%w: %s", errOperatorRecycle, cmd.Reason))
+				case CmdPause:
+					s.setPaused(true)
+				case CmdResume:
+					s.setPaused(false)
+				}
+			}
+		}
+	}()
+	watcherStopped := false
+	stopWatcher := func() {
+		if !watcherStopped {
+			watcherStopped = true
+			close(stopWatch)
+			<-watchDone
+		}
+	}
+	defer stopWatcher()
 
 	var (
 		machine   vm.Machine
@@ -398,7 +444,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool) {
 	// network seams — the per-state deadline is the contract, and the type
 	// system carries it to the call sites (ADR-0011).
 	enter := func(state State, d time.Duration, f func(bounded.Context) error) bool {
-		bctx, cancel := bounded.WithTimeout(ctx, d)
+		bctx, cancel := bounded.WithTimeout(cctx, d)
 		ok := runState(state, bctx, func() error { return f(bctx) })
 		cancel()
 		return ok
@@ -408,8 +454,8 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool) {
 	// ENSURE_IMAGE is the one state with no wall-clock deadline — pull
 	// duration is unknowable — so it runs under the cycle context; its
 	// operations carry their own bounds (resolve timeout, stall watcher).
-	ok := runState(StateEnsureImage, ctx, func() error {
-		digest, bundle, err := s.deps.Images.Ensure(ctx, s.setDetail)
+	ok := runState(StateEnsureImage, cctx, func() error {
+		digest, bundle, err := s.deps.Images.Ensure(cctx, s.setDetail)
 		if err != nil {
 			return err
 		}
@@ -481,7 +527,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool) {
 		ok = enter(StateProvision, cfg.Deadlines.Provision.D(), func(c bounded.Context) error {
 			// The proc must outlive this state's deadline: start it under the
 			// cycle ctx, but bound the wait-for-listening here.
-			p, err := guest.StartRunner(ctx, jit.EncodedJITConfig, s.deps.Pool.OS)
+			p, err := guest.StartRunner(cctx, jit.EncodedJITConfig, s.deps.Pool.OS)
 			if err != nil {
 				return err
 			}
@@ -504,15 +550,18 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool) {
 	}
 
 	// LISTENING / JOB: watch-driven, no fixed deadline; budgets come from the
-	// watches themselves.
+	// watches themselves. LISTENING services commands in its own select, so
+	// the cycle watcher retires first.
 	if ok {
-		jobRan, failState, failErr = s.listenAndRunJob(ctx, rec, proc, runnerName)
+		stopWatcher()
+		jobRan, failState, failErr = s.listenAndRunJob(cctx, rec, proc, runnerName)
 		ok = failState == ""
 	}
 
 	// TEARDOWN — unconditional. Force is the floor; a guest that survives
 	// even force-stop wedges the slot, and the record says so truthfully.
-	wedged := s.teardown(ctx, rec, teardownInputs{
+	stopWatcher()
+	wedged := s.teardown(cctx, rec, teardownInputs{
 		machine:  machine,
 		guest:    guest,
 		proc:     proc,
@@ -521,6 +570,22 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool) {
 		vmDir:    vmDir,
 		failed:   !ok,
 	})
+
+	// A cycle ended by operator recycle or daemon shutdown is recorded as a
+	// failure (the timeline is truthful) but is benign for backoff: neither
+	// says anything about the slot's health. A wedge is never benign.
+	benign := false
+	if !ok {
+		if cause := context.Cause(cctx); errors.Is(cause, errOperatorRecycle) {
+			// Surface the recycle as the failure text instead of the bare
+			// "context canceled" the interrupted state reported.
+			failErr = cause
+			benign = true
+		} else if errors.Is(failErr, errOperatorRecycle) || ctx.Err() != nil {
+			benign = true
+		}
+	}
+	benign = benign && !wedged
 
 	rec.Finished = time.Now()
 	switch {
@@ -533,7 +598,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool) {
 		rec.Result = cycle.ResultFailure
 		rec.Failure = &cycle.Failure{State: string(StateTeardown), Error: "vm stop escalation failed; guest still running"}
 	}
-	return rec, wedged
+	return rec, wedged, benign
 }
 
 // listenAndRunJob handles LISTENING and JOB. Returns jobRan and, on failure,
@@ -563,7 +628,7 @@ func (s *Slot) listenAndRunJob(ctx context.Context, rec *cycle.Record, proc Proc
 			switch cmd.Kind {
 			case CmdRecycle:
 				finishListening(cycle.OutcomeOK, "")
-				return false, StateListening, fmt.Errorf("recycled by operator: %s", cmd.Reason)
+				return false, StateListening, fmt.Errorf("%w: %s", errOperatorRecycle, cmd.Reason)
 			case CmdPause:
 				s.setPaused(true) // takes effect at next BACKOFF
 			case CmdResume:
@@ -737,7 +802,10 @@ func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInput
 }
 
 // finishCycle writes the record, updates failure accounting, and prunes.
-func (s *Slot) finishCycle(ctx context.Context, rec *cycle.Record) {
+// Benign endings (operator recycle, daemon shutdown) leave the failure
+// streak untouched in both directions: they are not health signals, so they
+// neither escalate backoff nor launder a failing slot's history (issue #21).
+func (s *Slot) finishCycle(rec *cycle.Record, benign bool) {
 	store := cycle.Store{SlotDir: s.deps.Home.SlotCyclesDir(s.name)}
 	if err := store.Write(rec); err != nil {
 		s.deps.Log.Error("writing cycle record", "err", err)
@@ -748,10 +816,13 @@ func (s *Slot) finishCycle(ctx context.Context, rec *cycle.Record) {
 	}
 
 	s.mu.Lock()
-	if rec.Result == cycle.ResultSuccess || heldListening(rec) {
+	switch {
+	case rec.Result == cycle.ResultSuccess || heldListening(rec):
 		s.failures = 0
 		s.status.LastFailure = ""
-	} else {
+	case benign:
+		// streak unchanged
+	default:
 		s.failures++
 		if rec.Failure != nil {
 			s.status.LastFailure = rec.Failure.State + ": " + rec.Failure.Error

@@ -100,6 +100,7 @@ type progress struct {
 	lastFeed   time.Time
 	lastDetail string
 	done       chan struct{}
+	exited     chan struct{}
 	stopOnce   sync.Once
 }
 
@@ -108,10 +109,13 @@ func newProgress(report func(string), log *slog.Logger, stallBudget time.Duratio
 	p := &progress{
 		report: report, log: log, budget: stallBudget,
 		winStart: now, lastLog: now, lastFeed: now,
-		done: make(chan struct{}),
+		done:   make(chan struct{}),
+		exited: make(chan struct{}),
 	}
 	if report != nil {
 		go p.watchStaleness()
+	} else {
+		close(p.exited)
 	}
 	return p
 }
@@ -119,6 +123,7 @@ func newProgress(report func(string), log *slog.Logger, stallBudget time.Duratio
 // watchStaleness annotates the report when data stops arriving, counting up
 // toward the stall budget so the operator can see the kill coming.
 func (p *progress) watchStaleness() {
+	defer close(p.exited)
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
 	for {
@@ -171,6 +176,10 @@ func (p *progress) feed(n int64) {
 
 func (p *progress) stop() {
 	p.stopOnce.Do(func() { close(p.done) })
+	// Join the watcher before clearing: select picks randomly among ready
+	// cases, so an un-joined goroutine could emit a stale "STALLED" report
+	// after the FSM has moved on and cleared the status detail.
+	<-p.exited
 	if p.report != nil {
 		p.report("")
 	}
@@ -226,11 +235,19 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 		return dest, nil // already cached
 	}
 	// Drop superseded tarballs of the same flavor (osx vs linux prefix).
-	prefix := strings.Join(strings.Split(assetName, "-")[:4], "-") // actions-runner-<os>-arm64
-	if entries, err := os.ReadDir(cacheDir); err == nil {
-		for _, e := range entries {
-			if strings.HasPrefix(e.Name(), prefix) && e.Name() != assetName {
-				_ = os.Remove(filepath.Join(cacheDir, e.Name()))
+	// assetName is GitHub's filename verbatim, so guard the shape — an
+	// unguarded [:4] would panic the whole daemon on a renamed asset, not
+	// fail one cycle. Skip .partial temps: they belong to whichever slot is
+	// mid-download (locks are per-assetName, so a sibling downloading a
+	// NEWER version shares this prefix but not this lock).
+	if parts := strings.Split(assetName, "-"); len(parts) >= 4 {
+		prefix := strings.Join(parts[:4], "-") // actions-runner-<os>-arm64
+		if entries, err := os.ReadDir(cacheDir); err == nil {
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), prefix) && e.Name() != assetName &&
+					!strings.HasSuffix(e.Name(), ".partial") {
+					_ = os.Remove(filepath.Join(cacheDir, e.Name()))
+				}
 			}
 		}
 	}
@@ -275,9 +292,11 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 		return "", tarballErr(wctx, err)
 	}
 	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
 		return "", err
 	}
 	if err := os.Rename(tmp, dest); err != nil {
+		_ = os.Remove(tmp)
 		return "", err
 	}
 	if log != nil {

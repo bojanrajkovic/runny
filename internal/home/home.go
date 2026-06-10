@@ -72,10 +72,14 @@ func (d Dir) Ensure() error {
 		if err := os.MkdirAll(p, 0o700); err != nil {
 			return fmt.Errorf("creating %s: %w", p, err)
 		}
+		// Tighten dirs created by an older runny too (MkdirAll leaves
+		// existing modes alone). The root at 0o700 is the boundary that
+		// matters; the rest is defense in depth.
+		if err := os.Chmod(p, 0o700); err != nil {
+			return fmt.Errorf("tightening %s: %w", p, err)
+		}
 	}
-	// Tighten a tree created by an older runny (MkdirAll leaves existing
-	// directories' modes alone).
-	return os.Chmod(string(d), 0o700)
+	return nil
 }
 
 // sanitizeRef makes an OCI reference filesystem-safe:

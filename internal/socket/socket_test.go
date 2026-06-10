@@ -9,28 +9,14 @@ import (
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
-// allStates mirrors the FSM's state inventory. If a state is added there
-// without a proto mapping, statusToProto silently degrades it to
-// SLOT_STATE_UNSPECIFIED on the wire — this test makes that loud.
-var allStates = []statemachine.State{
-	statemachine.StateBackoff,
-	statemachine.StateEnsureImage,
-	statemachine.StateClone,
-	statemachine.StateBoot,
-	statemachine.StateAwaitIP,
-	statemachine.StateAwaitSSH,
-	statemachine.StateMintJIT,
-	statemachine.StateProvision,
-	statemachine.StateListening,
-	statemachine.StateJob,
-	statemachine.StateTeardown,
-}
-
+// If a state is added to the FSM without a proto mapping, statusToProto
+// silently degrades it to SLOT_STATE_UNSPECIFIED on the wire — this test
+// makes that loud, keyed off the FSM's own state inventory.
 func TestStateToProtoIsExhaustive(t *testing.T) {
-	if len(stateToProto) != len(allStates) {
-		t.Errorf("stateToProto has %d entries, FSM has %d states", len(stateToProto), len(allStates))
+	if len(stateToProto) != len(statemachine.States) {
+		t.Errorf("stateToProto has %d entries, FSM has %d states", len(stateToProto), len(statemachine.States))
 	}
-	for _, st := range allStates {
+	for _, st := range statemachine.States {
 		if pb, ok := stateToProto[st]; !ok || pb == runnyv1.SlotState_SLOT_STATE_UNSPECIFIED {
 			t.Errorf("state %s has no proto mapping (would render as UNSPECIFIED on the wire)", st)
 		}

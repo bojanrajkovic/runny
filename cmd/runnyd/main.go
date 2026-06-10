@@ -70,6 +70,18 @@ func run() error {
 		return err
 	}
 
+	// Take the single-instance lock before touching the shared log file: a
+	// losing second instance must not interleave its startup lines into the
+	// winner's structured log. -doctor stays lock-free (read-only, useful
+	// against a live daemon).
+	if !*checkOnly {
+		lock, err := acquireLock(dir.LockPath())
+		if err != nil {
+			return err
+		}
+		defer lock.Close()
+	}
+
 	// Logging: size-capped file sink + ring buffer, both structured.
 	logFile, err := openRotatingFile(dir.LogFile(), logFileCap)
 	if err != nil {
@@ -103,12 +115,6 @@ func run() error {
 	if *checkOnly {
 		return runDoctor(doctor) // read-only: runs fine alongside a live daemon
 	}
-
-	lock, err := acquireLock(dir.LockPath())
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

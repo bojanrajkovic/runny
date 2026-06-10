@@ -39,6 +39,15 @@ const (
 	StateTeardown    State = "TEARDOWN"
 )
 
+// States lists every State the FSM can report. The proto-mapping
+// exhaustiveness test keys off it; keep it in sync with the constants above
+// (it sits directly below them so a new state is hard to miss).
+var States = []State{
+	StateBackoff, StateEnsureImage, StateClone, StateBoot, StateAwaitIP,
+	StateAwaitSSH, StateMintJIT, StateProvision, StateListening, StateJob,
+	StateTeardown,
+}
+
 // Runner-output markers (the actions runner's run.sh wording).
 const (
 	markerListening    = "Listening for Jobs"
@@ -84,8 +93,9 @@ type Guest interface {
 	// StartRunner stages the actions runner from the cache share and launches
 	// run.sh with the JIT config; goos selects the per-OS provision path.
 	// It deliberately takes a plain context: the ctx is the proc's LIFETIME
-	// (run.sh must outlive PROVISION's deadline), not an operation bound —
-	// session establishment is bounded internally by sshx's socket deadlines.
+	// — the whole cycle, outliving PROVISION's deadline, cancelled by
+	// operator recycle or daemon shutdown — not an operation bound; session
+	// establishment is bounded internally by sshx's socket deadlines.
 	StartRunner(ctx context.Context, jit, goos string) (Proc, error)
 	// PullDiag fetches the tail of the runner's _diag logs (post-mortem).
 	PullDiag(ctx bounded.Context) ([]byte, error)
@@ -188,7 +198,8 @@ func (s *Slot) Command(c Command) bool {
 
 // OnChange registers a status listener (the socket server's watch feed, the
 // daemon's wedge watcher). Listeners are called in registration order, off
-// the slot's lock.
+// the slot's lock, and synchronously on FSM goroutines — they must not
+// block (fan out through a buffered channel like the socket server does).
 func (s *Slot) OnChange(fn func(Status)) {
 	s.mu.Lock()
 	s.onChange = append(s.onChange, fn)
@@ -400,13 +411,12 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 			}
 		}
 	}()
-	watcherStopped := false
+	var stopOnce sync.Once
 	stopWatcher := func() {
-		if !watcherStopped {
-			watcherStopped = true
+		stopOnce.Do(func() {
 			close(stopWatch)
 			<-watchDone
-		}
+		})
 	}
 	defer stopWatcher()
 

@@ -13,7 +13,6 @@ import (
 // Config is runnyd's one configuration file (~/.runny/config.yaml). The Zod
 // of this repo: parse, default, validate here — nothing downstream re-checks.
 type Config struct {
-	GitHub    GitHubConfig `yaml:"github"`
 	Pools     []PoolConfig `yaml:"pools"`
 	Deadlines Deadlines    `yaml:"deadlines"`
 	Limits    Limits       `yaml:"limits"`
@@ -22,8 +21,9 @@ type Config struct {
 	NamePrefix string `yaml:"name_prefix"`
 }
 
-// GitHubConfig is App credentials only; registration targets live on pools
-// (ADR-0009).
+// GitHubConfig is one pool's App credentials. Each pool carries its own —
+// different registration targets are different App installations with
+// different keys (ADR-0009).
 type GitHubConfig struct {
 	AppID          int64  `yaml:"app_id"`
 	PrivateKeyPath string `yaml:"private_key_path"`
@@ -42,6 +42,10 @@ type PoolConfig struct {
 	Count int    `yaml:"count"`
 	// Target is the registration scope: an org, or an owner/repo pair.
 	Target TargetConfig `yaml:"target"`
+	// GitHub is this pool's App credentials. Required and per-pool: different
+	// registration targets are different App installations with different
+	// keys (ADR-0009).
+	GitHub GitHubConfig `yaml:"github"`
 	Labels []string     `yaml:"labels"`
 	// Runner group; 1 is the default group.
 	RunnerGroupID int64 `yaml:"runner_group_id"`
@@ -154,11 +158,11 @@ func (c *Config) applyDefaults() {
 	if c.NamePrefix == "" {
 		c.NamePrefix = "runny"
 	}
-	if c.GitHub.APIBase == "" {
-		c.GitHub.APIBase = "https://api.github.com"
-	}
 	for i := range c.Pools {
 		p := &c.Pools[i]
+		if p.GitHub.APIBase == "" {
+			p.GitHub.APIBase = "https://api.github.com"
+		}
 		if p.Count == 0 {
 			p.Count = 1
 		}
@@ -207,12 +211,6 @@ var poolNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 func (c *Config) validate() error {
 	var errs []error
-	if c.GitHub.AppID == 0 {
-		errs = append(errs, errors.New("github.app_id is required"))
-	}
-	if c.GitHub.PrivateKeyPath == "" {
-		errs = append(errs, errors.New("github.private_key_path is required"))
-	}
 	if len(c.Pools) == 0 {
 		errs = append(errs, errors.New("at least one pool is required"))
 	}
@@ -234,6 +232,12 @@ func (c *Config) validate() error {
 		}
 		if p.Count < 1 {
 			errs = append(errs, fmt.Errorf("%s: count must be >= 1", at))
+		}
+		if p.GitHub.AppID == 0 {
+			errs = append(errs, fmt.Errorf("%s: github.app_id is required", at))
+		}
+		if p.GitHub.PrivateKeyPath == "" {
+			errs = append(errs, fmt.Errorf("%s: github.private_key_path is required", at))
 		}
 		hasOrg, hasRepo := p.Target.Org != "", p.Target.Owner != "" || p.Target.Repo != ""
 		switch {

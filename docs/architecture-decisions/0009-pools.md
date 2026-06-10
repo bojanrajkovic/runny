@@ -27,8 +27,13 @@ Consequences through the stack:
 - **github**: a `Target` (org xor owner/repo) selects the endpoint family
   (`/orgs/{org}/...` vs `/repos/{o}/{r}/...`) and the permission the doctor
   asserts on a minted token: `administration: write` for repos,
-  `organization_self_hosted_runners: write` for orgs. One client per
-  distinct target; the App credentials are shared.
+  `organization_self_hosted_runners: write` for orgs. App credentials are
+  **per-pool**, not shared: different targets are different App installations
+  with different keys (a personal repo and an org are not the same App), so
+  each pool carries its own `github` block. One client per distinct
+  (App, target). *(Revised 2026-06-10: the original "credentials are shared"
+  assumption broke the first real mixed fleet — a personal-repo test pool and
+  the loupe-app org pool need different Apps.)*
 - **vm**: `Boot` dispatches on the bundle's `os` — the existing
   Mac platform path for darwin, an EFI path (`VZEFIBootLoader` + EFI
   variable store from `nvram.bin`, generic platform) for linux. Linux

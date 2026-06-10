@@ -93,25 +93,35 @@ func run() error {
 	slog.SetDefault(logger)
 	logger.Info("runnyd starting", "version", version, "home", dir.String())
 
-	// One client per distinct registration target; App credentials shared.
-	ghCfg := github.Config{
-		AppID:          cfg.GitHub.AppID,
-		PrivateKeyPath: cfg.GitHub.PrivateKeyPath,
-		APIBase:        cfg.GitHub.APIBase,
-	}
-	clients := map[home.TargetConfig]*github.Client{}
-	for _, p := range cfg.Pools {
-		if _, ok := clients[p.Target]; ok {
-			continue
+	// One client per distinct (App, target): pools targeting different orgs
+	// or repos usually carry different Apps (ADR-0009), so credentials are
+	// per-pool with the top-level block as the default.
+	clients := map[ghKey]*github.Client{}
+	var distinctClients []*github.Client
+	clientFor := func(p home.PoolConfig) (*github.Client, error) {
+		key := ghKey{appID: p.GitHub.AppID, target: p.Target}
+		if c, ok := clients[key]; ok {
+			return c, nil
 		}
-		c, err := github.New(ghCfg, github.Target(p.Target))
+		c, err := github.New(github.Config{
+			AppID:          p.GitHub.AppID,
+			PrivateKeyPath: p.GitHub.PrivateKeyPath,
+			APIBase:        p.GitHub.APIBase,
+		}, github.Target(p.Target))
 		if err != nil {
+			return nil, err
+		}
+		clients[key] = c
+		distinctClients = append(distinctClients, c)
+		return c, nil
+	}
+	for _, p := range cfg.Pools {
+		if _, err := clientFor(p); err != nil {
 			return err
 		}
-		clients[p.Target] = c
 	}
 
-	doctor := makeDoctor(dir, cfg, clients)
+	doctor := makeDoctor(dir, cfg, distinctClients)
 	if *checkOnly {
 		return runDoctor(doctor) // read-only: runs fine alongside a live daemon
 	}
@@ -135,7 +145,7 @@ func run() error {
 	if err := dir.Ensure(); err != nil {
 		return err
 	}
-	for _, c := range clients {
+	for _, c := range distinctClients {
 		sweepRegistrations(ctx, logger, c, cfg.NamePrefix)
 	}
 
@@ -149,7 +159,7 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("pool %s: %w", p.Name, err)
 		}
-		gh, osName := clients[p.Target], p.OS
+		gh, osName := clients[ghKey{appID: p.GitHub.AppID, target: p.Target}], p.OS
 		deps := statemachine.Deps{
 			Home:   dir,
 			Config: cfg,
@@ -169,7 +179,7 @@ func run() error {
 				_, err := tart.Clone(src, tart.Bundle(dst))
 				return err
 			},
-			GitHub: clients[p.Target],
+			GitHub: gh,
 			Dial: guest.Dialer{SSH: sshx.Config{
 				User:     p.SSHUser,
 				Password: p.SSHPassword,
@@ -275,7 +285,13 @@ const checkBudget = 30 * time.Second
 
 // makeDoctor builds the validation suite used at startup and by the Doctor
 // RPC: every predecessor failure mode that was checkable but unchecked.
-func makeDoctor(dir home.Dir, cfg *home.Config, clients map[home.TargetConfig]*github.Client) func(context.Context) []socket.DoctorCheck {
+// ghKey dedups github clients: one per distinct (App, registration target).
+type ghKey struct {
+	appID  int64
+	target home.TargetConfig
+}
+
+func makeDoctor(dir home.Dir, cfg *home.Config, clients []*github.Client) func(context.Context) []socket.DoctorCheck {
 	return func(ctx context.Context) []socket.DoctorCheck {
 		var checks []socket.DoctorCheck
 		add := func(name string, ok bool, detail string) {
@@ -316,8 +332,8 @@ func makeDoctor(dir home.Dir, cfg *home.Config, clients map[home.TargetConfig]*g
 			add("local-network", ok, detail)
 		}
 
-		for target, gh := range clients {
-			name := "runner-perm:" + target.String()
+		for _, gh := range clients {
+			name := "runner-perm:" + gh.Target().String()
 			pctx, cancel := bounded.WithTimeout(ctx, checkBudget)
 			err := gh.CheckRunnerPerm(pctx)
 			cancel()

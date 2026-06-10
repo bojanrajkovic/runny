@@ -4,7 +4,7 @@ The human-developer workflow. Agent-facing guidance and the project-wide index l
 
 ## Setup
 
-- **Toolchain:** mise-managed (`mise install`): bazelisk (Bazel version itself is pinned by `.bazelversion`), Go, Node (commitlint only), lefthook.
+- **Toolchain:** mise-managed (`mise install`): Bazel, Go, Node (commitlint only), lefthook — `.mise.toml` is the single home for every tool version, including Bazel's.
 - `npm install` once for the commitlint dev dependency, then `lefthook install` to wire the git hooks.
 - **macOS hosts (ix):** Command Line Tools suffice for the daemon (cgo + Virtualization.framework, verified); full Xcode is required only when building `RunnyBar` (rules_apple needs the SDK; Xcode is never opened — ADR-0007).
 

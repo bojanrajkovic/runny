@@ -16,17 +16,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
       - uses: actions/cache@v4
         with:
           path: ~/.cache/bazel
-          key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel', '.bazelversion') }}
+          key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel', '.mise.toml') }}
           restore-keys: bazel-${{ runner.os }}-
       - name: build
-        run: bazel build --config=ci //...
+        run: mise x -- bazel build --config=ci //...
       - name: test
         # Exit 4 = no test targets; tolerated until the first test lands.
-        run: bazel test --config=ci //... || test $? -eq 4
+        run: mise x -- bazel test --config=ci //... || test $? -eq 4
       - name: format
         run: |
-          bazel run --config=ci //tools/format
+          mise x -- bazel run --config=ci //tools/format
           git diff --exit-code

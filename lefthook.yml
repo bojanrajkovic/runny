@@ -9,7 +9,7 @@ pre-commit:
   commands:
     format:
       glob: "*.{go,bzl,bazel,swift}"
-      run: mise x -- bazelisk run //tools/format -- {staged_files}
+      run: mise x -- bazel run //tools/format -- {staged_files}
       stage_fixed: true
 
 commit-msg:
@@ -20,7 +20,7 @@ commit-msg:
 pre-push:
   commands:
     build:
-      run: mise x -- bazelisk build //...
+      run: mise x -- bazel build //...
     test:
       # Exit 4 = no test targets found; tolerated until the first test lands.
-      run: sh -c 'mise x -- bazelisk test //... || test $? -eq 4'
+      run: sh -c 'mise x -- bazel test //... || test $? -eq 4'

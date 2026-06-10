@@ -103,8 +103,9 @@ App, real images), not just under test fakes:
   whose job acquisition fails) is zombie-detected by the LISTENING reconcile
   within its interval, recycled, and leaves a diag capture in the cycle dir.
   A guest that survives even force-stop wedges its slot: the teardown is
-  recorded as an error, the slot parks, and the daemon exits for a launchd
-  cold start once no job is running — process exit is the only thing that
-  reclaims an in-process VM (ADR-0012).
+  recorded as an error, the slot parks, the daemon drains the remaining
+  slots to a paused idle (running jobs finish first), and then exits for a
+  launchd cold start — process exit is the only thing that reclaims an
+  in-process VM (ADR-0012).
 - Operator surface: recycle deregisters; pause holds; SIGTERM mid-cycle
   leaves zero VMs, zero vm dirs, zero registrations.

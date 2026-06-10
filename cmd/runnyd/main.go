@@ -173,18 +173,32 @@ func run() error {
 
 	// Wedge escalation (ADR-0012): a guest that survives force-stop can only
 	// be reclaimed by process exit (it lives in-process). The wedged slot has
-	// parked itself; exit for a launchd cold start as soon as no slot is
-	// running a job, so a live job on a healthy sibling finishes first.
-	var wedgeExit atomic.Bool
-	checkWedge := func(statemachine.Status) {
-		anyWedged, anyJob := false, false
-		for _, s := range slots {
-			st := s.Status()
-			anyWedged = anyWedged || st.Wedged
-			anyJob = anyJob || st.State == statemachine.StateJob
+	// parked itself. Drain the rest of the fleet to a stable idle — pause
+	// holds each slot in BACKOFF after its current cycle (a running job
+	// finishes first), recycle ends LISTENING without waiting out max-idle —
+	// then exit for a launchd cold start. Exiting only from stable states
+	// (parked, or paused in BACKOFF, which cannot start a job) closes the
+	// scan-then-exit race that could kill a job starting mid-scan.
+	var drainStarted, wedgeExit atomic.Bool
+	checkWedge := func(st statemachine.Status) {
+		if !st.Wedged && !drainStarted.Load() {
+			return // nothing wedged; stay off the hot status path
 		}
-		if anyWedged && !anyJob && wedgeExit.CompareAndSwap(false, true) {
-			logger.Error("wedged slot and no job running; exiting for a cold start to release the guest")
+		if drainStarted.CompareAndSwap(false, true) {
+			logger.Error("slot wedged: draining remaining slots to idle, then restarting to release the guest")
+			for _, s := range slots {
+				s.Command(statemachine.Command{Kind: statemachine.CmdPause})
+				s.Command(statemachine.Command{Kind: statemachine.CmdRecycle, Reason: "draining for wedge restart"})
+			}
+		}
+		for _, s := range slots {
+			sst := s.Status()
+			if !(sst.Wedged || (sst.Paused && sst.State == statemachine.StateBackoff)) {
+				return // still draining; a later status change re-evaluates
+			}
+		}
+		if wedgeExit.CompareAndSwap(false, true) {
+			logger.Error("fleet idle with a wedged guest; exiting for a cold start")
 			stop()
 		}
 	}

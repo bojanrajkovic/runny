@@ -29,12 +29,15 @@ Three parts, in escalating order:
    `wedged` field on the proto `SlotStatus`, rendered as `WEDGED!` by
    runnyctl) and its Run loop exits — re-booting against an occupied guest
    cap just burns doomed cycles.
-3. **Restart cold once idle.** The daemon watches slot status; as soon as a
-   wedged slot exists and *no slot is running a job*, it cancels its root
-   context and exits non-zero. launchd (KeepAlive) restarts it; the cold
-   start sweeps the vms dir and, the process having exited, the leaked guest
-   is gone. A job running on a healthy sibling slot finishes first — the
-   exit waits for it, bounded by the existing max-job-duration budget.
+3. **Drain, then restart cold.** On the first wedge the daemon pauses and
+   recycles every slot: pause holds each slot in BACKOFF after its current
+   cycle (a running job finishes first), recycle ends LISTENING without
+   waiting out max-idle. It exits non-zero only once every slot is in a
+   *stable* state — parked-wedged, or paused in BACKOFF, which cannot start
+   a job — so there is no scan-then-exit race that could kill a job starting
+   mid-scan. launchd (KeepAlive) restarts it; the cold start sweeps the vms
+   dir and, the process having exited, the leaked guest is gone. Convergence
+   is bounded by the existing max-job-duration budget.
 
 ## Rejected alternatives
 

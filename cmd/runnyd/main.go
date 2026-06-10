@@ -194,7 +194,7 @@ func failedChecks(checks []socket.DoctorCheck) []socket.DoctorCheck {
 }
 
 func runDoctor(doctor func(context.Context) []socket.DoctorCheck) error {
-	checks := doctor(context.Background()) // the suite self-bounds (doctorBudget)
+	checks := doctor(context.Background()) // each network check self-bounds (checkBudget)
 	bad := 0
 	for _, c := range checks {
 		mark := "ok"
@@ -209,18 +209,18 @@ func runDoctor(doctor func(context.Context) []socket.DoctorCheck) error {
 	return nil
 }
 
-// doctorBudget bounds the whole validation suite regardless of caller: the
-// Doctor RPC must not trust runnyctl's context, and the startup pass runs
-// under the un-deadlined signal context — a silent registry must not hang
-// the daemon before the socket even exists.
-const doctorBudget = 60 * time.Second
+// checkBudget bounds each network-touching doctor check individually, no
+// matter what context the caller supplies: the Doctor RPC must not rely on
+// runnyctl for a bound, and the startup pass runs under the un-deadlined
+// signal context — a silent registry must not hang the daemon before the
+// socket even exists. Per-check rather than per-suite so one slow target
+// cannot starve the remaining checks into false failures.
+const checkBudget = 30 * time.Second
 
 // makeDoctor builds the validation suite used at startup and by the Doctor
 // RPC: every predecessor failure mode that was checkable but unchecked.
 func makeDoctor(dir home.Dir, cfg *home.Config, clients map[home.TargetConfig]*github.Client) func(context.Context) []socket.DoctorCheck {
 	return func(ctx context.Context) []socket.DoctorCheck {
-		dctx, cancel := bounded.WithTimeout(ctx, doctorBudget)
-		defer cancel()
 		var checks []socket.DoctorCheck
 		add := func(name string, ok bool, detail string) {
 			checks = append(checks, socket.DoctorCheck{Name: name, OK: ok, Detail: detail})
@@ -251,7 +251,10 @@ func makeDoctor(dir home.Dir, cfg *home.Config, clients map[home.TargetConfig]*g
 
 		for target, gh := range clients {
 			name := "runner-perm:" + target.String()
-			if err := gh.CheckRunnerPerm(dctx); err != nil {
+			pctx, cancel := bounded.WithTimeout(ctx, checkBudget)
+			err := gh.CheckRunnerPerm(pctx)
+			cancel()
+			if err != nil {
 				add(name, false, err.Error())
 			} else {
 				add(name, true, "installation token carries the runner-administration permission")
@@ -265,7 +268,10 @@ func makeDoctor(dir home.Dir, cfg *home.Config, clients map[home.TargetConfig]*g
 				add(name, false, err.Error())
 				continue
 			}
-			if digest, err := oci.NewClient().Resolve(dctx, ref); err != nil {
+			rctx, cancel := bounded.WithTimeout(ctx, checkBudget)
+			digest, err := oci.NewClient().Resolve(rctx, ref)
+			cancel()
+			if err != nil {
 				add(name, false, err.Error())
 			} else {
 				add(name, true, fmt.Sprintf("%s → %s", ref, short(digest)))
@@ -287,10 +293,14 @@ func makeDoctor(dir home.Dir, cfg *home.Config, clients map[home.TargetConfig]*g
 	}
 }
 
+// sweepBudget bounds the whole startup registration sweep. Best-effort by
+// design: anything the budget cuts off is retried on the next cold start.
+const sweepBudget = time.Minute
+
 func sweepRegistrations(ctx context.Context, log *slog.Logger, gh *github.Client, prefix string) {
 	// Self-bounded: this runs under the un-deadlined signal context at
 	// startup; a hung GitHub API must not stall daemon boot.
-	sctx, cancel := bounded.WithTimeout(ctx, time.Minute)
+	sctx, cancel := bounded.WithTimeout(ctx, sweepBudget)
 	defer cancel()
 	runners, err := gh.ListRunners(sctx)
 	if err != nil {

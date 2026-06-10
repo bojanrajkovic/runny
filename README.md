@@ -25,7 +25,7 @@ unbounded, and no failure is ever silent.**
 ## Status
 
 Pre-1.0, under active construction. See `docs/architecture-decisions/` for the
-decision record and `docs/design-plans/` for what's in flight.
+decision record and the GitHub issues for what's in flight.
 
 ## Building
 

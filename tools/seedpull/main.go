@@ -32,7 +32,9 @@ func main() {
 
 	ctx := context.Background()
 	client := oci.NewClient()
-	digest, err := client.Resolve(ctx, ref)
+	rctx, rcancel := context.WithTimeout(ctx, time.Minute)
+	digest, err := client.Resolve(rctx, ref)
+	rcancel()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "resolve:", err)
 		os.Exit(1)
@@ -40,8 +42,14 @@ func main() {
 	dest := dir.ImageBundleDir(ref.String(), digest)
 	fmt.Printf("resolved %s -> %s\npulling to %s\n", ref, digest, dest)
 
+	// Stall-watched like every other download in this repo: a hung
+	// registry must fail loudly, not silently block an operator tool.
+	stall := oci.NewStall()
 	var total atomic.Int64
-	client.Progress = func(n int64) { total.Add(n) }
+	client.Progress = func(n int64) {
+		stall.Feed(n)
+		total.Add(n)
+	}
 	done := make(chan struct{})
 	go func() {
 		t := time.NewTicker(5 * time.Second)
@@ -58,8 +66,13 @@ func main() {
 
 	pinned := ref
 	pinned.Digest = digest
-	if _, err := client.PullTo(ctx, pinned, dest); err != nil {
+	wctx, cancel := stall.Watch(ctx, 3*time.Minute)
+	defer cancel()
+	if _, err := client.PullTo(wctx, pinned, dest); err != nil {
 		close(done)
+		if cause := context.Cause(wctx); cause != nil && wctx.Err() != nil {
+			err = cause
+		}
 		fmt.Fprintln(os.Stderr, "pull:", err)
 		os.Exit(1)
 	}

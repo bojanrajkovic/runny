@@ -380,6 +380,13 @@ func TestHappyCycleThroughJob(t *testing.T) {
 	if rec == nil {
 		t.Fatalf("no success record in %d records", len(recs))
 	}
+	// Any second record must be the canceled gated cycle, not a double
+	// write of the success cycle under another result.
+	for _, r := range recs {
+		if r != rec && r.CycleID == rec.CycleID {
+			t.Errorf("cycle %s recorded twice (second result %s)", rec.CycleID, r.Result)
+		}
+	}
 	if rec.Job == nil {
 		t.Error("job not recorded")
 	}

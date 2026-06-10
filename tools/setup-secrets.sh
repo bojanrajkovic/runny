@@ -35,7 +35,8 @@ echo "Setting secrets on $REPO"
 
 # Homebrew tap push (release workflow's formula update).
 if [ -z "$tap_token" ]; then
-	read -r -p "TAP_PUSH_TOKEN — PAT with contents:write on bojanrajkovic/homebrew-tap (empty to skip): " tap_token
+	# -s: a push-scoped PAT must not land in terminal scrollback.
+	read -rs -p "TAP_PUSH_TOKEN — PAT with contents:write on bojanrajkovic/homebrew-tap (empty to skip): " tap_token && echo
 fi
 set_secret TAP_PUSH_TOKEN "$tap_token"
 

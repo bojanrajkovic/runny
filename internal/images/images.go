@@ -5,7 +5,6 @@ package images
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -143,45 +142,28 @@ func (e *Ensurer) log() *slog.Logger {
 	return slog.Default()
 }
 
-// EnsureRunnerTarball makes sure the latest actions-runner osx-arm64 tarball
-// sits in cacheDir (the virtiofs share). Returns the tarball path. Existing
-// versions are kept; guests pick the newest by name sort.
-func EnsureRunnerTarball(ctx context.Context, cacheDir string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		"https://api.github.com/repos/actions/runner/releases/latest", nil)
+// RunnerResolver yields the service-blessed runner build (filename, url) —
+// see github.Client.RunnerDownload for why "latest release" is not it.
+type RunnerResolver func(ctx context.Context) (filename, url string, err error)
+
+// EnsureRunnerTarball makes sure the service-current actions-runner tarball
+// sits in cacheDir (the virtiofs share). Returns the tarball path. Older
+// versions are removed so guests (which pick by name) never stage a build
+// the broker has deprecated.
+func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerResolver) (string, error) {
+	assetName, assetURL, err := resolve(ctx)
 	if err != nil {
 		return "", err
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("fetching latest runner release: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("fetching latest runner release: HTTP %d", resp.StatusCode)
-	}
-	var rel struct {
-		TagName string `json:"tag_name"`
-		Assets  []struct {
-			Name               string `json:"name"`
-			BrowserDownloadURL string `json:"browser_download_url"`
-		} `json:"assets"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		return "", err
-	}
-	var assetURL, assetName string
-	for _, a := range rel.Assets {
-		if matched, _ := filepath.Match("actions-runner-osx-arm64-*.tar.gz", a.Name); matched {
-			assetURL, assetName = a.BrowserDownloadURL, a.Name
-			break
-		}
-	}
-	if assetURL == "" {
-		return "", fmt.Errorf("release %s has no osx-arm64 runner asset", rel.TagName)
 	}
 	dest := filepath.Join(cacheDir, assetName)
+	// Drop superseded tarballs.
+	if entries, err := os.ReadDir(cacheDir); err == nil {
+		for _, e := range entries {
+			if m, _ := filepath.Match("actions-runner-osx-arm64-*.tar.gz", e.Name()); m && e.Name() != assetName {
+				_ = os.Remove(filepath.Join(cacheDir, e.Name()))
+			}
+		}
+	}
 	if _, err := os.Stat(dest); err == nil {
 		return dest, nil // already cached
 	}

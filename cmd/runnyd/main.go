@@ -119,7 +119,7 @@ func run() error {
 	sweepRegistrations(ctx, logger, gh, cfg.Runners.NamePrefix)
 
 	// Runner tarball cache (shared into guests via virtiofs).
-	if _, err := images.EnsureRunnerTarball(ctx, dir.RunnerCacheDir()); err != nil {
+	if _, err := images.EnsureRunnerTarball(ctx, dir.RunnerCacheDir(), gh.RunnerDownload); err != nil {
 		return fmt.Errorf("priming runner cache: %w", err)
 	}
 

@@ -186,6 +186,36 @@ func (c *Client) GenerateJITConfig(ctx context.Context, name string, labels []st
 	return &JITRunner{RunnerID: resp.Runner.ID, EncodedJITConfig: resp.EncodedJITConfig}, nil
 }
 
+// RunnerDownload resolves the service-blessed actions-runner build for
+// osx/arm64 via the downloads endpoint. This is the only safe source: the
+// actions/runner repo's "latest" release can lag what the broker accepts,
+// and JIT runners cannot self-update (learned from a live Forbidden:
+// "Runner version vX is deprecated and cannot receive messages").
+func (c *Client) RunnerDownload(ctx context.Context) (filename, url string, err error) {
+	tok, err := c.installationToken(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	var downloads []struct {
+		OS           string `json:"os"`
+		Architecture string `json:"architecture"`
+		DownloadURL  string `json:"download_url"`
+		Filename     string `json:"filename"`
+	}
+	err = c.doRetry(ctx, http.MethodGet,
+		fmt.Sprintf("/repos/%s/%s/actions/runners/downloads", c.cfg.Owner, c.cfg.Repo),
+		"token "+tok, nil, &downloads)
+	if err != nil {
+		return "", "", fmt.Errorf("listing runner downloads: %w", err)
+	}
+	for _, d := range downloads {
+		if d.OS == "osx" && d.Architecture == "arm64" {
+			return d.Filename, d.DownloadURL, nil
+		}
+	}
+	return "", "", fmt.Errorf("no osx/arm64 runner build in downloads list (%d entries)", len(downloads))
+}
+
 // Runner is a registered self-hosted runner, as the reconcile loop sees it.
 type Runner struct {
 	ID     int64  `json:"id"`

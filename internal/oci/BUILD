@@ -16,7 +16,11 @@ go_library(
 
 go_test(
     name = "oci_test",
-    srcs = ["oci_test.go"],
+    srcs = [
+        "applelz4_test.go",
+        "oci_test.go",
+    ],
+    data = glob(["testdata/**"]),
     embed = [":oci"],
     deps = ["@com_github_pierrec_lz4_v4//:lz4"],
 )

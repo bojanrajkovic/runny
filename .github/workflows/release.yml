@@ -38,7 +38,7 @@ jobs:
           codesign -s - --entitlements tools/sign/runnyd.entitlements --force dist/runnyd
           tar -C dist -czf "runny_${VERSION}_darwin_arm64.tar.gz" runnyd runnyctl
           shasum -a 256 "runny_${VERSION}_darwin_arm64.tar.gz" > "runny_${VERSION}_darwin_arm64.tar.gz.sha256"
-      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+      - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
         with:
           subject-path: runny_*.tar.gz
       - name: attach to release

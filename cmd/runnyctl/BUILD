@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 load("//tools:stamp.bzl", "stamped_go_binary")
 
 # gazelle:map_kind go_binary stamped_go_binary //tools:stamp.bzl
@@ -22,4 +22,14 @@ stamped_go_binary(
     name = "runnyctl",
     embed = [":runnyctl_lib"],
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "runnyctl_test",
+    srcs = ["main_test.go"],
+    embed = [":runnyctl_lib"],
+    deps = [
+        "//proto/runny/v1:runny",
+        "@org_golang_google_protobuf//types/known/timestamppb",
+    ],
 )

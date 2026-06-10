@@ -209,6 +209,20 @@ func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 		if d := s.GetDetail(); d != "" {
 			note = d // live annotation beats stale failure text
 		}
+		// In BACKOFF the useful number is when the slot retries, not how long
+		// it has already waited (the FOR column). Surface the remaining
+		// backoff: backoff total minus time already in the state.
+		if s.GetState() == runnyv1.SlotState_SLOT_STATE_BACKOFF {
+			remaining := time.Duration(s.GetBackoffSeconds())*time.Second - time.Since(s.GetStateEntered().AsTime())
+			if remaining > 0 {
+				retry := "retry in " + durString(remaining)
+				if note == "" {
+					note = retry
+				} else {
+					note = retry + "; " + note
+				}
+			}
+		}
 		fmt.Fprintf(c.out, "%-10s %-13s %-9s %-15s %-22s %s\n",
 			s.GetSlot(), state,
 			durString(time.Since(s.GetStateEntered().AsTime())),

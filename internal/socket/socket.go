@@ -284,6 +284,7 @@ func statusToProto(st statemachine.Status) *runnyv1.SlotStatus {
 		BackoffSeconds:      st.BackoffSeconds,
 		LastFailure:         st.LastFailure,
 		Detail:              st.Detail,
+		Wedged:              st.Wedged,
 	}
 	if st.VM.MAC != "" || st.VM.IP != "" {
 		out.Vm = &runnyv1.VMInfo{Mac: st.VM.MAC, Ip: st.VM.IP}

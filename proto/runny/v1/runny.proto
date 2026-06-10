@@ -70,6 +70,9 @@ message SlotStatus {
   // "2.1 GiB at 41 MiB/s" during ENSURE_IMAGE). Empty when the state has
   // nothing to report.
   string detail = 11;
+  // The guest survived force-stop and still occupies a host guest-cap slot;
+  // the slot is parked and the daemon restarts cold once no job is running.
+  bool wedged = 12;
 }
 
 message GetStatusRequest {}

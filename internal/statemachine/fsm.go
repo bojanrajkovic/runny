@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -129,6 +130,10 @@ type Status struct {
 	LastFailure         string
 	// Detail is the current state's live annotation (pull progress etc).
 	Detail string
+	// Wedged: the guest survived force-stop and still occupies a
+	// Virtualization.framework guest slot. The slot is parked; only a daemon
+	// restart (cold start) reclaims the guest (ADR-0012).
+	Wedged bool
 }
 
 // Slot drives one runner slot's lifecycle.
@@ -140,7 +145,7 @@ type Slot struct {
 
 	mu       sync.Mutex
 	status   Status
-	onChange func(Status)
+	onChange []func(Status)
 
 	// failure streak for backoff; reset per ADR-0004.
 	failures uint32
@@ -170,11 +175,20 @@ func (s *Slot) Command(c Command) bool {
 	}
 }
 
-// OnChange registers the status listener (the socket server's watch feed).
+// OnChange registers a status listener (the socket server's watch feed, the
+// daemon's wedge watcher). Listeners are called in registration order, off
+// the slot's lock.
 func (s *Slot) OnChange(fn func(Status)) {
 	s.mu.Lock()
-	s.onChange = fn
+	s.onChange = append(s.onChange, fn)
 	s.mu.Unlock()
+}
+
+// notify calls every listener with snap (callers must not hold s.mu).
+func (s *Slot) notify(fns []func(Status), snap Status) {
+	for _, fn := range fns {
+		fn(snap)
+	}
 }
 
 // Status returns the current snapshot.
@@ -194,26 +208,45 @@ func (s *Slot) setState(state State, mut func(*Status)) {
 		mut(&s.status)
 	}
 	snap := s.status
-	fn := s.onChange
+	fns := slices.Clone(s.onChange)
 	s.mu.Unlock()
 	s.deps.Log.Info("state", "state", state, "cycle", snap.CycleID)
-	if fn != nil {
-		fn(snap)
-	}
+	s.notify(fns, snap)
 }
 
-// Run drives cycles until ctx is cancelled. This is the slot goroutine.
+// Run drives cycles until ctx is cancelled or the slot wedges. This is the
+// slot goroutine.
 func (s *Slot) Run(ctx context.Context) {
 	for {
 		if err := s.backoffWait(ctx); err != nil {
 			return // daemon shutdown
 		}
-		rec := s.runCycle(ctx)
+		rec, wedged := s.runCycle(ctx)
 		s.finishCycle(ctx, rec)
+		if wedged {
+			// The guest survived force-stop: it still occupies one of the
+			// host's Virtualization.framework guest slots, so every further
+			// boot on this slot is doomed. Park; only a daemon restart (cold
+			// start) reclaims an in-process VM (ADR-0012).
+			s.markWedged()
+			return
+		}
 		if ctx.Err() != nil {
 			return
 		}
 	}
+}
+
+// markWedged parks the slot and tells the world why.
+func (s *Slot) markWedged() {
+	s.mu.Lock()
+	s.status.Wedged = true
+	s.status.Detail = "guest survived force-stop; slot parked until the daemon restarts"
+	snap := s.status
+	fns := slices.Clone(s.onChange)
+	s.mu.Unlock()
+	s.deps.Log.Error("slot wedged: guest survived force-stop and holds a guest-cap slot; parking (the daemon restarts cold once no job is running)")
+	s.notify(fns, snap)
 }
 
 // backoffWait sits in BACKOFF until the backoff timer elapses and the slot
@@ -264,11 +297,9 @@ func (s *Slot) setDetail(detail string) {
 	}
 	s.status.Detail = detail
 	snap := s.status
-	fn := s.onChange
+	fns := slices.Clone(s.onChange)
 	s.mu.Unlock()
-	if fn != nil {
-		fn(snap)
-	}
+	s.notify(fns, snap)
 }
 
 func (s *Slot) isPaused() bool {
@@ -282,11 +313,9 @@ func (s *Slot) setPaused(p bool) {
 	s.paused = p
 	s.status.Paused = p
 	snap := s.status
-	fn := s.onChange
+	fns := slices.Clone(s.onChange)
 	s.mu.Unlock()
-	if fn != nil {
-		fn(snap)
-	}
+	s.notify(fns, snap)
 }
 
 func (s *Slot) currentBackoff() time.Duration {
@@ -314,8 +343,9 @@ type cycleErr struct {
 func (e *cycleErr) Error() string { return fmt.Sprintf("%s: %v", e.state, e.err) }
 
 // runCycle executes states 1..9, always handing off to TEARDOWN, and returns
-// the cycle record (teardown fills the tail).
-func (s *Slot) runCycle(ctx context.Context) *cycle.Record {
+// the cycle record (teardown fills the tail) plus whether teardown wedged
+// (force-stop failed with the guest still running).
+func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool) {
 	cfg := s.deps.Config
 	rec := &cycle.Record{
 		CycleID: cycle.NewID(),
@@ -466,8 +496,9 @@ func (s *Slot) runCycle(ctx context.Context) *cycle.Record {
 		ok = failState == ""
 	}
 
-	// TEARDOWN — unconditional, cannot fail (escalating force).
-	s.teardown(ctx, rec, teardownInputs{
+	// TEARDOWN — unconditional. Force is the floor; a guest that survives
+	// even force-stop wedges the slot, and the record says so truthfully.
+	wedged := s.teardown(ctx, rec, teardownInputs{
 		machine:  machine,
 		guest:    guest,
 		proc:     proc,
@@ -478,13 +509,17 @@ func (s *Slot) runCycle(ctx context.Context) *cycle.Record {
 	})
 
 	rec.Finished = time.Now()
-	if ok {
+	switch {
+	case ok && !wedged:
 		rec.Result = cycle.ResultSuccess
-	} else {
+	case !ok:
 		rec.Result = cycle.ResultFailure
 		rec.Failure = &cycle.Failure{State: string(failState), Error: failErr.Error()}
+	default: // the cycle succeeded but its teardown could not kill the guest
+		rec.Result = cycle.ResultFailure
+		rec.Failure = &cycle.Failure{State: string(StateTeardown), Error: "vm stop escalation failed; guest still running"}
 	}
-	return rec
+	return rec, wedged
 }
 
 // listenAndRunJob handles LISTENING and JOB. Returns jobRan and, on failure,
@@ -607,8 +642,10 @@ type teardownInputs struct {
 
 // teardown is the universal sink. Post-mortem first (failure cycles), then
 // stop → delete → deregister → record. Every step is best-effort with its own
-// bound; nothing here can wedge the slot.
-func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInputs) {
+// bound; nothing here can wedge the slot. Returns true when force-stop
+// failed with the guest still running — the one failure teardown cannot
+// absorb, because releasing an in-process VM takes a process exit.
+func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInputs) bool {
 	cfg := s.deps.Config
 	s.setState(StateTeardown, nil)
 	tr := cycle.StateRecord{State: string(StateTeardown), Entered: time.Now()}
@@ -642,15 +679,22 @@ func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInput
 	}
 
 	// 3. Stop the VM (graceful 10s → force; force is the floor).
+	wedged := false
 	if in.machine != nil {
 		if err := in.machine.Stop(tctx, 10*time.Second); err != nil {
-			s.deps.Log.Error("vm stop escalation failed", "err", err)
+			s.deps.Log.Error("vm stop escalation failed; guest still running", "err", err)
+			wedged = true
+			tr.Error = fmt.Sprintf("vm stop escalation failed: %v", err)
 		}
 	}
 
-	// 4. Delete the clone bundle.
-	if err := removeAll(in.vmDir); err != nil {
-		s.deps.Log.Error("removing vm dir", "err", err)
+	// 4. Delete the clone bundle — unless the undead guest still holds it.
+	// Deleting the disk out from under a live guest destroys the evidence
+	// and frees nothing that matters (the guest-cap slot stays occupied).
+	if !wedged {
+		if err := removeAll(in.vmDir); err != nil {
+			s.deps.Log.Error("removing vm dir", "err", err)
+		}
 	}
 
 	// 5. Deregister iff no job ran (JIT runners self-remove after a job).
@@ -660,8 +704,17 @@ func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInput
 		}
 	}
 
-	tr.Left, tr.Outcome = time.Now(), cycle.OutcomeOK
+	tr.Left = time.Now()
+	if wedged {
+		// Recording OK here once hid the exact outage this project exists
+		// to kill: cycle.json swore teardown succeeded while a ghost guest
+		// ate the macOS guest cap and every later boot failed.
+		tr.Outcome = cycle.OutcomeError
+	} else {
+		tr.Outcome = cycle.OutcomeOK
+	}
 	rec.States = append(rec.States, tr)
+	return wedged
 }
 
 // finishCycle writes the record, updates failure accounting, and prunes.

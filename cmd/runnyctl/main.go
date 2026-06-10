@@ -195,6 +195,9 @@ func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 		if s.GetPaused() {
 			state += "*"
 		}
+		if s.GetWedged() {
+			state = "WEDGED!"
+		}
 		job := ""
 		if s.GetJob() != nil {
 			job = s.GetJob().GetName()
@@ -211,7 +214,7 @@ func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 			durString(time.Since(s.GetStateEntered().AsTime())),
 			s.GetVm().GetIp(), trunc(job, 22), trunc(note, 60))
 	}
-	fmt.Fprintln(c.out, "\n(* = paused; STATE* holds in BACKOFF after the current cycle)")
+	fmt.Fprintln(c.out, "\n(* = paused; STATE* holds in BACKOFF after the current cycle. WEDGED! = guest survived force-stop; the daemon restarts cold once idle)")
 }
 
 func (c *ctl) watch(ctx context.Context) error {

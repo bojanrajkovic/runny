@@ -49,6 +49,7 @@ type fakeMachine struct {
 	mac     string
 	ip      string
 	ipErr   error
+	stopErr error
 	done    chan struct{}
 	stopped bool
 	mu      sync.Mutex
@@ -69,6 +70,9 @@ func (m *fakeMachine) WaitIP(ctx context.Context) (string, error) {
 func (m *fakeMachine) Stop(context.Context, time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.stopErr != nil {
+		return m.stopErr // the guest survives force-stop
+	}
 	if !m.stopped {
 		m.stopped = true
 		close(m.done)
@@ -600,6 +604,54 @@ func TestRunnerExitWhileListeningFails(t *testing.T) {
 	recs := h.records(t)
 	if !strings.Contains(recs[0].Failure.Error, "exited") {
 		t.Errorf("failure = %+v", recs[0].Failure)
+	}
+}
+
+// A guest that survives force-stop must wedge the slot: TEARDOWN recorded
+// as an error (not OK), the clone bundle kept as evidence, the slot parked.
+// Regression: this case once recorded OutcomeOK, deleted the disk out from
+// under the live guest, and burned doomed boot cycles against the occupied
+// guest cap forever.
+func TestStopFailureWedgesSlot(t *testing.T) {
+	h := newHarness(t, nil)
+	h.vmF.machine.stopErr = errors.New("force stop failed with guest still running")
+	h.vmF.machine.ip = "" // fail at AWAIT_IP so teardown owns a booted machine
+	cancel := h.start(t)
+	_ = cancel
+
+	h.waitState(t, StateTeardown)
+	// The slot must park on its own — Run exits without ctx cancellation.
+	select {
+	case <-h.runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("slot did not park after the guest survived force-stop")
+	}
+
+	st := h.slot.Status()
+	if !st.Wedged {
+		t.Error("status.Wedged = false, want true")
+	}
+	if h.vmF.boots != 1 {
+		t.Errorf("boots = %d; a wedged slot must not retry boots", h.vmF.boots)
+	}
+
+	recs := h.records(t)
+	rec := recs[0]
+	if rec.Result != cycle.ResultFailure {
+		t.Errorf("result = %s, want failure", rec.Result)
+	}
+	var tr *cycle.StateRecord
+	for i := range rec.States {
+		if rec.States[i].State == string(StateTeardown) {
+			tr = &rec.States[i]
+		}
+	}
+	if tr == nil || tr.Outcome != cycle.OutcomeError || !strings.Contains(tr.Error, "stop escalation failed") {
+		t.Errorf("teardown record = %+v, want error outcome with the stop failure", tr)
+	}
+	// The undead guest still holds the clone bundle; it must not be deleted.
+	if _, err := os.Stat(h.dir.VMDir("runner-1")); err != nil {
+		t.Errorf("vm dir was deleted out from under a live guest: %v", err)
 	}
 }
 

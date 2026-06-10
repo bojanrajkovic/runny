@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -170,6 +171,27 @@ func run() error {
 		func(slot string) cycle.Store { return cycle.Store{SlotDir: dir.SlotCyclesDir(slot)} },
 		doctor, version)
 
+	// Wedge escalation (ADR-0012): a guest that survives force-stop can only
+	// be reclaimed by process exit (it lives in-process). The wedged slot has
+	// parked itself; exit for a launchd cold start as soon as no slot is
+	// running a job, so a live job on a healthy sibling finishes first.
+	var wedgeExit atomic.Bool
+	checkWedge := func(statemachine.Status) {
+		anyWedged, anyJob := false, false
+		for _, s := range slots {
+			st := s.Status()
+			anyWedged = anyWedged || st.Wedged
+			anyJob = anyJob || st.State == statemachine.StateJob
+		}
+		if anyWedged && !anyJob && wedgeExit.CompareAndSwap(false, true) {
+			logger.Error("wedged slot and no job running; exiting for a cold start to release the guest")
+			stop()
+		}
+	}
+	for _, s := range slots {
+		s.OnChange(checkWedge)
+	}
+
 	var wg sync.WaitGroup
 	for _, s := range slots {
 		wg.Go(func() { s.Run(ctx) })
@@ -179,6 +201,11 @@ func run() error {
 	err = srv.Serve(ctx, dir.SocketPath())
 	wg.Wait()
 	logger.Info("runnyd stopped")
+	if wedgeExit.Load() && err == nil {
+		// Non-zero exit so launchd (KeepAlive) restarts us; the cold start
+		// sweeps the vms dir and reclaims the leaked guest.
+		err = errors.New("restarting to release a wedged guest: a VM survived force-stop (see the slot's cycle record)")
+	}
 	return err
 }
 

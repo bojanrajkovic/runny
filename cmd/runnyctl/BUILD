@@ -5,7 +5,14 @@ go_library(
     srcs = ["main.go"],
     importpath = "github.com/bojanrajkovic/runny/cmd/runnyctl",
     visibility = ["//visibility:private"],
-    deps = ["//proto/runny/v1:runny"],
+    deps = [
+        "//internal/home",
+        "//proto/runny/v1:runny",
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//credentials/insecure",
+        "@org_golang_google_protobuf//encoding/protojson",
+        "@org_golang_google_protobuf//proto",
+    ],
 )
 
 go_binary(

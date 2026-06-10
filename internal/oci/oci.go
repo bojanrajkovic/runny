@@ -19,7 +19,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -441,44 +440,4 @@ func (c *Client) progressWriter() io.Writer { return progressWriter{fn: c.Progre
 func (c *Client) WithHTTPClient(hc *http.Client) *Client {
 	c.hc = hc
 	return c
-}
-
-// Stall watches progress and fails when no bytes arrive for window — the
-// ENSURE_IMAGE budget shape from the image-economics learning: a slow pull is
-// expected, a silent one means stuck.
-type Stall struct {
-	mu   sync.Mutex
-	last time.Time
-}
-
-func NewStall() *Stall { return &Stall{last: time.Now()} }
-
-func (s *Stall) Feed(int64) {
-	s.mu.Lock()
-	s.last = time.Now()
-	s.mu.Unlock()
-}
-
-// Watch cancels the returned context when no progress arrives for window.
-func (s *Stall) Watch(ctx context.Context, window time.Duration) (context.Context, context.CancelFunc) {
-	wctx, cancel := context.WithCancelCause(ctx)
-	go func() {
-		t := time.NewTicker(window / 4)
-		defer t.Stop()
-		for {
-			select {
-			case <-wctx.Done():
-				return
-			case <-t.C:
-				s.mu.Lock()
-				idle := time.Since(s.last)
-				s.mu.Unlock()
-				if idle > window {
-					cancel(fmt.Errorf("image pull stalled: no progress for %v", window))
-					return
-				}
-			}
-		}
-	}()
-	return wctx, func() { cancel(nil) }
 }

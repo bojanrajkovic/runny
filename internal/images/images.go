@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bojanrajkovic/runny/internal/bounded"
 	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/oci"
 	"github.com/bojanrajkovic/runny/internal/tart"
@@ -57,7 +58,7 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string)) (string, tart
 	}
 
 	e.log().Info("pulling image", "ref", e.Ref.String(), "digest", digest)
-	stall := oci.NewStall()
+	stall := bounded.NewStall()
 	prog := newProgress(report, e.log(), e.StallBudget)
 	client.Progress = func(n int64) {
 		stall.Feed(n)
@@ -258,7 +259,7 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 	if report != nil {
 		report("downloading " + assetName)
 	}
-	stall := oci.NewStall()
+	stall := bounded.NewStall()
 	wctx, cancel := stall.Watch(ctx, stallBudget)
 	defer cancel()
 

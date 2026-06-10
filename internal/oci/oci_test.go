@@ -2,7 +2,6 @@ package oci
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -17,7 +16,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/pierrec/lz4/v4"
 )
@@ -258,31 +256,6 @@ func TestPinnedDigestMismatch(t *testing.T) {
 	_, err := NewClient().Resolve(t.Context(), ref)
 	if err == nil || !strings.Contains(err.Error(), "mismatch") {
 		t.Fatalf("want pinned-digest mismatch, got %v", err)
-	}
-}
-
-func TestStallWatch(t *testing.T) {
-	s := NewStall()
-	ctx, cancel := s.Watch(t.Context(), 200*time.Millisecond)
-	defer cancel()
-	// Feed for a while — must stay alive past the window.
-	for range 3 {
-		time.Sleep(80 * time.Millisecond)
-		s.Feed(1)
-	}
-	select {
-	case <-ctx.Done():
-		t.Fatal("stall fired despite progress")
-	default:
-	}
-	// Stop feeding — must fire.
-	select {
-	case <-ctx.Done():
-	case <-time.After(2 * time.Second):
-		t.Fatal("stall did not fire after progress stopped")
-	}
-	if cause := context.Cause(ctx); cause == nil || !strings.Contains(cause.Error(), "stalled") {
-		t.Errorf("cause = %v", cause)
 	}
 }
 

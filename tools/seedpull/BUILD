@@ -6,6 +6,7 @@ go_library(
     importpath = "github.com/bojanrajkovic/runny/tools/seedpull",
     visibility = ["//visibility:private"],
     deps = [
+        "//internal/bounded",
         "//internal/home",
         "//internal/oci",
     ],

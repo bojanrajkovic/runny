@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bojanrajkovic/runny/internal/bounded"
 	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/oci"
 )
@@ -44,7 +45,7 @@ func main() {
 
 	// Stall-watched like every other download in this repo: a hung
 	// registry must fail loudly, not silently block an operator tool.
-	stall := oci.NewStall()
+	stall := bounded.NewStall()
 	var total atomic.Int64
 	client.Progress = func(n int64) {
 		stall.Feed(n)

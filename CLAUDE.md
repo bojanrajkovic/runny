@@ -19,6 +19,7 @@ Go 1.26 (mise-managed) for daemon + CLI; cgo to Virtualization.framework via `Co
 ## Source tree
 
 - `cmd/runnyd`, `cmd/runnyctl` — binaries; thin mains over `internal/`.
+- `internal/bounded` — `bounded.Context`: the no-unbounded-operations invariant as a type (ADR-0011); wall-clock and progress-stall bounds.
 - `internal/statemachine` — the 11-state crash-only FSM (ADR-0004); per-state deadlines, backoff, cycle.json.
 - `internal/vm` — tart-bundle parsing + Virtualization.framework lifecycle via vz (darwin-tagged; ADR-0008).
 - `internal/oci` — tart-format image pull (non-standard OCI layout, LZ4 layers).
@@ -43,7 +44,7 @@ For per-directory detail, read that directory's `CLAUDE.md` if present. For curr
 
 ## Invariants
 
-- **No unbounded operations.** Every guest-facing call carries a deadline; SSH clients come from `internal/sshx` only — plain `ssh.Dial` silently reintroduces the failure mode this project exists to kill (ADR-0002).
+- **No unbounded operations.** Every guest-facing call carries a deadline or a progress bound — enforced by the type system where converted: such functions take `bounded.Context`, constructible only with a bound attached (ADR-0011). SSH clients come from `internal/sshx` only — plain `ssh.Dial` silently reintroduces the failure mode this project exists to kill (ADR-0002).
 - **Crash-only.** Failure handling is destroy-and-recycle, never repair-in-place; teardown cannot fail (ADR-0004).
 - **No tart binary at runtime**; tart *format* compatibility is the contract (ADR-0008).
 - **No .xcodeproj, ever.** Xcode is SDK-vendor only (ADR-0007).

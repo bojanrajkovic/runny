@@ -6,6 +6,7 @@ go_library(
     importpath = "github.com/bojanrajkovic/runny/internal/images",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/bounded",
         "//internal/home",
         "//internal/oci",
         "//internal/tart",

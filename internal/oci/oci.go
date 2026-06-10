@@ -308,6 +308,13 @@ func (c *Client) pullBlobToFile(ctx context.Context, ref Ref, d descriptor, path
 	if n != d.Size {
 		return fmt.Errorf("blob %s: got %d bytes, manifest says %d", d.Digest, n, d.Size)
 	}
+	// Close errors are write errors: a flush that fails must fail the pull,
+	// not leave a short file behind a passing digest (the digest hashed the
+	// stream, not the file). The deferred Close above only backstops early
+	// returns; double-closing an os.File is harmless.
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("flushing %s: %w", path, err)
+	}
 	return verifyDigest(d.Digest, h.Sum(nil))
 }
 
@@ -343,8 +350,14 @@ func (c *Client) pullDiskLayer(ctx context.Context, ref Ref, d descriptor, diskP
 	if written != expected {
 		return fmt.Errorf("disk layer %s decoded to %d bytes, annotation says %d", d.Digest, written, expected)
 	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("flushing disk layer %s: %w", d.Digest, err)
+	}
 	return verifyDigest(d.Digest, h.Sum(nil))
 }
+
+// errDecodeOverrun reports a layer decoding past its annotated size.
+var errDecodeOverrun = errors.New("layer decodes past its declared uncompressed size")
 
 // boundedWriter refuses writes past its budget — the guard that turns a
 // decompression bomb into an immediate error instead of a full disk or a
@@ -356,7 +369,7 @@ type boundedWriter struct {
 
 func (b *boundedWriter) Write(p []byte) (int, error) {
 	if int64(len(p)) > b.remain {
-		return 0, errors.New("layer decodes past its declared uncompressed size")
+		return 0, errDecodeOverrun
 	}
 	n, err := b.w.Write(p)
 	b.remain -= int64(n)

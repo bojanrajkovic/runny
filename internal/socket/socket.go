@@ -87,7 +87,21 @@ func (s *Server) Serve(ctx context.Context, socketPath string) error {
 	runnyv1.RegisterRunnyServiceServer(g, s)
 	go func() {
 		<-ctx.Done()
-		g.GracefulStop()
+		// GracefulStop waits for in-flight RPCs — including the streaming
+		// ones, which only end when the client hangs up. RunnyBar keeps a
+		// WatchStatus stream open by design, so an unbounded graceful phase
+		// means SIGTERM never terminates the daemon. Give unary RPCs a
+		// moment, then cut the streams.
+		done := make(chan struct{})
+		go func() {
+			g.GracefulStop()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			g.Stop()
+		}
 	}()
 	if err := g.Serve(ln); err != nil && ctx.Err() == nil {
 		return err

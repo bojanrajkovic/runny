@@ -352,17 +352,33 @@ func TestHappyCycleThroughJob(t *testing.T) {
 	h.proc.say("Job build completed with result: Succeeded")
 	h.proc.exit(0)
 	h.waitState(t, StateTeardown)
-	h.waitState(t, StateBackoff)
+	// Assert on the BACKOFF-entry snapshot: a later Status() read races the
+	// next gated cycle, whose cancellation re-increments the counter.
+	st = h.waitState(t, StateBackoff)
+	if st.ConsecutiveFailures != 0 {
+		t.Error("failures should reset after success")
+	}
 	cancel()
-	// record written before BACKOFF; single gated cycle
+	<-h.runDone // store is quiescent only once Run exits
 
+	// The gated second cycle may have started before cancel landed; its
+	// canceled teardown writes a failure record (every started cycle is
+	// accounted). This test owns exactly one success record.
 	recs := h.records(t)
-	if len(recs) != 1 {
+	if len(recs) == 0 || len(recs) > 2 {
 		t.Fatalf("got %d records", len(recs))
 	}
-	rec := recs[0]
-	if rec.Result != cycle.ResultSuccess {
-		t.Errorf("result = %s; failure = %+v", rec.Result, rec.Failure)
+	var rec *cycle.Record
+	for _, r := range recs {
+		if r.Result == cycle.ResultSuccess {
+			if rec != nil {
+				t.Fatal("more than one success record")
+			}
+			rec = r
+		}
+	}
+	if rec == nil {
+		t.Fatalf("no success record in %d records", len(recs))
 	}
 	if rec.Job == nil {
 		t.Error("job not recorded")
@@ -370,9 +386,6 @@ func TestHappyCycleThroughJob(t *testing.T) {
 	// Job ran → JIT runner self-removes → no explicit deletion.
 	if len(h.gh.deleted) != 0 {
 		t.Errorf("deleted %v, want none after a completed job", h.gh.deleted)
-	}
-	if h.slot.Status().ConsecutiveFailures != 0 {
-		t.Error("failures should reset after success")
 	}
 }
 

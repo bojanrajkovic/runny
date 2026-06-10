@@ -172,7 +172,13 @@ func (p *Proc) end() {
 // daemon shutdown — one leaked watcher per cycle was an unbounded leak in a
 // daemon that cycles every few minutes for weeks.
 func (c *Client) Start(ctx context.Context, cmd string) (*Proc, error) {
-	sess, err := c.newSession()
+	// One deadline bracket covers the whole establishment — channel open,
+	// pipes, exec request, and the error-path closes, which are writes a
+	// wedged transport would otherwise block forever. Cleared on return;
+	// Start returns within microseconds of the exec request landing.
+	_ = c.conn.SetDeadline(time.Now().Add(c.timeout))
+	defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
+	sess, err := c.c.NewSession()
 	if err != nil {
 		return nil, fmt.Errorf("ssh session: %w", err)
 	}
@@ -186,13 +192,7 @@ func (c *Client) Start(ctx context.Context, cmd string) (*Proc, error) {
 		_ = sess.Close()
 		return nil, fmt.Errorf("ssh stderr pipe: %w", err)
 	}
-	// The exec request awaits a server reply — bound it like the channel
-	// open (a wedged guest otherwise hangs PROVISION before its deadline
-	// can apply).
-	_ = c.conn.SetDeadline(time.Now().Add(c.timeout))
-	err = sess.Start(cmd)
-	_ = c.conn.SetDeadline(time.Time{})
-	if err != nil {
+	if err := sess.Start(cmd); err != nil {
 		_ = sess.Close()
 		return nil, fmt.Errorf("ssh start %q: %w", cmd, err)
 	}
@@ -240,7 +240,10 @@ func (c *Client) Start(ctx context.Context, cmd string) (*Proc, error) {
 }
 
 // Wait blocks until the command exits and returns its exit code. A negative
-// code means the session died without one (connection loss, kill).
+// code means the session died without one (connection loss, kill). Call it
+// only after Lines closes (the FSM's pattern): before that, a wedged
+// transport can hold the session's exit indefinitely, until Client.Close
+// cuts the socket.
 func (p *Proc) Wait() (int, error) {
 	err := <-p.wait
 	if err == nil {

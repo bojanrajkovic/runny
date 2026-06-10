@@ -5,6 +5,7 @@ package vm
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
@@ -184,10 +185,14 @@ func finishBoot(ctx context.Context, vmc *vz.VirtualMachineConfiguration, bundle
 	case <-ctx.Done():
 		// The BOOT deadline fired mid-start. The machine was never returned,
 		// so the FSM's teardown cannot own it — hand it a detached best-effort
-		// force stop once Start finally returns.
+		// force stop once Start finally returns. Best-effort is the floor
+		// here, but never silent: a stop failure means a leaked guest holding
+		// a guest-cap slot until the daemon restarts.
 		go func() {
 			if err := <-started; err == nil {
-				_ = machine.Stop()
+				if serr := machine.Stop(); serr != nil {
+					slog.Error("abandoned boot: force stop failed; guest may hold a guest-cap slot until restart", "err", serr)
+				}
 			}
 		}()
 		return nil, fmt.Errorf("vm start: %w", context.Cause(ctx))

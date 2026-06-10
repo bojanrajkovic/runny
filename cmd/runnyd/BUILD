@@ -6,6 +6,7 @@ load("//tools:stamp.bzl", "stamped_go_binary")
 go_library(
     name = "runnyd_lib",
     srcs = [
+        "localnet.go",
         "lock.go",
         "main.go",
         "platform_darwin.go",
@@ -89,6 +90,9 @@ stamped_go_binary(
 
 go_test(
     name = "runnyd_test",
-    srcs = ["rotate_test.go"],
+    srcs = [
+        "localnet_test.go",
+        "rotate_test.go",
+    ],
     embed = [":runnyd_lib"],
 )

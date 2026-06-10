@@ -305,6 +305,17 @@ func makeDoctor(dir home.Dir, cfg *home.Config, clients map[home.TargetConfig]*g
 			))
 		}
 
+		// Local Network (TCC): a LaunchDaemon or background-reparented runnyd
+		// is silently denied vmnet access, so guest dials fail "no route to
+		// host". The probe only asserts once a vmnet interface is up, so at
+		// idle startup it is informational; run `runnyd -doctor` (or the
+		// Doctor RPC) while a guest is running to confirm the grant. Only
+		// meaningful on darwin (docs/deploy.md).
+		if runtime.GOOS == "darwin" {
+			ok, detail := localNetworkReach()
+			add("local-network", ok, detail)
+		}
+
 		for target, gh := range clients {
 			name := "runner-perm:" + target.String()
 			pctx, cancel := bounded.WithTimeout(ctx, checkBudget)

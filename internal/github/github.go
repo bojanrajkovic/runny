@@ -83,7 +83,19 @@ type Client struct {
 	tokenPerms map[string]string
 	tokenExp   time.Time
 	instID     int64
+	runnerDL   map[string]runnerAsset // goos -> cached downloads resolution
 }
+
+// runnerAsset caches one downloads-endpoint resolution. Without it every
+// slot's every cycle paid an API call (and could fail on an API blip) even
+// when the tarball was already on disk; runner builds change on the order
+// of weeks, so a short TTL loses nothing.
+type runnerAsset struct {
+	filename, url string
+	fetched       time.Time
+}
+
+const runnerDLTTL = 15 * time.Minute
 
 func New(cfg Config, target Target) (*Client, error) {
 	raw, err := os.ReadFile(cfg.PrivateKeyPath)
@@ -234,6 +246,12 @@ func (c *Client) RunnerDownload(ctx context.Context, goos string) (filename, url
 	if apiOS == "" {
 		return "", "", fmt.Errorf("unsupported guest os %q", goos)
 	}
+	c.mu.Lock()
+	if a, ok := c.runnerDL[goos]; ok && time.Since(a.fetched) < runnerDLTTL {
+		c.mu.Unlock()
+		return a.filename, a.url, nil
+	}
+	c.mu.Unlock()
 	tok, err := c.installationToken(ctx)
 	if err != nil {
 		return "", "", err
@@ -252,6 +270,12 @@ func (c *Client) RunnerDownload(ctx context.Context, goos string) (filename, url
 	}
 	for _, d := range downloads {
 		if d.OS == apiOS && d.Architecture == "arm64" {
+			c.mu.Lock()
+			if c.runnerDL == nil {
+				c.runnerDL = map[string]runnerAsset{}
+			}
+			c.runnerDL[goos] = runnerAsset{filename: d.Filename, url: d.DownloadURL, fetched: time.Now()}
+			c.mu.Unlock()
 			return d.Filename, d.DownloadURL, nil
 		}
 	}

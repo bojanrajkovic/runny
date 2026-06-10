@@ -122,7 +122,7 @@ func NewClient() *Client {
 // transport carries no timeout of its own — an unbounded caller would hang
 // forever on a registry that accepts TCP and never answers (ADR-0011).
 func (c *Client) Resolve(ctx bounded.Context, ref Ref) (string, error) {
-	_, digest, err := c.fetchManifest(ctx, ref)
+	_, _, digest, err := c.fetchManifest(ctx, ref)
 	return digest, err
 }
 
@@ -131,7 +131,7 @@ func (c *Client) Resolve(ctx bounded.Context, ref Ref) (string, error) {
 // destDir is created; a partial pull leaves it half-written, so callers pull
 // into a temp dir and rename (PullTo does this).
 func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, error) {
-	m, digest, err := c.fetchManifest(ctx, ref)
+	m, raw, digest, err := c.fetchManifest(ctx, ref)
 	if err != nil {
 		return "", err
 	}
@@ -214,7 +214,9 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 		return "", err
 	}
 
-	raw, _ := json.Marshal(m)
+	// Store the registry's bytes verbatim: the digest is the hash of these
+	// exact bytes (re-marshaling would drop unknown fields and reorder
+	// keys), and the cache-hit path recomputes the digest from this file.
 	if err := os.WriteFile(filepath.Join(destDir, "manifest.json"), raw, 0o644); err != nil {
 		return "", err
 	}
@@ -243,13 +245,19 @@ func (c *Client) PullTo(ctx bounded.Context, ref Ref, destDir string) (string, e
 	mu.Lock()
 	defer mu.Unlock()
 
-	if _, err := os.Stat(filepath.Join(destDir, "manifest.json")); err == nil {
-		// Already complete (possibly by the slot we just waited on).
-		_, digest, err := c.fetchManifest(ctx, ref)
-		if err == nil {
+	if raw, err := os.ReadFile(filepath.Join(destDir, "manifest.json")); err == nil {
+		// Already complete (possibly by the slot we just waited on). The
+		// digest is the hash of the manifest bytes stored at pull time —
+		// read it from disk rather than re-asking the registry: waiters
+		// arrive here with their stall budgets already spent waiting for
+		// the winner, and a cache hit must not depend on the network.
+		sum := sha256.Sum256(raw)
+		digest := "sha256:" + hex.EncodeToString(sum[:])
+		if ref.Digest == "" || ref.Digest == digest {
 			return digest, nil
 		}
-		return "", err
+		// On-disk manifest doesn't hash to the pinned digest: treat the
+		// bundle as corrupt and fall through to re-pull it.
 	}
 	if err := os.MkdirAll(filepath.Dir(destDir), 0o755); err != nil {
 		return "", err
@@ -271,7 +279,9 @@ func (c *Client) PullTo(ctx bounded.Context, ref Ref, destDir string) (string, e
 	return digest, nil
 }
 
-func (c *Client) fetchManifest(ctx context.Context, ref Ref) (*manifest, string, error) {
+// fetchManifest returns the parsed manifest, the registry's exact bytes
+// (what the digest covers), and the digest.
+func (c *Client) fetchManifest(ctx context.Context, ref Ref) (*manifest, []byte, string, error) {
 	target := ref.Tag
 	if ref.Digest != "" {
 		target = ref.Digest
@@ -279,23 +289,23 @@ func (c *Client) fetchManifest(ctx context.Context, ref Ref) (*manifest, string,
 	u := fmt.Sprintf("%s://%s/v2/%s/manifests/%s", scheme(ref.Host), ref.Host, ref.Name, target)
 	resp, err := c.get(ctx, ref, u, manifestAccept)
 	if err != nil {
-		return nil, "", fmt.Errorf("fetching manifest %s: %w", ref, err)
+		return nil, nil, "", fmt.Errorf("fetching manifest %s: %w", ref, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return nil, "", err
+		return nil, nil, "", err
 	}
 	sum := sha256.Sum256(body)
 	digest := "sha256:" + hex.EncodeToString(sum[:])
 	if ref.Digest != "" && ref.Digest != digest {
-		return nil, "", fmt.Errorf("manifest digest mismatch: pinned %s, got %s", ref.Digest, digest)
+		return nil, nil, "", fmt.Errorf("manifest digest mismatch: pinned %s, got %s", ref.Digest, digest)
 	}
 	var m manifest
 	if err := json.Unmarshal(body, &m); err != nil {
-		return nil, "", fmt.Errorf("parsing manifest: %w", err)
+		return nil, nil, "", fmt.Errorf("parsing manifest: %w", err)
 	}
-	return &m, digest, nil
+	return &m, body, digest, nil
 }
 
 // maxSmallBlobSize caps config.json / nvram.bin downloads. tart's are a few

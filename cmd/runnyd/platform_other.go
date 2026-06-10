@@ -3,10 +3,9 @@
 package main
 
 import (
-	"context"
-
 	"golang.org/x/sys/unix"
 
+	"github.com/bojanrajkovic/runny/internal/bounded"
 	"github.com/bojanrajkovic/runny/internal/tart"
 	"github.com/bojanrajkovic/runny/internal/vm"
 )
@@ -15,7 +14,7 @@ import (
 // non-darwin hosts; Boot always fails with a clear error.
 type unsupportedManager struct{}
 
-func (unsupportedManager) Boot(context.Context, tart.Bundle, vm.BootOptions) (vm.Machine, error) {
+func (unsupportedManager) Boot(bounded.Context, tart.Bundle, vm.BootOptions) (vm.Machine, error) {
 	return nil, errNotDarwin
 }
 

@@ -45,10 +45,22 @@ is exactly the decision the four bugs above skipped. Because the inner field
 is unexported, `bounded.Context{someCtx}` does not compile either; the type
 cannot be laundered.
 
-Rollout starts where the bugs were: `oci.Client.Resolve` / `PullTo` and the
-`images.RunnerResolver` seam. The remaining guest-facing seams (`github`,
-`sshx`, `vm.Machine`, `guest`) convert as they are touched; `vm` requires a
-darwin host to verify, so it converts in a darwin-verified change.
+All guest/network seams are converted: `oci.Client.Resolve`/`PullTo`, the
+`images.RunnerResolver` seam, `github.Client`'s five entry points,
+`sshx.Dial`/`WaitFor`/`Output`, `guest.Dialer.WaitFor`/`PullDiag`, and
+`vm.Manager.Boot`/`Machine.WaitIP`/`Machine.Stop`. The FSM's `enter` hands
+each deadline-bounded state a `bounded.Context` directly, so the per-state
+deadline reaches the seams through the type system.
+
+Three functions deliberately keep plain `context.Context` — converting them
+would brand a lifetime handle as an operation bound:
+
+- `sshx.Client.Start` / `Guest.StartRunner`: the ctx is the runner proc's
+  *lifetime* (run.sh must outlive PROVISION's deadline); establishment is
+  bounded internally by the socket-deadline recipe.
+- `ImageEnsurer.Ensure`: ENSURE_IMAGE has no wall-clock deadline because
+  pull duration is unknowable; its operations bound themselves internally
+  (resolve timeout, stall watcher).
 
 ## Rejected alternatives
 

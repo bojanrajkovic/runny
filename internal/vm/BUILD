@@ -10,6 +10,7 @@ go_library(
     importpath = "github.com/bojanrajkovic/runny/internal/vm",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/bounded",
         "//internal/tart",
     ] + select({
         "@rules_go//go/platform:darwin": [

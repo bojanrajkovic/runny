@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/bojanrajkovic/runny/internal/bounded"
 )
 
 // ErrMissingRunnerPerm is returned when the App's installation token does
@@ -184,7 +186,7 @@ func (c *Client) installationToken(ctx context.Context) (string, error) {
 // CheckRunnerPerm mints (or reuses) a token and asserts the target-scoped
 // runner-administration permission is actually present — the doctor check
 // ADR-0003 calls for, target-aware per ADR-0009.
-func (c *Client) CheckRunnerPerm(ctx context.Context) error {
+func (c *Client) CheckRunnerPerm(ctx bounded.Context) error {
 	if _, err := c.installationToken(ctx); err != nil {
 		return err
 	}
@@ -210,7 +212,7 @@ type JITRunner struct {
 // GenerateJITConfig registers an ephemeral runner and returns its one-shot
 // config. The runner auto-removes after one job; if it never takes one, the
 // caller must DeleteRunner on teardown (ADR-0003).
-func (c *Client) GenerateJITConfig(ctx context.Context, name string, labels []string, groupID int64) (*JITRunner, error) {
+func (c *Client) GenerateJITConfig(ctx bounded.Context, name string, labels []string, groupID int64) (*JITRunner, error) {
 	tok, err := c.installationToken(ctx)
 	if err != nil {
 		return nil, err
@@ -241,7 +243,7 @@ func (c *Client) GenerateJITConfig(ctx context.Context, name string, labels []st
 // actions/runner repo's "latest" release can lag what the broker accepts,
 // and JIT runners cannot self-update (learned from a live Forbidden:
 // "Runner version vX is deprecated and cannot receive messages").
-func (c *Client) RunnerDownload(ctx context.Context, goos string) (filename, url string, err error) {
+func (c *Client) RunnerDownload(ctx bounded.Context, goos string) (filename, url string, err error) {
 	apiOS := map[string]string{"darwin": "osx", "linux": "linux"}[goos]
 	if apiOS == "" {
 		return "", "", fmt.Errorf("unsupported guest os %q", goos)
@@ -291,7 +293,7 @@ type Runner struct {
 }
 
 // ListRunners returns all self-hosted runners on the repo (paginated).
-func (c *Client) ListRunners(ctx context.Context) ([]Runner, error) {
+func (c *Client) ListRunners(ctx bounded.Context) ([]Runner, error) {
 	tok, err := c.installationToken(ctx)
 	if err != nil {
 		return nil, err
@@ -317,7 +319,7 @@ func (c *Client) ListRunners(ctx context.Context) ([]Runner, error) {
 
 // DeleteRunner removes a runner registration (the no-job teardown path).
 // A 404 is success: the runner already removed itself.
-func (c *Client) DeleteRunner(ctx context.Context, id int64) error {
+func (c *Client) DeleteRunner(ctx bounded.Context, id int64) error {
 	tok, err := c.installationToken(ctx)
 	if err != nil {
 		return err

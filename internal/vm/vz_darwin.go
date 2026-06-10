@@ -11,6 +11,7 @@ import (
 
 	vz "github.com/Code-Hex/vz/v3"
 
+	"github.com/bojanrajkovic/runny/internal/bounded"
 	"github.com/bojanrajkovic/runny/internal/tart"
 )
 
@@ -26,7 +27,7 @@ var _ Manager = VZManager{}
 // path for darwin, EFI for linux. A fresh machine identifier and a fresh
 // random MAC are used — the bundle's own values may be shared by other
 // clones (spike-verified).
-func (m VZManager) Boot(ctx context.Context, bundle tart.Bundle, opts BootOptions) (Machine, error) {
+func (m VZManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptions) (Machine, error) {
 	cfg, err := bundle.LoadConfig()
 	if err != nil {
 		return nil, err
@@ -222,7 +223,7 @@ func (m *vzMachine) watchState() {
 	}
 }
 
-func (m *vzMachine) WaitIP(ctx context.Context) (string, error) {
+func (m *vzMachine) WaitIP(ctx bounded.Context) (string, error) {
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
 	for {
@@ -246,7 +247,7 @@ func (m *vzMachine) WaitIP(ctx context.Context) (string, error) {
 // Stop: RequestStop (graceful, often stalls on vanilla images — spike-
 // verified) bounded by grace, then force Stop(). Force is the floor; this
 // method only errors if even force-stop failed AND the guest still runs.
-func (m *vzMachine) Stop(ctx context.Context, grace time.Duration) error {
+func (m *vzMachine) Stop(ctx bounded.Context, grace time.Duration) error {
 	select {
 	case <-m.done:
 		return nil // already stopped

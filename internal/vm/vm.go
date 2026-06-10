@@ -5,10 +5,10 @@
 package vm
 
 import (
-	"context"
 	"errors"
 	"time"
 
+	"github.com/bojanrajkovic/runny/internal/bounded"
 	"github.com/bojanrajkovic/runny/internal/tart"
 )
 
@@ -27,21 +27,21 @@ type BootOptions struct {
 // mount_virtiofs runny-cache /Volumes/runny-cache.
 const ShareTag = "runny-cache"
 
-// Machine is one running guest. Implementations must make every method
-// ctx-bounded; nothing here may block indefinitely.
+// Machine is one running guest. Every method takes bounded.Context — nothing
+// here may block indefinitely, and the type system enforces it (ADR-0011).
 type Machine interface {
 	// MAC returns the guest's network MAC (fresh per boot).
 	MAC() string
 	// WaitIP polls the host's DHCP leases until the guest's MAC has one.
-	WaitIP(ctx context.Context) (string, error)
+	WaitIP(ctx bounded.Context) (string, error)
 	// Stop requests a graceful stop, waits up to grace, then force-stops.
 	// It must not fail-and-leave-running: force is the floor (ADR-0004).
-	Stop(ctx context.Context, grace time.Duration) error
+	Stop(ctx bounded.Context, grace time.Duration) error
 	// Done is closed when the guest stops for any reason.
 	Done() <-chan struct{}
 }
 
 // Manager boots bundles.
 type Manager interface {
-	Boot(ctx context.Context, bundle tart.Bundle, opts BootOptions) (Machine, error)
+	Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptions) (Machine, error)
 }

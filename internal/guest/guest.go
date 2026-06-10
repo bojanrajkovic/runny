@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bojanrajkovic/runny/internal/bounded"
 	"github.com/bojanrajkovic/runny/internal/sshx"
 	"github.com/bojanrajkovic/runny/internal/statemachine"
 )
@@ -19,7 +20,7 @@ type Dialer struct {
 	RetryInterval time.Duration
 }
 
-func (d Dialer) WaitFor(ctx context.Context, addr string) (statemachine.Guest, error) {
+func (d Dialer) WaitFor(ctx bounded.Context, addr string) (statemachine.Guest, error) {
 	interval := d.RetryInterval
 	if interval == 0 {
 		interval = 2 * time.Second
@@ -93,7 +94,7 @@ func (g *Guest) StartRunner(ctx context.Context, jit, goos string) (statemachine
 
 // PullDiag fetches the tail of the runner's diagnostic logs — the
 // post-mortem material TEARDOWN collects before destroying the guest.
-func (g *Guest) PullDiag(ctx context.Context) ([]byte, error) {
+func (g *Guest) PullDiag(ctx bounded.Context) ([]byte, error) {
 	out, _, err := g.c.Output(ctx,
 		`for f in $HOME/runny-runner/_diag/*.log; do echo "==> $f <=="; tail -c 32768 "$f"; done 2>/dev/null`)
 	if err != nil {

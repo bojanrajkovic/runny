@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bojanrajkovic/runny/internal/bounded"
 	"github.com/bojanrajkovic/runny/internal/cycle"
 	"github.com/bojanrajkovic/runny/internal/github"
 	"github.com/bojanrajkovic/runny/internal/home"
@@ -57,11 +58,13 @@ type ImageEnsurer interface {
 // Cloner clones a bundle (tart.Clone's seam).
 type Cloner func(src tart.Bundle, dst string) error
 
-// GitHub is the slice of internal/github the FSM needs.
+// GitHub is the slice of internal/github the FSM needs. Every method takes
+// bounded.Context: these are network calls, and an unbounded call site is a
+// compile error (ADR-0011).
 type GitHub interface {
-	GenerateJITConfig(ctx context.Context, name string, labels []string, groupID int64) (*github.JITRunner, error)
-	ListRunners(ctx context.Context) ([]github.Runner, error)
-	DeleteRunner(ctx context.Context, id int64) error
+	GenerateJITConfig(ctx bounded.Context, name string, labels []string, groupID int64) (*github.JITRunner, error)
+	ListRunners(ctx bounded.Context) ([]github.Runner, error)
+	DeleteRunner(ctx bounded.Context, id int64) error
 }
 
 // Proc is a running guest process (the runner's run.sh).
@@ -75,15 +78,18 @@ type Proc interface {
 type Guest interface {
 	// StartRunner stages the actions runner from the cache share and launches
 	// run.sh with the JIT config; goos selects the per-OS provision path.
+	// It deliberately takes a plain context: the ctx is the proc's LIFETIME
+	// (run.sh must outlive PROVISION's deadline), not an operation bound —
+	// session establishment is bounded internally by sshx's socket deadlines.
 	StartRunner(ctx context.Context, jit, goos string) (Proc, error)
 	// PullDiag fetches the tail of the runner's _diag logs (post-mortem).
-	PullDiag(ctx context.Context) ([]byte, error)
+	PullDiag(ctx bounded.Context) ([]byte, error)
 	Close() error
 }
 
 // Dialer establishes Guest sessions (sshx's seam).
 type Dialer interface {
-	WaitFor(ctx context.Context, addr string) (Guest, error)
+	WaitFor(ctx bounded.Context, addr string) (Guest, error)
 }
 
 // Deps wires a slot to the world. Everything is an interface or func so the
@@ -364,17 +370,12 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool) {
 		failErr   error
 	)
 
-	// enter runs one deadline-bounded state; false = cycle failed.
-	enter := func(state State, d time.Duration, f func(context.Context) error) bool {
+	// runState records one state's execution; sctx is consulted only to
+	// classify deadline outcomes. false = cycle failed.
+	runState := func(state State, sctx context.Context, f func() error) bool {
 		s.setState(state, func(st *Status) { st.CycleID = rec.CycleID })
 		sr := cycle.StateRecord{State: string(state), Entered: time.Now()}
-		sctx := ctx
-		var cancel context.CancelFunc = func() {}
-		if d > 0 {
-			sctx, cancel = context.WithTimeout(ctx, d)
-		}
-		err := f(sctx)
-		cancel()
+		err := f()
 		sr.Left = time.Now()
 		switch {
 		case err == nil:
@@ -392,10 +393,23 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool) {
 		return true
 	}
 
+	// enter runs one deadline-bounded state. The state function receives the
+	// deadline as a bounded.Context it can hand straight to the guest and
+	// network seams — the per-state deadline is the contract, and the type
+	// system carries it to the call sites (ADR-0011).
+	enter := func(state State, d time.Duration, f func(bounded.Context) error) bool {
+		bctx, cancel := bounded.WithTimeout(ctx, d)
+		ok := runState(state, bctx, func() error { return f(bctx) })
+		cancel()
+		return ok
+	}
+
 	var srcBundle tart.Bundle
-	ok := enter(StateEnsureImage, 0, func(c context.Context) error {
-		// The puller carries its own progress-stall budget (Config.PullStall).
-		digest, bundle, err := s.deps.Images.Ensure(c, s.setDetail)
+	// ENSURE_IMAGE is the one state with no wall-clock deadline — pull
+	// duration is unknowable — so it runs under the cycle context; its
+	// operations carry their own bounds (resolve timeout, stall watcher).
+	ok := runState(StateEnsureImage, ctx, func() error {
+		digest, bundle, err := s.deps.Images.Ensure(ctx, s.setDetail)
 		if err != nil {
 			return err
 		}
@@ -406,12 +420,12 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool) {
 
 	vmDir := s.deps.Home.VMDir(s.name)
 	if ok {
-		ok = enter(StateClone, cfg.Deadlines.Clone.D(), func(c context.Context) error {
+		ok = enter(StateClone, cfg.Deadlines.Clone.D(), func(c bounded.Context) error {
 			return s.deps.Clone(srcBundle, vmDir)
 		})
 	}
 	if ok {
-		ok = enter(StateBoot, cfg.Deadlines.Boot.D(), func(c context.Context) error {
+		ok = enter(StateBoot, cfg.Deadlines.Boot.D(), func(c bounded.Context) error {
 			m, err := s.deps.VM.Boot(c, tart.Bundle(vmDir), vm.BootOptions{
 				RunnerCacheDir: s.deps.Home.RunnerCacheDir(),
 			})
@@ -428,7 +442,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool) {
 	}
 	var ip string
 	if ok {
-		ok = enter(StateAwaitIP, cfg.Deadlines.AwaitIP.D(), func(c context.Context) error {
+		ok = enter(StateAwaitIP, cfg.Deadlines.AwaitIP.D(), func(c bounded.Context) error {
 			got, err := machine.WaitIP(c)
 			if err != nil {
 				return err
@@ -442,7 +456,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool) {
 		})
 	}
 	if ok {
-		ok = enter(StateAwaitSSH, cfg.Deadlines.AwaitSSH.D(), func(c context.Context) error {
+		ok = enter(StateAwaitSSH, cfg.Deadlines.AwaitSSH.D(), func(c bounded.Context) error {
 			g, err := s.deps.Dial.WaitFor(c, ip+":22")
 			if err != nil {
 				return err
@@ -453,7 +467,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool) {
 	}
 	var jit *github.JITRunner
 	if ok {
-		ok = enter(StateMintJIT, cfg.Deadlines.MintJIT.D(), func(c context.Context) error {
+		ok = enter(StateMintJIT, cfg.Deadlines.MintJIT.D(), func(c bounded.Context) error {
 			j, err := s.deps.GitHub.GenerateJITConfig(c, runnerName, s.deps.Pool.Labels, s.deps.Pool.RunnerGroupID)
 			if err != nil {
 				return err
@@ -464,7 +478,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool) {
 		})
 	}
 	if ok {
-		ok = enter(StateProvision, cfg.Deadlines.Provision.D(), func(c context.Context) error {
+		ok = enter(StateProvision, cfg.Deadlines.Provision.D(), func(c bounded.Context) error {
 			// The proc must outlive this state's deadline: start it under the
 			// cycle ctx, but bound the wait-for-listening here.
 			p, err := guest.StartRunner(ctx, jit.EncodedJITConfig, s.deps.Pool.OS)
@@ -562,7 +576,12 @@ func (s *Slot) listenAndRunJob(ctx context.Context, rec *cycle.Record, proc Proc
 			return false, StateListening, fmt.Errorf("max idle (%v) reached", cfg.Limits.MaxIdle.D())
 
 		case <-reconcile.C:
-			runners, err := s.deps.GitHub.ListRunners(ctx)
+			// The interval doubles as the budget: a registration check
+			// slower than its own cadence is already pathological, and the
+			// LISTENING select must not be blockable past one tick.
+			rctx, rcancel := bounded.WithTimeout(ctx, cfg.Limits.ReconcileInterval.D())
+			runners, err := s.deps.GitHub.ListRunners(rctx)
+			rcancel()
 			if err != nil {
 				// GitHub unreachable is transient: hold and log, never recycle
 				// for it — sand's DNS-blip lesson.
@@ -650,14 +669,14 @@ func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInput
 	s.setState(StateTeardown, nil)
 	tr := cycle.StateRecord{State: string(StateTeardown), Entered: time.Now()}
 	// Teardown must run even when ctx (daemon shutdown) is done: detach.
-	tctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.Deadlines.Teardown.D())
+	tctx, cancel := bounded.WithTimeout(context.WithoutCancel(ctx), cfg.Deadlines.Teardown.D())
 	defer cancel()
 
 	store := cycle.Store{SlotDir: s.deps.Home.SlotCyclesDir(s.name)}
 
 	// 1. Post-mortem while the guest still exists (failure cycles only).
 	if in.failed && in.guest != nil {
-		pctx, pcancel := context.WithTimeout(tctx, 15*time.Second)
+		pctx, pcancel := bounded.WithTimeout(tctx, 15*time.Second)
 		if diag, err := in.guest.PullDiag(pctx); err == nil && len(diag) > 0 {
 			if dir, derr := store.Dir(rec); derr == nil {
 				if werr := writeFile(dir, "runner-diag.log", diag); werr == nil {

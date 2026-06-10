@@ -6,6 +6,7 @@ go_library(
     importpath = "github.com/bojanrajkovic/runny/internal/guest",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/bounded",
         "//internal/sshx",
         "//internal/statemachine",
     ],

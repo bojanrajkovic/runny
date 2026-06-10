@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/bojanrajkovic/runny/internal/bounded"
 )
 
 // Config carries guest credentials and the per-attempt budget.
@@ -38,7 +40,7 @@ type Client struct {
 }
 
 // Dial performs one bounded connection attempt (the ADR-0002 recipe).
-func Dial(ctx context.Context, addr string, cfg Config) (*Client, error) {
+func Dial(ctx bounded.Context, addr string, cfg Config) (*Client, error) {
 	d := net.Dialer{Timeout: cfg.Timeout}
 	conn, err := d.DialContext(ctx, "tcp", addr) // bounds TCP connect
 	if err != nil {
@@ -70,7 +72,7 @@ func Dial(ctx context.Context, addr string, cfg Config) (*Client, error) {
 
 // WaitFor retries Dial every interval until success or ctx expiry. The
 // AWAIT_SSH state is this function plus a state deadline.
-func WaitFor(ctx context.Context, addr string, cfg Config, interval time.Duration) (*Client, error) {
+func WaitFor(ctx bounded.Context, addr string, cfg Config, interval time.Duration) (*Client, error) {
 	var lastErr error
 	for {
 		c, err := Dial(ctx, addr, cfg)
@@ -108,7 +110,7 @@ func (c *Client) newSession() (*ssh.Session, error) {
 
 // Output runs cmd and captures combined stdout+stderr, bounded by ctx. Used
 // for short provisioning steps and post-mortem pulls.
-func (c *Client) Output(ctx context.Context, cmd string) ([]byte, int, error) {
+func (c *Client) Output(ctx bounded.Context, cmd string) ([]byte, int, error) {
 	sess, err := c.newSession()
 	if err != nil {
 		return nil, -1, fmt.Errorf("ssh session: %w", err)
@@ -171,6 +173,11 @@ func (p *Proc) end() {
 // end the session; every goroutine started here exits by teardown, not by
 // daemon shutdown — one leaked watcher per cycle was an unbounded leak in a
 // daemon that cycles every few minutes for weeks.
+//
+// Start deliberately takes a plain context (not bounded.Context): the ctx is
+// the proc's LIFETIME — run.sh must outlive the caller's state deadline —
+// not an operation bound. Establishment is bounded internally by the socket
+// deadline below (ADR-0011).
 func (c *Client) Start(ctx context.Context, cmd string) (*Proc, error) {
 	// One deadline bracket covers the whole establishment — channel open,
 	// pipes, exec request, and the error-path closes, which are writes a

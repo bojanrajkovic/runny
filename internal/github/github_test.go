@@ -17,8 +17,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bojanrajkovic/runny/internal/bounded"
+
 	"github.com/golang-jwt/jwt/v5"
 )
+
+// testCtx satisfies the bounded.Context the client API demands (ADR-0011).
+func testCtx(t *testing.T) bounded.Context {
+	t.Helper()
+	ctx, cancel := bounded.WithTimeout(t.Context(), time.Minute)
+	t.Cleanup(cancel)
+	return ctx
+}
 
 // fakeGitHub stubs the five endpoints the client touches, verifying the App
 // JWT signature against the test keypair on the way.
@@ -160,7 +170,7 @@ func newTestClientTarget(t *testing.T, f *fakeGitHub, target Target) *Client {
 func TestGenerateJITConfig(t *testing.T) {
 	f := &fakeGitHub{}
 	c := newTestClient(t, f)
-	jit, err := c.GenerateJITConfig(t.Context(), "runny-1-abcd1234", []string{"self-hosted", "macOS"}, 1)
+	jit, err := c.GenerateJITConfig(testCtx(t), "runny-1-abcd1234", []string{"self-hosted", "macOS"}, 1)
 	if err != nil {
 		t.Fatalf("GenerateJITConfig: %v", err)
 	}
@@ -173,7 +183,7 @@ func TestTokenCaching(t *testing.T) {
 	f := &fakeGitHub{}
 	c := newTestClient(t, f)
 	for range 3 {
-		if _, err := c.GenerateJITConfig(t.Context(), "n", nil, 1); err != nil {
+		if _, err := c.GenerateJITConfig(testCtx(t), "n", nil, 1); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -185,7 +195,7 @@ func TestTokenCaching(t *testing.T) {
 func TestJITRetryOn5xx(t *testing.T) {
 	f := &fakeGitHub{failJITN: 2}
 	c := newTestClient(t, f)
-	jit, err := c.GenerateJITConfig(t.Context(), "n", nil, 1)
+	jit, err := c.GenerateJITConfig(testCtx(t), "n", nil, 1)
 	if err != nil || jit.RunnerID != 4242 {
 		t.Fatalf("retry should have recovered: %v", err)
 	}
@@ -196,28 +206,28 @@ func TestJITRetryOn5xx(t *testing.T) {
 
 func TestCheckRunnerPerm(t *testing.T) {
 	c := newTestClient(t, &fakeGitHub{adminPerm: "write"})
-	if err := c.CheckRunnerPerm(t.Context()); err != nil {
+	if err := c.CheckRunnerPerm(testCtx(t)); err != nil {
 		t.Errorf("repo target with administration:write: %v", err)
 	}
 	c2 := newTestClient(t, &fakeGitHub{adminPerm: "read"})
-	if err := c2.CheckRunnerPerm(t.Context()); !errors.Is(err, ErrMissingRunnerPerm) {
+	if err := c2.CheckRunnerPerm(testCtx(t)); !errors.Is(err, ErrMissingRunnerPerm) {
 		t.Errorf("want ErrMissingRunnerPerm, got %v", err)
 	}
 	// Org target needs the ORG permission; administration alone is not enough.
 	org := Target{Org: "myorg"}
 	c3 := newTestClientTarget(t, &fakeGitHub{adminPerm: "write", orgRunnerPerm: "write"}, org)
-	if err := c3.CheckRunnerPerm(t.Context()); err != nil {
+	if err := c3.CheckRunnerPerm(testCtx(t)); err != nil {
 		t.Errorf("org target with org runner perm: %v", err)
 	}
 	c4 := newTestClientTarget(t, &fakeGitHub{adminPerm: "write"}, org)
-	if err := c4.CheckRunnerPerm(t.Context()); !errors.Is(err, ErrMissingRunnerPerm) {
+	if err := c4.CheckRunnerPerm(testCtx(t)); !errors.Is(err, ErrMissingRunnerPerm) {
 		t.Errorf("org target without org perm: want ErrMissingRunnerPerm, got %v", err)
 	}
 }
 
 func TestOrgTargetJITConfig(t *testing.T) {
 	c := newTestClientTarget(t, &fakeGitHub{}, Target{Org: "myorg"})
-	jit, err := c.GenerateJITConfig(t.Context(), "runny-lin-1-abcd1234", []string{"self-hosted"}, 1)
+	jit, err := c.GenerateJITConfig(testCtx(t), "runny-lin-1-abcd1234", []string{"self-hosted"}, 1)
 	if err != nil || jit.RunnerID != 4242 {
 		t.Fatalf("org jitconfig: %+v, %v", jit, err)
 	}
@@ -225,15 +235,15 @@ func TestOrgTargetJITConfig(t *testing.T) {
 
 func TestRunnerDownloadPerOS(t *testing.T) {
 	c := newTestClient(t, &fakeGitHub{})
-	name, url, err := c.RunnerDownload(t.Context(), "darwin")
+	name, url, err := c.RunnerDownload(testCtx(t), "darwin")
 	if err != nil || !strings.Contains(name, "osx-arm64") || url != "https://example/osx" {
 		t.Errorf("darwin: %s %s %v", name, url, err)
 	}
-	name, url, err = c.RunnerDownload(t.Context(), "linux")
+	name, url, err = c.RunnerDownload(testCtx(t), "linux")
 	if err != nil || !strings.Contains(name, "linux-arm64") || url != "https://example/linux" {
 		t.Errorf("linux: %s %s %v", name, url, err)
 	}
-	if _, _, err := c.RunnerDownload(t.Context(), "windows"); err == nil {
+	if _, _, err := c.RunnerDownload(testCtx(t), "windows"); err == nil {
 		t.Error("windows should be rejected")
 	}
 }
@@ -244,15 +254,15 @@ func TestListAndDeleteRunners(t *testing.T) {
 		{ID: 2, Name: "runny-2-bbbb", Status: "offline"},
 	}}
 	c := newTestClient(t, f)
-	rs, err := c.ListRunners(t.Context())
+	rs, err := c.ListRunners(testCtx(t))
 	if err != nil || len(rs) != 2 {
 		t.Fatalf("ListRunners: %v, %v", rs, err)
 	}
-	if err := c.DeleteRunner(t.Context(), 2); err != nil {
+	if err := c.DeleteRunner(testCtx(t), 2); err != nil {
 		t.Errorf("DeleteRunner: %v", err)
 	}
 	// 404 is success — the runner already removed itself after its job.
-	if err := c.DeleteRunner(t.Context(), 999); err != nil {
+	if err := c.DeleteRunner(testCtx(t), 999); err != nil {
 		t.Errorf("DeleteRunner on missing id should be nil, got %v", err)
 	}
 }

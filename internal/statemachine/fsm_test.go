@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bojanrajkovic/runny/internal/bounded"
 	"github.com/bojanrajkovic/runny/internal/cycle"
 	"github.com/bojanrajkovic/runny/internal/github"
 	"github.com/bojanrajkovic/runny/internal/home"
@@ -56,7 +57,7 @@ type fakeMachine struct {
 }
 
 func (m *fakeMachine) MAC() string { return m.mac }
-func (m *fakeMachine) WaitIP(ctx context.Context) (string, error) {
+func (m *fakeMachine) WaitIP(ctx bounded.Context) (string, error) {
 	if m.ipErr != nil {
 		return "", m.ipErr
 	}
@@ -67,7 +68,7 @@ func (m *fakeMachine) WaitIP(ctx context.Context) (string, error) {
 	return m.ip, nil
 }
 
-func (m *fakeMachine) Stop(context.Context, time.Duration) error {
+func (m *fakeMachine) Stop(bounded.Context, time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.stopErr != nil {
@@ -88,7 +89,7 @@ type fakeVM struct {
 	mu      sync.Mutex
 }
 
-func (f *fakeVM) Boot(ctx context.Context, b tart.Bundle, o vm.BootOptions) (vm.Machine, error) {
+func (f *fakeVM) Boot(ctx bounded.Context, b tart.Bundle, o vm.BootOptions) (vm.Machine, error) {
 	f.mu.Lock()
 	f.boots++
 	f.mu.Unlock()
@@ -141,7 +142,7 @@ func (g *fakeGuest) StartRunner(ctx context.Context, jit, goos string) (Proc, er
 	return g.proc, nil
 }
 
-func (g *fakeGuest) PullDiag(context.Context) ([]byte, error) {
+func (g *fakeGuest) PullDiag(bounded.Context) ([]byte, error) {
 	g.mu.Lock()
 	g.pulled = true
 	g.mu.Unlock()
@@ -154,7 +155,7 @@ type fakeDialer struct {
 	err   error
 }
 
-func (d *fakeDialer) WaitFor(ctx context.Context, addr string) (Guest, error) {
+func (d *fakeDialer) WaitFor(ctx bounded.Context, addr string) (Guest, error) {
 	if d.err != nil {
 		return nil, d.err
 	}
@@ -174,7 +175,7 @@ func newFakeGitHub() *fakeGitHub {
 	return &fakeGitHub{registered: map[string]bool{}, nextID: 100}
 }
 
-func (g *fakeGitHub) GenerateJITConfig(ctx context.Context, name string, labels []string, group int64) (*github.JITRunner, error) {
+func (g *fakeGitHub) GenerateJITConfig(ctx bounded.Context, name string, labels []string, group int64) (*github.JITRunner, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.nextID++
@@ -182,7 +183,7 @@ func (g *fakeGitHub) GenerateJITConfig(ctx context.Context, name string, labels 
 	return &github.JITRunner{RunnerID: g.nextID, EncodedJITConfig: "aml0"}, nil
 }
 
-func (g *fakeGitHub) ListRunners(ctx context.Context) ([]github.Runner, error) {
+func (g *fakeGitHub) ListRunners(ctx bounded.Context) ([]github.Runner, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.listErr != nil {
@@ -200,7 +201,7 @@ func (g *fakeGitHub) ListRunners(ctx context.Context) ([]github.Runner, error) {
 	return rs, nil
 }
 
-func (g *fakeGitHub) DeleteRunner(ctx context.Context, id int64) error {
+func (g *fakeGitHub) DeleteRunner(ctx bounded.Context, id int64) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.deleted = append(g.deleted, id)

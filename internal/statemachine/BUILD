@@ -9,6 +9,7 @@ go_library(
     importpath = "github.com/bojanrajkovic/runny/internal/statemachine",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/bounded",
         "//internal/cycle",
         "//internal/github",
         "//internal/home",
@@ -22,6 +23,7 @@ go_test(
     srcs = ["fsm_test.go"],
     embed = [":statemachine"],
     deps = [
+        "//internal/bounded",
         "//internal/cycle",
         "//internal/github",
         "//internal/home",

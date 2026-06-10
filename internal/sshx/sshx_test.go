@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/bojanrajkovic/runny/internal/bounded"
 )
 
 // testServer is a minimal in-process SSH server: password auth, exec with
@@ -118,17 +120,25 @@ func handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 	}
 }
 
+// testCtx satisfies the bounded.Context the client API demands (ADR-0011).
+func testCtx(t *testing.T) bounded.Context {
+	t.Helper()
+	ctx, cancel := bounded.WithTimeout(t.Context(), time.Minute)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 var testCfg = Config{User: "admin", Password: "admin", Timeout: 2 * time.Second}
 
 func TestDialAndOutput(t *testing.T) {
 	addr := testServer(t)
-	c, err := Dial(t.Context(), addr, testCfg)
+	c, err := Dial(testCtx(t), addr, testCfg)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer c.Close()
 
-	out, code, err := c.Output(t.Context(), "hello")
+	out, code, err := c.Output(testCtx(t), "hello")
 	if err != nil || code != 0 {
 		t.Fatalf("Output: %q, %d, %v", out, code, err)
 	}
@@ -138,12 +148,12 @@ func TestDialAndOutput(t *testing.T) {
 }
 
 func TestOutputExitCode(t *testing.T) {
-	c, err := Dial(t.Context(), testServer(t), testCfg)
+	c, err := Dial(testCtx(t), testServer(t), testCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	out, code, err := c.Output(t.Context(), "fail")
+	out, code, err := c.Output(testCtx(t), "fail")
 	if err != nil {
 		t.Fatalf("Output: %v", err)
 	}
@@ -153,7 +163,7 @@ func TestOutputExitCode(t *testing.T) {
 }
 
 func TestDialWrongPassword(t *testing.T) {
-	_, err := Dial(t.Context(), testServer(t), Config{User: "admin", Password: "nope", Timeout: 2 * time.Second})
+	_, err := Dial(testCtx(t), testServer(t), Config{User: "admin", Password: "nope", Timeout: 2 * time.Second})
 	if err == nil {
 		t.Fatal("want auth failure")
 	}
@@ -178,7 +188,7 @@ func TestDialBannerHang(t *testing.T) {
 	}()
 
 	start := time.Now()
-	_, err = Dial(t.Context(), ln.Addr().String(), Config{User: "admin", Password: "admin", Timeout: 500 * time.Millisecond})
+	_, err = Dial(testCtx(t), ln.Addr().String(), Config{User: "admin", Password: "admin", Timeout: 500 * time.Millisecond})
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("want banner-hang failure")
@@ -189,12 +199,12 @@ func TestDialBannerHang(t *testing.T) {
 }
 
 func TestOutputBoundedByContext(t *testing.T) {
-	c, err := Dial(t.Context(), testServer(t), testCfg)
+	c, err := Dial(testCtx(t), testServer(t), testCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	ctx, cancel := bounded.WithTimeout(t.Context(), 300*time.Millisecond)
 	defer cancel()
 	start := time.Now()
 	_, _, err = c.Output(ctx, "hang")
@@ -207,7 +217,7 @@ func TestOutputBoundedByContext(t *testing.T) {
 }
 
 func TestStartStreams(t *testing.T) {
-	c, err := Dial(t.Context(), testServer(t), testCfg)
+	c, err := Dial(testCtx(t), testServer(t), testCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +241,7 @@ func TestStartStreams(t *testing.T) {
 }
 
 func TestStartKilledByContext(t *testing.T) {
-	c, err := Dial(t.Context(), testServer(t), testCfg)
+	c, err := Dial(testCtx(t), testServer(t), testCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,13 +311,13 @@ func wedgedServer(t *testing.T) string {
 // bound it the same way it bounds the banner (TestDialBannerHang's sibling).
 func TestOutputBoundedOnWedgedChannelOpen(t *testing.T) {
 	cfg := Config{User: "admin", Password: "admin", Timeout: 500 * time.Millisecond}
-	c, err := Dial(t.Context(), wedgedServer(t), cfg)
+	c, err := Dial(testCtx(t), wedgedServer(t), cfg)
 	if err != nil {
 		t.Fatalf("Dial (handshake should succeed): %v", err)
 	}
 	defer c.Close()
 	start := time.Now()
-	_, _, err = c.Output(t.Context(), "hello")
+	_, _, err = c.Output(testCtx(t), "hello")
 	if err == nil {
 		t.Fatal("want channel-open failure against a wedged guest")
 	}
@@ -318,7 +328,7 @@ func TestOutputBoundedOnWedgedChannelOpen(t *testing.T) {
 
 func TestStartBoundedOnWedgedChannelOpen(t *testing.T) {
 	cfg := Config{User: "admin", Password: "admin", Timeout: 500 * time.Millisecond}
-	c, err := Dial(t.Context(), wedgedServer(t), cfg)
+	c, err := Dial(testCtx(t), wedgedServer(t), cfg)
 	if err != nil {
 		t.Fatalf("Dial (handshake should succeed): %v", err)
 	}
@@ -337,7 +347,7 @@ func TestStartBoundedOnWedgedChannelOpen(t *testing.T) {
 // proc's own done signal they parked forever once the FSM stopped draining
 // (it stops at the completion marker), wedging Wait behind them.
 func TestKillUnblocksWedgedReaders(t *testing.T) {
-	c, err := Dial(t.Context(), testServer(t), testCfg)
+	c, err := Dial(testCtx(t), testServer(t), testCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +375,7 @@ func TestKillUnblocksWedgedReaders(t *testing.T) {
 // ctx-watcher per cycle is unbounded growth in a daemon that cycles every
 // few minutes for weeks.
 func TestStartGoroutinesEndAtTeardown(t *testing.T) {
-	c, err := Dial(t.Context(), testServer(t), testCfg)
+	c, err := Dial(testCtx(t), testServer(t), testCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +405,7 @@ func TestStartGoroutinesEndAtTeardown(t *testing.T) {
 
 func TestWaitFor(t *testing.T) {
 	addr := testServer(t)
-	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	ctx, cancel := bounded.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	c, err := WaitFor(ctx, addr, testCfg, 50*time.Millisecond)
 	if err != nil {
@@ -404,7 +414,7 @@ func TestWaitFor(t *testing.T) {
 	_ = c.Close()
 
 	// And expiry against a dead address.
-	ctx2, cancel2 := context.WithTimeout(t.Context(), 400*time.Millisecond)
+	ctx2, cancel2 := bounded.WithTimeout(t.Context(), 400*time.Millisecond)
 	defer cancel2()
 	_, err = WaitFor(ctx2, "127.0.0.1:1", Config{User: "a", Password: "b", Timeout: 100 * time.Millisecond}, 50*time.Millisecond)
 	if err == nil {

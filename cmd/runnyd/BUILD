@@ -1,4 +1,7 @@
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_library")
+load("//tools:stamp.bzl", "stamped_go_binary")
+
+# gazelle:map_kind go_binary stamped_go_binary //tools:stamp.bzl
 
 go_library(
     name = "runnyd_lib",
@@ -90,7 +93,7 @@ go_library(
     }),
 )
 
-go_binary(
+stamped_go_binary(
     name = "runnyd",
     embed = [":runnyd_lib"],
     visibility = ["//visibility:public"],

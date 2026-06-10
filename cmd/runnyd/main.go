@@ -68,8 +68,8 @@ func run() error {
 		return err
 	}
 
-	// Logging: file sink + ring buffer, both structured.
-	logFile, err := os.OpenFile(dir.LogFile(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	// Logging: size-capped file sink + ring buffer, both structured.
+	logFile, err := openRotatingFile(dir.LogFile(), logFileCap)
 	if err != nil {
 		return fmt.Errorf("opening log file: %w", err)
 	}
@@ -99,8 +99,14 @@ func run() error {
 
 	doctor := makeDoctor(dir, cfg, clients)
 	if *checkOnly {
-		return runDoctor(doctor)
+		return runDoctor(doctor) // read-only: runs fine alongside a live daemon
 	}
+
+	lock, err := acquireLock(dir.LockPath())
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

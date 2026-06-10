@@ -3,7 +3,7 @@
   "private": true,
   "description": "Dev-only: commitlint for the commit-msg hook. Not part of the build graph.",
   "devDependencies": {
-    "@commitlint/cli": "^20.4.1",
-    "@commitlint/config-conventional": "^20.0.0"
+    "@commitlint/cli": "^21.0.0",
+    "@commitlint/config-conventional": "^21.0.0"
   }
 }

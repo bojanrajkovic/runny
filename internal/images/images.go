@@ -58,7 +58,7 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string)) (string, tart
 
 	e.log().Info("pulling image", "ref", e.Ref.String(), "digest", digest)
 	stall := oci.NewStall()
-	prog := newProgress(report, e.log())
+	prog := newProgress(report, e.log(), e.StallBudget)
 	client.Progress = func(n int64) {
 		stall.Feed(n)
 		prog.feed(n)
@@ -83,24 +83,60 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string)) (string, tart
 
 // progress turns raw byte deltas into operator-visible pull progress: a
 // live status annotation (throttled to 1/s) and a log line every 15s. Slow
-// ghcr and stuck pulls must look different (the predecessor's biggest
-// diagnosability gap).
+// and stuck must look DIFFERENT — when no data arrives, the annotation says
+// so explicitly instead of freezing on the last healthy reading (a wedged
+// download once sat behind "pulled 25.2 MiB at 4.2 MiB/s" for minutes).
 type progress struct {
 	report func(string)
 	log    *slog.Logger
+	budget time.Duration
 
-	mu        sync.Mutex
-	total     int64
-	winBytes  int64
-	winStart  time.Time
-	lastShow  time.Time
-	lastLog   time.Time
-	startedAt time.Time
+	mu         sync.Mutex
+	total      int64
+	winBytes   int64
+	winStart   time.Time
+	lastShow   time.Time
+	lastLog    time.Time
+	lastFeed   time.Time
+	lastDetail string
+	done       chan struct{}
+	stopOnce   sync.Once
 }
 
-func newProgress(report func(string), log *slog.Logger) *progress {
+func newProgress(report func(string), log *slog.Logger, stallBudget time.Duration) *progress {
 	now := time.Now()
-	return &progress{report: report, log: log, winStart: now, lastLog: now, startedAt: now}
+	p := &progress{
+		report: report, log: log, budget: stallBudget,
+		winStart: now, lastLog: now, lastFeed: now,
+		done: make(chan struct{}),
+	}
+	if report != nil {
+		go p.watchStaleness()
+	}
+	return p
+}
+
+// watchStaleness annotates the report when data stops arriving, counting up
+// toward the stall budget so the operator can see the kill coming.
+func (p *progress) watchStaleness() {
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-p.done:
+			return
+		case <-t.C:
+			p.mu.Lock()
+			idle := time.Since(p.lastFeed)
+			detail := p.lastDetail
+			p.mu.Unlock()
+			if idle >= 10*time.Second {
+				stalled := fmt.Sprintf("STALLED %s (no data; teardown at %s) — last: %s",
+					idle.Round(time.Second), p.budget, detail)
+				p.report(stalled)
+			}
+		}
+	}
 }
 
 func (p *progress) feed(n int64) {
@@ -111,6 +147,7 @@ func (p *progress) feed(n int64) {
 	p.total += n
 	p.winBytes += n
 	now := time.Now()
+	p.lastFeed = now
 	if now.Sub(p.lastShow) < time.Second {
 		p.mu.Unlock()
 		return
@@ -118,13 +155,14 @@ func (p *progress) feed(n int64) {
 	rate := float64(p.winBytes) / max(now.Sub(p.winStart).Seconds(), 0.001)
 	total := p.total
 	p.winBytes, p.winStart, p.lastShow = 0, now, now
+	detail := fmt.Sprintf("pulled %s at %s/s", humanBytes(total), humanBytes(int64(rate)))
+	p.lastDetail = detail
 	logIt := now.Sub(p.lastLog) >= 15*time.Second
 	if logIt {
 		p.lastLog = now
 	}
 	p.mu.Unlock()
 
-	detail := fmt.Sprintf("pulled %s at %s/s", humanBytes(total), humanBytes(int64(rate)))
 	p.report(detail)
 	if logIt {
 		p.log.Info("pull progress", "downloaded", humanBytes(total), "rate", humanBytes(int64(rate))+"/s")
@@ -132,6 +170,7 @@ func (p *progress) feed(n int64) {
 }
 
 func (p *progress) stop() {
+	p.stopOnce.Do(func() { close(p.done) })
 	if p.report != nil {
 		p.report("")
 	}
@@ -223,7 +262,7 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 	if err != nil {
 		return "", err
 	}
-	prog := newProgress(report, log)
+	prog := newProgress(report, log, stallBudget)
 	body := io.TeeReader(dresp.Body, progressWriter(func(n int64) {
 		stall.Feed(n)
 		prog.feed(n)

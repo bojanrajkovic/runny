@@ -61,35 +61,45 @@ jobs:
     needs: artifacts
     runs-on: ubuntu-latest
     # contents:read is only to check out this repo's formula template; the tap
-    # push uses TAP_PUSH_TOKEN, never GITHUB_TOKEN (which has no cross-repo
-    # write anyway).
+    # push uses a GitHub App installation token scoped to homebrew-tap, never
+    # GITHUB_TOKEN (which has no cross-repo write anyway).
     permissions:
       contents: read
+    env:
+      # The release bot App; absent until the secrets are set, which makes the
+      # whole tap update a graceful no-op (early releases skip it).
+      RELEASE_APP_ID: ${{ secrets.RELEASE_APP_ID }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+      - name: mint tap token
+        id: tap-token
+        if: ${{ env.RELEASE_APP_ID != '' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: bojanrajkovic
+          repositories: homebrew-tap
       - name: update tap formula
+        if: ${{ steps.tap-token.outputs.token != '' }}
         env:
-          TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+          TAP_TOKEN: ${{ steps.tap-token.outputs.token }}
           TAG: ${{ github.event.release.tag_name }}
           REPO: ${{ github.repository }}
           VERSION: ${{ needs.artifacts.outputs.version }}
           SHA: ${{ needs.artifacts.outputs.sha256 }}
         run: |
-          if [ -z "$TAP_PUSH_TOKEN" ]; then
-            echo "TAP_PUSH_TOKEN not set; skipping Homebrew formula update"
-            exit 0
-          fi
           export URL="https://github.com/${REPO}/releases/download/${TAG}/runny_${VERSION}_darwin_arm64.tar.gz"
-          git clone "https://x-access-token:${TAP_PUSH_TOKEN}@github.com/bojanrajkovic/homebrew-tap.git" tap
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/bojanrajkovic/homebrew-tap.git" tap
           mkdir -p tap/Formula
           # Render the reviewed template; only these three vars are substituted
           # so Ruby's own #{...} interpolations pass through untouched.
           envsubst '${VERSION} ${URL} ${SHA}' < tools/deploy/runny.rb.tmpl > tap/Formula/runny.rb
           cd tap
           git add Formula/runny.rb
-          git -c user.name="runny-release" -c user.email="noreply@coderinserepeat.com" \
+          git -c user.name="runny-release[bot]" -c user.email="noreply@coderinserepeat.com" \
             commit -m "runny ${VERSION}"
           # Explicit target: cloning an empty tap can leave the local branch
           # named 'master', and brew reads the formula from the default branch

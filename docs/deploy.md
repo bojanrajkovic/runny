@@ -89,9 +89,12 @@ brew services start runny
 ```
 
 The release workflow regenerates the formula from `tools/deploy/runny.rb.tmpl`
-on every release and pushes it to the tap when the `TAP_PUSH_TOKEN` secret is
-set (a PAT with Contents:write on the tap repo). `tools/deploy/install.sh`
-remains the path for running a from-checkout build.
+on every release and pushes it to the tap, authenticating as the **release
+bot App** (`RELEASE_APP_ID` / `RELEASE_APP_PRIVATE_KEY` secrets) with a
+short-lived installation token scoped to `homebrew-tap`; it no-ops until those
+secrets exist. That App is deliberately *not* the runtime runner-registration
+App — release/CI and prod-host/runner-admin are separate blast radii.
+`tools/deploy/install.sh` remains the path for running a from-checkout build.
 
 ## sand cutover (#9)
 

@@ -32,9 +32,13 @@ from conventional commits) + goreleaser (build, package, publish, brew tap).
 - **Provenance attestations** (`actions/attest-build-provenance`) on every
   artifact-producing job, release and branch alike.
 - **Homebrew tap** (`bojanrajkovic/homebrew-tap`): the release workflow
-  renders the formula (version + sha256) and pushes it — the same ~30 lines
-  goreleaser's brew publisher would run. Skipped gracefully when the
-  `TAP_PUSH_TOKEN` secret is absent.
+  renders the formula from `tools/deploy/runny.rb.tmpl` (version + url + sha256)
+  and pushes it — the same work goreleaser's brew publisher would run. It
+  authenticates as the **release bot App** (a GitHub App installation token
+  scoped to `homebrew-tap`, `RELEASE_APP_ID` / `RELEASE_APP_PRIVATE_KEY`), kept
+  distinct from the runtime runner-registration App so CI and prod-host
+  credentials don't share a blast radius. Skipped gracefully when those
+  secrets are absent.
 - Artifact-producing jobs stay **cold** (no Bazel or tool caches) per the CI
   security posture.
 

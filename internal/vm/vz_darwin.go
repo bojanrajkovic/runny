@@ -92,7 +92,7 @@ func (VZManager) bootDarwin(ctx context.Context, bundle tart.Bundle, cfg *tart.C
 	gfx.SetDisplays(display)
 	vmc.SetGraphicsDevicesVirtualMachineConfiguration([]vz.GraphicsDeviceConfiguration{gfx})
 
-	return finishBoot(vmc, bundle, opts)
+	return finishBoot(ctx, vmc, bundle, opts)
 }
 
 // bootLinux: EFI boot loader with the bundle's nvram.bin as the variable
@@ -115,12 +115,16 @@ func (VZManager) bootLinux(ctx context.Context, bundle tart.Bundle, cfg *tart.Co
 		return nil, fmt.Errorf("generic platform: %w", err)
 	}
 	vmc.SetPlatformVirtualMachineConfiguration(platform)
-	return finishBoot(vmc, bundle, opts)
+	return finishBoot(ctx, vmc, bundle, opts)
 }
 
 // finishBoot attaches the OS-independent devices (disk, NAT net with a fresh
-// MAC, optional virtiofs cache share), validates, and starts the guest.
-func finishBoot(vmc *vz.VirtualMachineConfiguration, bundle tart.Bundle, opts BootOptions) (Machine, error) {
+// MAC, optional virtiofs cache share), validates, and starts the guest. The
+// start itself honors ctx: Machine's contract says nothing here may block
+// indefinitely, and the BOOT state's deadline only works if that is true —
+// Start is an unbounded call into Virtualization.framework, the same
+// framework whose graceful stop often stalls.
+func finishBoot(ctx context.Context, vmc *vz.VirtualMachineConfiguration, bundle tart.Bundle, opts BootOptions) (Machine, error) {
 	diskAtt, err := vz.NewDiskImageStorageDeviceAttachment(bundle.DiskPath(), false)
 	if err != nil {
 		return nil, fmt.Errorf("disk attachment: %w", err)
@@ -170,8 +174,23 @@ func finishBoot(vmc *vz.VirtualMachineConfiguration, bundle tart.Bundle, opts Bo
 	if err != nil {
 		return nil, err
 	}
-	if err := machine.Start(); err != nil {
-		return nil, fmt.Errorf("vm start: %w", err)
+	started := make(chan error, 1)
+	go func() { started <- machine.Start() }()
+	select {
+	case err := <-started:
+		if err != nil {
+			return nil, fmt.Errorf("vm start: %w", err)
+		}
+	case <-ctx.Done():
+		// The BOOT deadline fired mid-start. The machine was never returned,
+		// so the FSM's teardown cannot own it — hand it a detached best-effort
+		// force stop once Start finally returns.
+		go func() {
+			if err := <-started; err == nil {
+				_ = machine.Stop()
+			}
+		}()
+		return nil, fmt.Errorf("vm start: %w", context.Cause(ctx))
 	}
 
 	m := &vzMachine{vm: machine, mac: mac.String(), done: make(chan struct{})}

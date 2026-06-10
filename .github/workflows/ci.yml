@@ -10,8 +10,8 @@ permissions:
 
 jobs:
   # Linux covers format, lint (nogo rides compilation), and all pure-Go
-  # build/test. Darwin-only targets (vz cgo, RunnyBar) get a macOS job in the
-  # Phase 3 expansion.
+  # build/test. Darwin-only targets (vz cgo, RunnyBar) need a macOS job,
+  # which doesn't exist yet.
   linux:
     runs-on: ubuntu-latest
     steps:

@@ -1,3 +1,8 @@
+# Security posture (see CONTRIBUTING.md "CI security"):
+# - All actions pinned by commit SHA; Renovate keeps the pins current.
+# - Bazel caches are used ONLY in test jobs. The artifact job builds cold —
+#   a poisoned cache must never be able to reach a deployable binary.
+# - checkout never persists credentials; permissions are read-only.
 name: ci
 
 on:
@@ -10,16 +15,15 @@ permissions:
 
 jobs:
   # Linux covers format, lint (nogo rides compilation), and all pure-Go
-  # build/test fast; macOS covers the darwin-only targets (vz cgo) and
-  # produces an ad-hoc-signed daemon artifact. GitHub's macOS runners are
-  # themselves VMs (no nested virtualization), so CI never boots guests —
-  # that remains an ix job.
+  # build/test fast. Cached: test feedback only, no artifacts.
   linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - uses: actions/cache@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/bazel
           key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel', '.mise.toml') }}
@@ -34,13 +38,18 @@ jobs:
           mise x -- bazel run --config=ci //tools/format
           git diff --exit-code
 
+  # Darwin-only targets (vz cgo) build/test here. Cached: test feedback
+  # only. GitHub's macOS runners are themselves VMs (no nested
+  # virtualization), so CI never boots guests — that remains an ix job.
   macos:
     # macos-26 matches the deployment host (ix) and guest image generation.
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - uses: actions/cache@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/Library/Caches/bazel
           key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel', '.mise.toml') }}
@@ -49,15 +58,32 @@ jobs:
         run: mise x -- bazel build --config=ci //...
       - name: test
         run: mise x -- bazel test --config=ci //... || test $? -eq 4
+
+  # The deployable daemon builds COLD — no cache restore, exact-pinned
+  # toolchain — so cache poisoning cannot reach the artifact. Slower by
+  # design; runs on main pushes only (PRs get build/test coverage above).
+  artifact:
+    if: github.event_name == 'push'
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+      - name: build (cold, no cache)
+        run: mise x -- bazel build --config=ci //cmd/runnyd //cmd/runnyctl
       - name: sign runnyd (ad-hoc, virtualization entitlement)
         # Ad-hoc signatures honor the virtualization entitlement on any host;
         # Developer ID signing waits on cert secrets (see CONTRIBUTING.md).
         run: |
           cp bazel-bin/cmd/runnyd/runnyd_/runnyd runnyd
+          cp bazel-bin/cmd/runnyctl/runnyctl_/runnyctl runnyctl
           chmod +w runnyd
           codesign -s - --entitlements tools/sign/runnyd.entitlements --force runnyd
           codesign -dv runnyd
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: runnyd-darwin-arm64
-          path: runnyd
+          name: runny-darwin-arm64
+          path: |
+            runnyd
+            runnyctl

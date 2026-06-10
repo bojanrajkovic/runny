@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -25,9 +26,15 @@ type Config struct {
 	Timeout time.Duration
 }
 
-// Client wraps ssh.Client; obtain one only via Dial or WaitFor.
+// Client wraps ssh.Client; obtain one only via Dial or WaitFor. The raw
+// net.Conn is retained because the deadline recipe applies per operation,
+// not just at dial time: channel opens and exec requests await server
+// replies, and a guest that wedges with the TCP connection still open
+// blocks them forever unless the socket itself bounds the wait.
 type Client struct {
-	c *ssh.Client
+	c       *ssh.Client
+	conn    net.Conn
+	timeout time.Duration
 }
 
 // Dial performs one bounded connection attempt (the ADR-0002 recipe).
@@ -58,7 +65,7 @@ func Dial(ctx context.Context, addr string, cfg Config) (*Client, error) {
 		_ = sc.Close()
 		return nil, fmt.Errorf("ssh clear deadline: %w", err)
 	}
-	return &Client{c: ssh.NewClient(sc, chans, reqs)}, nil
+	return &Client{c: ssh.NewClient(sc, chans, reqs), conn: conn, timeout: cfg.Timeout}, nil
 }
 
 // WaitFor retries Dial every interval until success or ctx expiry. The
@@ -79,16 +86,33 @@ func WaitFor(ctx context.Context, addr string, cfg Config, interval time.Duratio
 	}
 }
 
-func (c *Client) Close() error { return c.c.Close() }
+// Close tears down the connection. The polite SSH disconnect is a write — a
+// wedged transport blocks it forever, and Close runs on the teardown path
+// that must not wedge — so the socket is cut first; the client then cleans
+// up quickly against the dead transport.
+func (c *Client) Close() error {
+	err := c.conn.Close()
+	_ = c.c.Close()
+	return err
+}
+
+// newSession opens a session channel under a socket deadline: channel open
+// awaits a server reply, the same blind spot as the banner exchange
+// (ADR-0002). A wedged guest fails here within timeout instead of hanging
+// the caller forever.
+func (c *Client) newSession() (*ssh.Session, error) {
+	_ = c.conn.SetDeadline(time.Now().Add(c.timeout))
+	defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
+	return c.c.NewSession()
+}
 
 // Output runs cmd and captures combined stdout+stderr, bounded by ctx. Used
 // for short provisioning steps and post-mortem pulls.
 func (c *Client) Output(ctx context.Context, cmd string) ([]byte, int, error) {
-	sess, err := c.c.NewSession()
+	sess, err := c.newSession()
 	if err != nil {
 		return nil, -1, fmt.Errorf("ssh session: %w", err)
 	}
-	defer sess.Close()
 
 	type result struct {
 		out  []byte
@@ -98,11 +122,15 @@ func (c *Client) Output(ctx context.Context, cmd string) ([]byte, int, error) {
 	done := make(chan result, 1)
 	go func() {
 		out, err := sess.CombinedOutput(cmd)
+		_ = sess.Close()
 		done <- result{out, exitCode(err), err}
 	}()
 	select {
 	case <-ctx.Done():
-		_ = sess.Close() // unblocks CombinedOutput
+		// Session close is a write; on the wedged transport that got us
+		// here it can block forever — detach it. The worker unblocks when
+		// the close lands or when Client.Close cuts the socket.
+		go func() { _ = sess.Close() }()
 		return nil, -1, fmt.Errorf("ssh command %q: %w", cmd, ctx.Err())
 	case r := <-done:
 		if r.err != nil && r.code < 0 {
@@ -120,13 +148,31 @@ type Proc struct {
 	// when the command exits or the connection drops.
 	Lines <-chan string
 
-	sess *ssh.Session
-	wait chan error
+	sess    *ssh.Session
+	wait    chan error
+	done    chan struct{}
+	endOnce sync.Once
 }
 
-// Start launches cmd and streams its output. Cancel ctx to kill the session.
+// end is the proc's single exit path, idempotent: it releases every proc
+// goroutine (readers blocked on a full Lines channel included) and closes
+// the session without ever blocking on the wire — channel-close is a write,
+// and Kill runs on the teardown path that must not wedge. A close stuck on
+// a dead transport parks in its goroutine until Client.Close cuts the
+// socket, which teardown always does right after Kill.
+func (p *Proc) end() {
+	p.endOnce.Do(func() {
+		close(p.done)
+		go func() { _ = p.sess.Close() }()
+	})
+}
+
+// Start launches cmd and streams its output. Cancel ctx (or call Kill) to
+// end the session; every goroutine started here exits by teardown, not by
+// daemon shutdown — one leaked watcher per cycle was an unbounded leak in a
+// daemon that cycles every few minutes for weeks.
 func (c *Client) Start(ctx context.Context, cmd string) (*Proc, error) {
-	sess, err := c.c.NewSession()
+	sess, err := c.newSession()
 	if err != nil {
 		return nil, fmt.Errorf("ssh session: %w", err)
 	}
@@ -140,12 +186,20 @@ func (c *Client) Start(ctx context.Context, cmd string) (*Proc, error) {
 		_ = sess.Close()
 		return nil, fmt.Errorf("ssh stderr pipe: %w", err)
 	}
-	if err := sess.Start(cmd); err != nil {
+	// The exec request awaits a server reply — bound it like the channel
+	// open (a wedged guest otherwise hangs PROVISION before its deadline
+	// can apply).
+	_ = c.conn.SetDeadline(time.Now().Add(c.timeout))
+	err = sess.Start(cmd)
+	_ = c.conn.SetDeadline(time.Time{})
+	if err != nil {
 		_ = sess.Close()
 		return nil, fmt.Errorf("ssh start %q: %w", cmd, err)
 	}
 
 	lines := make(chan string, 64)
+	p := &Proc{Lines: lines, sess: sess, wait: make(chan error, 1), done: make(chan struct{})}
+
 	readDone := make(chan struct{}, 2)
 	for _, r := range []interface{ Read([]byte) (int, error) }{stdout, stderr} {
 		go func() {
@@ -154,7 +208,10 @@ func (c *Client) Start(ctx context.Context, cmd string) (*Proc, error) {
 			for sc.Scan() {
 				select {
 				case lines <- sc.Text():
-				case <-ctx.Done():
+				case <-p.done:
+					// Nobody is draining Lines anymore (the FSM stops after
+					// the completion marker); without this case a chatty
+					// runner wedged the readers on a full channel forever.
 					readDone <- struct{}{}
 					return
 				}
@@ -163,20 +220,23 @@ func (c *Client) Start(ctx context.Context, cmd string) (*Proc, error) {
 		}()
 	}
 
-	wait := make(chan error, 1)
 	go func() {
 		err := sess.Wait()
 		<-readDone
 		<-readDone
 		close(lines)
-		wait <- err
+		p.wait <- err
+		p.end() // natural exit: release the ctx watcher below
 	}()
 	go func() {
-		<-ctx.Done()
-		_ = sess.Close() // unblocks Wait and the readers
+		select {
+		case <-ctx.Done():
+			p.end()
+		case <-p.done:
+		}
 	}()
 
-	return &Proc{Lines: lines, sess: sess, wait: wait}, nil
+	return p, nil
 }
 
 // Wait blocks until the command exits and returns its exit code. A negative
@@ -192,8 +252,8 @@ func (p *Proc) Wait() (int, error) {
 	return -1, fmt.Errorf("remote command did not exit cleanly: %w", err)
 }
 
-// Kill tears the session down.
-func (p *Proc) Kill() { _ = p.sess.Close() }
+// Kill tears the session down without blocking (see end).
+func (p *Proc) Kill() { p.end() }
 
 func exitCode(err error) int {
 	if err == nil {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -101,6 +102,13 @@ func handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 				time.Sleep(20 * time.Millisecond)
 			}
 			exit(0)
+		case payload.Cmd == "spew":
+			// Far more output than the client's Lines buffer, then hang:
+			// a chatty runner whose consumer has stopped draining.
+			for i := range 500 {
+				fmt.Fprintf(ch, "spew %d\n", i)
+			}
+			select {} // never exits; the client must Kill it
 		case strings.HasPrefix(payload.Cmd, "hang"):
 			select {} // never exits; the client must bound it
 		default:
@@ -244,6 +252,145 @@ func TestStartKilledByContext(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Wait did not return after ctx cancellation — the hang class is back")
 	}
+}
+
+// wedgedServer completes the SSH handshake but never answers channel opens —
+// the post-handshake analogue of the banner hang: a guest that wedged with
+// its TCP connection still alive.
+func wedgedServer(t *testing.T) string {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf := &ssh.ServerConfig{
+		PasswordCallback: func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) { return nil, nil },
+	}
+	conf.AddHostKey(signer)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				_, chans, reqs, err := ssh.NewServerConn(conn, conf)
+				if err != nil {
+					return
+				}
+				go ssh.DiscardRequests(reqs)
+				for range chans {
+					// Take the open into limbo: never Accept, never Reject.
+				}
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// Channel open is a request the server must answer; the socket deadline must
+// bound it the same way it bounds the banner (TestDialBannerHang's sibling).
+func TestOutputBoundedOnWedgedChannelOpen(t *testing.T) {
+	cfg := Config{User: "admin", Password: "admin", Timeout: 500 * time.Millisecond}
+	c, err := Dial(t.Context(), wedgedServer(t), cfg)
+	if err != nil {
+		t.Fatalf("Dial (handshake should succeed): %v", err)
+	}
+	defer c.Close()
+	start := time.Now()
+	_, _, err = c.Output(t.Context(), "hello")
+	if err == nil {
+		t.Fatal("want channel-open failure against a wedged guest")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("Output took %v; the deadline did not bound the channel open", elapsed)
+	}
+}
+
+func TestStartBoundedOnWedgedChannelOpen(t *testing.T) {
+	cfg := Config{User: "admin", Password: "admin", Timeout: 500 * time.Millisecond}
+	c, err := Dial(t.Context(), wedgedServer(t), cfg)
+	if err != nil {
+		t.Fatalf("Dial (handshake should succeed): %v", err)
+	}
+	defer c.Close()
+	start := time.Now()
+	_, err = c.Start(t.Context(), "hello")
+	if err == nil {
+		t.Fatal("want session failure against a wedged guest")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("Start took %v; the deadline did not bound establishment", elapsed)
+	}
+}
+
+// Kill must release readers blocked on a full Lines channel — without the
+// proc's own done signal they parked forever once the FSM stopped draining
+// (it stops at the completion marker), wedging Wait behind them.
+func TestKillUnblocksWedgedReaders(t *testing.T) {
+	c, err := Dial(t.Context(), testServer(t), testCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	p, err := c.Start(t.Context(), "spew")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Let the readers fill the buffered channel and block; drain nothing.
+	time.Sleep(300 * time.Millisecond)
+	p.Kill()
+	done := make(chan struct{})
+	go func() {
+		_, _ = p.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Wait did not return after Kill with un-drained output")
+	}
+}
+
+// Proc goroutines must end at teardown, not daemon shutdown — one leaked
+// ctx-watcher per cycle is unbounded growth in a daemon that cycles every
+// few minutes for weeks.
+func TestStartGoroutinesEndAtTeardown(t *testing.T) {
+	c, err := Dial(t.Context(), testServer(t), testCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	base := runtime.NumGoroutine()
+	for range 10 {
+		p, err := c.Start(t.Context(), "stream")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range p.Lines {
+		}
+		if code, err := p.Wait(); err != nil || code != 0 {
+			t.Fatalf("Wait: %d, %v", code, err)
+		}
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= base+2 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("proc goroutines leaked across cycles: %d before, %d after", base, runtime.NumGoroutine())
 }
 
 func TestWaitFor(t *testing.T) {

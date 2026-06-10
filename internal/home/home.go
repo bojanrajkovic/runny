@@ -58,17 +58,23 @@ func (d Dir) VMDir(slot string) string { return filepath.Join(d.VMsDir(), slot) 
 // SlotCyclesDir holds the per-cycle artifact dirs for one slot.
 func (d Dir) SlotCyclesDir(slot string) string { return filepath.Join(d.CyclesDir(), slot) }
 
-// Ensure creates the directory skeleton with owner-only permissions where it
-// matters (the socket and config can carry credentials-adjacent material).
+// Ensure creates the directory skeleton owner-only throughout: the tree
+// holds credentials-adjacent material end to end — App key path in config,
+// the control socket, and post-mortem runner _diag logs that can contain
+// unmasked job secrets. Everything under it is read by the daemon's own
+// user only (RunnyBar and runnyctl run as the same user; virtiofs shares
+// are exported by the daemon process itself).
 func (d Dir) Ensure() error {
 	for _, p := range []string{
 		string(d), d.LogsDir(), d.ImagesDir(), d.VMsDir(), d.CyclesDir(), d.RunnerCacheDir(),
 	} {
-		if err := os.MkdirAll(p, 0o755); err != nil {
+		if err := os.MkdirAll(p, 0o700); err != nil {
 			return fmt.Errorf("creating %s: %w", p, err)
 		}
 	}
-	return nil
+	// Tighten a tree created by an older runny (MkdirAll leaves existing
+	// directories' modes alone).
+	return os.Chmod(string(d), 0o700)
 }
 
 // sanitizeRef makes an OCI reference filesystem-safe:

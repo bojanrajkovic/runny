@@ -743,7 +743,9 @@ func (s *Slot) finishCycle(ctx context.Context, rec *cycle.Record) {
 		s.deps.Log.Error("writing cycle record", "err", err)
 	}
 	cfg := s.deps.Config
-	_ = store.Prune(cfg.Retention.CyclesPerSlot, cfg.Retention.MaxAge.D(), time.Now())
+	if err := store.Prune(cfg.Retention.CyclesPerSlot, cfg.Retention.MaxAge.D(), time.Now()); err != nil {
+		s.deps.Log.Warn("pruning cycle records", "err", err)
+	}
 
 	s.mu.Lock()
 	if rec.Result == cycle.ResultSuccess || heldListening(rec) {

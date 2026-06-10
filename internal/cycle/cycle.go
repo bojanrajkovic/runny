@@ -92,13 +92,15 @@ type Store struct {
 func (s Store) Dir(r *Record) (string, error) {
 	name := r.Started.UTC().Format("2006-01-02T15-04-05Z") + "-" + r.CycleID
 	dir := filepath.Join(s.SlotDir, name)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("creating cycle dir: %w", err)
 	}
 	return dir, nil
 }
 
-// Write persists cycle.json into the record's artifact dir.
+// Write persists cycle.json into the record's artifact dir, atomically: a
+// crash mid-write must not silently erase the cycle from `runnyctl why` —
+// the record is the post-mortem.
 func (s Store) Write(r *Record) error {
 	dir, err := s.Dir(r)
 	if err != nil {
@@ -108,8 +110,13 @@ func (s Store) Write(r *Record) error {
 	if err != nil {
 		return fmt.Errorf("marshaling cycle record: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "cycle.json"), data, 0o644); err != nil {
+	tmp := filepath.Join(dir, ".cycle.json.tmp")
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return fmt.Errorf("writing cycle.json: %w", err)
+	}
+	if err := os.Rename(tmp, filepath.Join(dir, "cycle.json")); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("placing cycle.json: %w", err)
 	}
 	return nil
 }
@@ -149,9 +156,8 @@ func (s Store) Recent(n int) ([]*Record, error) {
 	return recs, nil
 }
 
-// Prune enforces retention: keep at most keepCount cycles and nothing older
-// than maxAge. Success cycles lose their extra artifacts immediately (only
-// cycle.json is retained); failure cycles keep everything until pruned.
+// Prune enforces retention: keep at most keepCount cycles and remove
+// anything older than maxAge.
 func (s Store) Prune(keepCount int, maxAge time.Duration, now time.Time) error {
 	entries, err := os.ReadDir(s.SlotDir)
 	if os.IsNotExist(err) {
@@ -173,23 +179,6 @@ func (s Store) Prune(keepCount int, maxAge time.Duration, now time.Time) error {
 		if tooMany || tooOld {
 			if err := os.RemoveAll(filepath.Join(s.SlotDir, name)); err != nil {
 				return fmt.Errorf("pruning %s: %w", name, err)
-			}
-		}
-	}
-	return nil
-}
-
-// StripSuccessArtifacts removes everything but cycle.json from a success
-// cycle's dir.
-func StripSuccessArtifacts(dir string) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if e.Name() != "cycle.json" {
-			if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
-				return err
 			}
 		}
 	}

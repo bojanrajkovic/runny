@@ -69,7 +69,7 @@ func run() error {
 	}
 
 	// Logging: file sink + ring buffer, both structured.
-	logFile, err := os.OpenFile(dir.LogFile(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	logFile, err := os.OpenFile(dir.LogFile(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("opening log file: %w", err)
 	}

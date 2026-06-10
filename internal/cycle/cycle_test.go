@@ -1,7 +1,6 @@
 package cycle
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -74,28 +73,6 @@ func TestPruneByAge(t *testing.T) {
 	recs, _ := s.Recent(0)
 	if len(recs) != 1 || recs[0].CycleID != "fresh001" {
 		t.Errorf("age prune kept wrong set: %+v", recs)
-	}
-}
-
-func TestStripSuccessArtifacts(t *testing.T) {
-	s := Store{SlotDir: t.TempDir()}
-	r := record("runner-1", "abcd1234", time.Date(2026, 6, 9, 22, 0, 0, 0, time.UTC), ResultSuccess)
-	dir, err := s.Dir(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Write(r); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "runner-diag.log"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := StripSuccessArtifacts(dir); err != nil {
-		t.Fatalf("StripSuccessArtifacts: %v", err)
-	}
-	entries, _ := os.ReadDir(dir)
-	if len(entries) != 1 || entries[0].Name() != "cycle.json" {
-		t.Errorf("dir not stripped to cycle.json: %v", entries)
 	}
 }
 

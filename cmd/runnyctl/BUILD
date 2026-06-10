@@ -19,4 +19,6 @@ go_binary(
     name = "runnyctl",
     embed = [":runnyctl_lib"],
     visibility = ["//visibility:public"],
+    # Stamped under --config=release (ADR-0010); "dev" otherwise.
+    x_defs = {"main.version": "{STABLE_VERSION}"},
 )

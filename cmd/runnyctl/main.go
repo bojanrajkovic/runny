@@ -21,11 +21,15 @@ import (
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
+// version is stamped by Bazel under --config=release (ADR-0010).
+var version = "dev"
+
 const usage = `runnyctl — control surface for runnyd
 
 usage: runnyctl [-home DIR] [-json] <command> [args]
 
 commands:
+  version             print the client version
   status              one-shot slot status
   watch               follow status transitions
   logs [-replay N] [-follow=false]
@@ -74,6 +78,9 @@ func run() error {
 
 	c := &ctl{client: client, json: *jsonOut, out: os.Stdout}
 	switch cmd, rest := args[0], args[1:]; cmd {
+	case "version":
+		fmt.Fprintln(c.out, version)
+		return nil
 	case "status":
 		return c.status(ctx)
 	case "watch":

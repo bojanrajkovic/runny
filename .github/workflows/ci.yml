@@ -59,32 +59,46 @@ jobs:
       - name: test
         run: mise x -- bazel test --config=ci //... || test $? -eq 4
 
-  # The deployable daemon builds COLD — no cache restore, exact-pinned
-  # toolchain — so cache poisoning cannot reach the artifact. Slower by
-  # design; runs on main pushes only (PRs get build/test coverage above).
+  # Deployable binaries build COLD — no Bazel or tool caches, exact-pinned
+  # toolchain — so cache poisoning cannot reach an artifact. Every build is
+  # stamped (ADR-0010): branch/PR builds carry the conventional-commit
+  # implied next version with a -beta.<sha> suffix; release builds (tag) the
+  # clean version. Provenance is attested either way.
   artifact:
-    if: github.event_name == 'push'
     runs-on: macos-26
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+          fetch-depth: 0 # tools/version.sh needs tags + history
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           # No tool-install cache either: cold means cold. Tools come from
           # their pinned upstream releases, not a poisonable cache entry.
           cache: false
-      - name: build (cold, no cache)
-        run: mise x -- bazel build --config=ci //cmd/runnyd //cmd/runnyctl
+      - name: build (cold, stamped)
+        run: mise x -- bazel build --config=ci --config=release //cmd/runnyd //cmd/runnyctl
       - name: sign runnyd (ad-hoc, virtualization entitlement)
         # Ad-hoc signatures honor the virtualization entitlement on any host;
         # Developer ID signing waits on cert secrets (see CONTRIBUTING.md).
         run: |
+          VERSION="$(mise x -- tools/version.sh)"
+          echo "runny version: $VERSION"
           cp bazel-bin/cmd/runnyd/runnyd_/runnyd runnyd
           cp bazel-bin/cmd/runnyctl/runnyctl_/runnyctl runnyctl
           chmod +w runnyd
           codesign -s - --entitlements tools/sign/runnyd.entitlements --force runnyd
-          codesign -dv runnyd
+          ./runnyctl version
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        if: github.event_name == 'push'
+        with:
+          subject-path: |
+            runnyd
+            runnyctl
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: runny-darwin-arm64

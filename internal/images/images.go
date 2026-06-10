@@ -21,6 +21,11 @@ import (
 	"github.com/bojanrajkovic/runny/internal/tart"
 )
 
+// resolveTimeout bounds the quick metadata round-trips (manifest resolve,
+// runner-download resolve) that precede a stall-watched transfer; 60s
+// matches the doctor's and seedpull's convention.
+const resolveTimeout = 60 * time.Second
+
 // Ensurer resolves and caches the configured image (ENSURE_IMAGE's work).
 type Ensurer struct {
 	Home home.Dir
@@ -47,7 +52,13 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string)) (string, tart
 	}
 
 	client := oci.NewClient()
-	digest, err := client.Resolve(ctx, e.Ref)
+	// ENSURE_IMAGE deliberately runs with no state deadline (pull duration is
+	// unknowable), so this quick metadata round-trip needs its own wall-clock
+	// bound — without one, a registry that accepts TCP and goes silent hangs
+	// the slot forever.
+	rctx, rcancel := bounded.WithTimeout(ctx, resolveTimeout)
+	digest, err := client.Resolve(rctx, e.Ref)
+	rcancel()
 	if err != nil {
 		return "", "", fmt.Errorf("resolving %s: %w", e.Ref, err)
 	}
@@ -207,8 +218,10 @@ func (e *Ensurer) log() *slog.Logger {
 }
 
 // RunnerResolver yields the service-blessed runner build (filename, url) —
-// see github.Client.RunnerDownload for why "latest release" is not it.
-type RunnerResolver func(ctx context.Context) (filename, url string, err error)
+// see github.Client.RunnerDownload for why "latest release" is not it. It
+// takes a bounded.Context because it hits the GitHub API from a state that
+// carries no deadline of its own (ADR-0011).
+type RunnerResolver func(ctx bounded.Context) (filename, url string, err error)
 
 // tarballLocks serializes per-filename ensures: slots of the same OS race to
 // the same file; one downloads, the rest wait and find it cached.
@@ -221,7 +234,9 @@ var tarballLocks sync.Map // filename -> *sync.Mutex
 // hung GitHub download with no timeout). Superseded same-OS tarballs are
 // removed so guests (which pick by name) never stage a deprecated build.
 func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerResolver, stallBudget time.Duration, report func(string), log *slog.Logger) (string, error) {
-	assetName, assetURL, err := resolve(ctx)
+	rctx, rcancel := bounded.WithTimeout(ctx, resolveTimeout)
+	assetName, assetURL, err := resolve(rctx)
+	rcancel()
 	if err != nil {
 		return "", err
 	}

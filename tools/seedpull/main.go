@@ -33,7 +33,7 @@ func main() {
 
 	ctx := context.Background()
 	client := oci.NewClient()
-	rctx, rcancel := context.WithTimeout(ctx, time.Minute)
+	rctx, rcancel := bounded.WithTimeout(ctx, time.Minute)
 	digest, err := client.Resolve(rctx, ref)
 	rcancel()
 	if err != nil {

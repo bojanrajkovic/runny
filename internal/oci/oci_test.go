@@ -16,9 +16,20 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pierrec/lz4/v4"
+
+	"github.com/bojanrajkovic/runny/internal/bounded"
 )
+
+// testCtx satisfies the bounded.Context the pull API demands (ADR-0011).
+func testCtx(t *testing.T) bounded.Context {
+	t.Helper()
+	ctx, cancel := bounded.WithTimeout(t.Context(), time.Minute)
+	t.Cleanup(cancel)
+	return ctx
+}
 
 // appleLZ4Encode is a test-only encoder for Apple's LZ4 block framing,
 // mirroring what tart's Compression-framework output looks like.
@@ -202,7 +213,7 @@ func TestPullToAssemblesBundle(t *testing.T) {
 	c.Progress = func(n int64) { progressed += n }
 
 	dest := filepath.Join(t.TempDir(), "bundle")
-	digest, err := c.PullTo(t.Context(), ref, dest)
+	digest, err := c.PullTo(testCtx(t), ref, dest)
 	if err != nil {
 		t.Fatalf("PullTo: %v", err)
 	}
@@ -227,7 +238,7 @@ func TestPullToAssemblesBundle(t *testing.T) {
 	}
 
 	// Second call: cache hit, returns the digest without re-pulling.
-	digest2, err := c.PullTo(t.Context(), ref, dest)
+	digest2, err := c.PullTo(testCtx(t), ref, dest)
 	if err != nil || digest2 != digest {
 		t.Errorf("idempotent PullTo: %s, %v", digest2, err)
 	}
@@ -243,7 +254,7 @@ func TestPullDetectsCorruptBlob(t *testing.T) {
 		}
 	}
 	_, ref := f.start()
-	_, err := NewClient().PullTo(t.Context(), ref, filepath.Join(t.TempDir(), "b"))
+	_, err := NewClient().PullTo(testCtx(t), ref, filepath.Join(t.TempDir(), "b"))
 	if err == nil || !strings.Contains(err.Error(), "digest mismatch") {
 		t.Fatalf("want digest mismatch, got %v", err)
 	}
@@ -253,7 +264,7 @@ func TestPinnedDigestMismatch(t *testing.T) {
 	f := newFakeRegistry(t, []byte("{}"), []byte("n"), []byte("d"))
 	_, ref := f.start()
 	ref.Digest = "sha256:" + strings.Repeat("0", 64)
-	_, err := NewClient().Resolve(t.Context(), ref)
+	_, err := NewClient().Resolve(testCtx(t), ref)
 	if err == nil || !strings.Contains(err.Error(), "mismatch") {
 		t.Fatalf("want pinned-digest mismatch, got %v", err)
 	}

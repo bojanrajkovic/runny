@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bojanrajkovic/runny/internal/bounded"
 	"github.com/bojanrajkovic/runny/internal/cycle"
 	"github.com/bojanrajkovic/runny/internal/github"
 	"github.com/bojanrajkovic/runny/internal/guest"
@@ -142,7 +143,7 @@ func run() error {
 			Images: &images.Ensurer{
 				Home: dir,
 				Ref:  ref,
-				Runner: func(c context.Context) (string, string, error) {
+				Runner: func(c bounded.Context) (string, string, error) {
 					return gh.RunnerDownload(c, osName)
 				},
 				StallBudget: cfg.Deadlines.PullStall.D(),
@@ -193,9 +194,7 @@ func failedChecks(checks []socket.DoctorCheck) []socket.DoctorCheck {
 }
 
 func runDoctor(doctor func(context.Context) []socket.DoctorCheck) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	checks := doctor(ctx)
+	checks := doctor(context.Background()) // the suite self-bounds (doctorBudget)
 	bad := 0
 	for _, c := range checks {
 		mark := "ok"
@@ -210,10 +209,18 @@ func runDoctor(doctor func(context.Context) []socket.DoctorCheck) error {
 	return nil
 }
 
+// doctorBudget bounds the whole validation suite regardless of caller: the
+// Doctor RPC must not trust runnyctl's context, and the startup pass runs
+// under the un-deadlined signal context — a silent registry must not hang
+// the daemon before the socket even exists.
+const doctorBudget = 60 * time.Second
+
 // makeDoctor builds the validation suite used at startup and by the Doctor
 // RPC: every predecessor failure mode that was checkable but unchecked.
 func makeDoctor(dir home.Dir, cfg *home.Config, clients map[home.TargetConfig]*github.Client) func(context.Context) []socket.DoctorCheck {
 	return func(ctx context.Context) []socket.DoctorCheck {
+		dctx, cancel := bounded.WithTimeout(ctx, doctorBudget)
+		defer cancel()
 		var checks []socket.DoctorCheck
 		add := func(name string, ok bool, detail string) {
 			checks = append(checks, socket.DoctorCheck{Name: name, OK: ok, Detail: detail})
@@ -244,7 +251,7 @@ func makeDoctor(dir home.Dir, cfg *home.Config, clients map[home.TargetConfig]*g
 
 		for target, gh := range clients {
 			name := "runner-perm:" + target.String()
-			if err := gh.CheckRunnerPerm(ctx); err != nil {
+			if err := gh.CheckRunnerPerm(dctx); err != nil {
 				add(name, false, err.Error())
 			} else {
 				add(name, true, "installation token carries the runner-administration permission")
@@ -258,7 +265,7 @@ func makeDoctor(dir home.Dir, cfg *home.Config, clients map[home.TargetConfig]*g
 				add(name, false, err.Error())
 				continue
 			}
-			if digest, err := oci.NewClient().Resolve(ctx, ref); err != nil {
+			if digest, err := oci.NewClient().Resolve(dctx, ref); err != nil {
 				add(name, false, err.Error())
 			} else {
 				add(name, true, fmt.Sprintf("%s → %s", ref, short(digest)))
@@ -281,14 +288,18 @@ func makeDoctor(dir home.Dir, cfg *home.Config, clients map[home.TargetConfig]*g
 }
 
 func sweepRegistrations(ctx context.Context, log *slog.Logger, gh *github.Client, prefix string) {
-	runners, err := gh.ListRunners(ctx)
+	// Self-bounded: this runs under the un-deadlined signal context at
+	// startup; a hung GitHub API must not stall daemon boot.
+	sctx, cancel := bounded.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	runners, err := gh.ListRunners(sctx)
 	if err != nil {
 		log.Warn("sweep: listing runners failed; stale registrations may linger", "err", err)
 		return
 	}
 	for _, r := range runners {
 		if strings.HasPrefix(r.Name, prefix+"-") && r.Status == "offline" {
-			if err := gh.DeleteRunner(ctx, r.ID); err != nil {
+			if err := gh.DeleteRunner(sctx, r.ID); err != nil {
 				log.Warn("sweep: deleting stale runner", "name", r.Name, "err", err)
 			} else {
 				log.Info("sweep: removed stale registration", "name", r.Name)

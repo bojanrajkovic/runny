@@ -10,6 +10,7 @@ go_library(
     importpath = "github.com/bojanrajkovic/runny/internal/oci",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/bounded",
         "@com_github_pierrec_lz4_v4//:lz4",
         "@org_golang_x_sync//errgroup",
     ] + select({
@@ -37,5 +38,8 @@ go_test(
     ],
     data = glob(["testdata/**"]),
     embed = [":oci"],
-    deps = ["@com_github_pierrec_lz4_v4//:lz4"],
+    deps = [
+        "//internal/bounded",
+        "@com_github_pierrec_lz4_v4//:lz4",
+    ],
 )

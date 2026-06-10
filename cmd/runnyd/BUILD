@@ -13,6 +13,7 @@ go_library(
     importpath = "github.com/bojanrajkovic/runny/cmd/runnyd",
     visibility = ["//visibility:private"],
     deps = [
+        "//internal/bounded",
         "//internal/cycle",
         "//internal/github",
         "//internal/guest",

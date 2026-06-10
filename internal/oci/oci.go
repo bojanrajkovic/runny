@@ -21,6 +21,8 @@ import (
 	"sync"
 
 	"golang.org/x/sync/errgroup"
+
+	"github.com/bojanrajkovic/runny/internal/bounded"
 )
 
 const (
@@ -114,8 +116,10 @@ func NewClient() *Client {
 }
 
 // Resolve returns the manifest digest for a ref (tag → digest, or the pinned
-// digest verified to exist).
-func (c *Client) Resolve(ctx context.Context, ref Ref) (string, error) {
+// digest verified to exist). It takes a bounded.Context because the client's
+// transport carries no timeout of its own — an unbounded caller would hang
+// forever on a registry that accepts TCP and never answers (ADR-0011).
+func (c *Client) Resolve(ctx bounded.Context, ref Ref) (string, error) {
 	_, digest, err := c.fetchManifest(ctx, ref)
 	return digest, err
 }
@@ -205,8 +209,9 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 
 // PullTo pulls into a sibling temp dir and renames into place, so destDir
 // either exists complete or not at all — ENSURE_IMAGE's idempotence depends
-// on this.
-func (c *Client) PullTo(ctx context.Context, ref Ref, destDir string) (string, error) {
+// on this. The bounded.Context is typically stall-bounded (Stall.Watch):
+// pull duration is unknowable, but silence is not tolerable (ADR-0011).
+func (c *Client) PullTo(ctx bounded.Context, ref Ref, destDir string) (string, error) {
 	if _, err := os.Stat(filepath.Join(destDir, "manifest.json")); err == nil {
 		// Already complete.
 		m, digest, err := c.fetchManifest(ctx, ref)

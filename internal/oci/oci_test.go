@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -267,6 +268,48 @@ func TestPinnedDigestMismatch(t *testing.T) {
 	_, err := NewClient().Resolve(testCtx(t), ref)
 	if err == nil || !strings.Contains(err.Error(), "mismatch") {
 		t.Fatalf("want pinned-digest mismatch, got %v", err)
+	}
+}
+
+// All slots of a pool share one cache path and enter ENSURE_IMAGE together
+// on a cold start. Concurrent PullTo calls for the same destination must
+// serialize: every caller gets the same digest and an intact bundle —
+// regression for a shared-temp-dir race where the loser's cleanup could
+// delete the winner's bundle or rename a half-written disk.img into place.
+func TestPullToConcurrentSameDest(t *testing.T) {
+	config := []byte(`{"os":"darwin"}`)
+	disk := append(bytes.Repeat([]byte("DISKDATA"), 20_000), randomBytes(50_000)...)
+	f := newFakeRegistry(t, config, []byte("nvram"), disk)
+	_, ref := f.start()
+
+	dest := filepath.Join(t.TempDir(), "bundle")
+	const callers = 4
+	digests := make([]string, callers)
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	for i := range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			digests[i], errs[i] = NewClient().PullTo(testCtx(t), ref, dest)
+		}()
+	}
+	wg.Wait()
+
+	for i := range callers {
+		if errs[i] != nil {
+			t.Fatalf("caller %d: %v", i, errs[i])
+		}
+		if digests[i] != f.digest {
+			t.Fatalf("caller %d digest = %s, want %s", i, digests[i], f.digest)
+		}
+	}
+	gotDisk, err := os.ReadFile(filepath.Join(dest, "disk.img"))
+	if err != nil || !bytes.Equal(gotDisk, disk) {
+		t.Fatalf("disk.img corrupted by concurrent pulls: %d bytes vs %d, err %v", len(gotDisk), len(disk), err)
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(t.TempDir(), "*partial*")); len(leftovers) > 0 {
+		t.Errorf("temp dirs left behind: %v", leftovers)
 	}
 }
 

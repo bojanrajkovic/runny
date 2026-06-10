@@ -221,31 +221,51 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 	return digest, nil
 }
 
+// pullLocks serializes concurrent pulls into the same destination: all slots
+// of a pool share one image cache path and enter ENSURE_IMAGE together on a
+// cold start. Never deleted; bounded by the number of distinct images.
+var pullLocks sync.Map // destDir -> *sync.Mutex
+
 // PullTo pulls into a sibling temp dir and renames into place, so destDir
 // either exists complete or not at all — ENSURE_IMAGE's idempotence depends
 // on this. The bounded.Context is typically stall-bounded (Stall.Watch):
 // pull duration is unknowable, but silence is not tolerable (ADR-0011).
+//
+// Concurrent callers for the same destDir serialize on a per-destination
+// lock: one pulls, the rest wait and take the cache hit. The wait itself is
+// transitively bounded — it ends when the holder's own bounded pull does.
+// Without it, two slots raced a shared temp dir: the loser's cleanup could
+// delete the winner's freshly placed bundle, or a half-written disk.img
+// could be renamed into place and pass Verify forever.
 func (c *Client) PullTo(ctx bounded.Context, ref Ref, destDir string) (string, error) {
+	muAny, _ := pullLocks.LoadOrStore(destDir, &sync.Mutex{})
+	mu := muAny.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+
 	if _, err := os.Stat(filepath.Join(destDir, "manifest.json")); err == nil {
-		// Already complete.
-		m, digest, err := c.fetchManifest(ctx, ref)
-		_ = m
+		// Already complete (possibly by the slot we just waited on).
+		_, digest, err := c.fetchManifest(ctx, ref)
 		if err == nil {
 			return digest, nil
 		}
 		return "", err
 	}
-	tmp := destDir + ".partial"
-	_ = os.RemoveAll(tmp)
-	digest, err := c.pull(ctx, ref, tmp)
+	if err := os.MkdirAll(filepath.Dir(destDir), 0o755); err != nil {
+		return "", err
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(destDir), filepath.Base(destDir)+".partial-")
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(destDir), 0o755); err != nil {
+	digest, err := c.pull(ctx, ref, tmp)
+	if err != nil {
+		_ = os.RemoveAll(tmp)
 		return "", err
 	}
 	_ = os.RemoveAll(destDir)
 	if err := os.Rename(tmp, destDir); err != nil {
+		_ = os.RemoveAll(tmp)
 		return "", fmt.Errorf("moving pulled image into place: %w", err)
 	}
 	return digest, nil

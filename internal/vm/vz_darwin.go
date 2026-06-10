@@ -21,14 +21,24 @@ type VZManager struct{}
 var _ Manager = VZManager{}
 
 // Boot builds the VZ configuration from the bundle's tart config and starts
-// the guest. A fresh machine identifier and a fresh random MAC are used —
-// the bundle's own values may be shared by other clones (spike-verified).
-func (VZManager) Boot(ctx context.Context, bundle tart.Bundle, opts BootOptions) (Machine, error) {
+// the guest, dispatching on the bundle's OS (ADR-0009): the Mac platform
+// path for darwin, EFI for linux. A fresh machine identifier and a fresh
+// random MAC are used — the bundle's own values may be shared by other
+// clones (spike-verified).
+func (m VZManager) Boot(ctx context.Context, bundle tart.Bundle, opts BootOptions) (Machine, error) {
 	cfg, err := bundle.LoadConfig()
 	if err != nil {
 		return nil, err
 	}
+	switch cfg.OS {
+	case "linux":
+		return m.bootLinux(ctx, bundle, cfg, opts)
+	default:
+		return m.bootDarwin(ctx, bundle, cfg, opts)
+	}
+}
 
+func (VZManager) bootDarwin(ctx context.Context, bundle tart.Bundle, cfg *tart.Config, opts BootOptions) (Machine, error) {
 	hwData, err := cfg.HardwareModel()
 	if err != nil {
 		return nil, err
@@ -66,6 +76,51 @@ func (VZManager) Boot(ctx context.Context, bundle tart.Bundle, opts BootOptions)
 	}
 	vmc.SetPlatformVirtualMachineConfiguration(platform)
 
+	// macOS guests want a display even headless; mirror the bundle's.
+	w, h := cfg.Display.Width, cfg.Display.Height
+	if w == 0 || h == 0 {
+		w, h = 1024, 768
+	}
+	gfx, err := vz.NewMacGraphicsDeviceConfiguration()
+	if err != nil {
+		return nil, err
+	}
+	display, err := vz.NewMacGraphicsDisplayConfiguration(int64(w), int64(h), 80)
+	if err != nil {
+		return nil, err
+	}
+	gfx.SetDisplays(display)
+	vmc.SetGraphicsDevicesVirtualMachineConfiguration([]vz.GraphicsDeviceConfiguration{gfx})
+
+	return finishBoot(vmc, bundle, opts)
+}
+
+// bootLinux: EFI boot loader with the bundle's nvram.bin as the variable
+// store, generic platform — the tart linux guest shape. No graphics needed.
+func (VZManager) bootLinux(ctx context.Context, bundle tart.Bundle, cfg *tart.Config, opts BootOptions) (Machine, error) {
+	efi, err := vz.NewEFIVariableStore(bundle.NVRAMPath())
+	if err != nil {
+		return nil, fmt.Errorf("efi variable store: %w", err)
+	}
+	boot, err := vz.NewEFIBootLoader(vz.WithEFIVariableStore(efi))
+	if err != nil {
+		return nil, fmt.Errorf("efi boot loader: %w", err)
+	}
+	vmc, err := vz.NewVirtualMachineConfiguration(boot, cfg.CPUCount, cfg.MemorySize)
+	if err != nil {
+		return nil, err
+	}
+	platform, err := vz.NewGenericPlatformConfiguration()
+	if err != nil {
+		return nil, fmt.Errorf("generic platform: %w", err)
+	}
+	vmc.SetPlatformVirtualMachineConfiguration(platform)
+	return finishBoot(vmc, bundle, opts)
+}
+
+// finishBoot attaches the OS-independent devices (disk, NAT net with a fresh
+// MAC, optional virtiofs cache share), validates, and starts the guest.
+func finishBoot(vmc *vz.VirtualMachineConfiguration, bundle tart.Bundle, opts BootOptions) (Machine, error) {
 	diskAtt, err := vz.NewDiskImageStorageDeviceAttachment(bundle.DiskPath(), false)
 	if err != nil {
 		return nil, fmt.Errorf("disk attachment: %w", err)
@@ -90,22 +145,6 @@ func (VZManager) Boot(ctx context.Context, bundle tart.Bundle, opts BootOptions)
 	}
 	netDev.SetMACAddress(mac)
 	vmc.SetNetworkDevicesVirtualMachineConfiguration([]*vz.VirtioNetworkDeviceConfiguration{netDev})
-
-	// macOS guests want a display even headless; mirror the bundle's.
-	w, h := cfg.Display.Width, cfg.Display.Height
-	if w == 0 || h == 0 {
-		w, h = 1024, 768
-	}
-	gfx, err := vz.NewMacGraphicsDeviceConfiguration()
-	if err != nil {
-		return nil, err
-	}
-	display, err := vz.NewMacGraphicsDisplayConfiguration(int64(w), int64(h), 80)
-	if err != nil {
-		return nil, err
-	}
-	gfx.SetDisplays(display)
-	vmc.SetGraphicsDevicesVirtualMachineConfiguration([]vz.GraphicsDeviceConfiguration{gfx})
 
 	if opts.RunnerCacheDir != "" {
 		fs, err := vz.NewVirtioFileSystemDeviceConfiguration(ShareTag)

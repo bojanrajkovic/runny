@@ -73,8 +73,8 @@ type Proc interface {
 // Guest is an authenticated session into a booted VM.
 type Guest interface {
 	// StartRunner stages the actions runner from the cache share and launches
-	// run.sh with the JIT config.
-	StartRunner(ctx context.Context, jit string) (Proc, error)
+	// run.sh with the JIT config; goos selects the per-OS provision path.
+	StartRunner(ctx context.Context, jit, goos string) (Proc, error)
 	// PullDiag fetches the tail of the runner's _diag logs (post-mortem).
 	PullDiag(ctx context.Context) ([]byte, error)
 	Close() error
@@ -86,10 +86,13 @@ type Dialer interface {
 }
 
 // Deps wires a slot to the world. Everything is an interface or func so the
-// FSM tests on any OS with fakes.
+// FSM tests on any OS with fakes. Images/GitHub/Dial are pool-scoped
+// (per-pool image, registration target, and guest credentials — ADR-0009);
+// Config carries the global deadlines/limits/retention.
 type Deps struct {
 	Home   home.Dir
 	Config *home.Config
+	Pool   home.PoolConfig
 	VM     vm.Manager
 	Images ImageEnsurer
 	Clone  Cloner
@@ -319,7 +322,7 @@ func (s *Slot) runCycle(ctx context.Context) *cycle.Record {
 		Slot:    s.name,
 		Started: time.Now(),
 	}
-	runnerName := fmt.Sprintf("%s-%s-%s", cfg.Runners.NamePrefix, s.name, rec.CycleID)
+	runnerName := fmt.Sprintf("%s-%s-%s", cfg.NamePrefix, s.name, rec.CycleID)
 
 	var (
 		machine   vm.Machine
@@ -421,7 +424,7 @@ func (s *Slot) runCycle(ctx context.Context) *cycle.Record {
 	var jit *github.JITRunner
 	if ok {
 		ok = enter(StateMintJIT, cfg.Deadlines.MintJIT.D(), func(c context.Context) error {
-			j, err := s.deps.GitHub.GenerateJITConfig(c, runnerName, cfg.GitHub.Labels, cfg.GitHub.RunnerGroupID)
+			j, err := s.deps.GitHub.GenerateJITConfig(c, runnerName, s.deps.Pool.Labels, s.deps.Pool.RunnerGroupID)
 			if err != nil {
 				return err
 			}
@@ -434,7 +437,7 @@ func (s *Slot) runCycle(ctx context.Context) *cycle.Record {
 		ok = enter(StateProvision, cfg.Deadlines.Provision.D(), func(c context.Context) error {
 			// The proc must outlive this state's deadline: start it under the
 			// cycle ctx, but bound the wait-for-listening here.
-			p, err := guest.StartRunner(ctx, jit.EncodedJITConfig)
+			p, err := guest.StartRunner(ctx, jit.EncodedJITConfig, s.deps.Pool.OS)
 			if err != nil {
 				return err
 			}

@@ -77,22 +77,25 @@ func run() error {
 	slog.SetDefault(logger)
 	logger.Info("runnyd starting", "version", version, "home", dir.String())
 
-	gh, err := github.New(github.Config{
+	// One client per distinct registration target; App credentials shared.
+	ghCfg := github.Config{
 		AppID:          cfg.GitHub.AppID,
 		PrivateKeyPath: cfg.GitHub.PrivateKeyPath,
-		Owner:          cfg.GitHub.Owner,
-		Repo:           cfg.GitHub.Repo,
 		APIBase:        cfg.GitHub.APIBase,
-	})
-	if err != nil {
-		return err
 	}
-	ref, err := oci.ParseRef(cfg.Image)
-	if err != nil {
-		return err
+	clients := map[home.TargetConfig]*github.Client{}
+	for _, p := range cfg.Pools {
+		if _, ok := clients[p.Target]; ok {
+			continue
+		}
+		c, err := github.New(ghCfg, github.Target(p.Target))
+		if err != nil {
+			return err
+		}
+		clients[p.Target] = c
 	}
 
-	doctor := makeDoctor(dir, cfg, gh, ref)
+	doctor := makeDoctor(dir, cfg, clients)
 	if *checkOnly {
 		return runDoctor(doctor)
 	}
@@ -109,41 +112,58 @@ func run() error {
 	}
 
 	// Sweep: cold start owns the world (ADR-0004). Clones first, then any
-	// offline registrations carrying our prefix.
+	// offline registrations carrying our prefix, on every target.
 	if err := os.RemoveAll(dir.VMsDir()); err != nil {
 		return fmt.Errorf("sweeping vms dir: %w", err)
 	}
 	if err := dir.Ensure(); err != nil {
 		return err
 	}
-	sweepRegistrations(ctx, logger, gh, cfg.Runners.NamePrefix)
-
-	// Runner tarball cache (shared into guests via virtiofs).
-	if _, err := images.EnsureRunnerTarball(ctx, dir.RunnerCacheDir(), gh.RunnerDownload); err != nil {
-		return fmt.Errorf("priming runner cache: %w", err)
+	for _, c := range clients {
+		sweepRegistrations(ctx, logger, c, cfg.NamePrefix)
 	}
 
-	deps := statemachine.Deps{
-		Home:   dir,
-		Config: cfg,
-		VM:     vmManager(),
-		Images: &images.Ensurer{Home: dir, Ref: ref, StallBudget: cfg.Deadlines.PullStall.D(), Log: logger},
-		Clone: func(src tart.Bundle, dst string) error {
-			_, err := tart.Clone(src, tart.Bundle(dst))
-			return err
-		},
-		GitHub: gh,
-		Dial: guest.Dialer{SSH: sshx.Config{
-			User:     cfg.Runners.SSHUser,
-			Password: cfg.Runners.SSHPassword,
-			Timeout:  3 * time.Second,
-		}},
-		Log: logger,
+	// Runner tarball cache: one service-blessed build per guest OS in play.
+	primed := map[string]bool{}
+	for _, p := range cfg.Pools {
+		if primed[p.OS] {
+			continue
+		}
+		gh, osName := clients[p.Target], p.OS
+		resolve := func(c context.Context) (string, string, error) { return gh.RunnerDownload(c, osName) }
+		if _, err := images.EnsureRunnerTarball(ctx, dir.RunnerCacheDir(), resolve); err != nil {
+			return fmt.Errorf("priming %s runner cache: %w", p.OS, err)
+		}
+		primed[p.OS] = true
 	}
 
-	slots := make([]*statemachine.Slot, cfg.Runners.Count)
-	for i := range slots {
-		slots[i] = statemachine.NewSlot(fmt.Sprintf("runner-%d", i+1), deps)
+	var slots []*statemachine.Slot
+	for _, p := range cfg.Pools {
+		ref, err := oci.ParseRef(p.Image)
+		if err != nil {
+			return fmt.Errorf("pool %s: %w", p.Name, err)
+		}
+		deps := statemachine.Deps{
+			Home:   dir,
+			Config: cfg,
+			Pool:   p,
+			VM:     vmManager(),
+			Images: &images.Ensurer{Home: dir, Ref: ref, StallBudget: cfg.Deadlines.PullStall.D(), Log: logger},
+			Clone: func(src tart.Bundle, dst string) error {
+				_, err := tart.Clone(src, tart.Bundle(dst))
+				return err
+			},
+			GitHub: clients[p.Target],
+			Dial: guest.Dialer{SSH: sshx.Config{
+				User:     p.SSHUser,
+				Password: p.SSHPassword,
+				Timeout:  3 * time.Second,
+			}},
+			Log: logger,
+		}
+		for i := 1; i <= p.Count; i++ {
+			slots = append(slots, statemachine.NewSlot(fmt.Sprintf("%s-%d", p.Name, i), deps))
+		}
 	}
 
 	srv := socket.NewServer(slots, ring,
@@ -193,7 +213,7 @@ func runDoctor(doctor func(context.Context) []socket.DoctorCheck) error {
 
 // makeDoctor builds the validation suite used at startup and by the Doctor
 // RPC: every predecessor failure mode that was checkable but unchecked.
-func makeDoctor(dir home.Dir, cfg *home.Config, gh *github.Client, ref oci.Ref) func(context.Context) []socket.DoctorCheck {
+func makeDoctor(dir home.Dir, cfg *home.Config, clients map[home.TargetConfig]*github.Client) func(context.Context) []socket.DoctorCheck {
 	return func(ctx context.Context) []socket.DoctorCheck {
 		var checks []socket.DoctorCheck
 		add := func(name string, ok bool, detail string) {
@@ -206,24 +226,43 @@ func makeDoctor(dir home.Dir, cfg *home.Config, gh *github.Client, ref oci.Ref) 
 			add("platform", false, fmt.Sprintf("%s/%s — VMs require darwin/arm64", runtime.GOOS, runtime.GOARCH))
 		}
 
-		if cfg.Runners.Count <= macOSGuestCap {
-			add("runner-count", true, fmt.Sprintf("%d ≤ cap %d", cfg.Runners.Count, macOSGuestCap))
+		// The Virtualization.framework concurrent-guest cap applies to macOS
+		// guests only; linux pools are bounded by memory, not licensing.
+		darwinCount := 0
+		for _, p := range cfg.Pools {
+			if p.OS == "darwin" {
+				darwinCount += p.Count
+			}
+		}
+		if darwinCount <= macOSGuestCap {
+			add("macos-guest-cap", true, fmt.Sprintf("%d darwin slot(s) ≤ cap %d", darwinCount, macOSGuestCap))
 		} else {
-			add("runner-count", false, fmt.Sprintf(
-				"runners.count=%d exceeds Virtualization.framework's %d-macOS-guest cap; the extra slots could never boot",
-				cfg.Runners.Count, macOSGuestCap))
+			add("macos-guest-cap", false, fmt.Sprintf(
+				"darwin pools total %d slots, exceeding Virtualization.framework's %d-macOS-guest cap; the extra slots could never boot",
+				darwinCount, macOSGuestCap))
 		}
 
-		if err := gh.CheckAdminWrite(ctx); err != nil {
-			add("github-admin-write", false, err.Error())
-		} else {
-			add("github-admin-write", true, "installation token carries administration:write")
+		for target, gh := range clients {
+			name := "runner-perm:" + target.String()
+			if err := gh.CheckRunnerPerm(ctx); err != nil {
+				add(name, false, err.Error())
+			} else {
+				add(name, true, "installation token carries the runner-administration permission")
+			}
 		}
 
-		if digest, err := oci.NewClient().Resolve(ctx, ref); err != nil {
-			add("image-resolve", false, err.Error())
-		} else {
-			add("image-resolve", true, fmt.Sprintf("%s → %s", ref, short(digest)))
+		for _, p := range cfg.Pools {
+			name := "image-resolve:" + p.Name
+			ref, err := oci.ParseRef(p.Image)
+			if err != nil {
+				add(name, false, err.Error())
+				continue
+			}
+			if digest, err := oci.NewClient().Resolve(ctx, ref); err != nil {
+				add(name, false, err.Error())
+			} else {
+				add(name, true, fmt.Sprintf("%s → %s", ref, short(digest)))
+			}
 		}
 
 		free, err := freeDiskGB(dir.String())

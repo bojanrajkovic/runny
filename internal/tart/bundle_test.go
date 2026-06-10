@@ -76,12 +76,33 @@ func TestLoadConfigRejectsASIF(t *testing.T) {
 	}
 }
 
-func TestLoadConfigRejectsLinuxGuest(t *testing.T) {
-	b := writeBundle(t, `{"version":1,"os":"linux","arch":"arm64","cpuCount":2,"memorySize":1,
-		"hardwareModel":"eA==","ecid":"eA=="}`)
-	_, err := b.LoadConfig()
-	if !errors.Is(err, ErrNotMacOSGuest) {
-		t.Errorf("want ErrNotMacOSGuest, got %v", err)
+func TestLoadConfigLinuxGuest(t *testing.T) {
+	// Linux bundles carry no hardwareModel/ecid — they boot via EFI.
+	b := writeBundle(t, `{"version":1,"os":"linux","arch":"arm64","cpuCount":4,"memorySize":4294967296,
+		"macAddress":"7a:47:bb:5f:97:c9","diskFormat":"raw"}`)
+	c, err := b.LoadConfig()
+	if err != nil {
+		t.Fatalf("linux bundle: %v", err)
+	}
+	if c.OS != "linux" || c.CPUCount != 4 {
+		t.Errorf("config = %+v", c)
+	}
+}
+
+func TestLoadConfigRejectsUnsupportedGuests(t *testing.T) {
+	for name, cfg := range map[string]string{
+		"windows": `{"version":1,"os":"windows","arch":"arm64","cpuCount":2,"memorySize":1}`,
+		"x86":     `{"version":1,"os":"linux","arch":"amd64","cpuCount":2,"memorySize":1}`,
+	} {
+		_, err := writeBundle(t, cfg).LoadConfig()
+		if !errors.Is(err, ErrUnsupportedGuest) {
+			t.Errorf("%s: want ErrUnsupportedGuest, got %v", name, err)
+		}
+	}
+	// darwin without the VZ data representations is broken, not just odd.
+	_, err := writeBundle(t, `{"version":1,"os":"darwin","arch":"arm64","cpuCount":2,"memorySize":1}`).LoadConfig()
+	if err == nil {
+		t.Error("darwin bundle without hardwareModel/ecid should fail")
 	}
 }
 

@@ -123,13 +123,17 @@ type fakeGuest struct {
 	diag     []byte
 	diagErr  error
 	pulled   bool
+	goos     string
 	mu       sync.Mutex
 }
 
-func (g *fakeGuest) StartRunner(ctx context.Context, jit string) (Proc, error) {
+func (g *fakeGuest) StartRunner(ctx context.Context, jit, goos string) (Proc, error) {
 	if g.startErr != nil {
 		return nil, g.startErr
 	}
+	g.mu.Lock()
+	g.goos = goos
+	g.mu.Unlock()
 	return g.proc, nil
 }
 
@@ -241,12 +245,16 @@ func newHarness(t *testing.T, mutate func(*home.Config)) *harness {
 	if err := dir.Ensure(); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &home.Config{}
-	// Defaults via the real path: write a minimal config through LoadConfig
-	// would need files; call the exported-for-test defaulting instead.
-	cfg.GitHub.Labels = []string{"self-hosted"}
-	cfg.GitHub.RunnerGroupID = 1
-	cfg.Runners.NamePrefix = "runny"
+	cfg := &home.Config{NamePrefix: "runny"}
+	pool := home.PoolConfig{
+		Name:          "runner",
+		OS:            "darwin",
+		Image:         "ghcr.io/test/image:1",
+		Count:         1,
+		Labels:        []string{"self-hosted"},
+		RunnerGroupID: 1,
+		Target:        home.TargetConfig{Owner: "o", Repo: "r"},
+	}
 	set := func(d *home.Duration, v time.Duration) { *d = home.Duration(v) }
 	set(&cfg.Deadlines.Clone, time.Second)
 	set(&cfg.Deadlines.Boot, time.Second)
@@ -279,6 +287,7 @@ func newHarness(t *testing.T, mutate func(*home.Config)) *harness {
 	deps := Deps{
 		Home:   dir,
 		Config: cfg,
+		Pool:   pool,
 		VM:     h.vmF,
 		Images: h.images,
 		Clone: func(src tart.Bundle, dst string) error {

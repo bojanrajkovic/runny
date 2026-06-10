@@ -21,8 +21,8 @@ var (
 	// ErrUnsupportedDiskFormat: ASIF (macOS 26 tart) is rejected until vz
 	// attachment support is verified — a clear error beats a hung boot.
 	ErrUnsupportedDiskFormat = errors.New("unsupported disk format (only raw is supported)")
-	// ErrNotMacOSGuest guards against booting linux bundles down a macOS path.
-	ErrNotMacOSGuest = errors.New("bundle is not a darwin/arm64 guest")
+	// ErrUnsupportedGuest rejects bundles outside darwin/linux on arm64.
+	ErrUnsupportedGuest = errors.New("bundle is not a darwin/arm64 or linux/arm64 guest")
 )
 
 // Bundle is a tart-format VM bundle directory.
@@ -75,7 +75,10 @@ func (c *Config) ECID() ([]byte, error) {
 	return b, nil
 }
 
-// LoadConfig reads and validates a bundle's config.json for macOS-guest use.
+// LoadConfig reads and validates a bundle's config.json. darwin and linux
+// arm64 guests are supported (ADR-0009); the VZ data representations
+// (hardwareModel/ecid) exist only on darwin bundles — linux boots via EFI
+// with the nvram.bin file as its variable store.
 func (b Bundle) LoadConfig() (*Config, error) {
 	raw, err := os.ReadFile(b.ConfigPath())
 	if err != nil {
@@ -85,14 +88,14 @@ func (b Bundle) LoadConfig() (*Config, error) {
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", b.ConfigPath(), err)
 	}
-	if c.OS != "darwin" || c.Arch != "arm64" {
-		return nil, fmt.Errorf("%w: %s/%s", ErrNotMacOSGuest, c.OS, c.Arch)
+	if (c.OS != "darwin" && c.OS != "linux") || c.Arch != "arm64" {
+		return nil, fmt.Errorf("%w: %s/%s", ErrUnsupportedGuest, c.OS, c.Arch)
 	}
 	if c.DiskFormat != "" && c.DiskFormat != "raw" {
 		return nil, fmt.Errorf("%w: %q", ErrUnsupportedDiskFormat, c.DiskFormat)
 	}
-	if c.HardwareModelB64 == "" || c.ECIDB64 == "" {
-		return nil, errors.New("bundle config missing hardwareModel or ecid")
+	if c.OS == "darwin" && (c.HardwareModelB64 == "" || c.ECIDB64 == "") {
+		return nil, errors.New("darwin bundle config missing hardwareModel or ecid")
 	}
 	if c.CPUCount == 0 || c.MemorySize == 0 {
 		return nil, errors.New("bundle config missing cpuCount or memorySize")

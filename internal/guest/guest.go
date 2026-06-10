@@ -36,9 +36,7 @@ type Guest struct {
 	c *sshx.Client
 }
 
-// provisionScript stages the runner and execs run.sh. The cache share
-// appears either at the automount path (macOS guests automount virtiofs
-// shares tagged for it) or gets mounted explicitly by tag; handle both.
+// The provision scripts stage the runner and exec run.sh, per guest OS.
 //
 // The runner ALWAYS comes from our cache share, into a runny-owned dir —
 // cirruslabs images ship a preinstalled ~/actions-runner whose version rots
@@ -47,7 +45,10 @@ type Guest struct {
 //
 // Exit 78 (EX_CONFIG) = cache share missing the tarball — a host-side
 // problem the post-mortem will show verbatim.
-const provisionScript = `set -e
+
+// darwin: the share appears at the automount path (macOS automounts tagged
+// virtiofs shares) or gets mounted explicitly by tag; handle both.
+const provisionScriptDarwin = `set -e
 CACHE="/Volumes/My Shared Files"
 if [ ! -d "$CACHE" ]; then
   sudo mkdir -p /Volumes/runny-cache 2>/dev/null || true
@@ -62,8 +63,28 @@ tar -xzf "$TARBALL"
 exec ./run.sh --jitconfig '%s'
 `
 
-func (g *Guest) StartRunner(ctx context.Context, jit string) (statemachine.Proc, error) {
-	p, err := g.c.Start(ctx, fmt.Sprintf(provisionScript, jit))
+// linux: explicit virtiofs mount; installdependencies.sh covers images
+// missing libicu et al (idempotent, tolerated offline when deps exist).
+const provisionScriptLinux = `set -e
+CACHE=/mnt/runny-cache
+sudo mkdir -p "$CACHE"
+mountpoint -q "$CACHE" || sudo mount -t virtiofs runny-cache "$CACHE"
+TARBALL="$(ls "$CACHE"/actions-runner-linux-arm64-*.tar.gz 2>/dev/null | head -1)"
+if [ -z "$TARBALL" ]; then echo "runny: no actions-runner tarball in cache share $CACHE" >&2; exit 78; fi
+RUNNER_DIR="$HOME/runny-runner"
+rm -rf "$RUNNER_DIR" && mkdir -p "$RUNNER_DIR" && cd "$RUNNER_DIR"
+tar -xzf "$TARBALL"
+sudo ./bin/installdependencies.sh >/dev/null 2>&1 || true
+exec ./run.sh --jitconfig '%s'
+`
+
+// StartRunner stages and launches the runner for the pool's guest OS.
+func (g *Guest) StartRunner(ctx context.Context, jit, goos string) (statemachine.Proc, error) {
+	script := provisionScriptDarwin
+	if goos == "linux" {
+		script = provisionScriptLinux
+	}
+	p, err := g.c.Start(ctx, fmt.Sprintf(script, jit))
 	if err != nil {
 		return nil, fmt.Errorf("starting runner: %w", err)
 	}

@@ -66,7 +66,7 @@ their job).
 `cycles/<slot>/<started>-<id>/cycle.json` (+ post-mortem artifacts on
 failure cycles; success cycles keep only the record).
 
-## Operational sharp edges (e2e-learned, 2026-06-09)
+## Operational sharp edges
 
 - **macOS Local Network privacy (TCC)**: a background-reparented ad-hoc
   runnyd gets silently denied vmnet access — every guest dial fails with
@@ -89,14 +89,17 @@ failure cycles; success cycles keep only the record).
   bundle to the host's `images/` and the next ENSURE_IMAGE cache-hits.
   Pause the slot during the copy so a concurrent pull's rename doesn't race.
 
-## E2E validation (2026-06-09, ix)
+## Validated against real infrastructure
 
-Full chain proven against real infrastructure: cache-hit ENSURE_IMAGE →
-clonefile CLONE → vz BOOT (~3s) → dhcpd AWAIT_IP (~6s) → AWAIT_SSH →
-MINT_JIT (real App → installation token → jitconfig) → PROVISION (tarball
-from virtiofs share) → LISTENING held with the runner `online` on GitHub
-with its labels. Operator recycle deregistered the unused runner; SIGTERM
-mid-cycle left zero VMs, zero vm dirs, zero registrations. Four defects
-found and fixed along the way (Apple-LZ4 dict chaining, pull-progress
-invisibility, the TCC denial, runner-version rot) — each surfaced by a
-different observability layer doing its job.
+Every path below has run live on ix (macOS and linux guests, real GitHub
+App, real images), not just under test fakes:
+
+- The full cycle, cold boot to job: ENSURE_IMAGE through LISTENING, job
+  pickup, success TEARDOWN, ephemeral self-removal, failure-counter reset.
+  A dispatched job completes in well under two minutes from a cold slot.
+- Failure handling: registry stalls surface as stall-vs-slow progress and
+  recycle cleanly; a vanished registration (GitHub deregisters a JIT runner
+  whose job acquisition fails) is zombie-detected by the LISTENING reconcile
+  within its interval, recycled, and leaves a diag capture in the cycle dir.
+- Operator surface: recycle deregisters; pause holds; SIGTERM mid-cycle
+  leaves zero VMs, zero vm dirs, zero registrations.

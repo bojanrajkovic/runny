@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,12 @@ import (
 type Ensurer struct {
 	Home home.Dir
 	Ref  oci.Ref
+	// Runner resolves the service-blessed actions-runner build for this
+	// pool's guest OS. Ensuring the tarball happens here, inside the cycle's
+	// ENSURE_IMAGE state, NOT at daemon startup: a download must always have
+	// stall detection, retry-with-backoff, and why-visibility — a startup
+	// prime had none and dead-stalled exactly the way sand used to.
+	Runner RunnerResolver
 	// StallBudget: the progress-based deadline — no layer bytes for this long
 	// means stuck (slow ≠ silent).
 	StallBudget time.Duration
@@ -30,6 +37,14 @@ type Ensurer struct {
 }
 
 func (e *Ensurer) Ensure(ctx context.Context, report func(string)) (string, tart.Bundle, error) {
+	// Runner tarball first: small, fails fast, and shared across slots
+	// (per-file locking inside).
+	if e.Runner != nil {
+		if _, err := EnsureRunnerTarball(ctx, e.Home.RunnerCacheDir(), e.Runner, e.StallBudget, report, e.log()); err != nil {
+			return "", "", fmt.Errorf("ensuring runner tarball: %w", err)
+		}
+	}
+
 	client := oci.NewClient()
 	digest, err := client.Resolve(ctx, e.Ref)
 	if err != nil {
@@ -146,35 +161,58 @@ func (e *Ensurer) log() *slog.Logger {
 // see github.Client.RunnerDownload for why "latest release" is not it.
 type RunnerResolver func(ctx context.Context) (filename, url string, err error)
 
+// tarballLocks serializes per-filename ensures: slots of the same OS race to
+// the same file; one downloads, the rest wait and find it cached.
+var tarballLocks sync.Map // filename -> *sync.Mutex
+
 // EnsureRunnerTarball makes sure the service-current actions-runner tarball
-// sits in cacheDir (the virtiofs share). Returns the tarball path. Older
-// versions are removed so guests (which pick by name) never stage a build
-// the broker has deprecated.
-func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerResolver) (string, error) {
+// sits in cacheDir (the virtiofs share). Returns the tarball path. The
+// download is stall-watched and progress-reported — no unbounded silent
+// network reads anywhere (a startup-time version of this dead-stalled on a
+// hung GitHub download with no timeout). Superseded same-OS tarballs are
+// removed so guests (which pick by name) never stage a deprecated build.
+func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerResolver, stallBudget time.Duration, report func(string), log *slog.Logger) (string, error) {
 	assetName, assetURL, err := resolve(ctx)
 	if err != nil {
 		return "", err
 	}
+
+	muAny, _ := tarballLocks.LoadOrStore(assetName, &sync.Mutex{})
+	mu := muAny.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+
 	dest := filepath.Join(cacheDir, assetName)
-	// Drop superseded tarballs.
+	if _, err := os.Stat(dest); err == nil {
+		return dest, nil // already cached
+	}
+	// Drop superseded tarballs of the same flavor (osx vs linux prefix).
+	prefix := strings.Join(strings.Split(assetName, "-")[:4], "-") // actions-runner-<os>-arm64
 	if entries, err := os.ReadDir(cacheDir); err == nil {
 		for _, e := range entries {
-			if m, _ := filepath.Match("actions-runner-osx-arm64-*.tar.gz", e.Name()); m && e.Name() != assetName {
+			if strings.HasPrefix(e.Name(), prefix) && e.Name() != assetName {
 				_ = os.Remove(filepath.Join(cacheDir, e.Name()))
 			}
 		}
 	}
-	if _, err := os.Stat(dest); err == nil {
-		return dest, nil // already cached
-	}
 
-	dreq, err := http.NewRequestWithContext(ctx, http.MethodGet, assetURL, nil)
+	if log != nil {
+		log.Info("downloading runner tarball", "asset", assetName)
+	}
+	if report != nil {
+		report("downloading " + assetName)
+	}
+	stall := oci.NewStall()
+	wctx, cancel := stall.Watch(ctx, stallBudget)
+	defer cancel()
+
+	dreq, err := http.NewRequestWithContext(wctx, http.MethodGet, assetURL, nil)
 	if err != nil {
 		return "", err
 	}
 	dresp, err := http.DefaultClient.Do(dreq)
 	if err != nil {
-		return "", fmt.Errorf("downloading runner tarball: %w", err)
+		return "", tarballErr(wctx, err)
 	}
 	defer dresp.Body.Close()
 	if dresp.StatusCode != http.StatusOK {
@@ -185,10 +223,17 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 	if err != nil {
 		return "", err
 	}
-	if _, err := io.Copy(f, dresp.Body); err != nil {
+	prog := newProgress(report, log)
+	body := io.TeeReader(dresp.Body, progressWriter(func(n int64) {
+		stall.Feed(n)
+		prog.feed(n)
+	}))
+	_, err = io.Copy(f, body)
+	prog.stop()
+	if err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
-		return "", fmt.Errorf("downloading runner tarball: %w", err)
+		return "", tarballErr(wctx, err)
 	}
 	if err := f.Close(); err != nil {
 		return "", err
@@ -196,5 +241,24 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 	if err := os.Rename(tmp, dest); err != nil {
 		return "", err
 	}
+	if log != nil {
+		log.Info("runner tarball cached", "asset", assetName)
+	}
 	return dest, nil
+}
+
+// tarballErr surfaces the stall cause when the watcher killed the download.
+func tarballErr(wctx context.Context, err error) error {
+	if cause := context.Cause(wctx); cause != nil && wctx.Err() != nil {
+		return fmt.Errorf("downloading runner tarball: %w", cause)
+	}
+	return fmt.Errorf("downloading runner tarball: %w", err)
+}
+
+// progressWriter adapts a byte-delta callback to io.Writer for TeeReader.
+type progressWriter func(int64)
+
+func (p progressWriter) Write(b []byte) (int, error) {
+	p(int64(len(b)))
+	return len(b), nil
 }

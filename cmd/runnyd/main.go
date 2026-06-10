@@ -123,32 +123,31 @@ func run() error {
 		sweepRegistrations(ctx, logger, c, cfg.NamePrefix)
 	}
 
-	// Runner tarball cache: one service-blessed build per guest OS in play.
-	primed := map[string]bool{}
-	for _, p := range cfg.Pools {
-		if primed[p.OS] {
-			continue
-		}
-		gh, osName := clients[p.Target], p.OS
-		resolve := func(c context.Context) (string, string, error) { return gh.RunnerDownload(c, osName) }
-		if _, err := images.EnsureRunnerTarball(ctx, dir.RunnerCacheDir(), resolve); err != nil {
-			return fmt.Errorf("priming %s runner cache: %w", p.OS, err)
-		}
-		primed[p.OS] = true
-	}
-
+	// No startup tarball priming: runner tarballs are ensured inside each
+	// cycle's ENSURE_IMAGE, where downloads get stall budgets, retries, and
+	// why-visibility. Startup network work blocked the socket and once
+	// dead-stalled silently — never again.
 	var slots []*statemachine.Slot
 	for _, p := range cfg.Pools {
 		ref, err := oci.ParseRef(p.Image)
 		if err != nil {
 			return fmt.Errorf("pool %s: %w", p.Name, err)
 		}
+		gh, osName := clients[p.Target], p.OS
 		deps := statemachine.Deps{
 			Home:   dir,
 			Config: cfg,
 			Pool:   p,
 			VM:     vmManager(),
-			Images: &images.Ensurer{Home: dir, Ref: ref, StallBudget: cfg.Deadlines.PullStall.D(), Log: logger},
+			Images: &images.Ensurer{
+				Home: dir,
+				Ref:  ref,
+				Runner: func(c context.Context) (string, string, error) {
+					return gh.RunnerDownload(c, osName)
+				},
+				StallBudget: cfg.Deadlines.PullStall.D(),
+				Log:         logger,
+			},
 			Clone: func(src tart.Bundle, dst string) error {
 				_, err := tart.Clone(src, tart.Bundle(dst))
 				return err

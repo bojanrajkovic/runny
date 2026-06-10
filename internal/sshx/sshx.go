@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -208,21 +209,9 @@ func (c *Client) Start(ctx context.Context, cmd string) (*Proc, error) {
 	p := &Proc{Lines: lines, sess: sess, wait: make(chan error, 1), done: make(chan struct{})}
 
 	readDone := make(chan struct{}, 2)
-	for _, r := range []interface{ Read([]byte) (int, error) }{stdout, stderr} {
+	for _, r := range []io.Reader{stdout, stderr} {
 		go func() {
-			sc := bufio.NewScanner(r)
-			sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-			for sc.Scan() {
-				select {
-				case lines <- sc.Text():
-				case <-p.done:
-					// Nobody is draining Lines anymore (the FSM stops after
-					// the completion marker); without this case a chatty
-					// runner wedged the readers on a full channel forever.
-					readDone <- struct{}{}
-					return
-				}
-			}
+			readLines(r, lines, p.done)
 			readDone <- struct{}{}
 		}()
 	}
@@ -244,6 +233,49 @@ func (c *Client) Start(ctx context.Context, cmd string) (*Proc, error) {
 	}()
 
 	return p, nil
+}
+
+// maxLine caps one delivered output line. Longer lines are truncated, not
+// fatal: bufio.Scanner's ErrTooLong silently stopped the reader, so a single
+// oversized line (a runner dumping a blob) made the FSM miss every later
+// marker — the JOB state then burned its whole budget on a finished job.
+const maxLine = 1 << 20
+
+// readLines streams r into lines until EOF/error, truncating oversized lines
+// and bailing out when done closes (nobody drains Lines after the FSM sees
+// its marker; without the escape a chatty runner wedged the readers on a
+// full channel forever).
+func readLines(r io.Reader, lines chan<- string, done <-chan struct{}) {
+	br := bufio.NewReaderSize(r, 64*1024)
+	for {
+		var buf []byte
+		truncated := false
+		for {
+			chunk, isPrefix, err := br.ReadLine()
+			if err != nil {
+				return // EOF or transport error; a trailing partial line is teardown noise
+			}
+			if room := maxLine - len(buf); room > 0 {
+				take := min(len(chunk), room)
+				buf = append(buf, chunk[:take]...)
+				truncated = truncated || take < len(chunk)
+			} else {
+				truncated = true
+			}
+			if !isPrefix {
+				break
+			}
+		}
+		text := string(buf)
+		if truncated {
+			text += " …[truncated]"
+		}
+		select {
+		case lines <- text:
+		case <-done:
+			return
+		}
+	}
 }
 
 // Wait blocks until the command exits and returns its exit code. A negative

@@ -104,6 +104,12 @@ func handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 				time.Sleep(20 * time.Millisecond)
 			}
 			exit(0)
+		case payload.Cmd == "longline":
+			// A single oversized line, then a marker: the reader must
+			// truncate and keep going, not die silently.
+			fmt.Fprintf(ch, "%s\n", strings.Repeat("x", 3<<20))
+			fmt.Fprintln(ch, "marker after long line")
+			exit(0)
 		case payload.Cmd == "spew":
 			// Far more output than the client's Lines buffer, then hang:
 			// a chatty runner whose consumer has stopped draining.
@@ -340,6 +346,37 @@ func TestStartBoundedOnWedgedChannelOpen(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Errorf("Start took %v; the deadline did not bound establishment", elapsed)
+	}
+}
+
+// A single oversized output line must not kill the readers: bufio.Scanner's
+// ErrTooLong once silently ended scanning, so every later line — including
+// the completion markers the FSM watches for — was lost.
+func TestStartSurvivesOversizedLine(t *testing.T) {
+	c, err := Dial(testCtx(t), testServer(t), testCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	p, err := c.Start(t.Context(), "longline")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	var got []string
+	for line := range p.Lines {
+		got = append(got, line)
+	}
+	if code, err := p.Wait(); err != nil || code != 0 {
+		t.Fatalf("Wait: %d, %v", code, err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("lines = %d, want 2 (truncated + marker)", len(got))
+	}
+	if len(got[0]) > maxLine+32 || !strings.HasSuffix(got[0], "…[truncated]") {
+		t.Errorf("long line not truncated: len=%d suffix=%q", len(got[0]), got[0][max(0, len(got[0])-20):])
+	}
+	if got[1] != "marker after long line" {
+		t.Errorf("marker lost after oversized line: %q", got[1])
 	}
 }
 

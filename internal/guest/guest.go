@@ -39,6 +39,12 @@ type Guest struct {
 // provisionScript stages the runner and execs run.sh. The cache share
 // appears either at the automount path (macOS guests automount virtiofs
 // shares tagged for it) or gets mounted explicitly by tag; handle both.
+//
+// The runner ALWAYS comes from our cache share, into a runny-owned dir —
+// cirruslabs images ship a preinstalled ~/actions-runner whose version rots
+// (a bundled v2.332.0 got "deprecated and cannot receive messages" from the
+// broker), and JIT runners cannot self-update. Never trust the image's copy.
+//
 // Exit 78 (EX_CONFIG) = cache share missing the tarball — a host-side
 // problem the post-mortem will show verbatim.
 const provisionScript = `set -e
@@ -48,13 +54,11 @@ if [ ! -d "$CACHE" ]; then
   sudo mount_virtiofs runny-cache /Volumes/runny-cache 2>/dev/null || true
   CACHE="/Volumes/runny-cache"
 fi
-RUNNER_DIR="$HOME/actions-runner"
-mkdir -p "$RUNNER_DIR" && cd "$RUNNER_DIR"
-if [ ! -x ./run.sh ]; then
-  TARBALL="$(ls "$CACHE"/actions-runner-osx-arm64-*.tar.gz 2>/dev/null | head -1)"
-  if [ -z "$TARBALL" ]; then echo "runny: no actions-runner tarball in cache share $CACHE" >&2; exit 78; fi
-  tar -xzf "$TARBALL"
-fi
+TARBALL="$(ls "$CACHE"/actions-runner-osx-arm64-*.tar.gz 2>/dev/null | head -1)"
+if [ -z "$TARBALL" ]; then echo "runny: no actions-runner tarball in cache share $CACHE" >&2; exit 78; fi
+RUNNER_DIR="$HOME/runny-runner"
+rm -rf "$RUNNER_DIR" && mkdir -p "$RUNNER_DIR" && cd "$RUNNER_DIR"
+tar -xzf "$TARBALL"
 exec ./run.sh --jitconfig '%s'
 `
 
@@ -70,7 +74,7 @@ func (g *Guest) StartRunner(ctx context.Context, jit string) (statemachine.Proc,
 // post-mortem material TEARDOWN collects before destroying the guest.
 func (g *Guest) PullDiag(ctx context.Context) ([]byte, error) {
 	out, _, err := g.c.Output(ctx,
-		`for f in $HOME/actions-runner/_diag/*.log; do echo "==> $f <=="; tail -c 32768 "$f"; done 2>/dev/null`)
+		`for f in $HOME/runny-runner/_diag/*.log; do echo "==> $f <=="; tail -c 32768 "$f"; done 2>/dev/null`)
 	if err != nil {
 		return nil, err
 	}

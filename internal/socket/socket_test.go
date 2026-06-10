@@ -1,9 +1,18 @@
 package socket
 
 import (
+	"context"
+	"io"
+	"log/slog"
+	"net"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
+
+	"github.com/bojanrajkovic/runny/internal/cycle"
 	"github.com/bojanrajkovic/runny/internal/logring"
 	"github.com/bojanrajkovic/runny/internal/statemachine"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
@@ -50,5 +59,188 @@ func TestToLogLine(t *testing.T) {
 	}
 	if !l.GetTime().AsTime().Equal(e.Time) {
 		t.Errorf("time mangled: %v", l.GetTime().AsTime())
+	}
+}
+
+// ---- RPC handler coverage (over a real gRPC pipe via bufconn) ----------------
+
+func testSlots(names ...string) []*statemachine.Slot {
+	var slots []*statemachine.Slot
+	for _, n := range names {
+		slots = append(slots, statemachine.NewSlot(n, statemachine.Deps{}))
+	}
+	return slots
+}
+
+// newTestServer builds a Server with sensible defaults; pass non-nil to
+// override a specific seam.
+func newTestServer(slots []*statemachine.Slot, ring *logring.Ring, stores func(string) cycle.Store, doctor func(context.Context) []DoctorCheck) *Server {
+	if ring == nil {
+		ring = logring.NewRing(16)
+	}
+	if stores == nil {
+		stores = func(string) cycle.Store { return cycle.Store{SlotDir: "/nonexistent"} } // Recent → nil, nil
+	}
+	if doctor == nil {
+		doctor = func(context.Context) []DoctorCheck { return nil }
+	}
+	return NewServer(slots, ring, stores, doctor, "test")
+}
+
+// dial serves srv over an in-memory bufconn pipe and returns a connected
+// client — the real gRPC wire path, not direct handler calls.
+func dial(t *testing.T, srv *Server) runnyv1.RunnyServiceClient {
+	t.Helper()
+	lis := bufconn.Listen(1 << 20)
+	g := grpc.NewServer()
+	runnyv1.RegisterRunnyServiceServer(g, srv)
+	go func() { _ = g.Serve(lis) }()
+	t.Cleanup(g.Stop)
+
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return runnyv1.NewRunnyServiceClient(conn)
+}
+
+func TestGetStatusReturnsConfiguredSlots(t *testing.T) {
+	c := dial(t, newTestServer(testSlots("mac-1", "mac-2"), nil, nil, nil))
+	resp, err := c.GetStatus(t.Context(), &runnyv1.GetStatusRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.GetSlots()) != 2 {
+		t.Errorf("got %d slots, want 2", len(resp.GetSlots()))
+	}
+	if resp.GetVersion() != "test" {
+		t.Errorf("version = %q", resp.GetVersion())
+	}
+}
+
+func TestCommandsResolveSlotByName(t *testing.T) {
+	c := dial(t, newTestServer(testSlots("mac-1"), nil, nil, nil))
+
+	// Known slot: each command RPC succeeds.
+	if _, err := c.Recycle(t.Context(), &runnyv1.RecycleRequest{Slot: "mac-1", Reason: "x"}); err != nil {
+		t.Errorf("Recycle known slot: %v", err)
+	}
+	if _, err := c.Pause(t.Context(), &runnyv1.PauseRequest{Slot: "mac-1"}); err != nil {
+		t.Errorf("Pause known slot: %v", err)
+	}
+	if _, err := c.Resume(t.Context(), &runnyv1.ResumeRequest{Slot: "mac-1"}); err != nil {
+		t.Errorf("Resume known slot: %v", err)
+	}
+
+	// Unknown slot: findSlot's error path (this regressed once — findSlot
+	// matched the mutable Status().Slot, empty until a slot transitions).
+	if _, err := c.Recycle(t.Context(), &runnyv1.RecycleRequest{Slot: "nope"}); err == nil {
+		t.Error("Recycle of unknown slot should error")
+	}
+	if _, err := c.Pause(t.Context(), &runnyv1.PauseRequest{Slot: "nope"}); err == nil {
+		t.Error("Pause of unknown slot should error")
+	}
+}
+
+func TestWhyReturnsRecentCycle(t *testing.T) {
+	dir := t.TempDir()
+	store := cycle.Store{SlotDir: dir}
+	if err := store.Write(&cycle.Record{
+		CycleID: "abcd1234", Slot: "mac-1",
+		Started: time.Now(), Finished: time.Now(), Result: cycle.ResultSuccess,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := newTestServer(testSlots("mac-1"), nil, func(string) cycle.Store { return store }, nil)
+	c := dial(t, srv)
+
+	resp, err := c.Why(t.Context(), &runnyv1.WhyRequest{Slot: "mac-1", Cycles: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.GetCycles()) != 1 || resp.GetCycles()[0].GetCycleId() != "abcd1234" {
+		t.Errorf("Why = %+v, want one cycle abcd1234", resp.GetCycles())
+	}
+
+	if _, err := c.Why(t.Context(), &runnyv1.WhyRequest{Slot: "nope"}); err == nil {
+		t.Error("Why of unknown slot should error")
+	}
+}
+
+func TestDoctorPassesThroughChecks(t *testing.T) {
+	doctor := func(context.Context) []DoctorCheck {
+		return []DoctorCheck{{Name: "platform", OK: true, Detail: "darwin/arm64"}}
+	}
+	c := dial(t, newTestServer(testSlots("mac-1"), nil, nil, doctor))
+	resp, err := c.Doctor(t.Context(), &runnyv1.DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.GetChecks()) != 1 || !resp.GetChecks()[0].GetOk() || resp.GetChecks()[0].GetName() != "platform" {
+		t.Errorf("Doctor = %+v", resp.GetChecks())
+	}
+}
+
+func TestWatchStatusSendsInitialThenOnNotify(t *testing.T) {
+	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	c := dial(t, srv)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	stream, err := c.WatchStatus(ctx, &runnyv1.WatchStatusRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); err != nil { // initial snapshot
+		t.Fatalf("initial snapshot: %v", err)
+	}
+	// A state change fans out through the watch registry.
+	srv.notify()
+	if _, err := stream.Recv(); err != nil {
+		t.Fatalf("snapshot after notify: %v", err)
+	}
+	// Cancelling the stream context ends the handler cleanly (and removes the
+	// watch from the registry via its defer).
+	cancel()
+	if _, err := stream.Recv(); err == nil {
+		t.Error("stream did not end after cancel")
+	}
+}
+
+func TestStreamLogsReplaysThenFollows(t *testing.T) {
+	ring := logring.NewRing(16)
+	logger := slog.New(logring.NewHandler(io.Discard, slog.LevelDebug, ring))
+	logger.Info("line one")
+	logger.Info("line two")
+
+	c := dial(t, newTestServer(testSlots("mac-1"), ring, nil, nil))
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	stream, err := c.StreamLogs(ctx, &runnyv1.StreamLogsRequest{Replay: 2, Follow: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The two buffered lines replay in order before following.
+	for _, want := range []string{"line one", "line two"} {
+		got, err := stream.Recv()
+		if err != nil {
+			t.Fatalf("replay recv: %v", err)
+		}
+		if got.GetMessage() != want {
+			t.Errorf("replay = %q, want %q", got.GetMessage(), want)
+		}
+	}
+	// A line logged after subscription follows through live.
+	logger.Info("line three")
+	got, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("follow recv: %v", err)
+	}
+	if got.GetMessage() != "line three" {
+		t.Errorf("follow = %q, want line three", got.GetMessage())
 	}
 }

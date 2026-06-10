@@ -20,8 +20,12 @@ go_test(
     srcs = ["socket_test.go"],
     embed = [":socket"],
     deps = [
+        "//internal/cycle",
         "//internal/logring",
         "//internal/statemachine",
         "//proto/runny/v1:runny",
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//credentials/insecure",
+        "@org_golang_google_grpc//test/bufconn",
     ],
 )

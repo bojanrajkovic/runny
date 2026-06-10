@@ -65,21 +65,19 @@ jobs:
     # GITHUB_TOKEN (which has no cross-repo write anyway).
     permissions:
       contents: read
-    env:
-      # The release bot App; absent until the secrets are set, which makes the
-      # whole tap update a graceful no-op (early releases skip it).
-      RELEASE_APP_ID: ${{ secrets.RELEASE_APP_ID }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
       - name: mint tap token
         id: tap-token
-        if: ${{ env.RELEASE_APP_ID != '' }}
+        # The release bot App; its id is a public var, its key a secret. Absent
+        # until configured, which makes the whole tap update a graceful no-op.
+        if: ${{ vars.RELEASER_APP_ID != '' }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          app-id: ${{ vars.RELEASER_APP_ID }}
+          private-key: ${{ secrets.RELEASER_APP_PRIVATE_KEY }}
           owner: bojanrajkovic
           repositories: homebrew-tap
       - name: update tap formula

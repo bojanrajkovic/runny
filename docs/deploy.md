@@ -90,7 +90,7 @@ brew services start runny
 
 The release workflow regenerates the formula from `tools/deploy/runny.rb.tmpl`
 on every release and pushes it to the tap, authenticating as the **release
-bot App** (`RELEASE_APP_ID` / `RELEASE_APP_PRIVATE_KEY` secrets) with a
+bot App** (the `RELEASER_APP_ID` variable + `RELEASER_APP_PRIVATE_KEY` secret) with a
 short-lived installation token scoped to `homebrew-tap`; it no-ops until those
 secrets exist. That App is deliberately *not* the runtime runner-registration
 App — release/CI and prod-host/runner-admin are separate blast radii.

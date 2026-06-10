@@ -35,7 +35,7 @@ from conventional commits) + goreleaser (build, package, publish, brew tap).
   renders the formula from `tools/deploy/runny.rb.tmpl` (version + url + sha256)
   and pushes it — the same work goreleaser's brew publisher would run. It
   authenticates as the **release bot App** (a GitHub App installation token
-  scoped to `homebrew-tap`, `RELEASE_APP_ID` / `RELEASE_APP_PRIVATE_KEY`), kept
+  scoped to `homebrew-tap`, `RELEASER_APP_ID` var, `RELEASER_APP_PRIVATE_KEY` secret), kept
   distinct from the runtime runner-registration App so CI and prod-host
   credentials don't share a blast radius. Skipped gracefully when those
   secrets are absent.

@@ -31,8 +31,7 @@ jobs:
       - name: build
         run: mise x -- bazel build --config=ci //...
       - name: test
-        # Exit 4 = no test targets; tolerated until the first test lands.
-        run: mise x -- bazel test --config=ci //... || test $? -eq 4
+        run: mise x -- bazel test --config=ci //...
       - name: format
         run: |
           mise x -- bazel run --config=ci //tools/format
@@ -57,7 +56,7 @@ jobs:
       - name: build
         run: mise x -- bazel build --config=ci //...
       - name: test
-        run: mise x -- bazel test --config=ci //... || test $? -eq 4
+        run: mise x -- bazel test --config=ci //...
 
   # Deployable binaries build COLD — no Bazel or tool caches, exact-pinned
   # toolchain — so cache poisoning cannot reach an artifact. Every build is
@@ -92,6 +91,9 @@ jobs:
           cp bazel-bin/cmd/runnyctl/runnyctl_/runnyctl runnyctl
           chmod +w runnyd
           codesign -s - --entitlements tools/sign/runnyd.entitlements --force runnyd
+          # The sign step exits 0 even for a plist whose key is wrong;
+          # assert the entitlement actually embedded (CI security).
+          codesign -d --entitlements - runnyd | grep -q com.apple.security.virtualization
           ./runnyctl version
       - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
         if: github.event_name == 'push'

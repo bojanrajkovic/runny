@@ -1,7 +1,10 @@
 # Release artifacts (ADR-0010): cold stamped Bazel build (no caches — see
 # CONTRIBUTING.md "CI security"), ad-hoc signed, checksummed, attested, and
 # attached to the release; then the Homebrew tap formula is updated when a
-# TAP_PUSH_TOKEN secret exists.
+# TAP_PUSH_TOKEN secret exists. The formula's sha256 comes from the package
+# step's own checksum via job outputs — never from re-downloading the asset
+# (a CDN-propagation race, and it would attest whatever GitHub served
+# rather than what this run built).
 name: release
 
 on:
@@ -16,6 +19,9 @@ permissions:
 jobs:
   artifacts:
     runs-on: macos-26
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+      sha256: ${{ steps.package.outputs.sha256 }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -36,33 +42,39 @@ jobs:
           cp bazel-bin/cmd/runnyctl/runnyctl_/runnyctl dist/
           chmod +w dist/runnyd
           codesign -s - --entitlements tools/sign/runnyd.entitlements --force dist/runnyd
+          # The sign step exits 0 even for a plist whose key is wrong;
+          # assert the entitlement actually embedded (CI security).
+          codesign -d --entitlements - dist/runnyd | grep -q com.apple.security.virtualization
           tar -C dist -czf "runny_${VERSION}_darwin_arm64.tar.gz" runnyd runnyctl
           shasum -a 256 "runny_${VERSION}_darwin_arm64.tar.gz" > "runny_${VERSION}_darwin_arm64.tar.gz.sha256"
+          echo "sha256=$(cut -d' ' -f1 < "runny_${VERSION}_darwin_arm64.tar.gz.sha256")" >> "$GITHUB_OUTPUT"
       - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
         with:
           subject-path: runny_*.tar.gz
       - name: attach to release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" runny_*.tar.gz runny_*.sha256
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" runny_*.tar.gz runny_*.sha256
 
   homebrew:
     needs: artifacts
     runs-on: ubuntu-latest
+    permissions: {} # pushes via TAP_PUSH_TOKEN only; no GITHUB_TOKEN access
     steps:
       - name: update tap formula
         env:
           TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
           TAG: ${{ github.event.release.tag_name }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.artifacts.outputs.version }}
+          SHA: ${{ needs.artifacts.outputs.sha256 }}
         run: |
           if [ -z "$TAP_PUSH_TOKEN" ]; then
             echo "TAP_PUSH_TOKEN not set; skipping Homebrew formula update"
             exit 0
           fi
-          VERSION="${TAG#v}"
-          URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/runny_${VERSION}_darwin_arm64.tar.gz"
-          curl -fsSL -o runny.tar.gz "$URL"
-          SHA=$(sha256sum runny.tar.gz | cut -d' ' -f1)
+          URL="https://github.com/${REPO}/releases/download/${TAG}/runny_${VERSION}_darwin_arm64.tar.gz"
           git clone "https://x-access-token:${TAP_PUSH_TOKEN}@github.com/bojanrajkovic/homebrew-tap.git" tap
           mkdir -p tap/Formula
           cat > tap/Formula/runny.rb <<EOF

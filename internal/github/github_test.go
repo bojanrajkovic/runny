@@ -92,7 +92,7 @@ func (f *fakeGitHub) handler() http.Handler {
 	downloads := func(w http.ResponseWriter, r *http.Request) {
 		f.requireToken(r)
 		_ = json.NewEncoder(w).Encode([]map[string]string{
-			{"os": "osx", "architecture": "arm64", "filename": "actions-runner-osx-arm64-2.334.0.tar.gz", "download_url": "https://example/osx"},
+			{"os": "osx", "architecture": "arm64", "filename": "actions-runner-osx-arm64-2.334.0.tar.gz", "download_url": "https://example/osx", "sha256_checksum": "ab12cd34"},
 			{"os": "linux", "architecture": "arm64", "filename": "actions-runner-linux-arm64-2.334.0.tar.gz", "download_url": "https://example/linux"},
 			{"os": "linux", "architecture": "x64", "filename": "actions-runner-linux-x64-2.334.0.tar.gz", "download_url": "https://example/x64"},
 		})
@@ -235,15 +235,18 @@ func TestOrgTargetJITConfig(t *testing.T) {
 
 func TestRunnerDownloadPerOS(t *testing.T) {
 	c := newTestClient(t, &fakeGitHub{})
-	name, url, err := c.RunnerDownload(testCtx(t), "darwin")
+	name, url, sha, err := c.RunnerDownload(testCtx(t), "darwin")
 	if err != nil || !strings.Contains(name, "osx-arm64") || url != "https://example/osx" {
 		t.Errorf("darwin: %s %s %v", name, url, err)
 	}
-	name, url, err = c.RunnerDownload(testCtx(t), "linux")
+	if sha != "ab12cd34" {
+		t.Errorf("sha = %q, want the downloads endpoint checksum", sha)
+	}
+	name, url, _, err = c.RunnerDownload(testCtx(t), "linux")
 	if err != nil || !strings.Contains(name, "linux-arm64") || url != "https://example/linux" {
 		t.Errorf("linux: %s %s %v", name, url, err)
 	}
-	if _, _, err := c.RunnerDownload(testCtx(t), "windows"); err == nil {
+	if _, _, _, err := c.RunnerDownload(testCtx(t), "windows"); err == nil {
 		t.Error("windows should be rejected")
 	}
 }

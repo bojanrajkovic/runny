@@ -5,6 +5,8 @@ package images
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -227,11 +229,12 @@ func (e *Ensurer) log() *slog.Logger {
 	return slog.Default()
 }
 
-// RunnerResolver yields the service-blessed runner build (filename, url) —
-// see github.Client.RunnerDownload for why "latest release" is not it. It
-// takes a bounded.Context because it hits the GitHub API from a state that
+// RunnerResolver yields the service-blessed runner build (filename, url,
+// and the service-declared sha256, possibly empty on older GHES) — see
+// github.Client.RunnerDownload for why "latest release" is not it. It takes
+// a bounded.Context because it hits the GitHub API from a state that
 // carries no deadline of its own (ADR-0011).
-type RunnerResolver func(ctx bounded.Context) (filename, url string, err error)
+type RunnerResolver func(ctx bounded.Context) (filename, url, sha256 string, err error)
 
 // tarballLocks serializes per-filename ensures: slots of the same OS race to
 // the same file; one downloads, the rest wait and find it cached.
@@ -248,7 +251,7 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 		resolveBudget = defaultResolveTimeout
 	}
 	rctx, rcancel := bounded.WithTimeout(ctx, resolveBudget)
-	assetName, assetURL, err := resolve(rctx)
+	assetName, assetURL, wantSHA, err := resolve(rctx)
 	rcancel()
 	if err != nil {
 		return "", err
@@ -313,7 +316,8 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 		stall.Feed(n)
 		prog.feed(n)
 	}))
-	_, err = io.Copy(f, body)
+	h := sha256.New()
+	_, err = io.Copy(io.MultiWriter(f, h), body)
 	prog.stop()
 	if err != nil {
 		_ = f.Close()
@@ -323,6 +327,15 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
 		return "", err
+	}
+	// The tarball is staged into every guest and executed; verify it against
+	// the service-declared checksum when one was given (older GHES may omit
+	// it — a missing checksum downgrades to the TLS-only trust we had).
+	if wantSHA != "" {
+		if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, wantSHA) {
+			_ = os.Remove(tmp)
+			return "", fmt.Errorf("runner tarball checksum mismatch: downloads endpoint says %s, got %s", wantSHA, got)
+		}
 	}
 	if err := os.Rename(tmp, dest); err != nil {
 		_ = os.Remove(tmp)

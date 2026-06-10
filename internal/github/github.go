@@ -80,7 +80,11 @@ type Client struct {
 	key    *rsa.PrivateKey
 	hc     *http.Client
 
+	// mu guards the cached state below; it is never held across network
+	// calls — that once serialized every slot of a target behind one token
+	// mint. mintMu serializes the mint itself (stampede control).
 	mu         sync.Mutex
+	mintMu     sync.Mutex
 	token      string
 	tokenPerms map[string]string
 	tokenExp   time.Time
@@ -93,8 +97,8 @@ type Client struct {
 // when the tarball was already on disk; runner builds change on the order
 // of weeks, so a short TTL loses nothing.
 type runnerAsset struct {
-	filename, url string
-	fetched       time.Time
+	filename, url, sha256 string
+	fetched               time.Time
 }
 
 const runnerDLTTL = 15 * time.Minute
@@ -146,17 +150,36 @@ func (c *Client) appJWT() (string, error) {
 // installationToken returns a cached installation token, minting a fresh one
 // when within 5 minutes of expiry.
 func (c *Client) installationToken(ctx context.Context) (string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.token != "" && time.Until(c.tokenExp) > 5*time.Minute {
-		return c.token, nil
+	cached := func() (string, bool) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.token != "" && time.Until(c.tokenExp) > 5*time.Minute {
+			return c.token, true
+		}
+		return "", false
+	}
+	if tok, ok := cached(); ok {
+		return tok, nil
+	}
+
+	// Mint without holding the state lock: the two API round-trips here
+	// once serialized every slot of the target behind c.mu. mintMu keeps
+	// concurrent expiries from stampeding the token endpoint; the re-check
+	// catches a mint that finished while we waited for it.
+	c.mintMu.Lock()
+	defer c.mintMu.Unlock()
+	if tok, ok := cached(); ok {
+		return tok, nil
 	}
 
 	jwtStr, err := c.appJWT()
 	if err != nil {
 		return "", fmt.Errorf("minting app jwt: %w", err)
 	}
-	if c.instID == 0 {
+	c.mu.Lock()
+	instID := c.instID
+	c.mu.Unlock()
+	if instID == 0 {
 		var inst struct {
 			ID int64 `json:"id"`
 		}
@@ -165,7 +188,7 @@ func (c *Client) installationToken(ctx context.Context) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("resolving installation for %s: %w", c.target, err)
 		}
-		c.instID = inst.ID
+		instID = inst.ID
 	}
 
 	var tok struct {
@@ -174,13 +197,16 @@ func (c *Client) installationToken(ctx context.Context) (string, error) {
 		Permissions map[string]string `json:"permissions"`
 	}
 	err = c.do(ctx, http.MethodPost,
-		fmt.Sprintf("/app/installations/%d/access_tokens", c.instID),
+		fmt.Sprintf("/app/installations/%d/access_tokens", instID),
 		"Bearer "+jwtStr, nil, &tok)
 	if err != nil {
 		return "", fmt.Errorf("minting installation token: %w", err)
 	}
+	c.mu.Lock()
+	c.instID = instID
 	c.token, c.tokenExp, c.tokenPerms = tok.Token, tok.ExpiresAt, tok.Permissions
-	return c.token, nil
+	c.mu.Unlock()
+	return tok.Token, nil
 }
 
 // CheckRunnerPerm mints (or reuses) a token and asserts the target-scoped
@@ -243,32 +269,35 @@ func (c *Client) GenerateJITConfig(ctx bounded.Context, name string, labels []st
 // actions/runner repo's "latest" release can lag what the broker accepts,
 // and JIT runners cannot self-update (learned from a live Forbidden:
 // "Runner version vX is deprecated and cannot receive messages").
-func (c *Client) RunnerDownload(ctx bounded.Context, goos string) (filename, url string, err error) {
+// The returned sha256 is the service-declared checksum of the tarball (may
+// be empty on older GHES); the downloader verifies it when present.
+func (c *Client) RunnerDownload(ctx bounded.Context, goos string) (filename, url, sha256 string, err error) {
 	apiOS := map[string]string{"darwin": "osx", "linux": "linux"}[goos]
 	if apiOS == "" {
-		return "", "", fmt.Errorf("unsupported guest os %q", goos)
+		return "", "", "", fmt.Errorf("unsupported guest os %q", goos)
 	}
 	c.mu.Lock()
 	if a, ok := c.runnerDL[goos]; ok && time.Since(a.fetched) < runnerDLTTL {
 		c.mu.Unlock()
-		return a.filename, a.url, nil
+		return a.filename, a.url, a.sha256, nil
 	}
 	c.mu.Unlock()
 	tok, err := c.installationToken(ctx)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	var downloads []struct {
 		OS           string `json:"os"`
 		Architecture string `json:"architecture"`
 		DownloadURL  string `json:"download_url"`
 		Filename     string `json:"filename"`
+		SHA256       string `json:"sha256_checksum"`
 	}
 	err = c.doRetry(ctx, http.MethodGet,
 		c.target.base()+"/actions/runners/downloads",
 		"token "+tok, nil, &downloads)
 	if err != nil {
-		return "", "", fmt.Errorf("listing runner downloads: %w", err)
+		return "", "", "", fmt.Errorf("listing runner downloads: %w", err)
 	}
 	for _, d := range downloads {
 		if d.OS == apiOS && d.Architecture == "arm64" {
@@ -276,12 +305,12 @@ func (c *Client) RunnerDownload(ctx bounded.Context, goos string) (filename, url
 			if c.runnerDL == nil {
 				c.runnerDL = map[string]runnerAsset{}
 			}
-			c.runnerDL[goos] = runnerAsset{filename: d.Filename, url: d.DownloadURL, fetched: time.Now()}
+			c.runnerDL[goos] = runnerAsset{filename: d.Filename, url: d.DownloadURL, sha256: d.SHA256, fetched: time.Now()}
 			c.mu.Unlock()
-			return d.Filename, d.DownloadURL, nil
+			return d.Filename, d.DownloadURL, d.SHA256, nil
 		}
 	}
-	return "", "", fmt.Errorf("no %s/arm64 runner build in downloads list (%d entries)", apiOS, len(downloads))
+	return "", "", "", fmt.Errorf("no %s/arm64 runner build in downloads list (%d entries)", apiOS, len(downloads))
 }
 
 // Runner is a registered self-hosted runner, as the reconcile loop sees it.

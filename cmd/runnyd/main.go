@@ -144,7 +144,7 @@ func run() error {
 			Images: &images.Ensurer{
 				Home: dir,
 				Ref:  ref,
-				Runner: func(c bounded.Context) (string, string, error) {
+				Runner: func(c bounded.Context) (string, string, string, error) {
 					return gh.RunnerDownload(c, osName)
 				},
 				StallBudget:   cfg.Deadlines.PullStall.D(),

@@ -49,6 +49,16 @@ func (r *Ring) add(e Entry) {
 	r.mu.Unlock()
 }
 
+// Snapshot returns up to the last n entries without subscribing.
+func (r *Ring) Snapshot(n int) []Entry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	start := max(len(r.buf)-n, 0)
+	out := make([]Entry, len(r.buf)-start)
+	copy(out, r.buf[start:])
+	return out
+}
+
 // Subscribe returns a channel that replays the last `replay` entries then
 // follows. Call the returned cancel to unsubscribe.
 func (r *Ring) Subscribe(replay int) (<-chan Entry, func()) {

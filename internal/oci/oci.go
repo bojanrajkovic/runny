@@ -176,6 +176,13 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 		}
 		total += n
 	}
+	// Refuse a doomed pull up front: the decompressed image must fit. Hours
+	// of download ending in ENOSPC is the silent-failure shape this daemon
+	// exists to kill (and these images are large — 80GB+ uncompressed).
+	if free, err := freeBytes(filepath.Dir(destDir)); err == nil && uint64(total) > free-(2<<30) {
+		return "", fmt.Errorf("image %s needs %s uncompressed but only %s is free — refusing to start a pull that cannot complete",
+			ref, human(total), human(int64(free)))
+	}
 	if err := truncateFile(diskPath, total); err != nil {
 		return "", err
 	}
@@ -406,6 +413,17 @@ func truncateFile(path string, size int64) error {
 	}
 	defer f.Close()
 	return f.Truncate(size)
+}
+
+func human(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
 }
 
 type progressWriter struct{ fn func(int64) }

@@ -85,6 +85,8 @@ message WatchStatusRequest {}
 message StreamLogsRequest {
   // Number of buffered lines to replay before following; 0 = follow only.
   uint32 replay = 1;
+  // When false, send the replay snapshot and close instead of following.
+  bool follow = 2;
 }
 
 message LogLine {

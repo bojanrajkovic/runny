@@ -142,6 +142,19 @@ func (s *Server) WatchStatus(_ *runnyv1.WatchStatusRequest, stream grpc.ServerSt
 }
 
 func (s *Server) StreamLogs(req *runnyv1.StreamLogsRequest, stream grpc.ServerStreamingServer[runnyv1.LogLine]) error {
+	if !req.GetFollow() {
+		for _, e := range s.Ring.Snapshot(int(req.GetReplay())) {
+			if err := stream.Send(&runnyv1.LogLine{
+				Time:    timestamppb.New(e.Time),
+				Level:   e.Level,
+				Message: e.Message,
+				Attrs:   e.Attrs,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	ch, cancel := s.Ring.Subscribe(int(req.GetReplay()))
 	defer cancel()
 	for {

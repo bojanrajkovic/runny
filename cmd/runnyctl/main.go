@@ -28,7 +28,8 @@ usage: runnyctl [-home DIR] [-json] <command> [args]
 commands:
   status              one-shot slot status
   watch               follow status transitions
-  logs [-replay N]    follow daemon logs (replaying N buffered lines)
+  logs [-replay N] [-follow=false]
+                      stream daemon logs (replay N buffered lines first)
   recycle SLOT [-reason WHY]
                       destroy SLOT's current cycle and start fresh
   pause SLOT          hold SLOT after its current cycle drains
@@ -80,8 +81,9 @@ func run() error {
 	case "logs":
 		fs := flag.NewFlagSet("logs", flag.ExitOnError)
 		replay := fs.Int("replay", 50, "buffered lines to replay")
+		follow := fs.Bool("follow", true, "keep following after the replay")
 		_ = fs.Parse(rest)
-		return c.logs(ctx, *replay)
+		return c.logs(ctx, *replay, *follow)
 	case "recycle":
 		fs := flag.NewFlagSet("recycle", flag.ExitOnError)
 		reason := fs.String("reason", "operator request", "reason recorded in the cycle")
@@ -129,14 +131,23 @@ func run() error {
 }
 
 func slotArg(fs *flag.FlagSet, rest []string) (string, error) {
-	// Accept both "cmd SLOT -flag" and "cmd -flag SLOT".
+	// Accept both "cmd SLOT -flag" and "cmd -flag SLOT" (Go's flag package
+	// stops at the first non-flag arg, so slot-first needs special-casing).
+	var slot string
+	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+		slot, rest = rest[0], rest[1:]
+	}
 	if err := fs.Parse(rest); err != nil {
 		return "", err
 	}
-	if fs.NArg() != 1 {
+	switch {
+	case slot != "" && fs.NArg() == 0:
+		return slot, nil
+	case slot == "" && fs.NArg() == 1:
+		return fs.Arg(0), nil
+	default:
 		return "", fmt.Errorf("exactly one SLOT argument is required")
 	}
-	return fs.Arg(0), nil
 }
 
 type ctl struct {
@@ -217,8 +228,8 @@ func (c *ctl) watch(ctx context.Context) error {
 	}
 }
 
-func (c *ctl) logs(ctx context.Context, replay int) error {
-	stream, err := c.client.StreamLogs(ctx, &runnyv1.StreamLogsRequest{Replay: uint32(replay)})
+func (c *ctl) logs(ctx context.Context, replay int, follow bool) error {
+	stream, err := c.client.StreamLogs(ctx, &runnyv1.StreamLogsRequest{Replay: uint32(replay), Follow: follow})
 	if err != nil {
 		return err
 	}

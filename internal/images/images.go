@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/bojanrajkovic/runny/internal/home"
@@ -29,7 +30,7 @@ type Ensurer struct {
 	Log         *slog.Logger
 }
 
-func (e *Ensurer) Ensure(ctx context.Context) (string, tart.Bundle, error) {
+func (e *Ensurer) Ensure(ctx context.Context, report func(string)) (string, tart.Bundle, error) {
 	client := oci.NewClient()
 	digest, err := client.Resolve(ctx, e.Ref)
 	if err != nil {
@@ -43,7 +44,12 @@ func (e *Ensurer) Ensure(ctx context.Context) (string, tart.Bundle, error) {
 
 	e.log().Info("pulling image", "ref", e.Ref.String(), "digest", digest)
 	stall := oci.NewStall()
-	client.Progress = stall.Feed
+	prog := newProgress(report, e.log())
+	client.Progress = func(n int64) {
+		stall.Feed(n)
+		prog.feed(n)
+	}
+	defer prog.stop()
 	wctx, cancel := stall.Watch(ctx, e.StallBudget)
 	defer cancel()
 	pinned := e.Ref
@@ -59,6 +65,75 @@ func (e *Ensurer) Ensure(ctx context.Context) (string, tart.Bundle, error) {
 	}
 	e.log().Info("image cached", "digest", digest)
 	return digest, bundle, nil
+}
+
+// progress turns raw byte deltas into operator-visible pull progress: a
+// live status annotation (throttled to 1/s) and a log line every 15s. Slow
+// ghcr and stuck pulls must look different (the predecessor's biggest
+// diagnosability gap).
+type progress struct {
+	report func(string)
+	log    *slog.Logger
+
+	mu        sync.Mutex
+	total     int64
+	winBytes  int64
+	winStart  time.Time
+	lastShow  time.Time
+	lastLog   time.Time
+	startedAt time.Time
+}
+
+func newProgress(report func(string), log *slog.Logger) *progress {
+	now := time.Now()
+	return &progress{report: report, log: log, winStart: now, lastLog: now, startedAt: now}
+}
+
+func (p *progress) feed(n int64) {
+	if p.report == nil {
+		return
+	}
+	p.mu.Lock()
+	p.total += n
+	p.winBytes += n
+	now := time.Now()
+	if now.Sub(p.lastShow) < time.Second {
+		p.mu.Unlock()
+		return
+	}
+	rate := float64(p.winBytes) / max(now.Sub(p.winStart).Seconds(), 0.001)
+	total := p.total
+	p.winBytes, p.winStart, p.lastShow = 0, now, now
+	logIt := now.Sub(p.lastLog) >= 15*time.Second
+	if logIt {
+		p.lastLog = now
+	}
+	p.mu.Unlock()
+
+	detail := fmt.Sprintf("pulled %s at %s/s", humanBytes(total), humanBytes(int64(rate)))
+	p.report(detail)
+	if logIt {
+		p.log.Info("pull progress", "downloaded", humanBytes(total), "rate", humanBytes(int64(rate))+"/s")
+	}
+}
+
+func (p *progress) stop() {
+	if p.report != nil {
+		p.report("")
+	}
+}
+
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
 }
 
 func (e *Ensurer) log() *slog.Logger {

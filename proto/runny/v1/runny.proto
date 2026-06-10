@@ -66,6 +66,10 @@ message SlotStatus {
   JobInfo job = 9;
   // Summary of the last failure, empty after a successful cycle.
   string last_failure = 10;
+  // Free-form live annotation for the current state (e.g. pull progress
+  // "2.1 GiB at 41 MiB/s" during ENSURE_IMAGE). Empty when the state has
+  // nothing to report.
+  string detail = 11;
 }
 
 message GetStatusRequest {}

@@ -185,6 +185,9 @@ func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 		if s.GetConsecutiveFailures() > 0 {
 			note = fmt.Sprintf("%d consecutive failures; %s", s.GetConsecutiveFailures(), note)
 		}
+		if d := s.GetDetail(); d != "" {
+			note = d // live annotation beats stale failure text
+		}
 		fmt.Fprintf(c.out, "%-10s %-13s %-9s %-15s %-22s %s\n",
 			s.GetSlot(), state,
 			durString(time.Since(s.GetStateEntered().AsTime())),

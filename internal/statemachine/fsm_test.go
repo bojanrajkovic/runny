@@ -30,7 +30,10 @@ type fakeImages struct {
 	mu       sync.Mutex
 }
 
-func (f *fakeImages) Ensure(ctx context.Context) (string, tart.Bundle, error) {
+func (f *fakeImages) Ensure(ctx context.Context, report func(string)) (string, tart.Bundle, error) {
+	if report != nil {
+		report("pulled 1.0 MiB at 1.0 MiB/s")
+	}
 	f.mu.Lock()
 	f.calls++
 	blocked := f.maxCalls > 0 && f.calls > f.maxCalls

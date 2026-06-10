@@ -45,9 +45,12 @@ const (
 )
 
 // ImageEnsurer makes sure the configured image is cached locally and returns
-// its digest and bundle dir (ENSURE_IMAGE's work).
+// its digest and bundle dir (ENSURE_IMAGE's work). report receives live
+// progress annotations ("2.1 GiB at 41 MiB/s") — pull progress must be
+// visible, not just stall-detected, so an operator can tell slow-registry
+// from stuck (the predecessor made them indistinguishable).
 type ImageEnsurer interface {
-	Ensure(ctx context.Context) (digest string, bundle tart.Bundle, err error)
+	Ensure(ctx context.Context, report func(detail string)) (digest string, bundle tart.Bundle, err error)
 }
 
 // Cloner clones a bundle (tart.Clone's seam).
@@ -121,6 +124,8 @@ type Status struct {
 	VM                  cycle.VMInfo
 	Job                 *cycle.JobInfo
 	LastFailure         string
+	// Detail is the current state's live annotation (pull progress etc).
+	Detail string
 }
 
 // Slot drives one runner slot's lifecycle.
@@ -181,6 +186,7 @@ func (s *Slot) setState(state State, mut func(*Status)) {
 	s.status.Slot = s.name
 	s.status.State = state
 	s.status.StateEntered = time.Now()
+	s.status.Detail = ""
 	if mut != nil {
 		mut(&s.status)
 	}
@@ -243,6 +249,22 @@ func (s *Slot) handleIdleCommand(cmd Command) {
 		s.setPaused(false)
 	case CmdRecycle:
 		// Nothing to recycle while idle.
+	}
+}
+
+// setDetail publishes a live annotation for the current state.
+func (s *Slot) setDetail(detail string) {
+	s.mu.Lock()
+	if s.status.Detail == detail {
+		s.mu.Unlock()
+		return
+	}
+	s.status.Detail = detail
+	snap := s.status
+	fn := s.onChange
+	s.mu.Unlock()
+	if fn != nil {
+		fn(snap)
 	}
 }
 
@@ -340,7 +362,7 @@ func (s *Slot) runCycle(ctx context.Context) *cycle.Record {
 	var srcBundle tart.Bundle
 	ok := enter(StateEnsureImage, 0, func(c context.Context) error {
 		// The puller carries its own progress-stall budget (Config.PullStall).
-		digest, bundle, err := s.deps.Images.Ensure(c)
+		digest, bundle, err := s.deps.Images.Ensure(c, s.setDetail)
 		if err != nil {
 			return err
 		}

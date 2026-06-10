@@ -124,13 +124,14 @@ func (p *fakeProc) exit(code int) {
 }
 
 type fakeGuest struct {
-	proc     *fakeProc
-	startErr error
-	diag     []byte
-	diagErr  error
-	pulled   bool
-	goos     string
-	mu       sync.Mutex
+	proc      *fakeProc
+	startErr  error
+	diag      []byte
+	diagErr   error
+	diagBlock bool // PullDiag blocks until ctx expires (a wedged guest)
+	pulled    bool
+	goos      string
+	mu        sync.Mutex
 }
 
 func (g *fakeGuest) StartRunner(ctx context.Context, jit, goos string) (Proc, error) {
@@ -143,10 +144,15 @@ func (g *fakeGuest) StartRunner(ctx context.Context, jit, goos string) (Proc, er
 	return g.proc, nil
 }
 
-func (g *fakeGuest) PullDiag(bounded.Context) ([]byte, error) {
+func (g *fakeGuest) PullDiag(ctx bounded.Context) ([]byte, error) {
 	g.mu.Lock()
 	g.pulled = true
+	block := g.diagBlock
 	g.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	return g.diag, g.diagErr
 }
 func (g *fakeGuest) Close() error { return nil }
@@ -690,6 +696,64 @@ func TestStopFailureWedgesSlot(t *testing.T) {
 	// The undead guest still holds the clone bundle; it must not be deleted.
 	if _, err := os.Stat(h.dir.VMDir("runner-1")); err != nil {
 		t.Errorf("vm dir was deleted out from under a live guest: %v", err)
+	}
+}
+
+// Backoff arithmetic is one of the two riskiest untested paths: growth must
+// be exponential from the base, capped, immune to shift overflow, and zero
+// on a clean slate.
+func TestBackoffProgression(t *testing.T) {
+	h := newHarness(t, func(c *home.Config) {
+		c.Limits.BackoffBase = home.Duration(time.Second)
+		c.Limits.BackoffCap = home.Duration(30 * time.Second)
+	})
+	set := func(n uint32) {
+		h.slot.mu.Lock()
+		h.slot.failures = n
+		h.slot.mu.Unlock()
+	}
+	cases := []struct {
+		failures uint32
+		want     time.Duration
+	}{
+		{0, 0},
+		{1, time.Second},
+		{2, 2 * time.Second},
+		{3, 4 * time.Second},
+		{5, 16 * time.Second},
+		{6, 30 * time.Second},   // capped
+		{100, 30 * time.Second}, // shift saturates, never overflows
+	}
+	for _, tc := range cases {
+		set(tc.failures)
+		if got := h.slot.currentBackoff(); got != tc.want {
+			t.Errorf("backoff(failures=%d) = %v, want %v", tc.failures, got, tc.want)
+		}
+	}
+}
+
+// Teardown hang-resistance: a wedged guest whose diag pull never returns on
+// its own must not hold TEARDOWN past its budget — crash-only means teardown
+// converges no matter what the guest does.
+func TestTeardownBoundedDespiteWedgedDiagPull(t *testing.T) {
+	h := newHarness(t, nil)
+	h.guest.diagBlock = true // PullDiag blocks until its ctx expires
+	h.vmF.machine.ip = ""    // fail at AWAIT_IP → failure teardown pulls diag
+	cancel := h.start(t)
+	_ = cancel
+
+	h.waitState(t, StateTeardown)
+	start := time.Now()
+	h.waitState(t, StateBackoff)
+	if elapsed := time.Since(start); elapsed > 4*time.Second {
+		t.Errorf("teardown took %v with a wedged diag pull; its budget is 2s", elapsed)
+	}
+	// And the machine still got stopped despite the diag hang.
+	h.vmF.machine.mu.Lock()
+	stopped := h.vmF.machine.stopped
+	h.vmF.machine.mu.Unlock()
+	if !stopped {
+		t.Error("teardown never stopped the machine")
 	}
 }
 

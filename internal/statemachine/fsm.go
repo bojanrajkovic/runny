@@ -202,6 +202,10 @@ func (s *Slot) notify(fns []func(Status), snap Status) {
 	}
 }
 
+// Name returns the slot's immutable name (the status snapshot's Slot field
+// is empty until the first state transition; lookups must not depend on it).
+func (s *Slot) Name() string { return s.name }
+
 // Status returns the current snapshot.
 func (s *Slot) Status() Status {
 	s.mu.Lock()

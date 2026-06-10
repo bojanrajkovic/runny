@@ -200,7 +200,7 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 	// exists to kill (and these images are large — 80GB+ uncompressed).
 	if free, err := freeBytes(filepath.Dir(destDir)); err == nil && uint64(total)+(2<<30) > free {
 		return "", fmt.Errorf("image %s needs %s uncompressed but only %s is free — refusing to start a pull that cannot complete",
-			ref, human(total), human(int64(free)))
+			ref, HumanBytes(total), HumanBytes(int64(free)))
 	}
 	if err := truncateFile(diskPath, total); err != nil {
 		return "", err
@@ -549,12 +549,17 @@ func truncateFile(path string, size int64) error {
 	return f.Truncate(size)
 }
 
-func human(n int64) string {
+// HumanBytes renders a byte count for humans. Exported because the pull
+// progress reporting in internal/images speaks the same dialect — two
+// copies of this had already drifted apart once.
+func HumanBytes(n int64) string {
 	switch {
 	case n >= 1<<30:
 		return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
 	case n >= 1<<20:
 		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
 	default:
 		return fmt.Sprintf("%d B", n)
 	}

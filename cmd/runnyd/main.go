@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/bojanrajkovic/runny/internal/bounded"
 	"github.com/bojanrajkovic/runny/internal/cycle"
 	"github.com/bojanrajkovic/runny/internal/github"
@@ -373,4 +375,11 @@ func short(digest string) string {
 	return digest
 }
 
-var errNotDarwin = errors.New("vm boot requires darwin/arm64 (see -doctor)")
+// freeDiskGB: judged by statfs, never du — CoW clones lie to du.
+func freeDiskGB(path string) (uint64, error) {
+	var st unix.Statfs_t
+	if err := unix.Statfs(path, &st); err != nil {
+		return 0, err
+	}
+	return st.Bavail * uint64(st.Bsize) / (1 << 30), nil
+}

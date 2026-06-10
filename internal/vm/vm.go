@@ -12,8 +12,9 @@ import (
 	"github.com/bojanrajkovic/runny/internal/tart"
 )
 
-// ErrUnsupportedPlatform is returned by Boot on non-darwin builds.
-var ErrUnsupportedPlatform = errors.New("vm: virtualization requires darwin/arm64")
+// ErrUnsupportedPlatform is returned when a boot is attempted on a
+// non-darwin build (the daemon's stub manager; see cmd/runnyd).
+var ErrUnsupportedPlatform = errors.New("vm boot requires darwin/arm64 (see -doctor)")
 
 // BootOptions configures one guest boot.
 type BootOptions struct {

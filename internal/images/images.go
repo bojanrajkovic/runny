@@ -93,10 +93,7 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string)) (string, tart
 	pinned := e.Ref
 	pinned.Digest = digest // pull exactly what we resolved
 	if _, err := client.PullTo(wctx, pinned, dir); err != nil {
-		if cause := context.Cause(wctx); cause != nil && wctx.Err() != nil {
-			return "", "", fmt.Errorf("pulling %s: %w", e.Ref, cause)
-		}
-		return "", "", fmt.Errorf("pulling %s: %w", e.Ref, err)
+		return "", "", stallErr(wctx, err, fmt.Sprintf("pulling %s", e.Ref))
 	}
 	if err := bundle.Verify(); err != nil {
 		return "", "", fmt.Errorf("pulled image incomplete: %w", err)
@@ -184,7 +181,7 @@ func (p *progress) feed(n int64) {
 	rate := float64(p.winBytes) / max(now.Sub(p.winStart).Seconds(), 0.001)
 	total := p.total
 	p.winBytes, p.winStart, p.lastShow = 0, now, now
-	detail := fmt.Sprintf("pulled %s at %s/s", humanBytes(total), humanBytes(int64(rate)))
+	detail := fmt.Sprintf("pulled %s at %s/s", oci.HumanBytes(total), oci.HumanBytes(int64(rate)))
 	p.lastDetail = detail
 	logIt := now.Sub(p.lastLog) >= 15*time.Second
 	if logIt {
@@ -194,7 +191,7 @@ func (p *progress) feed(n int64) {
 
 	p.report(detail)
 	if logIt {
-		p.log.Info("pull progress", "downloaded", humanBytes(total), "rate", humanBytes(int64(rate))+"/s")
+		p.log.Info("pull progress", "downloaded", oci.HumanBytes(total), "rate", oci.HumanBytes(int64(rate))+"/s")
 	}
 }
 
@@ -206,19 +203,6 @@ func (p *progress) stop() {
 	<-p.exited
 	if p.report != nil {
 		p.report("")
-	}
-}
-
-func humanBytes(n int64) string {
-	switch {
-	case n >= 1<<30:
-		return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
-	case n >= 1<<20:
-		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
-	case n >= 1<<10:
-		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
-	default:
-		return fmt.Sprintf("%d B", n)
 	}
 }
 
@@ -300,7 +284,7 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 	}
 	dresp, err := http.DefaultClient.Do(dreq)
 	if err != nil {
-		return "", tarballErr(wctx, err)
+		return "", stallErr(wctx, err, "downloading runner tarball")
 	}
 	defer dresp.Body.Close()
 	if dresp.StatusCode != http.StatusOK {
@@ -322,7 +306,7 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 	if err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
-		return "", tarballErr(wctx, err)
+		return "", stallErr(wctx, err, "downloading runner tarball")
 	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
@@ -347,12 +331,13 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 	return dest, nil
 }
 
-// tarballErr surfaces the stall cause when the watcher killed the download.
-func tarballErr(wctx context.Context, err error) error {
+// stallErr surfaces the stall cause when the watcher killed a transfer —
+// "transfer stalled: no progress for 3m" beats a bare "context canceled".
+func stallErr(wctx context.Context, err error, doing string) error {
 	if cause := context.Cause(wctx); cause != nil && wctx.Err() != nil {
-		return fmt.Errorf("downloading runner tarball: %w", cause)
+		return fmt.Errorf("%s: %w", doing, cause)
 	}
-	return fmt.Errorf("downloading runner tarball: %w", err)
+	return fmt.Errorf("%s: %w", doing, err)
 }
 
 // progressWriter adapts a byte-delta callback to io.Writer for TeeReader.

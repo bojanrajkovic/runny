@@ -194,7 +194,7 @@ func toLogLine(e logring.Entry) *runnyv1.LogLine {
 
 func (s *Server) findSlot(name string) (*statemachine.Slot, error) {
 	for _, slot := range s.Slots {
-		if slot.Status().Slot == name {
+		if slot.Name() == name {
 			return slot, nil
 		}
 	}

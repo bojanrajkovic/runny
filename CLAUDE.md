@@ -55,7 +55,7 @@ For per-directory detail, read that directory's `CLAUDE.md` if present. For curr
 - **No tart binary at runtime**; tart *format* compatibility is the contract (ADR-0008).
 - **No .xcodeproj, ever.** Xcode is SDK-vendor only (ADR-0007).
 - **Conventional Commits**, enforced by the commit-msg hook; atomic commits. See `CONTRIBUTING.md`.
-- **Three-tier hooks** — pre-commit (format), commit-msg (commitlint), pre-push (build + test); CI re-runs them. Don't bypass.
+- **Three-tier hooks** — pre-commit (format + zizmor on workflows), commit-msg (commitlint), pre-push (build + test); CI re-runs them. Don't bypass.
 - **`AGENTS.md` symlinks** — every `CLAUDE.md` has a sibling `AGENTS.md` symlink.
 - **Reference content is read from source, never enumerated in prose.** See `docs/documentation-system.md`.
 

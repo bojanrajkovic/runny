@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
-# Sets the GitHub repo secrets the release pipeline can use (ADR-0010,
+# Sets the GitHub secrets the release pipeline can use (ADR-0010,
 # CONTRIBUTING.md "Codesigning tiers"). Everything is optional — workflows
-# skip gracefully when a secret is absent. Run interactively or with flags:
+# skip gracefully when a secret is absent. Secrets land on the `release`
+# environment, not the repo: only jobs that declare `environment: release`
+# can read them (zizmor: secrets-outside-env). Run interactively or with
+# flags:
 #
 #   tools/setup-secrets.sh \
-#     --tap-token <PAT with repo write on bojanrajkovic/homebrew-tap> \
+#     --releaser-key ~/keys/releaser-bot.private-key.pem \
 #     --cert-p12 ~/certs/developer-id.p12 --p12-password '...' \
 #     --notary-key ~/keys/AuthKey_ABC123.p8 --notary-key-id ABC123 \
 #     --notary-issuer-id 12345678-...-...
 set -euo pipefail
 
 REPO="bojanrajkovic/runny"
-tap_token="" cert_p12="" p12_password="" notary_key="" notary_key_id="" notary_issuer_id=""
+ENVIRONMENT="release"
+releaser_key="" cert_p12="" p12_password="" notary_key="" notary_key_id="" notary_issuer_id=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
-	--tap-token) tap_token="$2" && shift 2 ;;
+	--releaser-key) releaser_key="$2" && shift 2 ;;
 	--cert-p12) cert_p12="$2" && shift 2 ;;
 	--p12-password) p12_password="$2" && shift 2 ;;
 	--notary-key) notary_key="$2" && shift 2 ;;
@@ -25,20 +29,27 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
+# The environment must exist before secrets can land on it (idempotent).
+gh api -X PUT "repos/$REPO/environments/$ENVIRONMENT" --silent
+
 set_secret() { # set_secret <name> <value>
 	[ -z "$2" ] && echo "  - $1: skipped" && return 0
-	printf '%s' "$2" | gh secret set "$1" --repo "$REPO"
+	printf '%s' "$2" | gh secret set "$1" --repo "$REPO" --env "$ENVIRONMENT"
 	echo "  ✓ $1"
 }
 
-echo "Setting secrets on $REPO"
+echo "Setting secrets on $REPO (environment: $ENVIRONMENT)"
 
-# Homebrew tap push (release workflow's formula update).
-if [ -z "$tap_token" ]; then
-	# -s: a push-scoped PAT must not land in terminal scrollback.
-	read -rs -p "TAP_PUSH_TOKEN — PAT with contents:write on bojanrajkovic/homebrew-tap (empty to skip): " tap_token && echo
+# The releaser App's private key (release-please + tap push mint scoped
+# installation tokens from it).
+if [ -z "$releaser_key" ]; then
+	read -r -p "Path to releaser App private key .pem (empty to skip): " releaser_key
 fi
-set_secret TAP_PUSH_TOKEN "$tap_token"
+if [ -n "$releaser_key" ]; then
+	set_secret RELEASER_APP_PRIVATE_KEY "$(cat "$releaser_key")"
+else
+	echo "  - RELEASER_APP_PRIVATE_KEY: skipped"
+fi
 
 # Developer ID signing (upgrade from ad-hoc; see CONTRIBUTING.md).
 if [ -z "$cert_p12" ]; then
@@ -74,5 +85,5 @@ else
 	echo "  - NOTARY_KEY_P8 / NOTARY_KEY_ID / NOTARY_ISSUER_ID: skipped"
 fi
 
-echo "Done. Current secrets:"
-gh secret list --repo "$REPO"
+echo "Done. Current environment secrets:"
+gh secret list --repo "$REPO" --env "$ENVIRONMENT"

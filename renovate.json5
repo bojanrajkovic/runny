@@ -5,7 +5,10 @@
   schedule: ['before 9am on monday'],
   semanticCommits: 'enabled',
   enabledManagers: ['bazel-module', 'gomod', 'github-actions', 'npm', 'mise'],
-  postUpdateOptions: ['gomodTidy'],
+  // gomodTidyE, not gomodTidy: plain `go mod tidy` aborts mid-attribution on
+  // the in-graph proto import and mangles every dep to `// indirect` — the
+  // `-e` is load-bearing (CONTRIBUTING.md "Known wrinkle").
+  postUpdateOptions: ['gomodTidyE'],
   packageRules: [
     {
       description: 'Bazel rules move together; group them.',

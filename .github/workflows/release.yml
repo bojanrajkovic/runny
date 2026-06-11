@@ -23,8 +23,9 @@ jobs:
   artifacts:
     name: build + attest artifacts
     runs-on: macos-26
-    # Release secrets (Developer ID signing, when configured) live on this
-    # environment; jobs outside it cannot read them.
+    # Signing/notary credentials (Developer ID, when configured) live on
+    # this environment, restricted to v* tag refs; jobs outside it cannot
+    # read them.
     environment: release
     permissions:
       contents: write # attach assets to the release
@@ -77,8 +78,9 @@ jobs:
     name: update tap formula
     needs: artifacts
     runs-on: ubuntu-latest
-    # The App private key is an environment secret (see release-please.yml).
-    environment: release
+    # The App private key is on releaser-app (see release-please.yml) —
+    # this job mints App tokens but must not see signing credentials.
+    environment: releaser-app
     # contents:read is only to check out this repo's formula template; the tap
     # push uses a GitHub App installation token scoped to homebrew-tap, never
     # GITHUB_TOKEN (which has no cross-repo write anyway).

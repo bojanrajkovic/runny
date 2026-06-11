@@ -21,9 +21,10 @@ jobs:
   release-please:
     name: version + release PR
     runs-on: ubuntu-latest
-    # The App private key is an environment secret: only jobs that declare
-    # this environment can read it (zizmor: secrets-outside-env).
-    environment: release
+    # The App private key lives on the releaser-app environment — the trust
+    # domain for minting App tokens, separate from `release` (which holds
+    # signing credentials). Only jobs declaring this environment can read it.
+    environment: releaser-app
     steps:
       - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         id: app

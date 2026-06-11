@@ -11,14 +11,17 @@ on:
   release:
     types: [published]
 
-permissions:
-  contents: write
-  id-token: write
-  attestations: write
+permissions: {}
 
 jobs:
   artifacts:
     runs-on: macos-26
+    # contents:write to attach assets to the release; id-token + attestations
+    # for build provenance. The homebrew job scopes itself separately.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     outputs:
       version: ${{ steps.package.outputs.version }}
       sha256: ${{ steps.package.outputs.sha256 }}
@@ -85,6 +88,9 @@ jobs:
           private-key: ${{ secrets.RELEASER_APP_PRIVATE_KEY }}
           owner: bojanrajkovic
           repositories: homebrew-tap
+          # Formula push only — without this the token inherits every
+          # permission the App installation has.
+          permission-contents: write
       - name: update tap formula
         if: ${{ steps.tap-token.outputs.token != '' }}
         env:

@@ -17,8 +17,6 @@ type Config struct {
 	Deadlines Deadlines    `yaml:"deadlines"`
 	Limits    Limits       `yaml:"limits"`
 	Retention Retention    `yaml:"retention"`
-	// NamePrefix prefixes runner names globally: <prefix>-<slot>-<cycle8>.
-	NamePrefix string `yaml:"name_prefix"`
 }
 
 // GitHubConfig is one pool's App credentials. Each pool carries its own —
@@ -161,9 +159,6 @@ func (c *Config) applyDefaults() {
 		if *d == 0 {
 			*d = Duration(v)
 		}
-	}
-	if c.NamePrefix == "" {
-		c.NamePrefix = "runny"
 	}
 	for i := range c.Pools {
 		p := &c.Pools[i]

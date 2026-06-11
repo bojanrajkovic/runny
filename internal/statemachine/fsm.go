@@ -115,12 +115,16 @@ type Deps struct {
 	Home   home.Dir
 	Config *home.Config
 	Pool   home.PoolConfig
-	VM     vm.Manager
-	Images ImageEnsurer
-	Clone  Cloner
-	GitHub GitHub
-	Dial   Dialer
-	Log    *slog.Logger
+	// InstancePrefix is this install's runner-name namespace
+	// (<slug(hostname)>-<rand8>, derived and persisted by home.Dir, ADR-0009):
+	// runner names are <InstancePrefix>-<slot>-<cycle8>.
+	InstancePrefix string
+	VM             vm.Manager
+	Images         ImageEnsurer
+	Clone          Cloner
+	GitHub         GitHub
+	Dial           Dialer
+	Log            *slog.Logger
 }
 
 // Command is an operator injection (from runnyctl via the socket).
@@ -379,7 +383,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 		Slot:    s.name,
 		Started: time.Now(),
 	}
-	runnerName := fmt.Sprintf("%s-%s-%s", cfg.NamePrefix, s.name, rec.CycleID)
+	runnerName := fmt.Sprintf("%s-%s-%s", s.deps.InstancePrefix, s.name, rec.CycleID)
 
 	// Operator commands must be able to interrupt ANY state, not just
 	// LISTENING: a recycle issued mid-pull once sat queued for hours, then

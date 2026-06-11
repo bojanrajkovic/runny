@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "config.go",
         "home.go",
+        "instance.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/home",
     visibility = ["//:__subpackages__"],
@@ -13,6 +14,9 @@ go_library(
 
 go_test(
     name = "home_test",
-    srcs = ["config_test.go"],
+    srcs = [
+        "config_test.go",
+        "instance_test.go",
+    ],
     embed = [":home"],
 )

@@ -20,7 +20,18 @@ target, N identical macOS slots. Two needs broke that shape at once:
 The fleet is a list of **pools**. Each pool declares its guest `os`
 (darwin | linux), `image`, `count`, registration `target` (an org, or an
 owner/repo pair), `labels`, and optional overrides. Slots are named
-`<pool>-<n>`; runner names stay `<prefix>-<slot>-<cycle8>`.
+`<pool>-<n>`; runner names are `<instance-prefix>-<slot>-<cycle8>`.
+
+The instance prefix is **derived, not configured**: `<slug(hostname)>-<rand8>`,
+generated once and persisted in `~/.runny/instance-id`. It is the daemon's
+ownership namespace — the startup sweep deletes offline registrations by
+matching it — so it is deliberately not a config knob: a mistyped prefix would
+orphan runners beyond the sweep's reach or collide with another host's, and it
+is persisted (not regenerated per process) so a crash-restart keeps the same
+namespace. The host slug makes runners human-identifiable; `rand8` disambiguates
+same-hostname hosts and anchors stability if the hostname later changes.
+*(Revised 2026-06-10: replaced the configurable `name_prefix`, which put a
+sweep-critical identifier in fragile operator hands.)*
 
 Consequences through the stack:
 

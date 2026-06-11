@@ -257,7 +257,7 @@ func newHarness(t *testing.T, mutate func(*home.Config)) *harness {
 	if err := dir.Ensure(); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &home.Config{NamePrefix: "runny"}
+	cfg := &home.Config{}
 	pool := home.PoolConfig{
 		Name:          "runner",
 		OS:            "darwin",
@@ -297,11 +297,12 @@ func newHarness(t *testing.T, mutate func(*home.Config)) *harness {
 		states: make(chan Status, 256),
 	}
 	deps := Deps{
-		Home:   dir,
-		Config: cfg,
-		Pool:   pool,
-		VM:     h.vmF,
-		Images: h.images,
+		Home:           dir,
+		Config:         cfg,
+		Pool:           pool,
+		InstancePrefix: "runny",
+		VM:             h.vmF,
+		Images:         h.images,
 		Clone: func(src tart.Bundle, dst string) error {
 			return os.MkdirAll(dst, 0o755)
 		},

@@ -137,6 +137,15 @@ func run() error {
 		return fmt.Errorf("%d startup check(s) failed (run runnyd -doctor for detail)", len(failed))
 	}
 
+	// This install's runner-name namespace: <slug(hostname)>-<rand8>, derived
+	// and persisted (not configured) so it can't be mistyped and stays stable
+	// across restarts — the sweep below depends on it (ADR-0009).
+	prefix, err := dir.InstancePrefix()
+	if err != nil {
+		return err
+	}
+	logger.Info("runner namespace", "prefix", prefix)
+
 	// Sweep: cold start owns the world (ADR-0004). Clones first, then any
 	// offline registrations carrying our prefix, on every target.
 	if err := os.RemoveAll(dir.VMsDir()); err != nil {
@@ -146,7 +155,7 @@ func run() error {
 		return err
 	}
 	for _, c := range distinctClients {
-		sweepRegistrations(ctx, logger, c, cfg.NamePrefix)
+		sweepRegistrations(ctx, logger, c, prefix)
 	}
 
 	// No startup tarball priming: runner tarballs are ensured inside each
@@ -161,10 +170,11 @@ func run() error {
 		}
 		gh, osName := clients[ghKey{appID: p.GitHub.AppID, target: p.Target}], p.OS
 		deps := statemachine.Deps{
-			Home:   dir,
-			Config: cfg,
-			Pool:   p,
-			VM:     vmManager(),
+			Home:           dir,
+			Config:         cfg,
+			Pool:           p,
+			InstancePrefix: prefix,
+			VM:             vmManager(),
 			Images: &images.Ensurer{
 				Home: dir,
 				Ref:  ref,

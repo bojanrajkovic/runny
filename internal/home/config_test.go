@@ -36,9 +36,6 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if c.NamePrefix != "runny" {
-		t.Errorf("NamePrefix = %q, want runny", c.NamePrefix)
-	}
 	p := c.Pools[0]
 	if p.RunnerGroupID != 1 || p.SSHUser != "admin" || p.SSHPassword != "admin" {
 		t.Errorf("pool defaults: %+v", p)
@@ -107,7 +104,7 @@ func TestLoadConfigValidation(t *testing.T) {
 	cases := []struct {
 		name, yaml, wantErr string
 	}{
-		{"no pools", "name_prefix: runny\n", "at least one pool"},
+		{"no pools", "retention:\n  cycles_per_slot: 5\n", "at least one pool"},
 		{"pool missing github", "pools:\n  - name: x\n    os: linux\n    image: i\n    target: {org: a}\n", "github.app_id is required"},
 		{"bad os", minimalConfig + "  - name: w\n    os: windows\n    image: x\n    target: {org: a}\n", "os must be darwin or linux"},
 		{"both targets", minimalConfig + "  - name: b\n    os: linux\n    image: x\n    target: {org: a, owner: b, repo: c}\n", "not both"},

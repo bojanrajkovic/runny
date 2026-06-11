@@ -14,18 +14,23 @@ Go 1.26 (mise-managed) for daemon + CLI; cgo to Virtualization.framework via `Co
 
 `bazel build //...` · `bazel test //...` · `bazel run //tools/format` · `bazel run //:gazelle` (after changing Go imports). Dependency workflow: `go mod tidy` → `bazel mod tidy` → `bazel run //:gazelle`. Full reference and dev setup: `CONTRIBUTING.md`.
 
-**Darwin-only targets** (vz cgo, RunnyBar) do not build on Linux — develop here, build/test them on ix (`tools/ix` sync helper; see CONTRIBUTING.md).
+**Darwin-only targets** (vz cgo, RunnyBar) build and test only on Darwin. On other hosts, everything pure-Go still builds and tests; for the cross-host loop see CONTRIBUTING.md.
 
 ## Source tree
 
 - `cmd/runnyd`, `cmd/runnyctl` — binaries; thin mains over `internal/`.
 - `internal/bounded` — `bounded.Context`: the no-unbounded-operations invariant as a type (ADR-0011); wall-clock and progress-stall bounds.
 - `internal/statemachine` — the 11-state crash-only FSM (ADR-0004); per-state deadlines, backoff, cycle.json.
-- `internal/vm` — tart-bundle parsing + Virtualization.framework lifecycle via vz (darwin-tagged; ADR-0008).
+- `internal/tart` — the tart bundle format: config.json parsing, validation, APFS clone.
+- `internal/vm` — Virtualization.framework lifecycle via vz (darwin-tagged; ADR-0008) + guest sizing.
 - `internal/oci` — tart-format image pull (non-standard OCI layout, LZ4 layers).
+- `internal/images` — the ENSURE_IMAGE ensurer: image + runner-tarball caching, stall watching, pull progress.
 - `internal/sshx` — the only package allowed to construct SSH clients (deadline recipe, ADR-0002).
+- `internal/guest` — what to do over SSH: provision scripts, runner launch, diag pull.
 - `internal/github` — App JWT → installation token → JIT config; runner list/delete (ADR-0003).
-- `internal/home` — the `~/.runny` on-disk layout: images, vms, cycles, logs, socket.
+- `internal/home` — the `~/.runny` on-disk layout (images, vms, cycles, logs, socket, instance-id) + config schema and runner-name rules.
+- `internal/cycle` — per-cycle artifact records (cycle.json) and retention.
+- `internal/logring` — log fan-out: file sink + in-memory rings (daemon log, runner output) behind StreamLogs.
 - `internal/socket` — the gRPC server over the unix socket.
 - `proto/runny/v1` — the contract `runnyctl` and RunnyBar both consume.
 - `apps/RunnyBar` — SwiftUI MenuBarExtra (ADR-0007: no .xcodeproj, ever).

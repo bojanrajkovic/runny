@@ -50,18 +50,19 @@ codesign -s - --entitlements tools/sign/runnyd.entitlements --force bazel-bin/cm
 
 - **Conventional Commits**, validated by the commit-msg hook (`@commitlint/config-conventional`); the type enum is owned by `commitlint.config.mjs`. Wrap body lines at 100 characters.
 - **Atomic commits** — one logical change each, describable in a sentence without "and".
-- **Hooks (lefthook):** pre-commit formats staged files (restaging fixes); commit-msg runs commitlint; pre-push runs `bazel build` + `bazel test`. Do not bypass them.
+- **Hooks (lefthook):** pre-commit formats staged files (restaging fixes) and zizmor-audits staged workflow files (offline); commit-msg runs commitlint; pre-push runs `bazel build` + `bazel test`. Do not bypass them.
 - **Squash-merge** — the PR title becomes the shipped subject (gated by `pr-title.yml`); the PR body becomes the commit body, so write it as "what shipped". Split multi-phase work into multiple PRs, each one logical change.
 
 ## CI
 
-GitHub Actions gate every PR and push to `main`: `ci.yml` (Linux: build/test/format; macOS: darwin targets + an ad-hoc-signed `runnyd` artifact) and `pr-title.yml`. All checks must pass before merge. CI never boots guests — GitHub's macOS runners are VMs themselves, so VM-touching verification happens on a real host.
+GitHub Actions gate every PR and push to `main`: `ci.yml` (Linux: build/test/format; macOS: darwin targets + an ad-hoc-signed `runnyd` artifact; zizmor: workflow audit) and `pr-title.yml`. All checks must pass before merge. CI never boots guests — GitHub's macOS runners are VMs themselves, so VM-touching verification happens on a real host.
 
 ### CI security
 
 - **Actions are pinned by commit SHA** (tag in a trailing comment); Renovate updates the pins. Never add an action by movable tag.
 - **Caches never touch artifacts.** Bazel caches are restored only in build/test jobs; the `artifact` job builds cold so cache poisoning cannot reach a deployable binary. Keep it that way when adding release workflows.
 - `persist-credentials: false` on every checkout; workflow permissions are read-only.
+- **Workflows are zizmor-audited** (mise-managed, default persona): pre-commit audits staged workflow files offline; the `zizmor` CI job runs the full audit with online checks. Fix findings rather than suppress; a suppression needs an inline `# zizmor: ignore[rule]` comment whose justification survives review. GitHub App tokens (`create-github-app-token`) always declare `permission-*` inputs — an unscoped token inherits every permission the App installation has.
 
 ### Codesigning tiers
 

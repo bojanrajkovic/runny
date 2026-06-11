@@ -11,6 +11,11 @@ pre-commit:
       glob: "*.{go,bzl,bazel,swift}"
       run: mise x -- bazel run //tools/format -- {staged_files}
       stage_fixed: true
+    zizmor:
+      glob: ".github/workflows/*.{yml,yaml}"
+      # --offline keeps the hook network- and auth-free; the CI zizmor job
+      # runs the full audit including the online checks.
+      run: mise x -- zizmor --offline {staged_files}
 
 commit-msg:
   commands:

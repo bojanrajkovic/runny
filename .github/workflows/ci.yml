@@ -10,13 +10,20 @@ on:
   push:
     branches: [main]
 
+# Superseded runs are dead weight — a new push cancels the old run's
+# (10x-billed) macOS minutes. Release workflows serialize instead.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
-  contents: read
+  contents: read # checkout only
 
 jobs:
   # Linux covers format, lint (nogo rides compilation), and all pure-Go
   # build/test fast. Cached: test feedback only, no artifacts.
   linux:
+    name: build + test (linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -41,6 +48,7 @@ jobs:
   # only. GitHub's macOS runners are themselves VMs (no nested
   # virtualization), so CI never boots guests — that remains an ix job.
   macos:
+    name: build + test (macos)
     # macos-26 matches the deployment host (ix) and guest image generation.
     runs-on: macos-26
     steps:
@@ -60,19 +68,22 @@ jobs:
 
   # The workflows themselves are attack surface (template injection,
   # unpinned actions, excessive permissions, leaked App tokens): zizmor
-  # audits them. The pre-commit hook runs the same audit --offline; this
-  # job adds the online checks (known-vulnerable-actions needs a token).
+  # audits them. The pre-commit hook runs the same audit --offline via the
+  # mise-pinned CLI; this job runs the official action with online checks.
+  # advanced-security: false makes findings fail the job — a normal
+  # blocking check rather than a Security-tab entry behind a ruleset.
   zizmor:
+    name: workflow audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4
-      - name: audit workflows
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: mise x -- zizmor .github/workflows/
+      - uses: zizmorcore/zizmor-action@5f14fd08f7cf1cb1609c1e344975f152c7ee938d # v0.5.6
+        with:
+          advanced-security: false
+          # Strictest persona: catches secrets-outside-env and friends.
+          persona: auditor
 
   # Deployable binaries build COLD — no Bazel or tool caches, exact-pinned
   # toolchain — so cache poisoning cannot reach an artifact. Every build is
@@ -80,11 +91,12 @@ jobs:
   # implied next version with a -beta.<sha> suffix; release builds (tag) the
   # clean version. Provenance is attested either way.
   artifact:
+    name: cold artifact build
     runs-on: macos-26
     permissions:
-      contents: read
-      id-token: write
-      attestations: write
+      contents: read # checkout only
+      id-token: write # OIDC identity for provenance attestation
+      attestations: write # attest-build-provenance stores the attestation
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:

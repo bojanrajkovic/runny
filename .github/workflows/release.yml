@@ -1,7 +1,7 @@
 # Release artifacts (ADR-0010): cold stamped Bazel build (no caches — see
 # CONTRIBUTING.md "CI security"), ad-hoc signed, checksummed, attested, and
-# attached to the release; then the Homebrew tap formula is updated when a
-# TAP_PUSH_TOKEN secret exists. The formula's sha256 comes from the package
+# attached to the release; then the Homebrew tap formula is updated when the
+# releaser App is configured. The formula's sha256 comes from the package
 # step's own checksum via job outputs — never from re-downloading the asset
 # (a CDN-propagation race, and it would attest whatever GitHub served
 # rather than what this run built).
@@ -11,17 +11,25 @@ on:
   release:
     types: [published]
 
+# One release at a time, never cancelled mid-publish; a second publish
+# event queues behind the first.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 permissions: {}
 
 jobs:
   artifacts:
+    name: build + attest artifacts
     runs-on: macos-26
-    # contents:write to attach assets to the release; id-token + attestations
-    # for build provenance. The homebrew job scopes itself separately.
+    # Release secrets (Developer ID signing, when configured) live on this
+    # environment; jobs outside it cannot read them.
+    environment: release
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
+      contents: write # attach assets to the release
+      id-token: write # OIDC identity for provenance attestation
+      attestations: write # attest-build-provenance stores the attestation
     outputs:
       version: ${{ steps.package.outputs.version }}
       sha256: ${{ steps.package.outputs.sha256 }}
@@ -66,8 +74,11 @@ jobs:
         run: gh release upload "$TAG" runny_*.tar.gz runny_*.sha256
 
   homebrew:
+    name: update tap formula
     needs: artifacts
     runs-on: ubuntu-latest
+    # The App private key is an environment secret (see release-please.yml).
+    environment: release
     # contents:read is only to check out this repo's formula template; the tap
     # push uses a GitHub App installation token scoped to homebrew-tap, never
     # GITHUB_TOKEN (which has no cross-repo write anyway).

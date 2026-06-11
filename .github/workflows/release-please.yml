@@ -9,11 +9,21 @@ on:
   push:
     branches: [main]
 
+# Serialize: never cancel an in-flight run mid-release; the next push
+# queues behind it.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
 permissions: {}
 
 jobs:
   release-please:
+    name: version + release PR
     runs-on: ubuntu-latest
+    # The App private key is an environment secret: only jobs that declare
+    # this environment can read it (zizmor: secrets-outside-env).
+    environment: release
     steps:
       - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         id: app

@@ -15,7 +15,7 @@ pre-commit:
       glob: ".github/workflows/*.{yml,yaml}"
       # --offline keeps the hook network- and auth-free; the CI zizmor job
       # runs the full audit including the online checks.
-      run: mise x -- zizmor --offline {staged_files}
+      run: mise x -- zizmor --offline --persona auditor {staged_files}
 
 commit-msg:
   commands:

@@ -6,11 +6,17 @@ on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
 
+# A re-edit of the title supersedes the previous validation run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
-  pull-requests: read
+  pull-requests: read # the action reads the PR title
 
 jobs:
   validate:
+    name: validate PR title
     runs-on: ubuntu-latest
     steps:
       - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6

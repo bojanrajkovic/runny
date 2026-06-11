@@ -49,6 +49,11 @@ func (r *Ring) add(e Entry) {
 	r.mu.Unlock()
 }
 
+// Add records one entry from a non-slog producer (runner output lines).
+// Same non-blocking fan-out as the slog path: a slow subscriber loses lines
+// rather than wedging the producer.
+func (r *Ring) Add(e Entry) { r.add(e) }
+
 // Snapshot returns up to the last n entries without subscribing.
 func (r *Ring) Snapshot(n int) []Entry {
 	r.mu.Lock()

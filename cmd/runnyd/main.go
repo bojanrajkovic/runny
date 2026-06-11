@@ -89,6 +89,9 @@ func run() error {
 	}
 	defer logFile.Close()
 	ring := logring.NewRing(4096)
+	// Runner output gets its own ring: guest run.sh lines, the primary
+	// `runnyctl logs` stream, kept apart from the daemon's structured log.
+	runnerRing := logring.NewRing(4096)
 	logger := slog.New(logring.NewHandler(logFile, slog.LevelDebug, ring))
 	slog.SetDefault(logger)
 	logger.Info("runnyd starting", "version", version, "home", dir.String())
@@ -196,13 +199,19 @@ func run() error {
 				Timeout:  p.SSHTimeout.D(),
 			}},
 			Log: logger,
+			OnRunnerLine: func(slot, cycleID, line string) {
+				runnerRing.Add(logring.Entry{
+					Time: time.Now(), Level: "runner", Message: line,
+					Attrs: map[string]string{"slot": slot, "cycle": cycleID},
+				})
+			},
 		}
 		for i := 1; i <= p.Count; i++ {
 			slots = append(slots, statemachine.NewSlot(fmt.Sprintf("%s-%d", p.Name, i), deps))
 		}
 	}
 
-	srv := socket.NewServer(slots, ring,
+	srv := socket.NewServer(slots, ring, runnerRing,
 		func(slot string) cycle.Store { return cycle.Store{SlotDir: dir.SlotCyclesDir(slot)} },
 		doctor, version)
 

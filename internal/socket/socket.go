@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/bojanrajkovic/runny/internal/cycle"
@@ -30,12 +33,15 @@ type DoctorCheck struct {
 type Server struct {
 	runnyv1.UnimplementedRunnyServiceServer
 
-	Slots    []*statemachine.Slot
-	Ring     *logring.Ring
-	Stores   func(slot string) cycle.Store
-	DoctorFn func(ctx context.Context) []DoctorCheck
-	Started  time.Time
-	Version  string
+	Slots []*statemachine.Slot
+	// Ring is the daemon's own log; RunnerRing holds guest runner output
+	// lines (slot/cycle in attrs). StreamLogs serves RunnerRing by default.
+	Ring       *logring.Ring
+	RunnerRing *logring.Ring
+	Stores     func(slot string) cycle.Store
+	DoctorFn   func(ctx context.Context) []DoctorCheck
+	Started    time.Time
+	Version    string
 
 	// watch fan-out
 	mu      sync.Mutex
@@ -44,17 +50,18 @@ type Server struct {
 }
 
 // NewServer wires the slots' OnChange into the watch fan-out.
-func NewServer(slots []*statemachine.Slot, ring *logring.Ring,
+func NewServer(slots []*statemachine.Slot, ring, runnerRing *logring.Ring,
 	stores func(string) cycle.Store, doctor func(context.Context) []DoctorCheck, version string,
 ) *Server {
 	s := &Server{
-		Slots:    slots,
-		Ring:     ring,
-		Stores:   stores,
-		DoctorFn: doctor,
-		Started:  time.Now(),
-		Version:  version,
-		watches:  map[int]chan struct{}{},
+		Slots:      slots,
+		Ring:       ring,
+		RunnerRing: runnerRing,
+		Stores:     stores,
+		DoctorFn:   doctor,
+		Started:    time.Now(),
+		Version:    version,
+		watches:    map[int]chan struct{}{},
 	}
 	for _, slot := range slots {
 		slot.OnChange(func(statemachine.Status) { s.notify() })
@@ -156,17 +163,40 @@ func (s *Server) WatchStatus(_ *runnyv1.WatchStatusRequest, stream grpc.ServerSt
 }
 
 func (s *Server) StreamLogs(req *runnyv1.StreamLogsRequest, stream grpc.ServerStreamingServer[runnyv1.LogLine]) error {
+	ring := s.RunnerRing
+	keep := func(logring.Entry) bool { return true }
+	switch {
+	case req.GetDaemon():
+		if req.GetSlot() != "" {
+			return status.Error(codes.InvalidArgument, "slot filter does not apply to the daemon log")
+		}
+		ring = s.Ring
+	case req.GetSlot() != "":
+		want := req.GetSlot()
+		if !slices.ContainsFunc(s.Slots, func(sl *statemachine.Slot) bool { return sl.Name() == want }) {
+			return status.Errorf(codes.NotFound, "no slot named %q", want)
+		}
+		keep = func(e logring.Entry) bool { return e.Attrs["slot"] == want }
+	}
+	// With a filter, replay counts matching lines: subscribe to the whole
+	// buffer and tail the survivors, so `-replay 50 loupe-1` means 50 lines
+	// of loupe-1, not loupe-1's share of the last 50 global lines.
+	replay := int(req.GetReplay())
+	subscribeReplay := replay
+	if req.GetSlot() != "" {
+		subscribeReplay = 1 << 20 // effectively "all of the ring"
+	}
 	if !req.GetFollow() {
-		for _, e := range s.Ring.Snapshot(int(req.GetReplay())) {
+		for _, e := range tailKept(ring.Snapshot(subscribeReplay), keep, replay) {
 			if err := stream.Send(toLogLine(e)); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	snap, ch, cancel := s.Ring.Subscribe(int(req.GetReplay()))
+	snap, ch, cancel := ring.Subscribe(subscribeReplay)
 	defer cancel()
-	for _, e := range snap {
+	for _, e := range tailKept(snap, keep, replay) {
 		if err := stream.Send(toLogLine(e)); err != nil {
 			return err
 		}
@@ -176,11 +206,28 @@ func (s *Server) StreamLogs(req *runnyv1.StreamLogsRequest, stream grpc.ServerSt
 		case <-stream.Context().Done():
 			return nil
 		case e := <-ch:
+			if !keep(e) {
+				continue
+			}
 			if err := stream.Send(toLogLine(e)); err != nil {
 				return err
 			}
 		}
 	}
+}
+
+// tailKept filters entries and returns the last n survivors.
+func tailKept(entries []logring.Entry, keep func(logring.Entry) bool, n int) []logring.Entry {
+	var out []logring.Entry
+	for _, e := range entries {
+		if keep(e) {
+			out = append(out, e)
+		}
+	}
+	if len(out) > n {
+		out = out[len(out)-n:]
+	}
+	return out
 }
 
 func toLogLine(e logring.Entry) *runnyv1.LogLine {

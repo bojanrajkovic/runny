@@ -90,6 +90,12 @@ message StreamLogsRequest {
   uint32 replay = 1;
   // When false, send the replay snapshot and close instead of following.
   bool follow = 2;
+  // The default stream is runner output (each guest's run.sh lines, tagged
+  // with slot/cycle attrs); daemon switches to runnyd's own structured log.
+  bool daemon = 3;
+  // slot filters runner output to one slot; empty = all slots interleaved.
+  // Invalid with daemon.
+  string slot = 4;
 }
 
 message LogLine {

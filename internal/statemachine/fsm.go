@@ -125,6 +125,12 @@ type Deps struct {
 	GitHub         GitHub
 	Dial           Dialer
 	Log            *slog.Logger
+	// OnRunnerLine, when set, receives every line of the guest runner's
+	// output (run.sh stdout/stderr) as it arrives — the feed for the
+	// runnyctl-visible runner log stream. Called on the FSM's line path; it
+	// must not block (sink into a logring.Ring, whose fan-out drops on slow
+	// subscribers).
+	OnRunnerLine func(slot, cycleID, line string)
 }
 
 // Command is an operator injection (from runnyctl via the socket).
@@ -561,6 +567,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 						code, _ := p.Wait()
 						return fmt.Errorf("runner exited (code %d) before listening", code)
 					}
+					s.emitRunnerLine(rec.CycleID, line)
 					if strings.Contains(line, markerListening) {
 						return nil
 					}
@@ -684,6 +691,7 @@ func (s *Slot) listenAndRunJob(ctx context.Context, rec *cycle.Record, proc Proc
 				finishListening(cycle.OutcomeError, fmt.Sprintf("runner exited (code %d) while idle", code))
 				return false, StateListening, fmt.Errorf("runner exited (code %d) while listening", code)
 			}
+			s.emitRunnerLine(rec.CycleID, line)
 			if !strings.Contains(line, markerJobStarted) {
 				continue
 			}
@@ -696,7 +704,7 @@ func (s *Slot) listenAndRunJob(ctx context.Context, rec *cycle.Record, proc Proc
 			jrec := cycle.StateRecord{State: string(StateJob), Entered: time.Now()}
 
 			jctx, cancel := context.WithTimeout(ctx, cfg.Limits.MaxJobDuration.D())
-			ok, err := s.watchJob(jctx, proc)
+			ok, err := s.watchJob(jctx, proc, rec.CycleID)
 			cancel()
 			jrec.Left = time.Now()
 			if ok {
@@ -711,7 +719,7 @@ func (s *Slot) listenAndRunJob(ctx context.Context, rec *cycle.Record, proc Proc
 	}
 }
 
-func (s *Slot) watchJob(ctx context.Context, proc Proc) (bool, error) {
+func (s *Slot) watchJob(ctx context.Context, proc Proc, cycleID string) (bool, error) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -727,10 +735,22 @@ func (s *Slot) watchJob(ctx context.Context, proc Proc) (bool, error) {
 				}
 				return false, fmt.Errorf("runner exited mid-job (code %d)", code)
 			}
+			s.emitRunnerLine(cycleID, line)
 			if strings.Contains(line, markerJobCompleted) {
 				return true, nil
 			}
 		}
+	}
+}
+
+// emitRunnerLine forwards one line of guest runner output to the configured
+// sink (the runner log ring). The FSM's own reads are the tee points — a
+// wrapper goroutine would block (and leak) on lines the FSM stops consuming
+// after a marker ends its state; lines nobody reads simply aren't logged,
+// matching what an operator could ever have observed.
+func (s *Slot) emitRunnerLine(cycleID, line string) {
+	if s.deps.OnRunnerLine != nil {
+		s.deps.OnRunnerLine(s.name, cycleID, line)
 	}
 }
 

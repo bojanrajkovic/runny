@@ -32,8 +32,9 @@ commands:
   version             print the client version
   status              one-shot slot status
   watch               follow status transitions
-  logs [-replay N] [-follow=false]
-                      stream daemon logs (replay N buffered lines first)
+  logs [SLOT] [-daemon] [-replay N] [-follow=false]
+                      stream runner output (all slots, or just SLOT);
+                      -daemon streams runnyd's own log instead
   recycle SLOT [-reason WHY]
                       destroy SLOT's current cycle and start fresh
   pause SLOT          hold SLOT after its current cycle drains
@@ -89,8 +90,13 @@ func run() error {
 		fs := flag.NewFlagSet("logs", flag.ExitOnError)
 		replay := fs.Int("replay", 50, "buffered lines to replay")
 		follow := fs.Bool("follow", true, "keep following after the replay")
+		daemon := fs.Bool("daemon", false, "stream the daemon's own log instead of runner output")
 		_ = fs.Parse(rest)
-		return c.logs(ctx, *replay, *follow)
+		slot := fs.Arg(0)
+		if *daemon && slot != "" {
+			return fmt.Errorf("-daemon and a slot filter are mutually exclusive")
+		}
+		return c.logs(ctx, *replay, *follow, *daemon, slot)
 	case "recycle":
 		fs := flag.NewFlagSet("recycle", flag.ExitOnError)
 		reason := fs.String("reason", "operator request", "reason recorded in the cycle")
@@ -252,8 +258,10 @@ func (c *ctl) watch(ctx context.Context) error {
 	}
 }
 
-func (c *ctl) logs(ctx context.Context, replay int, follow bool) error {
-	stream, err := c.client.StreamLogs(ctx, &runnyv1.StreamLogsRequest{Replay: uint32(replay), Follow: follow})
+func (c *ctl) logs(ctx context.Context, replay int, follow, daemon bool, slot string) error {
+	stream, err := c.client.StreamLogs(ctx, &runnyv1.StreamLogsRequest{
+		Replay: uint32(replay), Follow: follow, Daemon: daemon, Slot: slot,
+	})
 	if err != nil {
 		return err
 	}
@@ -268,14 +276,20 @@ func (c *ctl) logs(ctx context.Context, replay int, follow bool) error {
 			}
 			continue
 		}
+		ts := line.GetTime().AsTime().Local().Format("15:04:05")
+		// Runner output reads like a log tail: timestamp, owning slot, the
+		// guest's line verbatim. The daemon's structured records keep the
+		// level + sorted-attrs rendering.
+		if !daemon {
+			fmt.Fprintf(c.out, "%s %s │ %s\n", ts, line.GetAttrs()["slot"], line.GetMessage())
+			continue
+		}
 		attrs := make([]string, 0, len(line.GetAttrs()))
 		for k, v := range line.GetAttrs() {
 			attrs = append(attrs, k+"="+v)
 		}
 		sort.Strings(attrs)
-		fmt.Fprintf(c.out, "%s %-5s %s %s\n",
-			line.GetTime().AsTime().Local().Format("15:04:05"),
-			line.GetLevel(), line.GetMessage(), strings.Join(attrs, " "))
+		fmt.Fprintf(c.out, "%s %-5s %s %s\n", ts, line.GetLevel(), line.GetMessage(), strings.Join(attrs, " "))
 	}
 }
 

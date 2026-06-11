@@ -38,7 +38,7 @@ tested with fakes on any OS while the darwin-only implementations stay thin.
 | `internal/github` | App JWT → installation token → JIT config; list/delete for reconcile |
 | `internal/vm` | Virtualization.framework boot (darwin), dhcpd-lease IP resolution |
 | `internal/statemachine` | the FSM; depends only on the seams above |
-| `internal/logring` | slog → file sink + in-memory ring for StreamLogs |
+| `internal/logring` | slog → file sink + in-memory rings for StreamLogs (daemon log, and a second ring of guest runner output — the default `runnyctl logs` stream) |
 | `internal/socket` | the gRPC server over the unix socket |
 
 Dependency direction: `cmd/runnyd` wires everything; `internal/statemachine`

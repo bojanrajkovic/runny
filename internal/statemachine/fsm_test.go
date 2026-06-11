@@ -227,6 +227,9 @@ type harness struct {
 	dir     home.Dir
 	states  chan Status
 	runDone chan struct{}
+
+	linesMu     sync.Mutex
+	runnerLines []string // "slot cycle line" per OnRunnerLine call
 }
 
 // start launches the slot and registers a cleanup that waits for Run to
@@ -308,6 +311,11 @@ func newHarness(t *testing.T, mutate func(*home.Config)) *harness {
 		},
 		GitHub: h.gh,
 		Dial:   &fakeDialer{guest: h.guest},
+		OnRunnerLine: func(slot, cycleID, line string) {
+			h.linesMu.Lock()
+			h.runnerLines = append(h.runnerLines, slot+" "+cycleID+" "+line)
+			h.linesMu.Unlock()
+		},
 	}
 	h.slot = NewSlot("runner-1", deps)
 	h.slot.OnChange(func(st Status) {
@@ -392,6 +400,19 @@ func TestHappyCycleThroughJob(t *testing.T) {
 	}
 	if rec == nil {
 		t.Fatalf("no success record in %d records", len(recs))
+	}
+	// Every line the FSM consumed — provision wait, listening, and job —
+	// reached the runner-log sink, attributed to this slot and cycle.
+	h.linesMu.Lock()
+	lines := strings.Join(h.runnerLines, "\n")
+	h.linesMu.Unlock()
+	for _, want := range []string{"Connected to GitHub", "Listening for Jobs", "Running job:", "completed with result"} {
+		if !strings.Contains(lines, want) {
+			t.Errorf("runner-log sink missing %q in:\n%s", want, lines)
+		}
+	}
+	if !strings.Contains(lines, "runner-1 "+rec.CycleID+" ") {
+		t.Errorf("runner lines not attributed to slot+cycle:\n%s", lines)
 	}
 	// Any second record must be the canceled gated cycle, not a double
 	// write of the success cycle under another result.

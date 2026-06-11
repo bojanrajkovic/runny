@@ -41,6 +41,9 @@ enum SlotState {
   SLOT_STATE_LISTENING = 9;
   SLOT_STATE_JOB = 10;
   SLOT_STATE_TEARDOWN = 11;
+  // Appended (wire compat); sits between AWAIT_SSH and MINT_JIT in cycle
+  // order. Numeric order already diverges from cycle order — render by name.
+  SLOT_STATE_SECURE_SSH = 12;
 }
 
 message VMInfo {

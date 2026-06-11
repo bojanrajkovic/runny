@@ -32,6 +32,7 @@ const (
 	StateBoot        State = "BOOT"
 	StateAwaitIP     State = "AWAIT_IP"
 	StateAwaitSSH    State = "AWAIT_SSH"
+	StateSecureSSH   State = "SECURE_SSH"
 	StateMintJIT     State = "MINT_JIT"
 	StateProvision   State = "PROVISION"
 	StateListening   State = "LISTENING"
@@ -44,8 +45,8 @@ const (
 // (it sits directly below them so a new state is hard to miss).
 var States = []State{
 	StateBackoff, StateEnsureImage, StateClone, StateBoot, StateAwaitIP,
-	StateAwaitSSH, StateMintJIT, StateProvision, StateListening, StateJob,
-	StateTeardown,
+	StateAwaitSSH, StateSecureSSH, StateMintJIT, StateProvision,
+	StateListening, StateJob, StateTeardown,
 }
 
 // Runner-output markers (the actions runner's run.sh wording).

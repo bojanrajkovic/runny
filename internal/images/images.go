@@ -87,6 +87,35 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string)) (string, tart
 		stall.Feed(n)
 		prog.feed(n)
 	}
+	// A lock wait behind another slot's pull of this same image is progress,
+	// not silence: the winner's stall watch bounds the wait transitively, so
+	// keep this slot's own stall fed and annotate honestly — without this,
+	// the waiter reported STALLED and its watch killed the context it would
+	// need for a re-pull if the winner failed.
+	client.Waiting = func() func() {
+		start := time.Now()
+		stall.Feed(0)
+		prog.waiting(0)
+		done := make(chan struct{})
+		exited := make(chan struct{})
+		go func() {
+			defer close(exited)
+			t := time.NewTicker(2 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-t.C:
+					stall.Feed(0)
+					prog.waiting(time.Since(start))
+				}
+			}
+		}()
+		// Join before returning: an un-joined ticker could stamp a stale
+		// "waiting" annotation over the pull progress that follows.
+		return func() { close(done); <-exited }
+	}
 	defer prog.stop()
 	wctx, cancel := stall.Watch(ctx, e.StallBudget)
 	defer cancel()
@@ -193,6 +222,21 @@ func (p *progress) feed(n int64) {
 	if logIt {
 		p.log.Info("pull progress", "downloaded", oci.HumanBytes(total), "rate", oci.HumanBytes(int64(rate))+"/s")
 	}
+}
+
+// waiting annotates a lock wait behind another slot's pull of the same image
+// and counts as activity for the staleness watcher — the winner's progress is
+// this slot's progress.
+func (p *progress) waiting(since time.Duration) {
+	if p.report == nil {
+		return
+	}
+	detail := fmt.Sprintf("waiting for a concurrent pull of this image (%s)", since.Round(time.Second))
+	p.mu.Lock()
+	p.lastFeed = time.Now()
+	p.lastDetail = detail
+	p.mu.Unlock()
+	p.report(detail)
 }
 
 func (p *progress) stop() {

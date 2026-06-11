@@ -110,6 +110,12 @@ type Client struct {
 	// feed for ENSURE_IMAGE's stall detector (a slow pull is fine, a silent
 	// one is not).
 	Progress func(bytes int64)
+	// Waiting, when set, is called by PullTo when another pull into the same
+	// destination holds the lock: the wait is progress (the winner is moving
+	// this caller's image), not silence, and without this signal the caller's
+	// stall detector reads the lock wait as a stalled transfer. It returns a
+	// stop func PullTo calls when the wait ends (lock acquired or ctx done).
+	Waiting func() (stop func())
 
 	mu     sync.Mutex
 	tokens map[string]string // host -> bearer token
@@ -227,8 +233,10 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 
 // pullLocks serializes concurrent pulls into the same destination: all slots
 // of a pool share one image cache path and enter ENSURE_IMAGE together on a
-// cold start. Never deleted; bounded by the number of distinct images.
-var pullLocks sync.Map // destDir -> *sync.Mutex
+// cold start. A capacity-1 channel rather than a mutex so the wait is
+// ctx-aware (an operator recycle must be able to interrupt a waiting slot).
+// Never deleted; bounded by the number of distinct images.
+var pullLocks sync.Map // destDir -> chan struct{} (capacity-1 semaphore)
 
 // PullTo pulls into a sibling temp dir and renames into place, so destDir
 // either exists complete or not at all — ENSURE_IMAGE's idempotence depends
@@ -242,10 +250,26 @@ var pullLocks sync.Map // destDir -> *sync.Mutex
 // delete the winner's freshly placed bundle, or a half-written disk.img
 // could be renamed into place and pass Verify forever.
 func (c *Client) PullTo(ctx bounded.Context, ref Ref, destDir string) (string, error) {
-	muAny, _ := pullLocks.LoadOrStore(destDir, &sync.Mutex{})
-	mu := muAny.(*sync.Mutex)
-	mu.Lock()
-	defer mu.Unlock()
+	semAny, _ := pullLocks.LoadOrStore(destDir, make(chan struct{}, 1))
+	sem := semAny.(chan struct{})
+	select {
+	case sem <- struct{}{}:
+	default:
+		// Contended: another slot is pulling this destination right now. Tell
+		// the caller it is waiting (not stalled) and block interruptibly.
+		stop := func() {}
+		if c.Waiting != nil {
+			stop = c.Waiting()
+		}
+		select {
+		case sem <- struct{}{}:
+			stop()
+		case <-ctx.Done():
+			stop()
+			return "", fmt.Errorf("waiting for a concurrent pull into %s: %w", destDir, context.Cause(ctx))
+		}
+	}
+	defer func() { <-sem }()
 
 	// A cache hit must pass the same completeness bar the consumer applies
 	// (tart.Bundle.Verify), not just "manifest.json exists" — a manifest

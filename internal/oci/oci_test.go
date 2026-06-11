@@ -454,3 +454,71 @@ func TestPullRejectsNegativeUncompressedSize(t *testing.T) {
 
 // Silence unused-import lint in case of build-tag pruning.
 var _ = url.Values{}
+
+// A waiter behind another slot's pull of the same destination must (a) signal
+// Waiting so its stall detector treats the wait as progress, not silence, and
+// (b) proceed normally once the holder releases. Regression: a second slot in
+// ENSURE_IMAGE showed STALLED while the first pulled their shared image.
+func TestPullToWaitingCallback(t *testing.T) {
+	config := []byte(`{"os":"darwin"}`)
+	f := newFakeRegistry(t, config, []byte("nvram"), []byte("disk"))
+	_, ref := f.start()
+	dest := filepath.Join(t.TempDir(), "bundle")
+
+	// Occupy the per-dest semaphore, simulating a pull in flight.
+	semAny, _ := pullLocks.LoadOrStore(dest, make(chan struct{}, 1))
+	sem := semAny.(chan struct{})
+	sem <- struct{}{}
+
+	waited := make(chan struct{})
+	stopped := make(chan struct{})
+	c := NewClient()
+	c.Waiting = func() func() {
+		close(waited)
+		return func() { close(stopped) }
+	}
+
+	got := make(chan error, 1)
+	go func() {
+		_, err := c.PullTo(testCtx(t), ref, dest)
+		got <- err
+	}()
+
+	select {
+	case <-waited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Waiting callback never fired for a contended pull")
+	}
+	<-sem // release the "holder"
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatalf("PullTo after wait: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("PullTo did not complete after the holder released")
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Error("Waiting's stop func was not called after the wait ended")
+	}
+}
+
+// The lock wait must be interruptible: a cancelled context (operator recycle,
+// daemon shutdown) frees the waiter instead of leaving it blocked until the
+// holder finishes a multi-GiB pull.
+func TestPullToWaitInterruptible(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "bundle")
+	semAny, _ := pullLocks.LoadOrStore(dest, make(chan struct{}, 1))
+	sem := semAny.(chan struct{})
+	sem <- struct{}{}
+	defer func() { <-sem }()
+
+	ctx, cancel := bounded.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	_, err := NewClient().PullTo(ctx, Ref{Host: "example.com", Name: "x", Tag: "y"}, dest)
+	if err == nil || !strings.Contains(err.Error(), "waiting for a concurrent pull") {
+		t.Fatalf("want interruptible-wait error, got %v", err)
+	}
+}

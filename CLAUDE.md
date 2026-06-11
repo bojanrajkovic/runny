@@ -44,6 +44,7 @@ For per-directory detail, read that directory's `CLAUDE.md` if present. For curr
 | --- | --- |
 | How it works (current architecture) | `docs/architecture/` |
 | Decisions, and why | `docs/architecture-decisions/` |
+| Security posture | `docs/security.md` |
 | Installing/operating runnyd on a host | `docs/deploy.md` |
 | Doc-system governance | `docs/documentation-system.md` |
 | Human dev workflow | `CONTRIBUTING.md` |

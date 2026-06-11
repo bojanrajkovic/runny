@@ -20,6 +20,8 @@ Pre-implementation planning is not a tracked genre. Decisions worth keeping grad
 
 **`docs/deploy.md`** is the operator-facing install/operations guide: host-level procedure (TCC grant, LaunchAgent, migration, rollback). Maintained like architecture — tracks current behavior, carries no phase artifacts (ticket numbers, host names, one-time runbooks).
 
+**`docs/security.md`** is the security posture: the controls that keep runny and its supply chain safe, stated as current facts, each citing the decision (ADR) or contributor rule behind it. It is the canonical home for security topics — CONTRIBUTING and the ADRs are pointed *to* by it for "why", and other docs point *here* for "what is the posture" rather than restating. Maintained like architecture; no history.
+
 **Directory `CLAUDE.md`** is a thin pointer to the canonical doc plus reactively-accreted sharp edges — the gotcha that bit someone, never speculation. A directory earns one when it has edges worth recording, not reflexively. Retire a sharp edge in the same commit that deletes its referent.
 
 ## 3. Reference content is read from source, never enumerated in prose

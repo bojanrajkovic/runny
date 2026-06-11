@@ -1,0 +1,11 @@
+# CODEOWNERS — auto-requests review from listed owners on matching PRs.
+#
+# Pairs with the "Protect Main" ruleset's require_code_owner_review rule
+# (inert without this file). Admin bypass on the ruleset preserves
+# solo-merge for the author while collaborators ramp up.
+#
+# Patterns follow gitignore syntax. Last matching pattern wins. Path-specific
+# owners can be added later as collaborators arrive — for now everything
+# routes to the sole maintainer.
+
+* @bojanrajkovic

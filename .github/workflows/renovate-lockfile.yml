@@ -1,20 +1,28 @@
 # Hosted Renovate cannot run bazel, so its MODULE.bazel / bazel-version PRs
 # arrive with a stale MODULE.bazel.lock and fail CI's --lockfile_mode=error
 # (#22; CONTRIBUTING.md "Renovate and the bzlmod lockfile"). This regenerates
-# the lockfile and pushes it back to the PR branch. The push uses an App
-# token, not GITHUB_TOKEN: GitHub suppresses workflow triggers for
-# GITHUB_TOKEN pushes, so CI would never re-run on the fixed head. The push
-# re-fires this workflow too (paths match the whole PR diff); that second run
-# finds the lockfile current and exits without pushing.
+# the lockfile and pushes it back to the Renovate branch.
+#
+# Triggered on push (not pull_request): environment protection evaluates a
+# pull_request job against the merge ref (refs/pull/N/merge), which no branch
+# policy can match — push runs against refs/heads/renovate/*, which the
+# releaser-app policy allows. Push also regenerates before the PR even opens,
+# and the bot's own lockfile push cannot re-trigger this workflow (it only
+# touches MODULE.bazel.lock, which the paths filter excludes).
+#
+# The push uses an App token, not GITHUB_TOKEN: GitHub suppresses workflow
+# triggers for GITHUB_TOKEN pushes, so CI would never run on the fixed head.
 name: renovate-lockfile
 
 on:
-  pull_request:
+  push:
+    branches:
+      - "renovate/**"
     paths:
       - "MODULE.bazel"
       - ".mise.toml" # bazel version bumps resolve different implicit deps
 
-# A newer push to the PR supersedes any in-flight regen.
+# A newer push to the branch supersedes any in-flight regen.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -24,14 +32,12 @@ permissions: {}
 jobs:
   regen:
     name: regenerate bazel lockfile
-    # Renovate's own same-repo branches only; every other author keeps the
-    # manual flow (CONTRIBUTING.md). The PR author, unlike github.actor,
-    # cannot be changed by re-running the workflow.
-    if: >
-      github.event.pull_request.user.login == 'renovate[bot]' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+    # No actor condition: push events only fire from same-repo branches, the
+    # branch filter is renovate/**, and the environment ref policy re-checks —
+    # an actor check would be re-run-spoofable anyway (zizmor bot-conditions).
     runs-on: ubuntu-latest
-    # The App private key lives on releaser-app (see release-please.yml).
+    # The App private key lives on releaser-app (see release-please.yml);
+    # the environment's ref policy additionally restricts it to renovate/*.
     environment: releaser-app
     permissions:
       contents: read # checkout only; the push uses the App token
@@ -41,11 +47,11 @@ jobs:
         with:
           app-id: ${{ vars.RELEASER_APP_ID }}
           private-key: ${{ secrets.RELEASER_APP_PRIVATE_KEY }}
-          # Lockfile push to this repo's PR branch only.
+          # Lockfile push to this repo's Renovate branch only.
           permission-contents: write
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ github.event.pull_request.head.ref }}
+          ref: ${{ github.ref_name }}
           persist-credentials: false
       - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4
         with:
@@ -57,7 +63,7 @@ jobs:
       - name: push lockfile if changed
         env:
           TOKEN: ${{ steps.app.outputs.token }}
-          BRANCH: ${{ github.event.pull_request.head.ref }}
+          BRANCH: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
           if git diff --quiet -- MODULE.bazel.lock; then

@@ -2,6 +2,9 @@
 
 **Status:** Accepted (2026-06-10)
 
+**Amended:** 2026-06-11 — added the delegated-bound rule for waits on a
+peer's bounded operation (the concurrent-pull and tarball locks).
+
 ## Context
 
 "No operation is ever unbounded" was a disciplinary invariant: every
@@ -61,6 +64,23 @@ would brand a lifetime handle as an operation bound:
 - `ImageEnsurer.Ensure`: ENSURE_IMAGE has no wall-clock deadline because
   pull duration is unknowable; its operations bound themselves internally
   (resolve timeout, stall watcher).
+
+### The delegated bound
+
+A third legitimate bound exists alongside wall-clock and stall: **waiting on
+a peer's bounded operation**. When slots serialize on a per-destination lock
+(the image-pull and runner-tarball locks), the waiter's wait ends exactly
+when the holder's own stall-watched transfer does — the bound is delegated,
+not absent. Two conditions make the delegation honest rather than a loophole:
+
+1. **The wait must be interruptible** — a `select` on the lock and
+   `ctx.Done()`, never a bare mutex acquire, so an operator recycle or
+   shutdown still ends it early.
+2. **The wait must be visible** — the waiter annotates ("waiting for a
+   concurrent …") and keeps its own stall detector fed, because to a watcher
+   that only counts the waiter's bytes, a healthy delegated wait is
+   indistinguishable from a dead transfer; left unfed it reported STALLED and
+   killed the context the waiter would need if the holder failed.
 
 ## Rejected alternatives
 

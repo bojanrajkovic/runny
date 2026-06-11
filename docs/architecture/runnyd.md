@@ -48,16 +48,16 @@ their job).
 
 ## Daemon lifecycle
 
-1. **Load + validate**: config parse (strict), then the doctor suite —
-   platform, the 2-macOS-guest cap, `administration:write` asserted on a
-   minted token, image resolvability, `df`-based disk headroom. Any failure
-   refuses startup loudly.
+1. **Load + validate**: config parse (strict), then the doctor suite (the
+   check inventory lives in `cmd/runnyd`'s `makeDoctor`; `runnyd -doctor`
+   prints it). Any failure refuses startup loudly.
 2. **Sweep** (cold start owns the world): delete `vms/*`, deregister offline
-   runners carrying our name prefix.
-3. **Prime**: ensure the actions-runner tarball is in the cache share.
-4. **Run**: one goroutine per slot + the socket server. SIGINT/SIGTERM cancels
+   runners carrying our instance prefix.
+3. **Run**: one goroutine per slot + the socket server. SIGINT/SIGTERM cancels
    the root context; in-flight cycles fail into TEARDOWN (which detaches from
    the root context so cleanup always completes), then the daemon exits.
+   Runner tarballs are ensured inside each cycle's ENSURE_IMAGE — deliberately
+   not at startup, where an unbounded download once blocked the socket.
 
 ## On-disk layout
 
@@ -73,9 +73,8 @@ failure cycles; success cycles keep only the record).
   runnyd gets silently denied vmnet access — every guest dial fails with
   `connect: no route to host` while the host shell reaches the same port.
   Foreground children of sshd inherit its exemption. The deployment owns the
-  grant story via a per-user LaunchAgent (`docs/deploy.md`); the
-  `local-network` doctor check reports whether this process can reach the
-  guest subnet. Until installed that way, run the daemon under a held session.
+  grant story via a per-user LaunchAgent; symptoms and the fix live in
+  `docs/deploy.md` "Troubleshooting: Local Network permission".
 - **Never trust the image's bundled runner**: cirruslabs images preinstall
   `~/actions-runner`, which rots into broker-rejected versions ("deprecated
   and cannot receive messages") that JIT runners cannot self-update out of.

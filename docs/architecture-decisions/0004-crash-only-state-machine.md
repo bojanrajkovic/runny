@@ -11,7 +11,7 @@ ever unbounded** and that every failure converges to a clean retry.
 
 ## Decision
 
-One goroutine per runner slot drives an 11-state FSM. Every state is entered
+One goroutine per runner slot drives the FSM. Every state is entered
 with a `context.WithDeadline`; deadline expiry is just another event. The only
 response to any failure is destroy-and-recycle (TEARDOWN → BACKOFF), with
 capped exponential backoff (5 s base, ×2, cap 300 s; reset on job completion or
@@ -54,13 +54,14 @@ Key properties:
   from "GitHub unreachable" (transient → hold and log) — sand conflated these.
 - **Crash-only restart = cold start**: in-process VMs (ADR-0008) die with the
   daemon. Startup = validate → sweep (`vms/*`, offline GitHub registrations by
-  name prefix) → fresh cycles. Disk holds artifacts, never authoritative state.
+  instance prefix) → fresh cycles. Disk holds artifacts, never authoritative
+  state.
 - Every teardown writes `cycle.json` — the machine-readable timeline that
   `runnyctl why` renders.
 
 Per-state deadline defaults are calibrated from the 2026-06-09 spike (boot
 266 ms → 30 s budget; IP 8.3 s → 60 s; SSH 11.2 s → 90 s) and live in config,
-not code. The full normative state table lives in `docs/architecture/`.
+not code. The normative state inventory is the code (`internal/statemachine`).
 
 ## Rejected alternatives
 

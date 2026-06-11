@@ -13,8 +13,9 @@ Three artifacts, one contract:
   listen → run one job → destroy → repeat. Every failure converges to
   destroy-and-recycle with capped backoff; every cycle writes a
   machine-readable post-mortem.
-- **`runnyctl`** — the CLI: `status`, `logs -f`, `recycle`, `pause`, `why`,
-  `doctor`, over a unix socket.
+- **`runnyctl`** — the CLI over a unix socket: live status and runner logs,
+  recycle/pause, per-cycle post-mortems (`why`), environment checks
+  (`doctor`).
 - **`RunnyBar`** — a SwiftUI menu-bar app, a sibling client of the same
   protobuf contract.
 

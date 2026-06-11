@@ -39,7 +39,7 @@ for a solo repo.
 
 ## Consequences
 
-- Dependency workflow is `go mod tidy` → `bazel mod tidy` → `bazel run
-  gazelle` (documented in CONTRIBUTING.md).
+- Dependencies are managed through the graph; the exact workflow (with a
+  load-bearing flag and step order) lives in CONTRIBUTING.md.
 - Swift/Apple targets build only on macOS hosts; the build graph must keep
   pure-Go packages testable on Linux (dev box) via build constraints.

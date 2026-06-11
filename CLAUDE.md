@@ -12,7 +12,7 @@ Go 1.26 (mise-managed) for daemon + CLI; cgo to Virtualization.framework via `Co
 
 ## Commands
 
-`bazel build //...` · `bazel test //...` · `bazel run //tools/format` · `bazel run //:gazelle` (after changing Go imports). Dependency workflow: `go mod tidy` → `bazel mod tidy` → `bazel run //:gazelle`. Full reference and dev setup: `CONTRIBUTING.md`.
+`bazel build //...` · `bazel test //...` · `bazel run //tools/format` · `bazel run //:gazelle` (after changing Go imports). Dependency changes follow CONTRIBUTING.md's workflow exactly — its flag and step order are load-bearing. Full reference and dev setup: `CONTRIBUTING.md`.
 
 **Darwin-only targets** (vz cgo, RunnyBar) build and test only on Darwin. On other hosts, everything pure-Go still builds and tests; for the cross-host loop see CONTRIBUTING.md.
 
@@ -20,7 +20,7 @@ Go 1.26 (mise-managed) for daemon + CLI; cgo to Virtualization.framework via `Co
 
 - `cmd/runnyd`, `cmd/runnyctl` — binaries; thin mains over `internal/`.
 - `internal/bounded` — `bounded.Context`: the no-unbounded-operations invariant as a type (ADR-0011); wall-clock and progress-stall bounds.
-- `internal/statemachine` — the 11-state crash-only FSM (ADR-0004); per-state deadlines, backoff, cycle.json.
+- `internal/statemachine` — the crash-only FSM (ADR-0004); per-state deadlines, backoff, cycle.json.
 - `internal/tart` — the tart bundle format: config.json parsing, validation, APFS clone.
 - `internal/vm` — Virtualization.framework lifecycle via vz (darwin-tagged; ADR-0008) + guest sizing.
 - `internal/oci` — tart-format image pull (non-standard OCI layout, LZ4 layers).
@@ -44,6 +44,7 @@ For per-directory detail, read that directory's `CLAUDE.md` if present. For curr
 | --- | --- |
 | How it works (current architecture) | `docs/architecture/` |
 | Decisions, and why | `docs/architecture-decisions/` |
+| Installing/operating runnyd on a host | `docs/deploy.md` |
 | Doc-system governance | `docs/documentation-system.md` |
 | Human dev workflow | `CONTRIBUTING.md` |
 

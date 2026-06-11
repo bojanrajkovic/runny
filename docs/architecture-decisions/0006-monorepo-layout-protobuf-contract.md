@@ -29,12 +29,12 @@ flowchart LR
 ```
 
 - `cmd/runnyd`, `cmd/runnyctl` — Go binaries (gazelle-managed).
-- `internal/` — daemon libraries; one package per concern (statemachine, sshx,
-  vm, oci, github, home, socket).
+- `internal/` — daemon libraries; one package per concern (the root `CLAUDE.md`
+  index carries the current inventory).
 - `proto/runny/v1/` — the contract: `proto_library` → `go_proto_library` +
   `swift_proto_library`, generated **in-graph**. No committed generated code.
 - `apps/RunnyBar/` — SwiftUI app (ADR-0007).
-- `docs/` — architecture, this ADR series, design plans, doc-system governance.
+- `docs/` — architecture, this ADR series, doc-system governance.
 
 **`runnyctl` and RunnyBar are deliberately symmetric**: sibling clients of the
 same `runny.v1` contract, no privileged path for either. Anything the CLI can

@@ -2,6 +2,13 @@
 
 **Status:** Accepted (2026-06-09)
 
+**Amended:** 2026-06-10 — App credentials became per-pool and required (the
+original fleet-shared assumption broke the first real mixed fleet: a
+personal-repo pool and an org pool are different App installations).
+2026-06-10 — the runner-name prefix became derived and persisted, replacing
+the configurable `name_prefix`, which put a sweep-critical identifier in
+fragile operator hands.
+
 ## Context
 
 The first working configuration was one image, one repo-scoped registration
@@ -30,8 +37,6 @@ orphan runners beyond the sweep's reach or collide with another host's, and it
 is persisted (not regenerated per process) so a crash-restart keeps the same
 namespace. The host slug makes runners human-identifiable; `rand8` disambiguates
 same-hostname hosts and anchors stability if the hostname later changes.
-*(Revised 2026-06-10: replaced the configurable `name_prefix`, which put a
-sweep-critical identifier in fragile operator hands.)*
 
 Consequences through the stack:
 
@@ -42,9 +47,7 @@ Consequences through the stack:
   **per-pool**, not shared: different targets are different App installations
   with different keys (a personal repo and an org are not the same App), so
   each pool carries its own `github` block. One client per distinct
-  (App, target). *(Revised 2026-06-10: the original "credentials are shared"
-  assumption broke the first real mixed fleet — a personal-repo test pool and
-  the production org pool need different Apps.)*
+  (App, target).
 - **vm**: `Boot` dispatches on the bundle's `os` — the existing
   Mac platform path for darwin, an EFI path (`VZEFIBootLoader` + EFI
   variable store from `nvram.bin`, generic platform) for linux. Linux

@@ -5,20 +5,68 @@ The current shape of the daemon. Decisions and their alternatives live in
 
 ## System shape
 
-The diagram lives in [ADR-0006](../architecture-decisions/0006-monorepo-layout-protobuf-contract.md).
-In one paragraph: `runnyd` runs one crash-only state machine per runner slot,
-boots tart-format macOS guests in-process via Virtualization.framework
-(`internal/vm`), provisions them over deadline-bounded SSH (`internal/sshx` →
-`internal/guest`), registers them with GitHub via JIT config
-(`internal/github`), and serves the `runny.v1` control surface over a unix
-socket (`internal/socket`) to `runnyctl` and `RunnyBar` as equal clients.
+`runnyd` runs one crash-only state machine per runner slot, boots tart-format
+guests in-process via Virtualization.framework (`internal/vm`), provisions
+them over deadline-bounded SSH (`internal/sshx` → `internal/guest`),
+registers them with GitHub via JIT config (`internal/github`), and serves the
+`runny.v1` control surface over a unix socket (`internal/socket`) to
+`runnyctl` and `RunnyBar` as equal clients. The layout decision is
+[ADR-0006](../architecture-decisions/0006-monorepo-layout-protobuf-contract.md);
+this diagram is the living copy and tracks the code.
+
+```mermaid
+flowchart LR
+    subgraph host["macOS host"]
+        runnyd["runnyd (Go)<br/>state machines + vz"]
+        sock[("unix socket<br/>~/.runny/runnyd.sock")]
+        vm1["macOS guest slot 1"]
+        vm2["macOS guest slot 2"]
+        runnyd -- "Virtualization.framework (in-process)" --> vm1
+        runnyd --> vm2
+        runnyd --- sock
+    end
+    ctl["runnyctl (Go CLI)"] -- "protobuf (runny.v1)" --> sock
+    bar["RunnyBar (SwiftUI)"] -- "protobuf (runny.v1)" --> sock
+    runnyd --> gh["GitHub API"]
+    runnyd --> ghcr["ghcr.io images"]
+```
 
 ## The cycle
 
-The FSM (states, transitions, the TEARDOWN sink, backoff policy) is specified
-in [ADR-0004](../architecture-decisions/0004-crash-only-state-machine.md) and
-implemented in `internal/statemachine`. The code is the authority on states
-and deadline defaults; this doc deliberately does not re-enumerate them.
+The crash-only FSM design (per-state deadlines, the TEARDOWN sink, backoff
+policy) is decided in
+[ADR-0004](../architecture-decisions/0004-crash-only-state-machine.md); the
+per-cycle SSH hardening state is
+[ADR-0013](../architecture-decisions/0013-ephemeral-ssh-keys-in-band-rotation.md).
+The code (`internal/statemachine`) is the authority on states and deadline
+defaults; the diagram below is the living transition map and tracks the code.
+
+```mermaid
+stateDiagram-v2
+    [*] --> BACKOFF: startup sweep done
+    BACKOFF --> ENSURE_IMAGE: backoff elapsed
+    ENSURE_IMAGE --> CLONE: image cached (digest)
+    CLONE --> BOOT: clonefile × 3
+    BOOT --> AWAIT_IP: vz state Running
+    AWAIT_IP --> AWAIT_SSH: dhcpd lease for our MAC
+    AWAIT_SSH --> SECURE_SSH: authed session (ssh_hardening rotate)
+    AWAIT_SSH --> MINT_JIT: authed session (ssh_hardening off)
+    SECURE_SSH --> MINT_JIT: per-cycle key live, host key pinned
+    MINT_JIT --> PROVISION: encoded_jit_config
+    PROVISION --> LISTENING: "Listening for Jobs"
+    LISTENING --> JOB: "Running job:"
+    LISTENING --> TEARDOWN: zombie / liveness lost / max-idle / recycle
+    JOB --> TEARDOWN: job completed (success path)
+    TEARDOWN --> BACKOFF: cycle.json written
+
+    note right of TEARDOWN
+        Universal sink: every non-terminal state
+        transitions here on ANY error or deadline
+        expiry. Post-mortem first (failure cycles),
+        then stop -> force-stop -> delete -> dereg.
+        Cannot fail; escalating force is the floor.
+    end note
+```
 
 Per-state work is delegated through interfaces (`ImageEnsurer`, `Cloner`,
 `vm.Manager`, `Dialer`, `GitHub`), which is what lets the FSM's guarantees be

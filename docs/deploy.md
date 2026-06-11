@@ -90,6 +90,19 @@ If `local-network` is not ok:
    guests provision there but not under the LaunchAgent, the permission is
    the problem.
 
+## Troubleshooting: SSH into a guest
+
+Hardened guests (the default, `ssh_hardening: rotate` — see
+[security.md](security.md) "Guest access") **refuse password SSH** for the
+rest of the cycle: mid-cycle `ssh admin@<guest-ip>` fails with
+`Permission denied` by design, and the per-cycle private key lives only in
+runnyd's memory. For interactive debugging, set `ssh_hardening: off` on the
+pool and **restart the daemon** (`brew services restart runny` — runnyd reads
+config once at startup; a recycle alone keeps the old setting), then SSH into
+a fresh guest with the pool password. Re-enable hardening and restart again
+when done. (On-demand operator key injection into a live hardened guest is
+tracked in [#39](https://github.com/bojanrajkovic/runny/issues/39).)
+
 ## Migrating from another runner manager
 
 On a host already serving runners through something else:

@@ -47,7 +47,7 @@ reach each guest. A compromised job cannot pivot to a sibling guest's services
 further tighten, this; it is a fixed property of the attachment.
 
 **Residual risk.** Bridge isolation does not defend against ARP spoofing (a
-guest poisoning the bridge's ARP table to intercept a sibling's traffic) or
+guest poisoning the bridge's ARP table to intercept *host↔guest* traffic) or
 DHCP-pool exhaustion under heavy guest churn. The userspace packet filter
 [softnet](https://github.com/openai/softnet) closes both, but runs as a
 SUID-root helper holding the `com.apple.vm.networking` entitlement — a
@@ -56,19 +56,37 @@ privileged runtime dependency against the no-runtime-binary posture
 It is not adopted: the threats it defends require an untrusted multi-tenant
 fleet, out of scope at current scale. Adopting it would be ADR-worthy.
 
+The SSH host-key pinning below narrows what the ARP-spoof residual buys an
+attacker: redirecting the host's SSH traffic to a fake guest fails the pin
+check instead of harvesting credentials. What remains is the
+trust-on-first-use window — an *active* MITM already present at a cycle's
+first connection can proxy it — conceded with the same at-current-scale
+rationale as softnet ([ADR-0013](architecture-decisions/0013-ephemeral-ssh-keys-in-band-rotation.md)).
+
 ## Guest access
 
 Guest control is **SSH only**, through `x/crypto/ssh` with mandatory socket
 deadlines — never an external `ssh`/`sshpass` binary
 ([ADR-0002](architecture-decisions/0002-x-crypto-ssh-with-socket-deadlines.md)).
-Host keys are not verified because guests are ephemeral with fresh keys each
-boot (`internal/sshx`).
 
-Provisioning currently authenticates with a **baked password** — `admin`/`admin`,
-the base image default. The network isolation above is what bounds this: the
-password is reachable from the host datapath, not from sibling guests.
-Replacing it with per-cycle ephemeral keys for Linux pools is tracked in
-[#24](https://github.com/bojanrajkovic/runny/issues/24).
+**The image's baked password is a bootstrap credential, used once per cycle.**
+By default (`ssh_hardening: rotate`,
+[ADR-0013](architecture-decisions/0013-ephemeral-ssh-keys-in-band-rotation.md)),
+the first authenticated session of each cycle mints an in-memory ed25519
+keypair, installs the public key, **disables password authentication** in the
+guest, and reconnects authenticated by the key with the guest's **host keys
+pinned**. The private key never touches disk and dies with the daemon; the
+guest cannot outlive it (in-process VMs,
+[ADR-0008](architecture-decisions/0008-native-virtualization-framework.md)).
+The GitHub JIT config is minted strictly *after* the rotation, so it only
+ever crosses the keyed, pinned channel. Auth selection is exclusive — a guest
+that rejects the cycle key fails the cycle loudly rather than silently
+falling back to the password.
+
+Pools can opt out per pool (`ssh_hardening: off`), which preserves
+password-auth-for-the-whole-cycle behavior; the network posture above is then
+what bounds the password (reachable from the host datapath only, not from
+sibling guests).
 
 ## Ephemeral guests
 

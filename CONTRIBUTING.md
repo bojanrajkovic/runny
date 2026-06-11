@@ -52,6 +52,7 @@ codesign -s - --entitlements tools/sign/runnyd.entitlements --force bazel-bin/cm
 - **Atomic commits** — one logical change each, describable in a sentence without "and".
 - **Hooks (lefthook):** pre-commit formats staged files (restaging fixes) and zizmor-audits staged workflow files (offline); commit-msg runs commitlint; pre-push runs `bazel build` + `bazel test`. Do not bypass them.
 - **Squash-merge** — the PR title becomes the shipped subject (gated by `pr-title.yml`); the PR body becomes the commit body, so write it as "what shipped". Split multi-phase work into multiple PRs, each one logical change.
+- **`main` is protected by the "Protect Main" ruleset** — PR-only with required checks (strict), code-owner review, signed commits, linear history, no force-push or deletion. Repo admins and Renovate bypass; read the ruleset itself for the authoritative rule list.
 
 ## CI
 

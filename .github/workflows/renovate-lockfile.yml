@@ -1,0 +1,71 @@
+# Hosted Renovate cannot run bazel, so its MODULE.bazel / bazel-version PRs
+# arrive with a stale MODULE.bazel.lock and fail CI's --lockfile_mode=error
+# (#22; CONTRIBUTING.md "Renovate and the bzlmod lockfile"). This regenerates
+# the lockfile and pushes it back to the PR branch. The push uses an App
+# token, not GITHUB_TOKEN: GitHub suppresses workflow triggers for
+# GITHUB_TOKEN pushes, so CI would never re-run on the fixed head. The push
+# re-fires this workflow too (paths match the whole PR diff); that second run
+# finds the lockfile current and exits without pushing.
+name: renovate-lockfile
+
+on:
+  pull_request:
+    paths:
+      - "MODULE.bazel"
+      - ".mise.toml" # bazel version bumps resolve different implicit deps
+
+# A newer push to the PR supersedes any in-flight regen.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  regen:
+    name: regenerate bazel lockfile
+    # Renovate's own same-repo branches only; every other author keeps the
+    # manual flow (CONTRIBUTING.md). The PR author, unlike github.actor,
+    # cannot be changed by re-running the workflow.
+    if: >
+      github.event.pull_request.user.login == 'renovate[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    # The App private key lives on releaser-app (see release-please.yml).
+    environment: releaser-app
+    permissions:
+      contents: read # checkout only; the push uses the App token
+    steps:
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app
+        with:
+          app-id: ${{ vars.RELEASER_APP_ID }}
+          private-key: ${{ secrets.RELEASER_APP_PRIVATE_KEY }}
+          # Lockfile push to this repo's PR branch only.
+          permission-contents: write
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          persist-credentials: false
+      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4
+        with:
+          # No caches: the lockfile this produces feeds every later build —
+          # the same cold reasoning as the artifact job (CI security).
+          cache: false
+      - name: regenerate lockfile
+        run: mise x -- bazel mod deps --lockfile_mode=update
+      - name: push lockfile if changed
+        env:
+          TOKEN: ${{ steps.app.outputs.token }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          if git diff --quiet -- MODULE.bazel.lock; then
+            echo "lockfile already current; nothing to push"
+            exit 0
+          fi
+          # gitIgnoredAuthors in renovate.json5 must keep matching this email,
+          # or Renovate treats the branch as human-edited and stops rebasing.
+          git -c user.name="runny-release[bot]" -c user.email="noreply@coderinserepeat.com" \
+            commit -m "chore(deps): regenerate MODULE.bazel.lock" -- MODULE.bazel.lock
+          git push "https://x-access-token:${TOKEN}@github.com/${REPO}.git" "HEAD:${BRANCH}"

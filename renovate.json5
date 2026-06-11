@@ -5,6 +5,10 @@
   schedule: ['before 9am on monday'],
   semanticCommits: 'enabled',
   enabledManagers: ['bazel-module', 'gomod', 'github-actions', 'npm', 'mise'],
+  // The renovate-lockfile workflow pushes MODULE.bazel.lock commits onto
+  // Renovate's branches as this author; without this, Renovate treats those
+  // branches as human-edited and stops rebasing them.
+  gitIgnoredAuthors: ['noreply@coderinserepeat.com'],
   // gomodTidyE, not gomodTidy: plain `go mod tidy` aborts mid-attribution on
   // the in-graph proto import and mangles every dep to `// indirect` — the
   // `-e` is load-bearing (CONTRIBUTING.md "Known wrinkle").

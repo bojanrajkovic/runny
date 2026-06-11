@@ -62,7 +62,7 @@ GitHub Actions gate every PR and push to `main`: `ci.yml` (Linux: build/test/for
 - **Actions are pinned by commit SHA** (tag in a trailing comment); Renovate updates the pins. Never add an action by movable tag.
 - **Caches never touch artifacts.** Bazel caches are restored only in build/test jobs; the `artifact` job builds cold so cache poisoning cannot reach a deployable binary. Keep it that way when adding release workflows.
 - `persist-credentials: false` on every checkout; workflow permissions are read-only.
-- **Workflows are zizmor-audited** (auditor persona — the strictest): pre-commit audits staged workflow files offline via the mise-managed CLI; the `zizmor` CI job runs the official zizmor-action with online checks, and findings fail the job. Fix findings rather than suppress; a suppression needs an inline `# zizmor: ignore[rule]` comment whose justification survives review. GitHub App tokens (`create-github-app-token`) always declare `permission-*` inputs — an unscoped token inherits every permission the App installation has.
+- **Workflows are zizmor-audited** (auditor persona — the strictest): pre-commit audits staged workflow files offline via the mise-managed CLI; the `zizmor` CI job runs the official zizmor-action with online checks, uploads SARIF to code scanning (Security tab), and fails on any finding — dismissing a Security-tab alert does not unblock the gate. Fix findings rather than suppress; a suppression needs an inline `# zizmor: ignore[rule]` comment whose justification survives review. GitHub App tokens (`create-github-app-token`) always declare `permission-*` inputs — an unscoped token inherits every permission the App installation has.
 
 ### Codesigning tiers
 

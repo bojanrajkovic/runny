@@ -53,6 +53,11 @@
       automerge: true,
     },
     {
+      description: 'Pin conversions change no resolved version; automerge unconditionally.',
+      matchUpdateTypes: ['pin', 'pinDigest'],
+      automerge: true,
+    },
+    {
       description: 'The 7-day cooldown applies to npm too, overriding the preset 3-day npm rule (last match wins).',
       matchDatasources: ['npm'],
       minimumReleaseAge: '7 days',

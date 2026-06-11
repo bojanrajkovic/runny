@@ -7,11 +7,13 @@ package sshx
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,13 +22,65 @@ import (
 	"github.com/bojanrajkovic/runny/internal/bounded"
 )
 
+// ErrAuthRejected marks a connection attempt that reached the server and
+// completed the key exchange, but whose authentication the server refused.
+// It distinguishes "the guest rejected our credential" from "ssh is not up
+// yet" — the two look identical as raw handshake errors but mean opposite
+// things to a caller mid-rotation. WaitFor deliberately keeps retrying on it:
+// a guest reloading sshd can briefly reject the new credential before the
+// flipped config takes effect.
+var ErrAuthRejected = errors.New("ssh auth rejected")
+
 // Config carries guest credentials and the per-attempt budget.
 type Config struct {
 	User     string
 	Password string
+	// Signer, when set, makes publickey the ONLY auth method attempted —
+	// Password is ignored entirely, never a fallback. A silent fallback would
+	// reintroduce the password-on-the-wire exposure while reporting the
+	// hardened path succeeded; a guest that rejects the key must fail loudly
+	// (ErrAuthRejected), not quietly downgrade.
+	Signer ssh.Signer
+	// HostKeys, when non-empty, pins the server: the handshake fails unless
+	// the presented host key is a member of this set. The set must contain
+	// EVERY key the server may present (capture all of /etc/ssh/*.pub, not
+	// just one): which key the server offers is negotiated per connection, so
+	// a partial set fails whenever negotiation lands outside it. Empty
+	// preserves the no-verification default for ephemeral guests with fresh
+	// keys every boot.
+	HostKeys []ssh.PublicKey
 	// Timeout bounds one connection attempt end-to-end: TCP connect, banner,
 	// handshake, and auth together.
 	Timeout time.Duration
+}
+
+// auth returns the exclusive auth method selection (see Config.Signer).
+func (cfg Config) auth() []ssh.AuthMethod {
+	if cfg.Signer != nil {
+		return []ssh.AuthMethod{ssh.PublicKeys(cfg.Signer)}
+	}
+	return []ssh.AuthMethod{ssh.Password(cfg.Password)}
+}
+
+// hostKeyCallback returns the set-membership pin check, or the ephemeral
+// no-verification default (see Config.HostKeys).
+func (cfg Config) hostKeyCallback() ssh.HostKeyCallback {
+	if len(cfg.HostKeys) == 0 {
+		return ssh.InsecureIgnoreHostKey() // ephemeral guests, fresh keys every boot
+	}
+	pinned := make([][]byte, len(cfg.HostKeys))
+	for i, k := range cfg.HostKeys {
+		pinned[i] = k.Marshal()
+	}
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		got := key.Marshal()
+		for _, want := range pinned {
+			if bytes.Equal(got, want) {
+				return nil
+			}
+		}
+		return fmt.Errorf("host key for %s: presented %s key is not in the pinned set", hostname, key.Type())
+	}
 }
 
 // Client wraps ssh.Client; obtain one only via Dial or WaitFor. The raw
@@ -55,12 +109,22 @@ func Dial(ctx bounded.Context, addr string, cfg Config) (*Client, error) {
 	}
 	sc, chans, reqs, err := ssh.NewClientConn(conn, addr, &ssh.ClientConfig{
 		User:            cfg.User,
-		Auth:            []ssh.AuthMethod{ssh.Password(cfg.Password)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // ephemeral guests, fresh keys every boot
+		Auth:            cfg.auth(),
+		HostKeyCallback: cfg.hostKeyCallback(),
 		Timeout:         cfg.Timeout,
 	})
 	if err != nil {
 		_ = conn.Close()
+		// x/crypto/ssh exposes client auth failure only as error text. The
+		// full-prefix match (not Contains) is deliberate: a disconnect error
+		// embeds server-controlled text ("ssh: disconnect, reason N: <msg>"),
+		// which a hostile guest could lace with the auth string — but never
+		// at position zero. Upstream's own tests assert this exact prefix,
+		// and ours run against every dependency bump, so a rewording fails
+		// loudly instead of silently degrading rejection into absence.
+		if strings.HasPrefix(err.Error(), "ssh: handshake failed: ssh: unable to authenticate") {
+			return nil, fmt.Errorf("ssh handshake %s: %w: %w", addr, ErrAuthRejected, err)
+		}
 		return nil, fmt.Errorf("ssh handshake %s: %w", addr, err)
 	}
 	// Clear the deadline for session use; per-operation bounds come from ctx.
@@ -72,7 +136,11 @@ func Dial(ctx bounded.Context, addr string, cfg Config) (*Client, error) {
 }
 
 // WaitFor retries Dial every interval until success or ctx expiry. The
-// AWAIT_SSH state is this function plus a state deadline.
+// AWAIT_SSH state is this function plus a state deadline. Auth rejection
+// (ErrAuthRejected) retries like any other failure — sshd may still be
+// flipping its config when the first post-rotation attempt lands — and the
+// expiry error carries the last attempt's text, so a deadline spent being
+// rejected reads as rejection, not absence.
 func WaitFor(ctx bounded.Context, addr string, cfg Config, interval time.Duration) (*Client, error) {
 	var lastErr error
 	for {
@@ -80,9 +148,19 @@ func WaitFor(ctx bounded.Context, addr string, cfg Config, interval time.Duratio
 		if err == nil {
 			return c, nil
 		}
-		lastErr = err
+		// An attempt aborted by ctx expiry mid-dial reports only the abort
+		// ("i/o timeout", "operation was canceled") — keep the last attempt
+		// that failed on its own merits instead; that is the one that says
+		// WHY ssh never came up (rejection vs refusal vs silence).
+		if ctx.Err() == nil || lastErr == nil {
+			lastErr = err
+		}
 		select {
 		case <-ctx.Done():
+			// lastErr is deliberately %v, not %w: a per-attempt TCP timeout
+			// satisfies errors.Is(err, context.DeadlineExceeded), and letting
+			// it ride the chain would make the FSM record an operator-canceled
+			// wait as a deadline expiry. The text alone carries the diagnosis.
 			return nil, fmt.Errorf("waiting for ssh on %s: %w (last attempt: %v)", addr, ctx.Err(), lastErr)
 		case <-time.After(interval):
 		}

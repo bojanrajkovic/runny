@@ -1,6 +1,7 @@
 package sshx
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +24,21 @@ import (
 // SSH wire behavior, not mocks.
 func testServer(t *testing.T) string {
 	t.Helper()
+	addr, _ := serveSSH(t, &ssh.ServerConfig{
+		PasswordCallback: func(meta ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
+			if meta.User() == "admin" && string(pass) == "admin" {
+				return nil, nil
+			}
+			return nil, errors.New("denied")
+		},
+	})
+	return addr
+}
+
+// newTestSigner mints an in-memory ed25519 signer (both server host keys and
+// client credentials in these tests).
+func newTestSigner(t *testing.T) ssh.Signer {
+	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -30,15 +47,15 @@ func testServer(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conf := &ssh.ServerConfig{
-		PasswordCallback: func(meta ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
-			if meta.User() == "admin" && string(pass) == "admin" {
-				return nil, nil
-			}
-			return nil, errors.New("denied")
-		},
-	}
-	conf.AddHostKey(signer)
+	return signer
+}
+
+// serveSSH runs an in-process SSH server with the given auth config and the
+// canned exec behaviors, returning its address and host public key.
+func serveSSH(t *testing.T, conf *ssh.ServerConfig) (string, ssh.PublicKey) {
+	t.Helper()
+	hostKey := newTestSigner(t)
+	conf.AddHostKey(hostKey)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -73,7 +90,7 @@ func testServer(t *testing.T) string {
 			}()
 		}
 	}()
-	return ln.Addr().String()
+	return ln.Addr().String(), hostKey.PublicKey()
 }
 
 func handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
@@ -173,6 +190,11 @@ func TestDialWrongPassword(t *testing.T) {
 	if err == nil {
 		t.Fatal("want auth failure")
 	}
+	// Rejection must be distinguishable from "ssh not up" (the rotation
+	// redial's signal).
+	if !errors.Is(err, ErrAuthRejected) {
+		t.Errorf("err = %v, want ErrAuthRejected in the chain", err)
+	}
 }
 
 // TestDialBannerHang is THE test: a server that accepts TCP but never sends
@@ -201,6 +223,10 @@ func TestDialBannerHang(t *testing.T) {
 	}
 	if elapsed > 2*time.Second {
 		t.Errorf("dial took %v; the deadline did not bound the banner exchange", elapsed)
+	}
+	// A server that never spoke did not reject anything.
+	if errors.Is(err, ErrAuthRejected) {
+		t.Errorf("banner hang classified as auth rejection: %v", err)
 	}
 }
 
@@ -275,18 +301,10 @@ func TestStartKilledByContext(t *testing.T) {
 // its TCP connection still alive.
 func wedgedServer(t *testing.T) string {
 	t.Helper()
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	signer, err := ssh.NewSignerFromKey(priv)
-	if err != nil {
-		t.Fatal(err)
-	}
 	conf := &ssh.ServerConfig{
 		PasswordCallback: func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) { return nil, nil },
 	}
-	conf.AddHostKey(signer)
+	conf.AddHostKey(newTestSigner(t))
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -456,5 +474,136 @@ func TestWaitFor(t *testing.T) {
 	_, err = WaitFor(ctx2, "127.0.0.1:1", Config{User: "a", Password: "b", Timeout: 100 * time.Millisecond}, 50*time.Millisecond)
 	if err == nil {
 		t.Fatal("want WaitFor expiry on dead address")
+	}
+}
+
+// acceptKey is a PublicKeyCallback accepting exactly one public key.
+func acceptKey(want ssh.PublicKey) func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
+	return func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+		if bytes.Equal(key.Marshal(), want.Marshal()) {
+			return nil, nil
+		}
+		return nil, errors.New("denied")
+	}
+}
+
+// With a Signer set, password auth must never be attempted — a fallback would
+// reintroduce the password on the wire while reporting the hardened path
+// succeeded.
+func TestDialSignerNeverAttemptsPassword(t *testing.T) {
+	signer := newTestSigner(t)
+	addr, _ := serveSSH(t, &ssh.ServerConfig{
+		PasswordCallback: func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) {
+			t.Error("password auth attempted with Signer set")
+			return nil, errors.New("denied")
+		},
+		PublicKeyCallback: acceptKey(signer.PublicKey()),
+	})
+	c, err := Dial(testCtx(t), addr, Config{User: "admin", Password: "admin", Signer: signer, Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatalf("Dial with signer: %v", err)
+	}
+	_ = c.Close()
+}
+
+// The inverse: a guest that rejects the key must fail loudly even though the
+// configured password would have worked. Auth selection is exclusive.
+func TestDialNoPasswordFallback(t *testing.T) {
+	addr, _ := serveSSH(t, &ssh.ServerConfig{
+		PasswordCallback: func(meta ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
+			if meta.User() == "admin" && string(pass) == "admin" {
+				return nil, nil
+			}
+			return nil, errors.New("denied")
+		},
+		PublicKeyCallback: func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
+			return nil, errors.New("denied")
+		},
+	})
+	_, err := Dial(testCtx(t), addr, Config{User: "admin", Password: "admin", Signer: newTestSigner(t), Timeout: 2 * time.Second})
+	if err == nil {
+		t.Fatal("Dial succeeded — silent password fallback is back")
+	}
+	if !errors.Is(err, ErrAuthRejected) {
+		t.Errorf("err = %v, want ErrAuthRejected", err)
+	}
+}
+
+// Pinning is set-membership: any captured host key passes (the host-key
+// algorithm is negotiated, so which key the server presents is its choice),
+// and a server outside the set fails before auth.
+func TestDialHostKeyPinning(t *testing.T) {
+	passwordConf := func() *ssh.ServerConfig {
+		return &ssh.ServerConfig{
+			PasswordCallback: func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) { return nil, nil },
+		}
+	}
+	addr, hostKey := serveSSH(t, passwordConf())
+	stranger := newTestSigner(t).PublicKey()
+
+	// Member of the pin set (not the first entry — membership, not equality).
+	cfg := Config{User: "admin", Password: "admin", Timeout: 2 * time.Second}
+	cfg.HostKeys = []ssh.PublicKey{stranger, hostKey}
+	c, err := Dial(testCtx(t), addr, cfg)
+	if err != nil {
+		t.Fatalf("Dial with pinned member: %v", err)
+	}
+	_ = c.Close()
+
+	// A server whose key is not pinned must be refused — this is the
+	// fake-server-harvests-the-JIT-config defense.
+	addr2, _ := serveSSH(t, passwordConf())
+	_, err = Dial(testCtx(t), addr2, cfg)
+	if err == nil {
+		t.Fatal("Dial accepted an unpinned host key")
+	}
+	if !strings.Contains(err.Error(), "pinned") {
+		t.Errorf("err = %v, want the pin-set refusal", err)
+	}
+	if errors.Is(err, ErrAuthRejected) {
+		t.Errorf("host-key refusal classified as auth rejection: %v", err)
+	}
+}
+
+// WaitFor must ride out auth rejection, not abort: right after rotation,
+// sshd may briefly reject the new key while its config flip settles.
+func TestWaitForRetriesAuthRejection(t *testing.T) {
+	signer := newTestSigner(t)
+	var accept atomic.Bool
+	keyOK := acceptKey(signer.PublicKey())
+	addr, _ := serveSSH(t, &ssh.ServerConfig{
+		PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			if !accept.Load() {
+				return nil, errors.New("denied")
+			}
+			return keyOK(meta, key)
+		},
+	})
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		accept.Store(true)
+	}()
+	ctx, cancel := bounded.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	c, err := WaitFor(ctx, addr, Config{User: "admin", Signer: signer, Timeout: time.Second}, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("WaitFor did not survive transient auth rejection: %v", err)
+	}
+	_ = c.Close()
+
+	// And when rejection never lifts, the expiry error names it — in text
+	// (WaitFor deliberately keeps lastErr out of the chain; see its comment).
+	accept.Store(false)
+	ctx2, cancel2 := bounded.WithTimeout(t.Context(), 400*time.Millisecond)
+	defer cancel2()
+	_, err = WaitFor(ctx2, addr, Config{User: "admin", Signer: signer, Timeout: time.Second}, 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("want WaitFor expiry under permanent rejection")
+	}
+	if !strings.Contains(err.Error(), ErrAuthRejected.Error()) {
+		t.Errorf("expiry error does not name the rejection: %v", err)
+	}
+	if errors.Is(err, ErrAuthRejected) {
+		t.Errorf("lastErr leaked into the expiry chain (see WaitFor's %%v rationale): %v", err)
 	}
 }

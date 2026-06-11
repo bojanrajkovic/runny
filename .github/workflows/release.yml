@@ -34,8 +34,13 @@ jobs:
         run: mise x -- bazel build --config=ci --config=release //cmd/runnyd //cmd/runnyctl
       - name: package
         id: package
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
           VERSION="$(mise x -- tools/version.sh)"
+          # The tag must be exactly what version.sh stamps at this commit —
+          # a hand-named tag is how svu and release-please diverge (ADR-0010).
+          [ "v$VERSION" = "$TAG" ] || { echo "tag $TAG != stamped v$VERSION" >&2; exit 1; }
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           mkdir -p dist
           cp bazel-bin/cmd/runnyd/runnyd_/runnyd dist/

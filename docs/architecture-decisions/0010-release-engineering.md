@@ -52,6 +52,12 @@ from conventional commits) + goreleaser (build, package, publish, brew tap).
 
 ## Consequences
 
+- Manual pre-release tags are legal but must be named exactly what
+  `tools/version.sh` stamps at that commit (`<next>-beta.<shortsha>`): svu
+  and release-please share bump semantics but not baselines (latest tag vs
+  the manifest), and a hand-named tag is how they diverge. Stable tags come
+  only from release-please. The release workflow refuses a tag that
+  disagrees with the version it stamps.
 - RunnyBar distribution (later) follows the Tailscale shape: the .app
   bundles the daemon+CLI, signed and notarized — Developer ID signing
   upgrades this pipeline when certificates exist (see CONTRIBUTING.md).

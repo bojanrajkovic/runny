@@ -19,9 +19,12 @@ the decision or rule behind it. Other docs point here rather than restating.
 - **Checkouts never persist credentials**; workflow permissions are
   least-privilege, declared per job, and GitHub App tokens declare explicit
   `permission-*` scopes rather than inheriting the installation's full rights.
-- **Release credentials are environment-scoped**: signing and App secrets live
-  on the `release` deployment environment, readable only by jobs that declare
-  it (`tools/setup-secrets.sh`).
+- **Release credentials are environment-scoped, one environment per trust
+  domain**: the `releaser-app` environment holds the GitHub App key (jobs that
+  mint App tokens; `main` and `v*` refs only), and the `release` environment
+  holds signing/notary credentials (the artifact-signing job; `v*` tag refs
+  only). A job declares at most one — token-minting jobs can never read
+  signing keys. Provisioning is `tools/setup-secrets.sh`.
 - **`main` is protected**: pull-request-only, required status checks, signed
   commits, linear history, no force-push or deletion.
 - **Secret scanning and push protection** are enabled on the repository.

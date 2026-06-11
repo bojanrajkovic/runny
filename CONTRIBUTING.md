@@ -65,12 +65,13 @@ The posture these workflows implement — SHA-pinned actions, cold cache-isolate
 - **Pin every new action by commit SHA** (the tag in a trailing comment), never by a movable tag; Renovate updates the pins.
 - **Keep caches out of the `artifact` job** — Bazel/tool caches are restored only in build/test jobs so a poisoned cache cannot reach a deployable binary. Preserve this when adding release workflows.
 - **`persist-credentials: false`** on every checkout; declare per-job permissions, not workflow-level.
-- **Fix zizmor findings rather than suppress them.** The hook audits staged workflows offline; the CI job runs zizmor-action (auditor persona) online and fails on any finding (it also uploads SARIF to the Security tab — a dismissal there does not unblock the gate). A real suppression needs an inline `# zizmor: ignore[rule]` whose justification survives review. Fix findings rather than suppress; a suppression needs an inline `# zizmor: ignore[rule]` comment whose justification survives review. GitHub App tokens (`create-github-app-token`) always declare `permission-*` inputs — an unscoped token inherits every permission the App installation has.
+- **Fix zizmor findings rather than suppress them.** The hook audits staged workflows offline; the CI job runs zizmor-action (auditor persona) online and fails on any finding (it also uploads SARIF to the Security tab — a dismissal there does not unblock the gate). A real suppression needs an inline `# zizmor: ignore[rule]` whose justification survives review.
+- **GitHub App tokens (`create-github-app-token`) always declare `permission-*` inputs** — an unscoped token inherits every permission the App installation has. Jobs that mint App tokens declare `environment: releaser-app`; jobs that sign artifacts declare `environment: release`. No job needs both.
 
 ### Codesigning tiers
 
 - **Ad-hoc (current)**: CI signs `runnyd` with `codesign -s -` plus the virtualization entitlement; the artifact boots VMs on any host. No setup required.
-- **Developer ID (when distribution matters)**: requires an Apple Developer Program membership. Export the Developer ID Application certificate as `.p12` and add repo secrets `BUILD_CERTIFICATE_BASE64`, `P12_PASSWORD`, `KEYCHAIN_PASSWORD`; for notarization add an App Store Connect API key (`.p8` content, key ID, issuer ID). The signing workflow upgrade lands once those secrets exist.
+- **Developer ID (when distribution matters)**: requires an Apple Developer Program membership. Export the Developer ID Application certificate as `.p12` and provision it (plus the App Store Connect notary key) onto the `release` environment via `tools/setup-secrets.sh`. The signing workflow upgrade lands once those secrets exist.
 
 ## Boundaries
 

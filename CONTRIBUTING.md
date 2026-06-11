@@ -60,10 +60,12 @@ GitHub Actions gate every PR and push to `main`: `ci.yml` (Linux: build/test/for
 
 ### CI security
 
-- **Actions are pinned by commit SHA** (tag in a trailing comment); Renovate updates the pins. Never add an action by movable tag.
-- **Caches never touch artifacts.** Bazel caches are restored only in build/test jobs; the `artifact` job builds cold so cache poisoning cannot reach a deployable binary. Keep it that way when adding release workflows.
-- `persist-credentials: false` on every checkout; workflow permissions are read-only.
-- **Workflows are zizmor-audited** (auditor persona — the strictest): pre-commit audits staged workflow files offline via the mise-managed CLI; the `zizmor` CI job runs the official zizmor-action with online checks, uploads SARIF to code scanning (Security tab), and fails on any finding — dismissing a Security-tab alert does not unblock the gate. Fix findings rather than suppress; a suppression needs an inline `# zizmor: ignore[rule]` comment whose justification survives review. GitHub App tokens (`create-github-app-token`) always declare `permission-*` inputs — an unscoped token inherits every permission the App installation has.
+The posture these workflows implement — SHA-pinned actions, cold cache-isolated artifact builds, least-privilege tokens, environment-scoped release secrets, zizmor auditing — is the canonical subject of [`docs/security.md`](docs/security.md). When you touch CI, preserve it:
+
+- **Pin every new action by commit SHA** (the tag in a trailing comment), never by a movable tag; Renovate updates the pins.
+- **Keep caches out of the `artifact` job** — Bazel/tool caches are restored only in build/test jobs so a poisoned cache cannot reach a deployable binary. Preserve this when adding release workflows.
+- **`persist-credentials: false`** on every checkout; declare per-job permissions, not workflow-level.
+- **Fix zizmor findings rather than suppress them.** The hook audits staged workflows offline; the CI job runs zizmor-action (auditor persona) online and fails on any finding (it also uploads SARIF to the Security tab — a dismissal there does not unblock the gate). A real suppression needs an inline `# zizmor: ignore[rule]` whose justification survives review. Fix findings rather than suppress; a suppression needs an inline `# zizmor: ignore[rule]` comment whose justification survives review. GitHub App tokens (`create-github-app-token`) always declare `permission-*` inputs — an unscoped token inherits every permission the App installation has.
 
 ### Codesigning tiers
 

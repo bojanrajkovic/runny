@@ -128,7 +128,7 @@ func (f *fakeGitHub) verifyJWT(r *http.Request) {
 	if err != nil || !tok.Valid {
 		f.t.Errorf("app JWT invalid: %v", err)
 	}
-	if iss, _ := tok.Claims.GetIssuer(); iss != "2798371" {
+	if iss, _ := tok.Claims.GetIssuer(); iss != "123456" {
 		f.t.Errorf("jwt iss = %q", iss)
 	}
 }
@@ -160,7 +160,7 @@ func newTestClientTarget(t *testing.T, f *fakeGitHub, target Target) *Client {
 	}
 	srv := httptest.NewServer(f.handler())
 	t.Cleanup(srv.Close)
-	c, err := New(Config{AppID: 2798371, PrivateKeyPath: keyPath, APIBase: srv.URL}, target)
+	c, err := New(Config{AppID: 123456, PrivateKeyPath: keyPath, APIBase: srv.URL}, target)
 	if err != nil {
 		t.Fatal(err)
 	}

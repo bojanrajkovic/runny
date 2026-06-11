@@ -183,8 +183,8 @@ func (s *Server) StreamLogs(req *runnyv1.StreamLogsRequest, stream grpc.ServerSt
 		keep = func(e logring.Entry) bool { return e.Attrs["slot"] == want }
 	}
 	// With a filter, replay counts matching lines: subscribe to the whole
-	// buffer and tail the survivors, so `-replay 50 loupe-1` means 50 lines
-	// of loupe-1, not loupe-1's share of the last 50 global lines.
+	// buffer and tail the survivors, so `-replay 50 mac-1` means 50 lines
+	// of mac-1, not mac-1's share of the last 50 global lines.
 	replay := int(req.GetReplay())
 	subscribeReplay := replay
 	if req.GetSlot() != "" && replay > 0 {

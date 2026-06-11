@@ -42,8 +42,8 @@ commands:
   why SLOT [-cycles N]
                       render SLOT's recent cycle timelines
 
-SLOT accepts the bare slot name (loupe-1) or a full runner name as shown
-by status and the GitHub runners page (<prefix>-loupe-1-<cycle>).
+SLOT accepts the bare slot name (mac-1) or a full runner name as shown
+by status and the GitHub runners page (<prefix>-mac-1-<cycle>).
   doctor              run the daemon's validation checks
 `
 

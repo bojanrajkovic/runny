@@ -18,7 +18,7 @@ pools:
       owner: bojanrajkovic
       repo: mcp-paprika
     github:
-      app_id: 2798371
+      app_id: 123456
       private_key_path: /tmp/key.pem
 `
 
@@ -65,9 +65,9 @@ func TestLoadConfigMixedPools(t *testing.T) {
     cpu_cores: 6
     ram_gb: 12
     target:
-      org: loupe-app
+      org: example-org
     github:
-      app_id: 3083480
+      app_id: 654321
       private_key_path: /tmp/lin-key.pem
 `))
 	if err != nil {
@@ -77,14 +77,14 @@ func TestLoadConfigMixedPools(t *testing.T) {
 		t.Fatalf("pools = %d", len(c.Pools))
 	}
 	lin := c.Pools[1]
-	if !lin.Target.IsOrg() || lin.Target.String() != "org:loupe-app" {
+	if !lin.Target.IsOrg() || lin.Target.String() != "org:example-org" {
 		t.Errorf("org target: %+v", lin.Target)
 	}
 	if lin.Labels[1] != "Linux" {
 		t.Errorf("linux label default: %v", lin.Labels)
 	}
 	// Each pool carries its own App; the two must not be conflated.
-	if c.Pools[0].GitHub.AppID != 2798371 || lin.GitHub.AppID != 3083480 {
+	if c.Pools[0].GitHub.AppID != 123456 || lin.GitHub.AppID != 654321 {
 		t.Errorf("per-pool app ids: mac=%d lin=%d", c.Pools[0].GitHub.AppID, lin.GitHub.AppID)
 	}
 	if lin.GitHub.APIBase != "https://api.github.com" {

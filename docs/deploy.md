@@ -100,7 +100,7 @@ App — release/CI and prod-host/runner-admin are separate blast radii.
 
 On ix, with the grant validated:
 
-1. Install runnyd and write `config.yaml` with the loupe-app org pool
+1. Install runnyd and write `config.yaml` with the production org pool
    (`count: 2`, `os: darwin`). Keep sand's launchd plist on disk for rollback.
 2. `runnyd -doctor` — every check green, including `runner-perm:` and (with a
    guest up) `local-network`.

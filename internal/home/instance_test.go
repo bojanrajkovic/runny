@@ -54,7 +54,7 @@ func TestInstancePrefixPersists(t *testing.T) {
 func TestValidateRunnerNames(t *testing.T) {
 	// Worst-case prefix: 24-char slug + dash + rand8 = 33 chars.
 	long := "abcdefghijklmnopqrstuvwx-a1b2c3d4"
-	ok := []PoolConfig{{Name: "loupe", Count: 2}}
+	ok := []PoolConfig{{Name: "mac", Count: 2}}
 	if err := ValidateRunnerNames(long, ok); err != nil {
 		t.Errorf("short pool name should fit: %v", err)
 	}

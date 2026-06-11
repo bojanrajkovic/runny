@@ -11,8 +11,8 @@ target, N identical macOS slots. Two needs broke that shape at once:
    (tart-format ubuntu images exist, and Virtualization.framework's
    2-concurrent-guest cap applies to *macOS* guests only), and the homelab
    has Linux CI demand.
-2. **Org-level registration.** The production fleet (sand) serves the
-   loupe-app *organization*, while ad-hoc projects want repo-scoped runners.
+2. **Org-level registration.** The production fleet (sand) serves an
+   *organization*, while ad-hoc projects want repo-scoped runners.
    A daemon that can't mix both can't replace sand.
 
 ## Decision
@@ -44,7 +44,7 @@ Consequences through the stack:
   each pool carries its own `github` block. One client per distinct
   (App, target). *(Revised 2026-06-10: the original "credentials are shared"
   assumption broke the first real mixed fleet — a personal-repo test pool and
-  the loupe-app org pool need different Apps.)*
+  the production org pool need different Apps.)*
 - **vm**: `Boot` dispatches on the bundle's `os` — the existing
   Mac platform path for darwin, an EFI path (`VZEFIBootLoader` + EFI
   variable store from `nvram.bin`, generic platform) for linux. Linux

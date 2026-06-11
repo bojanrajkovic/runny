@@ -1,10 +1,24 @@
 {
   $schema: 'https://docs.renovatebot.com/renovate-schema.json',
-  extends: ['config:recommended'],
-  // Keep the noise down on a solo repo: weekly batch, semantic commits.
-  schedule: ['before 9am on monday'],
+  // best-practices = recommended + docker:pinDigests + helpers:pinGitHubActionDigests
+  // + :configMigration + :pinDevDependencies + abandonments:recommended
+  // + security:minimumReleaseAgeNpm + :maintainLockFilesWeekly
+  extends: ['config:best-practices'],
   semanticCommits: 'enabled',
-  enabledManagers: ['bazel-module', 'gomod', 'github-actions', 'npm', 'mise'],
+  // No schedule: the supply-chain delay is minimumReleaseAge (deterministic),
+  // not a weekly batch (a random 0-7 day lag); automerge absorbs the noise.
+  // Observed malware-takedown windows in the 2025 npm attacks were
+  // hours-to-days; 7 days clears them with margin. Vulnerability PRs
+  // bypass the cooldown.
+  minimumReleaseAge: '7 days',
+  // Renovate merges after CI is green rather than via GitHub auto-merge:
+  // Renovate is a bypass actor on the Protect Main ruleset, so platform
+  // auto-merge is not guaranteed to wait on the required checks.
+  platformAutomerge: false,
+  automergeStrategy: 'squash',
+  // Dependabot alerts are enabled on the repo; OSV adds a second source.
+  vulnerabilityAlerts: { labels: ['security'] },
+  osvVulnerabilityAlerts: true,
   // The renovate-lockfile workflow pushes MODULE.bazel.lock commits onto
   // Renovate's branches as this author; without this, Renovate treats those
   // branches as human-edited and stops rebasing them.
@@ -18,6 +32,30 @@
       description: 'Bazel rules move together; group them.',
       matchManagers: ['bazel-module'],
       groupName: 'bazel module deps',
+    },
+    {
+      description: 'Automerge non-major library updates once CI is green; 0.x stays manual (no compat contract).',
+      matchManagers: ['gomod', 'npm', 'bazel-module'],
+      matchUpdateTypes: ['minor', 'patch'],
+      matchCurrentVersion: '!/^v?0\\./',
+      automerge: true,
+    },
+    {
+      description: 'Actions are SHA-pinned; automerge digest/pin motion and non-major tag bumps.',
+      matchManagers: ['github-actions'],
+      matchUpdateTypes: ['minor', 'patch', 'digest', 'pin'],
+      automerge: true,
+    },
+    {
+      description: 'Toolchains (bazel/go/node) change what builds the release binary; automerge patches only.',
+      matchManagers: ['mise'],
+      matchUpdateTypes: ['patch'],
+      automerge: true,
+    },
+    {
+      description: 'The 7-day cooldown applies to npm too, overriding the preset 3-day npm rule (last match wins).',
+      matchDatasources: ['npm'],
+      minimumReleaseAge: '7 days',
     },
   ],
 }

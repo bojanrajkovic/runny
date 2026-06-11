@@ -369,6 +369,10 @@ func TestHappyCycleThroughJob(t *testing.T) {
 	if st.Job == nil || !strings.Contains(st.Job.Name, "build") {
 		t.Errorf("job info = %+v", st.Job)
 	}
+	// The status carries the GitHub-visible runner name of the live cycle.
+	if want := "runny-runner-1-" + st.CycleID; st.RunnerName != want {
+		t.Errorf("RunnerName = %q, want %q", st.RunnerName, want)
+	}
 
 	h.proc.say("Job build completed with result: Succeeded")
 	h.proc.exit(0)

@@ -326,6 +326,7 @@ func statusToProto(st statemachine.Status) *runnyv1.SlotStatus {
 		State:               stateToProto[st.State],
 		StateEntered:        timestamppb.New(st.StateEntered),
 		CycleId:             st.CycleID,
+		RunnerName:          st.RunnerName,
 		Paused:              st.Paused,
 		ConsecutiveFailures: st.ConsecutiveFailures,
 		BackoffSeconds:      st.BackoffSeconds,

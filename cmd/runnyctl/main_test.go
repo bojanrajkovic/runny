@@ -30,6 +30,7 @@ func TestRenderStatusShowsBackoffRemaining(t *testing.T) {
 				Slot:         "mac-2",
 				State:        runnyv1.SlotState_SLOT_STATE_LISTENING,
 				StateEntered: timestamppb.New(time.Now()),
+				RunnerName:   "junction-a1b2c3d4-mac-2-e48657d0",
 			},
 		},
 	})
@@ -42,6 +43,14 @@ func TestRenderStatusShowsBackoffRemaining(t *testing.T) {
 		if strings.Contains(line, "mac-2") && strings.Contains(line, "retry in") {
 			t.Errorf("LISTENING slot showed a retry countdown: %q", line)
 		}
+	}
+	// A live cycle shows the GitHub-visible runner name; a BACKOFF slot
+	// (no runner exists) falls back to the bare slot handle.
+	if !strings.Contains(out, "junction-a1b2c3d4-mac-2-e48657d0") {
+		t.Errorf("runner name not rendered:\n%s", out)
+	}
+	if !strings.Contains(out, "mac-1") {
+		t.Errorf("BACKOFF slot lost its slot-name fallback:\n%s", out)
 	}
 }
 

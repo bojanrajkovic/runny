@@ -73,6 +73,9 @@ message SlotStatus {
   // The guest survived force-stop and still occupies a host guest-cap slot;
   // the slot is parked and the daemon restarts cold once no job is running.
   bool wedged = 12;
+  // The GitHub-visible runner name of the current cycle
+  // (<instance-prefix>-<slot>-<cycle8>); empty in BACKOFF.
+  string runner_name = 13;
 }
 
 message GetStatusRequest {}

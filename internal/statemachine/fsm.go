@@ -149,10 +149,13 @@ const (
 
 // Status is the live snapshot the control surface renders.
 type Status struct {
-	Slot                string
-	State               State
-	StateEntered        time.Time
-	CycleID             string
+	Slot         string
+	State        State
+	StateEntered time.Time
+	CycleID      string
+	// RunnerName is the GitHub-visible name of the current cycle's runner
+	// (<prefix>-<slot>-<cycle8>); empty in BACKOFF, when no runner exists.
+	RunnerName          string
 	Paused              bool
 	ConsecutiveFailures uint32
 	BackoffSeconds      int64
@@ -292,6 +295,7 @@ func (s *Slot) backoffWait(ctx context.Context) error {
 	s.setState(StateBackoff, func(st *Status) {
 		st.BackoffSeconds = int64(wait / time.Second)
 		st.CycleID = ""
+		st.RunnerName = "" // the cycle's runner no longer exists
 		st.VM = cycle.VMInfo{}
 		st.Job = nil
 	})
@@ -443,7 +447,10 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	// runState records one state's execution; sctx is consulted only to
 	// classify deadline outcomes. false = cycle failed.
 	runState := func(state State, sctx context.Context, f func() error) bool {
-		s.setState(state, func(st *Status) { st.CycleID = rec.CycleID })
+		s.setState(state, func(st *Status) {
+			st.CycleID = rec.CycleID
+			st.RunnerName = runnerName
+		})
 		sr := cycle.StateRecord{State: string(state), Entered: time.Now()}
 		err := f()
 		sr.Left = time.Now()

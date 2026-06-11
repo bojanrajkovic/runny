@@ -195,7 +195,20 @@ func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 		durString(time.Since(resp.GetDaemonStarted().AsTime())))
 	slots := append([]*runnyv1.SlotStatus{}, resp.GetSlots()...)
 	sort.Slice(slots, func(i, j int) bool { return slots[i].GetSlot() < slots[j].GetSlot() })
-	fmt.Fprintf(c.out, "%-10s %-13s %-9s %-15s %-22s %s\n", "SLOT", "STATE", "FOR", "IP", "JOB", "NOTE")
+	// RUNNER shows the GitHub-visible name of the live cycle's runner —
+	// what the org runners page lists — falling back to the bare slot in
+	// BACKOFF (no runner exists; the slot is still the recycle/pause handle).
+	name := func(s *runnyv1.SlotStatus) string {
+		if n := s.GetRunnerName(); n != "" {
+			return n
+		}
+		return s.GetSlot()
+	}
+	w := len("RUNNER")
+	for _, s := range slots {
+		w = max(w, len(name(s)))
+	}
+	fmt.Fprintf(c.out, "%-*s %-13s %-9s %-15s %-22s %s\n", w, "RUNNER", "STATE", "FOR", "IP", "JOB", "NOTE")
 	for _, s := range slots {
 		state := strings.TrimPrefix(s.GetState().String(), "SLOT_STATE_")
 		if s.GetPaused() {
@@ -229,8 +242,8 @@ func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 				}
 			}
 		}
-		fmt.Fprintf(c.out, "%-10s %-13s %-9s %-15s %-22s %s\n",
-			s.GetSlot(), state,
+		fmt.Fprintf(c.out, "%-*s %-13s %-9s %-15s %-22s %s\n",
+			w, name(s), state,
 			durString(time.Since(s.GetStateEntered().AsTime())),
 			s.GetVm().GetIp(), trunc(job, 22), trunc(note, 60))
 	}

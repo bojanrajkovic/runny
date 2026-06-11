@@ -49,7 +49,17 @@ type Guest struct {
 
 // darwin: the share appears at the automount path (macOS automounts tagged
 // virtiofs shares) or gets mounted explicitly by tag; handle both.
+//
+// An SSH exec is a non-login shell, so macOS hands it a minimal PATH
+// (/usr/bin:/bin:/usr/sbin:/sbin) with /etc/zprofile (and path_helper) never
+// sourced — which drops /usr/local/bin, where pkg installers like the AWS CLI
+// symlink, and Homebrew. The runner inherits this PATH and passes it to every
+// job step, so a step that installs a tool into /usr/local/bin then can't run
+// it ("aws: command not found" right after a successful install). Rebuild the
+// PATH a normal login session has, once, before launching the runner.
 const provisionScriptDarwin = `set -e
+eval "$(/usr/libexec/path_helper -s)"
+[ -x /opt/homebrew/bin/brew ] && eval "$(/opt/homebrew/bin/brew shellenv)" || true
 CACHE="/Volumes/My Shared Files"
 if [ ! -d "$CACHE" ]; then
   sudo mkdir -p /Volumes/runny-cache 2>/dev/null || true

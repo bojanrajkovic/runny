@@ -37,7 +37,10 @@ Consequences through the stack:
 - **vm**: `Boot` dispatches on the bundle's `os` — the existing
   Mac platform path for darwin, an EFI path (`VZEFIBootLoader` + EFI
   variable store from `nvram.bin`, generic platform) for linux. Linux
-  bundles carry no hardwareModel/ecid; validation is per-OS.
+  bundles carry no hardwareModel/ecid; validation is per-OS. Guest CPU/RAM
+  default to the image's baked `config.json` values; a pool may override
+  them (`cpu_cores`, `ram_gb`) — a request below the bundle's recorded
+  minimum is rejected, not clamped.
 - **guest**: the provision script is per-OS (mount semantics, runner
   tarball flavor, `installdependencies.sh` on linux).
 - **images**: the runner-tarball cache holds one tarball per guest OS,

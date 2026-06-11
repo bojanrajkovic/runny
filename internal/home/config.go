@@ -57,6 +57,13 @@ type PoolConfig struct {
 	// because guest responsiveness varies by image and load; a guest under
 	// teardown pressure may need more headroom than the 3s default.
 	SSHTimeout Duration `yaml:"ssh_timeout"`
+	// CPUCores and RAMGB override the guest's CPU count and memory, which
+	// otherwise come from the image's baked config.json (e.g. cirruslabs
+	// images ship a conservative 2c/4GiB). Zero means "use the image's
+	// value". A request below the image's recorded minimum is rejected at
+	// boot, not silently clamped. RAMGB is gibibytes.
+	CPUCores uint `yaml:"cpu_cores"`
+	RAMGB    uint `yaml:"ram_gb"`
 }
 
 // TargetConfig holds exactly one of: Org, or Owner+Repo.

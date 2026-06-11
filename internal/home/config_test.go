@@ -65,6 +65,8 @@ func TestLoadConfigMixedPools(t *testing.T) {
     os: linux
     image: ghcr.io/cirruslabs/ubuntu:latest
     count: 3
+    cpu_cores: 6
+    ram_gb: 12
     target:
       org: loupe-app
     github:
@@ -90,6 +92,14 @@ func TestLoadConfigMixedPools(t *testing.T) {
 	}
 	if lin.GitHub.APIBase != "https://api.github.com" {
 		t.Errorf("api_base default not applied per pool: %q", lin.GitHub.APIBase)
+	}
+	// Hardware sizing overrides parse; the mac pool left them unset (zero =
+	// use the image's baked value).
+	if lin.CPUCores != 6 || lin.RAMGB != 12 {
+		t.Errorf("sizing override: cpu=%d ram=%d", lin.CPUCores, lin.RAMGB)
+	}
+	if c.Pools[0].CPUCores != 0 || c.Pools[0].RAMGB != 0 {
+		t.Errorf("unset sizing should stay zero: cpu=%d ram=%d", c.Pools[0].CPUCores, c.Pools[0].RAMGB)
 	}
 }
 

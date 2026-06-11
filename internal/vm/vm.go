@@ -22,6 +22,11 @@ type BootOptions struct {
 	// virtiofs device tagged "runny-cache" — the actions-runner tarball
 	// cache, downloaded once per version on the host.
 	RunnerCacheDir string
+	// CPUCount and MemorySize override the guest's sizing. Zero means "use
+	// the bundle's baked config.json value". MemorySize is bytes. A request
+	// below the bundle's recorded minimum is rejected, not clamped.
+	CPUCount   uint
+	MemorySize uint64
 }
 
 // ShareTag is the virtiofs mount tag guests use:

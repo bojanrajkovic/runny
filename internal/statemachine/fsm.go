@@ -488,6 +488,8 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 		ok = enter(StateBoot, cfg.Deadlines.Boot.D(), func(c bounded.Context) error {
 			m, err := s.deps.VM.Boot(c, tart.Bundle(vmDir), vm.BootOptions{
 				RunnerCacheDir: s.deps.Home.RunnerCacheDir(),
+				CPUCount:       s.deps.Pool.CPUCores,
+				MemorySize:     uint64(s.deps.Pool.RAMGB) << 30, // GiB → bytes; 0 keeps the image's
 			})
 			if err != nil {
 				return err

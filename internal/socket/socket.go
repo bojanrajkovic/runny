@@ -7,7 +7,8 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"slices"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -172,10 +173,13 @@ func (s *Server) StreamLogs(req *runnyv1.StreamLogsRequest, stream grpc.ServerSt
 		}
 		ring = s.Ring
 	case req.GetSlot() != "":
-		want := req.GetSlot()
-		if !slices.ContainsFunc(s.Slots, func(sl *statemachine.Slot) bool { return sl.Name() == want }) {
-			return status.Errorf(codes.NotFound, "no slot named %q", want)
+		slot, err := s.findSlot(req.GetSlot())
+		if err != nil {
+			return status.Error(codes.NotFound, err.Error())
 		}
+		// Filter on the RESOLVED name: req may carry a runner name, which
+		// would never match the slot attr the ring entries carry.
+		want := slot.Name()
 		keep = func(e logring.Entry) bool { return e.Attrs["slot"] == want }
 	}
 	// With a filter, replay counts matching lines: subscribe to the whole
@@ -239,13 +243,42 @@ func toLogLine(e logring.Entry) *runnyv1.LogLine {
 	}
 }
 
+// cycleSuffixRE is the -<cycle8> tail of a runner name.
+var cycleSuffixRE = regexp.MustCompile(`-[0-9a-f]{8}$`)
+
+// findSlot resolves an operator-supplied handle: the bare slot name, the
+// live cycle's runner name, or any runner name of the right shape
+// (<prefix>-<slot>-<cycle8>, e.g. copied from the GitHub runners page after
+// the cycle ended) — status displays runner names, so commands must accept
+// what status shows. Pool names may contain dashes, so the structural match
+// errors on ambiguity rather than guessing.
 func (s *Server) findSlot(name string) (*statemachine.Slot, error) {
 	for _, slot := range s.Slots {
-		if slot.Name() == name {
+		if slot.Name() == name || slot.Status().RunnerName == name {
 			return slot, nil
 		}
 	}
-	return nil, fmt.Errorf("no such slot %q", name)
+	if base := cycleSuffixRE.ReplaceAllString(name, ""); base != name {
+		var matches []*statemachine.Slot
+		for _, slot := range s.Slots {
+			if strings.HasSuffix(base, "-"+slot.Name()) {
+				matches = append(matches, slot)
+			}
+		}
+		switch len(matches) {
+		case 1:
+			return matches[0], nil
+		case 0:
+			// fall through to the not-found error
+		default:
+			names := make([]string, len(matches))
+			for i, m := range matches {
+				names[i] = m.Name()
+			}
+			return nil, fmt.Errorf("runner name %q is ambiguous between slots %v — use the slot name", name, names)
+		}
+	}
+	return nil, fmt.Errorf("no slot matches %q (use the slot name, or a runner name as shown by status)", name)
 }
 
 func (s *Server) Recycle(ctx context.Context, req *runnyv1.RecycleRequest) (*runnyv1.RecycleResponse, error) {
@@ -278,14 +311,17 @@ func (s *Server) Resume(ctx context.Context, req *runnyv1.ResumeRequest) (*runny
 }
 
 func (s *Server) Why(ctx context.Context, req *runnyv1.WhyRequest) (*runnyv1.WhyResponse, error) {
-	if _, err := s.findSlot(req.GetSlot()); err != nil {
+	slot, err := s.findSlot(req.GetSlot())
+	if err != nil {
 		return nil, err
 	}
 	n := int(req.GetCycles())
 	if n == 0 {
 		n = 1
 	}
-	recs, err := s.Stores(req.GetSlot()).Recent(n)
+	// The store is keyed by the RESOLVED slot name: req may carry a runner
+	// name, which as a store key would silently read an empty directory.
+	recs, err := s.Stores(slot.Name()).Recent(n)
 	if err != nil {
 		return nil, err
 	}

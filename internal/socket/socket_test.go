@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -149,6 +150,25 @@ func TestCommandsResolveSlotByName(t *testing.T) {
 	}
 	if _, err := c.Pause(t.Context(), &runnyv1.PauseRequest{Slot: "nope"}); err == nil {
 		t.Error("Pause of unknown slot should error")
+	}
+}
+
+// Commands accept what status displays: a full runner name resolves to its
+// embedded slot, current cycle or stale.
+func TestCommandsResolveRunnerName(t *testing.T) {
+	c := dial(t, newTestServer(testSlots("mac-1", "lin-1"), nil, nil, nil))
+	if _, err := c.Recycle(t.Context(), &runnyv1.RecycleRequest{Slot: "host-a1b2c3d4-mac-1-e48657d0", Reason: "x"}); err != nil {
+		t.Errorf("Recycle by runner name: %v", err)
+	}
+	// A runner name whose embedded slot doesn't exist still errors.
+	if _, err := c.Recycle(t.Context(), &runnyv1.RecycleRequest{Slot: "host-a1b2c3d4-mac-9-e48657d0"}); err == nil {
+		t.Error("Recycle of runner name with unknown slot should error")
+	}
+	// Ambiguity (dashes make <prefix>-<slot> structurally uncertain) errors
+	// instead of guessing: "...-b-1-<cycle8>" suffix-matches both slots.
+	srv := newTestServer(testSlots("b-1", "a-b-1"), nil, nil, nil)
+	if _, err := srv.findSlot("host-a-b-1-e48657d0"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Errorf("ambiguous runner name should error, got %v", err)
 	}
 }
 

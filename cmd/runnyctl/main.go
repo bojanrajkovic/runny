@@ -41,6 +41,9 @@ commands:
   resume SLOT         release a paused SLOT
   why SLOT [-cycles N]
                       render SLOT's recent cycle timelines
+
+SLOT accepts the bare slot name (loupe-1) or a full runner name as shown
+by status and the GitHub runners page (<prefix>-loupe-1-<cycle>).
   doctor              run the daemon's validation checks
 `
 

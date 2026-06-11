@@ -9,6 +9,7 @@ go_library(
         "//internal/bounded",
         "//internal/sshx",
         "//internal/statemachine",
+        "@org_golang_x_crypto//ssh",
     ],
 )
 
@@ -16,4 +17,9 @@ go_test(
     name = "guest_test",
     srcs = ["guest_test.go"],
     embed = [":guest"],
+    deps = [
+        "//internal/bounded",
+        "//internal/sshx",
+        "@org_golang_x_crypto//ssh",
+    ],
 )

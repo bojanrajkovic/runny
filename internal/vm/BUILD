@@ -4,6 +4,7 @@ go_library(
     name = "vm",
     srcs = [
         "leases.go",
+        "sizing.go",
         "vm.go",
         "vz_darwin.go",
     ],
@@ -27,16 +28,8 @@ go_test(
     name = "vm_test",
     srcs = [
         "leases_test.go",
-        "vz_sizing_test.go",
+        "sizing_test.go",
     ],
     embed = [":vm"],
-    deps = select({
-        "@rules_go//go/platform:darwin": [
-            "//internal/tart",
-        ],
-        "@rules_go//go/platform:ios": [
-            "//internal/tart",
-        ],
-        "//conditions:default": [],
-    }),
+    deps = ["//internal/tart"],
 )

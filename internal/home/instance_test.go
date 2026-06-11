@@ -3,6 +3,7 @@ package home
 import (
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -47,5 +48,24 @@ func TestInstancePrefixPersists(t *testing.T) {
 	third, err := d.InstancePrefix()
 	if err != nil || third == "" {
 		t.Errorf("regenerate from empty file: %q, %v", third, err)
+	}
+}
+
+func TestValidateRunnerNames(t *testing.T) {
+	// Worst-case prefix: 24-char slug + dash + rand8 = 33 chars.
+	long := "abcdefghijklmnopqrstuvwx-a1b2c3d4"
+	ok := []PoolConfig{{Name: "loupe", Count: 2}}
+	if err := ValidateRunnerNames(long, ok); err != nil {
+		t.Errorf("short pool name should fit: %v", err)
+	}
+	// 33 + 1 + 21 + 1 + 1 + 1 + 8 = 66 > 64: must be rejected, naming the pool.
+	bad := []PoolConfig{{Name: "macos-arm64-productio", Count: 2}}
+	err := ValidateRunnerNames(long, bad)
+	if err == nil || !strings.Contains(err.Error(), "macos-arm64-productio") {
+		t.Errorf("oversized name not rejected: %v", err)
+	}
+	// A hand-edited oversized instance-id is caught the same way.
+	if err := ValidateRunnerNames(strings.Repeat("x", 60), ok); err == nil {
+		t.Error("oversized persisted prefix not rejected")
 	}
 }

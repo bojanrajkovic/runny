@@ -183,7 +183,7 @@ func (s *Server) StreamLogs(req *runnyv1.StreamLogsRequest, stream grpc.ServerSt
 	// of loupe-1, not loupe-1's share of the last 50 global lines.
 	replay := int(req.GetReplay())
 	subscribeReplay := replay
-	if req.GetSlot() != "" {
+	if req.GetSlot() != "" && replay > 0 {
 		subscribeReplay = 1 << 20 // effectively "all of the ring"
 	}
 	if !req.GetFollow() {

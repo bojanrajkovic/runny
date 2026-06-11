@@ -265,8 +265,14 @@ func (e *Ensurer) log() *slog.Logger {
 type RunnerResolver func(ctx bounded.Context) (filename, url, sha256 string, err error)
 
 // tarballLocks serializes per-filename ensures: slots of the same OS race to
-// the same file; one downloads, the rest wait and find it cached.
-var tarballLocks sync.Map // filename -> *sync.Mutex
+// the same file; one downloads, the rest wait and find it cached. A
+// capacity-1 channel rather than a mutex so the wait is ctx-aware and
+// visible — the same fix the per-destination image-pull lock got: a mutex
+// wait here was uninterruptible by operator recycle AND invisible (no
+// watcher is armed yet, so the slot just sat with no annotation at all).
+// The wait is transitively bounded by the holder's own stall-watched
+// download (ADR-0011's delegation argument).
+var tarballLocks sync.Map // filename -> chan struct{} (capacity-1 semaphore)
 
 // EnsureRunnerTarball makes sure the service-current actions-runner tarball
 // sits in cacheDir (the virtiofs share). Returns the tarball path. The
@@ -285,10 +291,21 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 		return "", err
 	}
 
-	muAny, _ := tarballLocks.LoadOrStore(assetName, &sync.Mutex{})
-	mu := muAny.(*sync.Mutex)
-	mu.Lock()
-	defer mu.Unlock()
+	semAny, _ := tarballLocks.LoadOrStore(assetName, make(chan struct{}, 1))
+	sem := semAny.(chan struct{})
+	select {
+	case sem <- struct{}{}:
+	default:
+		if report != nil {
+			report("waiting for a concurrent download of " + assetName)
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return "", fmt.Errorf("waiting for a concurrent download of %s: %w", assetName, context.Cause(ctx))
+		}
+	}
+	defer func() { <-sem }()
 
 	dest := filepath.Join(cacheDir, assetName)
 	if _, err := os.Stat(dest); err == nil {

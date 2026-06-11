@@ -147,6 +147,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if err := home.ValidateRunnerNames(prefix, cfg.Pools); err != nil {
+		return err
+	}
 	logger.Info("runner namespace", "prefix", prefix)
 
 	// Sweep: cold start owns the world (ADR-0004). Clones first, then any
@@ -321,6 +324,19 @@ func makeDoctor(dir home.Dir, cfg *home.Config, clients []*github.Client) func(c
 			add("platform", true, "darwin/arm64")
 		} else {
 			add("platform", false, fmt.Sprintf("%s/%s — VMs require darwin/arm64", runtime.GOOS, runtime.GOARCH))
+		}
+
+		// Runner namespace: derives (and persists, first run) the instance
+		// prefix — which also proves instance-id is writable, a startup
+		// requirement a doctor pass must not paper over — and validates the
+		// assembled runner names against GitHub's length cap, which would
+		// otherwise surface as a permanent non-retryable 422 loop at MINT_JIT.
+		if prefix, err := dir.InstancePrefix(); err != nil {
+			add("runner-namespace", false, err.Error())
+		} else if err := home.ValidateRunnerNames(prefix, cfg.Pools); err != nil {
+			add("runner-namespace", false, err.Error())
+		} else {
+			add("runner-namespace", true, prefix)
 		}
 
 		// The Virtualization.framework concurrent-guest cap applies to macOS

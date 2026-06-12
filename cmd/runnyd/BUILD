@@ -1,6 +1,6 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 load("//tools:stamp.bzl", "stamped_go_binary")
-load("//tools/sign:sign.bzl", "codesign_binary")
+load("//tools/sign:sign.bzl", "codesign_binary", "notarize_binary")
 
 # gazelle:map_kind go_binary stamped_go_binary //tools:stamp.bzl
 
@@ -93,6 +93,13 @@ codesign_binary(
     name = "runnyd_signed",
     binary = ":runnyd",
     entitlements = "//tools/sign:runnyd.entitlements",
+    entitlement_key = "com.apple.security.virtualization",
+    visibility = ["//visibility:public"],
+)
+
+notarize_binary(
+    name = "runnyd_notarized",
+    binary = ":runnyd_signed",
     visibility = ["//visibility:public"],
 )
 

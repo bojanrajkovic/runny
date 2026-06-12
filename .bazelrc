@@ -22,3 +22,9 @@ build:release --stamp --workspace_status_command=tools/workspace-status.sh
 # The identity string is the CN of the Developer ID Application certificate;
 # verify with: security find-identity -v -p codesigning
 build:developer-id --action_env="CODESIGN_IDENTITY=Developer ID Application: Bojan Rajkovic (FP2BC7CW97)"
+
+# Notarization via App Store Connect API (combine with --config=developer-id).
+# In CI the job env sets NOTARY_KEY_B64/NOTARY_KEY_ID/NOTARY_ISSUER_ID from
+# secrets. For local notarization, export the variables first (see
+# tools/sign/sign.bzl docstring for the base64 one-liner).
+build:notarize --action_env=NOTARY_KEY_B64 --action_env=NOTARY_KEY_ID --action_env=NOTARY_ISSUER_ID

@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	"crypto/sha256"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -15,7 +14,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -236,39 +234,36 @@ func run() error {
 		func(slot string) cycle.Store { return cycle.Store{SlotDir: dir.SlotCyclesDir(slot)} },
 		doctor, version)
 
-	// Wedge escalation (ADR-0012): a guest that survives force-stop can only
-	// be reclaimed by process exit (it lives in-process). The wedged slot has
-	// parked itself. Drain the rest of the fleet to a stable idle — pause
-	// holds each slot in BACKOFF after its current cycle (a running job
-	// finishes first), recycle ends LISTENING without waiting out max-idle —
-	// then exit for a launchd cold start. Exiting only from stable states
-	// (parked, or paused in BACKOFF, which cannot start a job) closes the
-	// scan-then-exit race that could kill a job starting mid-scan.
-	var drainStarted, wedgeExit atomic.Bool
-	checkWedge := func(st statemachine.Status) {
-		if !st.Wedged && !drainStarted.Load() {
-			return // nothing wedged; stay off the hot status path
-		}
-		if drainStarted.CompareAndSwap(false, true) {
-			logger.Error("slot wedged: draining remaining slots to idle, then restarting to release the guest")
-			for _, s := range slots {
-				s.Command(statemachine.Command{Kind: statemachine.CmdPause})
-				s.Command(statemachine.Command{Kind: statemachine.CmdRecycle, Reason: "draining for wedge restart"})
+	// Drain coordination: the wedge escalation (ADR-0012 — a guest that
+	// survives force-stop can only be reclaimed by process exit) and the
+	// config reload (ADR-0014) share one drainer. It drives every slot to a
+	// stable state (wedged, or paused in BACKOFF — running jobs finish
+	// first), re-issuing commands on every status change so a dropped
+	// command or the backoffWait timer-vs-pause race cannot stall the
+	// drain, then exits for a launchd cold start.
+	d := &drainer{
+		log:  logger,
+		stop: stop,
+		// The local exit gate, shared by both causes: before handing the
+		// process to launchd, prove the on-disk config still parses — the
+		// respawn loads it whether the drain was for a wedge or a reload,
+		// and holding a drained-but-serving daemon beats a crash-looping
+		// socketless one. Local file I/O only: no network work at the exit
+		// seam (a refusal there would have no good answer).
+		exitGate: func(acceptedSHA string) (bool, string) {
+			if _, err := home.LoadConfig(configPath); err != nil {
+				return false, fmt.Sprintf("config.yaml no longer parses; the respawn would refuse it: %v", err)
 			}
-		}
-		for _, s := range slots {
-			sst := s.Status()
-			if !(sst.Wedged || (sst.Paused && sst.State == statemachine.StateBackoff)) {
-				return // still draining; a later status change re-evaluates
+			if sha := configSHA(configPath); acceptedSHA != "" && sha != acceptedSHA {
+				logger.Warn("config changed during the drain; the respawn will validate and load the newer file",
+					"accepted_sha256", acceptedSHA, "current_sha256", sha)
 			}
-		}
-		if wedgeExit.CompareAndSwap(false, true) {
-			logger.Error("fleet idle with a wedged guest; exiting for a cold start")
-			stop()
-		}
+			return true, ""
+		},
 	}
 	for _, s := range slots {
-		s.OnChange(checkWedge)
+		d.slots = append(d.slots, s)
+		s.OnChange(d.observe)
 	}
 
 	var wg sync.WaitGroup
@@ -280,10 +275,12 @@ func run() error {
 	err = srv.Serve(ctx, dir.SocketPath())
 	wg.Wait()
 	logger.Info("runnyd stopped")
-	if wedgeExit.Load() && err == nil {
-		// Non-zero exit so launchd (KeepAlive) restarts us; the cold start
-		// sweeps the vms dir and reclaims the leaked guest.
-		err = errors.New("restarting to release a wedged guest: a VM survived force-stop (see the slot's cycle record)")
+	if d.Exited() && err == nil {
+		// Non-zero exit so launchd (KeepAlive) restarts us — deliberately
+		// not a success exit, which a future SuccessfulExit-style plist
+		// tweak would leave down silently. The cold start sweeps the vms
+		// dir (reclaiming a leaked guest) and loads the on-disk config.
+		err = fmt.Errorf("restarting after drain: %s", d.Reason())
 	}
 	return err
 }

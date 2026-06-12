@@ -7,6 +7,7 @@ load("//tools/sign:sign.bzl", "codesign_binary", "notarize_binary")
 go_library(
     name = "runnyd_lib",
     srcs = [
+        "drain.go",
         "localnet.go",
         "lock.go",
         "main.go",
@@ -106,8 +107,10 @@ notarize_binary(
 go_test(
     name = "runnyd_test",
     srcs = [
+        "drain_test.go",
         "localnet_test.go",
         "rotate_test.go",
     ],
     embed = [":runnyd_lib"],
+    deps = ["//internal/statemachine"],
 )

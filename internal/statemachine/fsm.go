@@ -1000,6 +1000,10 @@ func (s *Slot) watchJob(jctx, cctx context.Context, rec *cycle.Record, proc Proc
 				s.setPaused(false)
 			case CmdRecycle:
 				if cmd.CancelJob {
+					if arm.armed { // cancel consent destroys the job AND the armed hold
+						s.auditDisarm(rec, "operator recycle canceled the job", slog.LevelInfo)
+						s.clearArmedStatus(arm, jobDetail(rec))
+					}
 					return false, fmt.Errorf("%w: %s (running job canceled)", errOperatorRecycle, cmd.Reason)
 				}
 				if arm.armed { // plain recycle disarms + audit + clear status (§0)
@@ -1106,6 +1110,23 @@ func (s *Slot) auditDisarm(rec *cycle.Record, cause string, level slog.Level) {
 // rewrites Detail to the plain JOB line — used on every mid-job disarm (plain
 // recycle, pause-while-armed). NOT setState (we are in JOB; StateEntered must
 // not move). Mirrors the locked helper that SET the flag at arm time.
+// recordOperatorKey appends fp to the cycle's job audit (JobInfo.OperatorKeys),
+// copy-on-write under the lock. rec.Job and s.status.Job alias one *JobInfo
+// (set together at JOB entry), and Status()/the watch feed hand that pointer to
+// gRPC goroutines — so an unlocked `append` to its slice is a live data race
+// (a torn read of the slice header, or a read of a reallocated backing array).
+// Replacing the JobInfo with a fresh copy + fresh slice leaves every snapshot a
+// reader already holds immutable, and never mutates a slice another goroutine
+// is reading.
+func (s *Slot) recordOperatorKey(rec *cycle.Record, fp string) {
+	s.mu.Lock()
+	j := *rec.Job
+	j.OperatorKeys = append(append([]string(nil), rec.Job.OperatorKeys...), fp)
+	rec.Job = &j
+	s.status.Job = &j
+	s.mu.Unlock()
+}
+
 func (s *Slot) clearArmedStatus(arm *debugArm, detail string) {
 	arm.armed = false
 	s.mu.Lock()
@@ -1281,7 +1302,7 @@ func (s *Slot) midJobInject(ctx context.Context, rec *cycle.Record, guest Guest,
 		arm.armed = true
 		arm.hold = cmd.Hold
 		arm.keys = append(arm.keys, armedKey{fingerprint: fp, landed: true})
-		rec.Job.OperatorKeys = append(rec.Job.OperatorKeys, fp)
+		s.recordOperatorKey(rec, fp)
 		s.updateAudit(rec, idx, "armed", "")
 		s.setArmedStatus(s.armedDetail(fp, arm.hold))
 		cmd.reply(s.armedReply(guest))
@@ -1294,7 +1315,7 @@ func (s *Slot) midJobInject(ctx context.Context, rec *cycle.Record, guest Guest,
 		// Ambiguous: the key may or may not have landed. Record contamination,
 		// do NOT arm, the job continues (decision 18).
 		arm.keys = append(arm.keys, armedKey{fingerprint: fp, landed: false})
-		rec.Job.OperatorKeys = append(rec.Job.OperatorKeys, fp)
+		s.recordOperatorKey(rec, fp)
 		s.updateAudit(rec, idx, "error", err.Error())
 		cmd.reply(DebugKeyReply{Err: fmt.Errorf("install failed (key state unknown); the job continues: %w", err)})
 	}

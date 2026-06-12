@@ -50,8 +50,8 @@ commands:
                       installed immediately (the job is NOT touched) and the
                       slot holds in DEBUG when the job ends. Rerun with the
                       same key to extend; a new key to add. Release with
-                      'runnyctl recycle SLOT' (auto-releases after -hold;
-                      default/cap limits.max_debug_hold).
+                      'runnyctl recycle SLOT -force' (auto-releases after
+                      -hold; default/cap limits.max_debug_hold).
   pause SLOT          hold SLOT after its current cycle drains
   resume SLOT         release a paused SLOT
   reload [-reason WHY]
@@ -493,7 +493,7 @@ func (c *ctl) renderDebug(slot string, resp *runnyv1.InjectDebugKeyResponse) {
 		fmt.Fprintf(c.out, "  hold:     auto-releases %s (in %s)\n",
 			hu.AsTime().Local().Format(time.RFC3339), durString(time.Until(hu.AsTime())))
 	}
-	fmt.Fprintf(c.out, "  release:  runnyctl recycle %s\n", slot)
+	fmt.Fprintf(c.out, "  release:  runnyctl recycle %s -force   ·   extend: re-run this command\n", slot)
 }
 
 func (c *ctl) renderHostKeys(keys []string) {

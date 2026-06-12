@@ -122,7 +122,12 @@ func (p *fakeProc) Wait() (int, error) {
 	<-p.done
 	return p.code, nil
 }
-func (p *fakeProc) Kill() { p.exit(p.code) }
+
+// Kill must not read p.code: it's written inside exit's sync.Once on another
+// goroutine, so reading it here is a data race (and the value is discarded —
+// exit is once-guarded, a no-op when the proc already exited). -1 is the
+// "force-killed, no clean exit code" sentinel for the rare kill-before-exit.
+func (p *fakeProc) Kill() { p.exit(-1) }
 
 // waits reports how many times Wait was called — the post-job force-close path
 // (§5.4 step 2) must NOT call Wait, or the FSM goroutine hangs up to

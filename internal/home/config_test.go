@@ -60,6 +60,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if got := c.Deadlines.SecureSSH.D(); got != 15*time.Second {
 		t.Errorf("SecureSSH = %v, want 15s", got)
 	}
+	if got := c.Limits.MaxDebugHold.D(); got != 2*time.Hour {
+		t.Errorf("MaxDebugHold = %v, want 2h", got)
+	}
 	if p.Target.IsOrg() {
 		t.Error("owner/repo target misread as org")
 	}
@@ -133,6 +136,7 @@ func TestLoadConfigValidation(t *testing.T) {
 		{"negative ssh timeout", strings.Replace(minimalConfig, "count: 2", "count: 2\n    ssh_timeout: -3s", 1), "ssh_timeout must be positive"},
 		{"bad ssh hardening", strings.Replace(minimalConfig, "count: 2", "count: 2\n    ssh_hardening: maybe", 1), `ssh_hardening must be "rotate" or "off"`},
 		{"negative secure_ssh", minimalConfig + "deadlines:\n  secure_ssh: -15s\n", "secure_ssh must be positive"},
+		{"negative max_debug_hold", minimalConfig + "limits:\n  max_debug_hold: -1h\n", "max_debug_hold must be positive"},
 	}
 	for _, tc := range cases {
 		_, err := LoadConfig(writeConfig(t, tc.yaml))

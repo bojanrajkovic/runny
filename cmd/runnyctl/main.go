@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -207,11 +208,19 @@ func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 		}
 		return s.GetSlot()
 	}
-	w := len("RUNNER")
+	w := cellWidth("RUNNER")
 	for _, s := range slots {
-		w = max(w, len(name(s)))
+		w = max(w, cellWidth(name(s)))
 	}
-	fmt.Fprintf(c.out, "%-*s %-13s %-9s %-15s %-22s %s\n", w, "RUNNER", "STATE", "FOR", "IP", "JOB", "NOTE")
+	// Cells are padded to display width (not byte length: a clamped cell ends
+	// in a multi-byte ellipsis) and joined by single spaces; NOTE is last and
+	// unpadded so it overflows gracefully.
+	row := func(runner, state, dur, ip, job, note string) {
+		line := pad(runner, w) + " " + pad(state, 13) + " " + pad(dur, 9) + " " +
+			pad(ip, 15) + " " + pad(job, 22) + " " + note
+		fmt.Fprintln(c.out, strings.TrimRight(line, " "))
+	}
+	row("RUNNER", "STATE", "FOR", "IP", "JOB", "NOTE")
 	for _, s := range slots {
 		state := strings.TrimPrefix(s.GetState().String(), "SLOT_STATE_")
 		if s.GetPaused() {
@@ -245,8 +254,7 @@ func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 				}
 			}
 		}
-		fmt.Fprintf(c.out, "%-*s %-13s %-9s %-15s %-22s %s\n",
-			w, name(s), state,
+		row(name(s), state,
 			durString(time.Since(s.GetStateEntered().AsTime())),
 			s.GetVm().GetIp(), trunc(job, 22), trunc(note, 60))
 	}
@@ -412,8 +420,20 @@ func durString(d time.Duration) string {
 }
 
 func trunc(s string, n int) string {
-	if len(s) <= n {
+	if utf8.RuneCountInString(s) <= n {
 		return s
 	}
-	return s[:n-1] + "…"
+	return string([]rune(s)[:n-1]) + "…"
+}
+
+// cellWidth is a cell's display width. All table content is ASCII except
+// trunc's ellipsis (one column), so rune count is the display width.
+func cellWidth(s string) int { return utf8.RuneCountInString(s) }
+
+// pad right-pads s with spaces to display width w.
+func pad(s string, w int) string {
+	if d := w - cellWidth(s); d > 0 {
+		return s + strings.Repeat(" ", d)
+	}
+	return s
 }

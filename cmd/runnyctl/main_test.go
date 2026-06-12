@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -51,6 +52,48 @@ func TestRenderStatusShowsBackoffRemaining(t *testing.T) {
 	}
 	if !strings.Contains(out, "mac-1") {
 		t.Errorf("BACKOFF slot lost its slot-name fallback:\n%s", out)
+	}
+}
+
+// A clamped cell must occupy exactly n display columns. The old byte-based
+// trunc returned n−1 bytes plus a 3-byte ellipsis displaying as one column,
+// so every clamped cell rendered 2 columns narrower than its padded width
+// and shifted every column to its right.
+func TestTruncDisplayWidth(t *testing.T) {
+	cases := []struct {
+		s    string
+		n    int
+		want string
+	}{
+		{"short", 10, "short"},
+		{"exactly-ten", 11, "exactly-ten"},
+		{"a-much-longer-string", 10, "a-much-lo…"},
+		{"ünïcödé-rünés-everywhere", 10, "ünïcödé-r…"},
+	}
+	for _, tc := range cases {
+		got := trunc(tc.s, tc.n)
+		if got != tc.want {
+			t.Errorf("trunc(%q, %d) = %q, want %q", tc.s, tc.n, got, tc.want)
+		}
+		if w := utf8.RuneCountInString(got); w > tc.n {
+			t.Errorf("trunc(%q, %d) display width = %d, want <= %d", tc.s, tc.n, w, tc.n)
+		}
+	}
+}
+
+// pad must align a clamped cell (multi-byte ellipsis) with an unclamped one:
+// both render at the same display width.
+func TestPadAlignsClampedCells(t *testing.T) {
+	clamped := trunc("a-much-longer-string", 10)
+	plain := "short"
+	if cw, pw := cellWidth(pad(clamped, 22)), cellWidth(pad(plain, 22)); cw != pw {
+		t.Errorf("padded widths differ: clamped=%d plain=%d", cw, pw)
+	}
+	if got := pad("abc", 5); got != "abc  " {
+		t.Errorf("pad(abc, 5) = %q", got)
+	}
+	if got := pad("abcdef", 5); got != "abcdef" {
+		t.Errorf("pad must not clip: got %q", got)
 	}
 }
 

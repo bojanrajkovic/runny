@@ -1,4 +1,4 @@
-# ADR-0014: The Runny app — name, scope, and client toolchain
+# ADR-0016: The Runny app — name, scope, and client toolchain
 
 **Status:** Accepted (2026-06-12)
 

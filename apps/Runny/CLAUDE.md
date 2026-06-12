@@ -2,7 +2,7 @@
 
 The SwiftUI app: menu-bar popover + main window over the `runny.v1` socket.
 Canonical docs: `docs/architecture/runny-app.md` (shape, connection FSM,
-bounds) and ADR-0014 (decisions). Sharp edges below.
+bounds) and ADR-0016 (decisions). Sharp edges below.
 
 ## Sharp edges
 
@@ -27,7 +27,7 @@ bounds) and ADR-0014 (decisions). Sharp edges below.
   v1 compilers (`GRPC` module): `ClientConnection` over the UDS target,
   plaintext, with the generated `Async`-prefixed client wrappers. Do not
   import or imitate `GRPCCore` (v2) patterns — there is no in-graph path to
-  that runtime (ADR-0014).
+  that runtime (ADR-0016).
 - **Building needs full Xcode** (SDK vendor only, never opened — ADR-0007).
   Command Line Tools alone fail at analysis; `bazel query` still works as a
   syntax check.

@@ -2,7 +2,7 @@
 
 The current shape of the macOS app. Decisions and their alternatives live in
 `../architecture-decisions/` (the app's founding decisions are
-[ADR-0014](../architecture-decisions/0014-runny-app.md)); this doc tracks the
+[ADR-0016](../architecture-decisions/0016-runny-app.md)); this doc tracks the
 code at `apps/Runny`.
 
 ## The two surfaces
@@ -112,4 +112,4 @@ dmg chain in `apps/Runny/BUILD` — no .xcodeproj, ever (ADR-0007). All Swift
 targets are darwin-only (`target_compatible_with`), so non-macOS hosts prune
 them from `//...` before toolchain resolution. Building the app requires
 full Xcode as SDK vendor; it is never opened. Distribution is a notarized,
-stapled .dmg (ADR-0014).
+stapled .dmg (ADR-0016).

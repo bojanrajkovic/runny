@@ -88,6 +88,34 @@ password-auth-for-the-whole-cycle behavior; the network posture above is then
 what bounds the password (reachable from the host datapath only, not from
 sibling guests).
 
+## Operator debug keys
+
+`runnyctl debug` injects an operator's SSH public key into a live guest's
+`authorized_keys` for incident response
+([ADR-0014](architecture-decisions/0014-debug-key-injection.md)). The
+credential is **per-guest, per-cycle**: it is appended alongside the cycle key
+(no sshd config change, works under `ssh_hardening: off`) and dies with the
+clone at teardown — there is nothing to revoke. On the idle path the runner is
+**verifiably killed** (a pgrep read-back proving the listener dead) *before*
+the key lands, so a frozen guest cannot pick up a job with an operator
+credential present.
+
+A job **may run with an operator credential present**, by explicit consented
+operator action (the mid-job inject path) — runny's contract here is
+**visibility, not prevention**. Every such event is recorded three ways: the
+job record itself names the fingerprints (`JobInfo.operator_keys`); every
+attempt — including failed and refused ones — is in `CycleRecord.injected_keys`
+with its FSM state and outcome; and a write-ahead `operator-access.json`
+sidecar is written *before any byte reaches the guest*, survives a daemon
+crash, and is surfaced in `runnyctl why` for the cycle's **retention window**
+(not indefinitely — retention still ages it).
+
+Authorization is the socket itself: the 0600 owner-only `runnyd.sock` is the
+sole gate, deliberately — the socket owner already transitively holds
+everything injection grants (the config that can set `ssh_hardening: off`, the
+App key, the daemon binary). The audit trail is the accountability layer, not a
+second authorization tier.
+
 ## Ephemeral guests
 
 Each cycle runs a **fresh APFS clone that is destroyed on teardown**; no state

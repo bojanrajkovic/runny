@@ -56,7 +56,10 @@ stateDiagram-v2
     PROVISION --> LISTENING: "Listening for Jobs"
     LISTENING --> JOB: "Running job:"
     LISTENING --> TEARDOWN: zombie / liveness lost / max-idle / recycle
+    LISTENING --> DEBUG: debug key injected (runner killed + verified)
     JOB --> TEARDOWN: job completed (success path)
+    JOB --> DEBUG: armed hold (job end; listener killed + verified)
+    DEBUG --> TEARDOWN: recycle / hold expiry / daemon shutdown
     TEARDOWN --> BACKOFF: cycle.json written
 
     note right of TEARDOWN
@@ -136,10 +139,44 @@ each interrupted cycle's recycle reason.
 `logs/runnyd.log`, `images/<ref>/<digest>/` (immutable cache),
 `vms/<slot>/` (ephemeral, swept), `cache/actions-runner/` (virtiofs share),
 `cycles/<slot>/<started>-<id>/cycle.json` (+ post-mortem artifacts on
-failure cycles; success cycles keep only the record).
+failure cycles; success cycles keep only the record). A cycle that saw an
+operator debug-key attempt also carries `operator-access.json` — the
+write-ahead audit sidecar, written before any byte reaches the guest and
+surfaced in `runnyctl why` even after a daemon crash that left no cycle.json
+(ADR-0014).
+
+## Commands during a cycle
+
+Operator commands (`recycle`, `pause`, `resume`, `debug`) ride one buffered
+channel per slot; exactly one FSM select owns it at any instant. Every state
+that can hold a guest services it (ADR-0015):
+
+- **Boot-path states** — the runCycle watcher cancels the cycle on `recycle`;
+  `debug` is rejected (no usable guest yet).
+- **LISTENING** — `recycle` ends the cycle; `debug` runs the freeze into DEBUG.
+- **JOB** — `recycle` (plain) disarms any debug hold and lets the job finish;
+  `recycle -force` (`cancel_running_job`) cancels the job into teardown;
+  `pause`/`resume` take effect immediately; `debug` installs the key into the
+  running job without touching it and arms a post-job hold.
+- **DEBUG** — `recycle` releases (always destructive); `debug` extends the hold
+  or adds a key.
+- **BACKOFF** — a teardown-stranded plain recycle is drained and discarded
+  before the timer arms, so it can never cancel the next cycle's boot.
 
 ## Operational sharp edges
 
+- **A debug hold counts against the macOS guest cap.** A frozen or armed guest
+  occupies its slot's cap share for the whole hold; worst-case slot occupancy
+  is `max_job_duration + max_debug_hold` (4h default, since a mid-job arm's hold
+  clock starts only at job end). Both knobs are tunable and the occupancy is
+  visible in `status` throughout. Release is always destructive — there is no
+  path back to LISTENING; recycling (or hold expiry) destroys the guest.
+  Extending an installed key is exec-free.
+- **Pausing or plain-recycling an armed slot disarms the hold immediately.**
+  Two operator intents collided and pause/recycle won; the live `debug_hold_
+  armed` status drops at once (no lingering lie), an Error/Warn line is logged,
+  and a `disarmed` audit entry is written. The recovery is resume + re-inject
+  next cycle. This is what lets the wedge drain never stall behind a hold.
 - **macOS Local Network privacy (TCC)**: a background-reparented ad-hoc
   runnyd gets silently denied vmnet access — every guest dial fails with
   `connect: no route to host` while the host shell reaches the same port.

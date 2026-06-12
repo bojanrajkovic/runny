@@ -51,6 +51,9 @@ final class DaemonStore {
     private(set) var daemonVersion = ""
     private(set) var daemonStarted: Date?
     private(set) var lastUpdate: Date?
+    /// Non-empty while the daemon is draining toward a restart (wedge or
+    /// config reload): the reason every slot is converging to paused/wedged.
+    private(set) var draining = ""
 
     private(set) var doctorChecks: [Runny_V1_DoctorCheck]?
     private(set) var doctorRanAt: Date?
@@ -58,6 +61,9 @@ final class DaemonStore {
 
     /// Set when a command fails or goes unconfirmed; views alert and clear.
     var commandError: String?
+    /// Advisory note from a command (e.g. pause during a drain is in-memory);
+    /// not a failure — surfaced as info and cleared by the view.
+    var commandNote: String?
 
     private(set) var pending: [String: PendingCommand] = [:]
 
@@ -176,7 +182,7 @@ final class DaemonStore {
     /// instant retry. No polling: zero wakeups while idle.
     private func sleepInterruptibly(_ seconds: TimeInterval) async {
         guard !retryNow else { return }
-        let sleeper = Task { try? await Task.sleep(for: .seconds(seconds)) }
+        let sleeper = Task<Void, Never> { _ = try? await Task.sleep(for: .seconds(seconds)) }
         sleepTask = sleeper
         await sleeper.value
         sleepTask = nil
@@ -240,6 +246,7 @@ final class DaemonStore {
         slots = snapshot.slots.sorted { $0.slot < $1.slot }
         daemonVersion = snapshot.version
         daemonStarted = snapshot.hasDaemonStarted ? snapshot.daemonStarted.dateValue : nil
+        draining = snapshot.draining
         lastUpdate = Date()
         confirmPending()
     }
@@ -277,8 +284,10 @@ final class DaemonStore {
         return command
     }
 
+    /// Operations return an optional advisory note (e.g. pause-during-drain);
+    /// non-empty surfaces as an info banner, distinct from a failure.
     private func run(_ kind: PendingCommand.Kind, slot: Runny_V1_SlotStatus,
-                     _ operation: @escaping (RunnyClient) async throws -> Void)
+                     _ operation: @escaping (RunnyClient) async throws -> String?)
     {
         guard let client else {
             commandError = "daemon unreachable — \(kind.rawValue) not sent"
@@ -289,7 +298,9 @@ final class DaemonStore {
         )
         Task { @MainActor in
             do {
-                try await operation(client)
+                if let note = try await operation(client), !note.isEmpty {
+                    commandNote = note
+                }
             } catch {
                 pending.removeValue(forKey: slot.slot)
                 commandError = Self.describe(error, kind: kind, slot: slot.slot)
@@ -302,12 +313,13 @@ final class DaemonStore {
     }
 
     func resumeSlot(_ slot: Runny_V1_SlotStatus) {
-        run(.resume, slot: slot) { try await $0.resume(slot: slot.slot) }
+        run(.resume, slot: slot) { try await $0.resume(slot: slot.slot); return nil }
     }
 
     func recycleSlot(_ slot: Runny_V1_SlotStatus, reason: String) {
         run(.recycle, slot: slot) {
             try await $0.recycle(slot: slot.slot, reason: reason)
+            return nil
         }
     }
 
@@ -315,8 +327,9 @@ final class DaemonStore {
         _ error: Error, kind: PendingCommand.Kind, slot: String
     ) -> String {
         switch error.grpcCode {
-        case .resourceExhausted:
-            // The slot's command buffer is full — transient, self-draining.
+        case .unavailable:
+            // The slot's command buffer is full — transient, self-draining
+            // (the server's Unavailable, matching InjectDebugKey).
             "\(slot) is not accepting commands right now — try again shortly"
         case .notFound:
             "no slot named \(slot)"

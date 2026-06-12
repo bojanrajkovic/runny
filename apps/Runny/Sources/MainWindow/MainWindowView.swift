@@ -62,12 +62,24 @@ struct MainWindowView: View {
             actions: { Button("OK") { store.commandError = nil } },
             message: { Text(store.commandError ?? "") }
         )
+        .alert(
+            "Heads up", isPresented: commandNoteBinding,
+            actions: { Button("OK") { store.commandNote = nil } },
+            message: { Text(store.commandNote ?? "") }
+        )
     }
 
     private var commandErrorBinding: Binding<Bool> {
         Binding(
             get: { store.commandError != nil },
             set: { if !$0 { store.commandError = nil } }
+        )
+    }
+
+    private var commandNoteBinding: Binding<Bool> {
+        Binding(
+            get: { store.commandNote != nil },
+            set: { if !$0 { store.commandNote = nil } }
         )
     }
 }
@@ -85,6 +97,12 @@ struct DaemonCard: View {
                 }
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+            }
+            if !store.draining.isEmpty {
+                Label("draining for restart: \(store.draining)", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
             }
         }
         .padding(8)

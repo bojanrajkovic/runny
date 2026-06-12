@@ -95,6 +95,10 @@ struct CycleView: View {
                 summary
                 Divider()
                 states
+                if !cycle.injectedKeys.isEmpty {
+                    Divider()
+                    injectedKeys
+                }
                 if !cycle.artifacts.isEmpty {
                     Divider()
                     artifacts
@@ -127,8 +131,20 @@ struct CycleView: View {
             }
             .font(.callout)
             HStack(spacing: 12) {
+                // Configured ref (intent) and resolved digest (truth) — the
+                // pair `runnyctl why` renders.
+                if !cycle.image.isEmpty {
+                    Text(cycle.image)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
                 if !cycle.imageDigest.isEmpty {
-                    Text("image \(String(cycle.imageDigest.prefix(19)))…")
+                    Text(String(cycle.imageDigest.prefix(19)) + "…")
+                }
+                if !cycle.runnerVersion.isEmpty {
+                    Text(cycle.runnerVersion)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
                 if cycle.hasVm, !cycle.vm.ip.isEmpty {
                     Text("vm \(cycle.vm.ip)")
@@ -174,6 +190,34 @@ struct CycleView: View {
                     .font(.caption)
                     .monospaced()
                     .help("Retained in this cycle's directory under the runny home")
+            }
+        }
+    }
+
+    /// Operator debug-key audit trail: every attempt against this cycle's
+    /// guest, including refused and mid-job ones. A "JOB"-state entry is a
+    /// contamination event — the job ran with an operator credential present.
+    private var injectedKeys: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Debug keys")
+                .font(.caption)
+                .fontWeight(.semibold)
+                .foregroundStyle(.secondary)
+            ForEach(Array(cycle.injectedKeys.enumerated()), id: \.offset) { _, key in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: key.state == "JOB" ? "exclamationmark.shield" : "key")
+                        .foregroundStyle(key.state == "JOB" ? .orange : .secondary)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("\(key.fingerprint) — \(key.outcome) in \(key.state)")
+                            .font(.caption)
+                            .monospaced()
+                        if !key.reason.isEmpty || !key.error.isEmpty {
+                            Text([key.reason, key.error].filter { !$0.isEmpty }.joined(separator: " · "))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
             }
         }
     }

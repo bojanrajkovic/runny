@@ -11,11 +11,22 @@ struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 0) {
             MenuBarHeader()
                 .padding(Metrics.pad)
+            if !store.draining.isEmpty {
+                StatusBanner(
+                    text: "draining for restart: \(store.draining)",
+                    systemImage: "arrow.triangle.2.circlepath", tint: .orange
+                )
+            }
             // Command failures must be visible HERE: the main window's alert
             // doesn't exist while only the popover is open, and a recycle
             // that fails invisibly is a silent failure.
             if let error = store.commandError {
-                CommandErrorBanner(text: error)
+                StatusBanner(text: error, systemImage: "exclamationmark.triangle.fill",
+                             tint: .red) { store.commandError = nil }
+            }
+            if let note = store.commandNote {
+                StatusBanner(text: note, systemImage: "info.circle.fill",
+                             tint: .blue) { store.commandNote = nil }
             }
             Divider()
             if store.slots.isEmpty {
@@ -64,31 +75,36 @@ struct MenuBarView: View {
     }
 }
 
-struct CommandErrorBanner: View {
-    @Environment(DaemonStore.self) private var store
+/// One banner vocabulary for drain/error/note across the popover. A nil
+/// dismiss closure renders a non-dismissible banner (the drain state, which
+/// clears itself from snapshots).
+struct StatusBanner: View {
     let text: String
+    let systemImage: String
+    let tint: Color
+    var dismiss: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.red)
+            Image(systemName: systemImage)
+                .foregroundStyle(tint)
                 .font(.caption)
             Text(text)
                 .font(.caption)
                 .foregroundStyle(.primary)
                 .lineLimit(3)
             Spacer(minLength: 4)
-            Button {
-                store.commandError = nil
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.secondary)
+            if let dismiss {
+                Button(action: dismiss) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
         .padding(.horizontal, Metrics.pad)
         .padding(.vertical, 6)
-        .background(Color.red.opacity(0.08))
+        .background(tint.opacity(0.08))
     }
 }
 
@@ -233,6 +249,9 @@ struct MenuBarSlotRow: View {
     private func noteText(now: Date) -> String {
         if let pending = store.pendingCommand(for: slot.slot) {
             return pending.displayText
+        }
+        if slot.state == .debug, slot.hasDebugHoldExpires {
+            return "debug hold — releases in \(SlotPresentation.duration(slot.debugHoldExpires.dateValue.timeIntervalSince(now)))"
         }
         return SlotPresentation.note(slot, now: now)
     }

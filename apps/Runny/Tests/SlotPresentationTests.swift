@@ -23,6 +23,20 @@ final class CycleOrderTests: XCTestCase {
         )
     }
 
+    func testDebugSitsBetweenJobAndTeardown() {
+        // SLOT_STATE_DEBUG=13 is appended for wire compat but is the operator
+        // hold between JOB and TEARDOWN in cycle order.
+        XCTAssertLessThan(
+            Runny_V1_SlotState.job.cycleIndex,
+            Runny_V1_SlotState.debug.cycleIndex
+        )
+        XCTAssertLessThan(
+            Runny_V1_SlotState.debug.cycleIndex,
+            Runny_V1_SlotState.teardown.cycleIndex
+        )
+        XCTAssertEqual(Runny_V1_SlotState.debug.displayName, "DEBUG")
+    }
+
     func testUnknownStatesSortLastAndRenderGracefully() {
         XCTAssertEqual(
             Runny_V1_SlotState.unspecified.cycleIndex,

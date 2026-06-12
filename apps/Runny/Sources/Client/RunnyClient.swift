@@ -65,10 +65,13 @@ final class RunnyClient: @unchecked Sendable {
         _ = try await stub.recycle(request, callOptions: Self.options(Self.commandTimeout))
     }
 
-    func pause(slot: String) async throws {
+    /// Returns the daemon's note (non-empty only while draining: pause is
+    /// in-memory and won't survive the imminent respawn).
+    func pause(slot: String) async throws -> String {
         var request = Runny_V1_PauseRequest()
         request.slot = slot
-        _ = try await stub.pause(request, callOptions: Self.options(Self.commandTimeout))
+        let response = try await stub.pause(request, callOptions: Self.options(Self.commandTimeout))
+        return response.note
     }
 
     func resume(slot: String) async throws {

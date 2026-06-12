@@ -5,9 +5,9 @@ Xcode is never opened — ADR-0007). Elsewhere every target is pruned by
 target_compatible_with before toolchain resolution.
 """
 
-load("@rules_apple//apple:macos.bzl", "macos_application")
+load("@rules_apple//apple:macos.bzl", "macos_application", "macos_unit_test")
 load("@rules_apple//apple:versioning.bzl", "apple_bundle_version")
-load("@rules_swift//swift:swift.bzl", "swift_library", "swift_test")
+load("@rules_swift//swift:swift.bzl", "swift_library")
 load("//tools/sign:sign.bzl", "app_dmg", "codesign_app", "notarize_app", "notarize_dmg")
 
 swift_library(
@@ -21,14 +21,25 @@ swift_library(
     deps = ["//proto/runny/v1:runnyv1_swift_proto"],
 )
 
-swift_test(
-    name = "RunnyLibTests",
+swift_library(
+    name = "RunnyTestsLib",
+    testonly = True,
     srcs = glob(
         ["Tests/**/*.swift"],
         allow_empty = True,
     ),
+    module_name = "RunnyTests",
     target_compatible_with = ["@platforms//os:macos"],
     deps = [":RunnyLib"],
+)
+
+# A loadable .xctest bundle, not a swift_test executable: the bundle has no
+# main, so RunnyLib's @main entry point doesn't collide with a test runner's.
+macos_unit_test(
+    name = "RunnyLibTests",
+    minimum_os_version = "15.0",
+    target_compatible_with = ["@platforms//os:macos"],
+    deps = [":RunnyTestsLib"],
 )
 
 # CFBundleShortVersionString/CFBundleVersion come from the stamped build

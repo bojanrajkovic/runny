@@ -75,6 +75,7 @@ struct SlotDetailView: View {
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
+                DebugHoldChip(slot: slot)
                 Spacer()
             }
             if !SlotPresentation.note(slot, now: Date()).isEmpty {
@@ -86,6 +87,26 @@ struct SlotDetailView: View {
                 .lineLimit(2)
                 .truncationMode(.tail)
             }
+        }
+    }
+}
+
+/// Operator debug-hold status: armed (a JOB that will hold at end) or a live
+/// release countdown (a slot parked in DEBUG).
+struct DebugHoldChip: View {
+    let slot: Runny_V1_SlotStatus
+
+    var body: some View {
+        if slot.state == .debug, slot.hasDebugHoldExpires {
+            TickingText { now in
+                "releases in \(SlotPresentation.duration(slot.debugHoldExpires.dateValue.timeIntervalSince(now)))"
+            }
+            .font(.callout)
+            .foregroundStyle(.purple)
+        } else if slot.debugHoldArmed {
+            Label("debug hold armed", systemImage: "pause.circle")
+                .font(.callout)
+                .foregroundStyle(.purple)
         }
     }
 }
@@ -122,9 +143,32 @@ struct InfoTab: View {
                 if !slot.vm.ip.isEmpty { LabeledContent("IP", value: slot.vm.ip) }
                 if !slot.vm.mac.isEmpty { LabeledContent("MAC", value: slot.vm.mac) }
             }
+            if !slot.image.isEmpty {
+                LabeledContent("Image", value: slot.image)
+            }
+            if !slot.imageDigest.isEmpty {
+                LabeledContent("Digest", value: slot.imageDigest)
+            }
+            if !slot.runnerVersion.isEmpty {
+                LabeledContent("Runner", value: slot.runnerVersion)
+            }
             if slot.hasJob {
                 LabeledContent("Job", value: slot.job.name)
                 LabeledContent("Job started", value: Self.timestamp.string(from: slot.job.started.dateValue))
+                if !slot.job.operatorKeys.isEmpty {
+                    // Security-relevant: the job ran with an operator debug key
+                    // in its trust environment.
+                    LabeledContent("Operator keys", value: slot.job.operatorKeys.joined(separator: ", "))
+                        .foregroundStyle(.orange)
+                }
+            }
+            if slot.debugHoldArmed {
+                LabeledContent("Debug hold", value: "armed — enters DEBUG when the job ends")
+                    .foregroundStyle(.purple)
+            }
+            if slot.hasDebugHoldExpires {
+                LabeledContent("Debug hold expires", value: Self.timestamp.string(from: slot.debugHoldExpires.dateValue))
+                    .foregroundStyle(.purple)
             }
             if slot.consecutiveFailures > 0 {
                 LabeledContent("Consecutive failures", value: "\(slot.consecutiveFailures)")

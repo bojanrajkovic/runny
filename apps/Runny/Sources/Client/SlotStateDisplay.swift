@@ -2,12 +2,13 @@ import RunnyV1
 import SwiftUI
 
 extension Runny_V1_SlotState {
-    /// Cycle order, NOT proto numeric order: SECURE_SSH was appended for wire
-    /// compat and sits between AWAIT_SSH and MINT_JIT (see the proto comment).
+    /// Cycle order, NOT proto numeric order: SECURE_SSH (12) and DEBUG (13)
+    /// were appended for wire compat but sit mid-cycle (see the proto
+    /// comments). DEBUG is the operator hold between JOB and TEARDOWN.
     /// Render and sort by this, never by rawValue.
     static let cycleOrder: [Runny_V1_SlotState] = [
         .backoff, .ensureImage, .clone, .boot, .awaitIp, .awaitSsh,
-        .secureSsh, .mintJit, .provision, .listening, .job, .teardown,
+        .secureSsh, .mintJit, .provision, .listening, .job, .debug, .teardown,
     ]
 
     /// Position in the cycle, for sorting state records. Unknown/unspecified
@@ -31,6 +32,7 @@ extension Runny_V1_SlotState {
         case .provision: "PROVISION"
         case .listening: "LISTENING"
         case .job: "JOB"
+        case .debug: "DEBUG"
         case .teardown: "TEARDOWN"
         case let .UNRECOGNIZED(n): "STATE(\(n))"
         }
@@ -40,6 +42,7 @@ extension Runny_V1_SlotState {
         switch self {
         case .listening: .green
         case .job: .blue
+        case .debug: .purple // operator hold — runner killed, max-idle suspended
         case .backoff: .secondary.opacity(0.8)
         case .teardown: .orange
         case .unspecified, .UNRECOGNIZED: .secondary

@@ -40,6 +40,28 @@ Bazel rule/file label collision that arises when a genrule output shares
 its target name.
 """
 
+# The notarization credential recipe exists ONCE. Three macros submit three
+# artifact shapes (zip of a binary, app archive, dmg), and a credential or
+# flag change that lands in only some of them degrades silently to a
+# pass-through at the unset-env tier — the drift would first surface as a
+# Gatekeeper rejection on a published release.
+_NOTARY_KEY_SETUP = """
+            NOTARY_TMPDIR=$$(mktemp -d /tmp/bazel-notary.XXXXXX)
+            trap 'rm -rf "$$NOTARY_TMPDIR"' EXIT
+            KEY="$$NOTARY_TMPDIR/key.p8"
+            printf '%s' "$${{NOTARY_KEY_B64:-}}" | base64 --decode > "$$KEY"
+"""
+
+# --timeout bounds --wait: an Apple-side stall fails the build loudly after
+# 30 minutes instead of hanging it forever (no unbounded operations).
+_NOTARY_SUBMIT = """
+            xcrun notarytool submit {artifact} \\
+                --key "$$KEY" \\
+                --key-id "$${{NOTARY_KEY_ID:-}}" \\
+                --issuer "$${{NOTARY_ISSUER_ID:-}}" \\
+                --wait --timeout 30m
+"""
+
 def codesign_binary(name, binary, entitlements = None, entitlement_key = None, **kwargs):
     """Produce a signed copy of a macOS binary.
 
@@ -135,24 +157,17 @@ def notarize_binary(name, binary, **kwargs):
         name = name,
         srcs = [binary],
         outs = [name + ".bin"],
-        cmd = """
+        cmd = ("""
             if [ -z "$${{NOTARY_KEY_B64:-}}" ]; then
                 cp $(location {binary}) $@
                 exit 0
             fi
-            NOTARY_TMPDIR=$$(mktemp -d /tmp/bazel-notary.XXXXXX)
-            trap 'rm -rf "$$NOTARY_TMPDIR"' EXIT
-            KEY="$$NOTARY_TMPDIR/key.p8"
+""" + _NOTARY_KEY_SETUP + """
             ZIP="$$NOTARY_TMPDIR/submit.zip"
-            printf '%s' "$${{NOTARY_KEY_B64:-}}" | base64 --decode > "$$KEY"
             zip -j "$$ZIP" $(location {binary})
-            xcrun notarytool submit "$$ZIP" \\
-                --key "$$KEY" \\
-                --key-id "$${{NOTARY_KEY_ID:-}}" \\
-                --issuer "$${{NOTARY_ISSUER_ID:-}}" \\
-                --wait
+""" + _NOTARY_SUBMIT + """
             cp $(location {binary}) $@
-        """.format(binary = binary),
+        """).format(binary = binary, artifact = '"$$ZIP"'),
         # no-sandbox: notarytool needs outbound HTTPS to Apple's notarization
         # service. no-remote: credentials in action-env must not reach a remote
         # executor.
@@ -166,13 +181,19 @@ def codesign_app(name, app_zip, **kwargs):
 
     rules_apple signs the bundle ad-hoc in-rule; this target re-signs it
     with the identity from CODESIGN_IDENTITY (action-env), defaulting to
-    '-' (ad-hoc) when unset. Developer ID signing adds hardened runtime
-    (--options runtime) and a trusted timestamp (--timestamp); ad-hoc adds
-    neither.
+    '-' (ad-hoc) when unset. Both tiers apply hardened runtime (--options
+    runtime), matching codesign_binary, so dev builds exercise the same
+    runtime restrictions the release ships with; Developer ID adds the
+    trusted timestamp (the timestamp server rejects '-').
 
     The bundle is signed with a single codesign of the .app — never --deep
     (deprecated, signs inside-out in unspecified order). The app's only
     nested Mach-O is its main executable, which signing the bundle covers.
+
+    app_zip must resolve to exactly one file: with --apple_generate_dsym
+    or include_symbols_in_bundle, macos_application's default output grows
+    dSYM files and $(location) fails loudly — strip those flags or point
+    at the archive output explicitly.
 
     Args:
         name:    Target name. Output is <name>.zip containing the signed .app.
@@ -186,7 +207,7 @@ def codesign_app(name, app_zip, **kwargs):
         cmd = """
             IDENTITY="$${{CODESIGN_IDENTITY:--}}"
             if [ "$$IDENTITY" = "-" ]; then
-                EXTRA_FLAGS=""
+                EXTRA_FLAGS="--options runtime"
             else
                 EXTRA_FLAGS="--options runtime --timestamp"
             fi
@@ -222,25 +243,17 @@ def notarize_app(name, app_zip, **kwargs):
         name = name,
         srcs = [app_zip],
         outs = [name + ".zip"],
-        cmd = """
+        cmd = ("""
             if [ -z "$${{NOTARY_KEY_B64:-}}" ]; then
                 cp $(location {app_zip}) $@
                 exit 0
             fi
-            NOTARY_TMPDIR=$$(mktemp -d /tmp/bazel-notary.XXXXXX)
-            trap 'rm -rf "$$NOTARY_TMPDIR"' EXIT
-            KEY="$$NOTARY_TMPDIR/key.p8"
-            printf '%s' "$${{NOTARY_KEY_B64:-}}" | base64 --decode > "$$KEY"
-            xcrun notarytool submit $(location {app_zip}) \\
-                --key "$$KEY" \\
-                --key-id "$${{NOTARY_KEY_ID:-}}" \\
-                --issuer "$${{NOTARY_ISSUER_ID:-}}" \\
-                --wait
+""" + _NOTARY_KEY_SETUP + _NOTARY_SUBMIT + """
             ditto -x -k $(location {app_zip}) "$$NOTARY_TMPDIR/bundle"
             APP=$$(echo "$$NOTARY_TMPDIR/bundle"/*.app)
             xcrun stapler staple "$$APP"
             ditto -c -k --keepParent "$$APP" "$@"
-        """.format(app_zip = app_zip),
+        """).format(app_zip = app_zip, artifact = "$(location {})".format(app_zip)),
         # no-sandbox: notarytool needs outbound HTTPS to Apple's notarization
         # service. no-remote: credentials in action-env must not reach a remote
         # executor.
@@ -309,23 +322,15 @@ def notarize_dmg(name, dmg, **kwargs):
         name = name,
         srcs = [dmg],
         outs = [name + ".dmg"],
-        cmd = """
+        cmd = ("""
             cp $(location {dmg}) $@
             if [ -z "$${{NOTARY_KEY_B64:-}}" ]; then
                 exit 0
             fi
             chmod +w $@
-            NOTARY_TMPDIR=$$(mktemp -d /tmp/bazel-notary.XXXXXX)
-            trap 'rm -rf "$$NOTARY_TMPDIR"' EXIT
-            KEY="$$NOTARY_TMPDIR/key.p8"
-            printf '%s' "$${{NOTARY_KEY_B64:-}}" | base64 --decode > "$$KEY"
-            xcrun notarytool submit $(location {dmg}) \\
-                --key "$$KEY" \\
-                --key-id "$${{NOTARY_KEY_ID:-}}" \\
-                --issuer "$${{NOTARY_ISSUER_ID:-}}" \\
-                --wait
+""" + _NOTARY_KEY_SETUP + _NOTARY_SUBMIT + """
             xcrun stapler staple $@
-        """.format(dmg = dmg),
+        """).format(dmg = dmg, artifact = "$(location {})".format(dmg)),
         # no-sandbox: notarytool needs outbound HTTPS to Apple's notarization
         # service. no-remote: credentials in action-env must not reach a remote
         # executor.

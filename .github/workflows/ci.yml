@@ -123,8 +123,11 @@ jobs:
         # unset; Developer ID signing requires cert secrets on the release
         # environment (see CONTRIBUTING.md "Codesigning tiers"). The app dmg
         # additionally needs --embed_label so apple_bundle_version stamps
-        # CFBundleShortVersionString/CFBundleVersion (ADR-0010: every build
-        # anywhere is identifiable).
+        # CFBundleShortVersionString/CFBundleVersion. Bundle version fields
+        # are numeric-only, so the bundle carries the bare x.y.z; the full
+        # pre-release label (x.y.z-beta.<sha>) rides the artifact filename
+        # and the Go binaries' stamps (ADR-0010 identifiability, within
+        # Apple's constraint).
         run: |
           VERSION="$(mise x -- tools/version.sh)"
           echo "runny version: $VERSION"

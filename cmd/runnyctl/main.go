@@ -499,8 +499,10 @@ func (c *ctl) renderReload(resp *runnyv1.ReloadResponse, reason string) error {
 	if len(sha) > 12 {
 		sha = sha[:12]
 	}
-	for _, w := range resp.GetWarnings() {
-		fmt.Fprintf(c.out, "warning: %s — %s\n", w.GetName(), w.GetDetail())
+	warn := func() {
+		for _, w := range resp.GetWarnings() {
+			fmt.Fprintf(c.out, "warning: %s — %s\n", w.GetName(), w.GetDetail())
+		}
 	}
 	if resp.GetAccepted() {
 		// Did THIS call start the drain? The daemon's drain reason for it
@@ -512,6 +514,7 @@ func (c *ctl) renderReload(resp *runnyv1.ReloadResponse, reason string) error {
 		if resp.GetDraining() != mine {
 			fmt.Fprintf(c.out, "config validated (sha256 %s); daemon already draining (%s) — the respawn will apply this config\n",
 				sha, resp.GetDraining())
+			warn()
 			return nil
 		}
 		fmt.Fprintf(c.out, "reload accepted: config validated (sha256 %s); draining %d slot(s)\n", sha, resp.GetSlotCount())
@@ -520,8 +523,10 @@ func (c *ctl) renderReload(resp *runnyv1.ReloadResponse, reason string) error {
 		if paused := resp.GetOperatorPausedSlots(); len(paused) > 0 {
 			fmt.Fprintf(c.out, "note: operator-paused slots resume after the respawn: %s\n", strings.Join(paused, ", "))
 		}
+		warn()
 		return nil
 	}
+	warn()
 	c.renderChecks(resp.GetFailedChecks())
 	if d := resp.GetDraining(); d != "" {
 		fmt.Fprintf(c.out, "WARNING: the daemon is already draining (%s) and the respawn WILL load this invalid config — fix ~/.runny/config.yaml before the drain converges, or the respawn will crash-loop (visible in launchd.err.log; diagnose with runnyd -doctor)\n", d)

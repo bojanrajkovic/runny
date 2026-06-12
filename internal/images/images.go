@@ -54,7 +54,7 @@ func (e *Ensurer) resolveBudget() time.Duration {
 	return defaultResolveTimeout
 }
 
-func (e *Ensurer) Ensure(ctx context.Context, report func(string)) (digest, runnerVersion string, bundle tart.Bundle, err error) {
+func (e *Ensurer) Ensure(ctx context.Context, report func(string), onDigestResolved func(string)) (digest, runnerVersion string, bundle tart.Bundle, err error) {
 	// Runner tarball first: small, fails fast, and shared across slots
 	// (per-file locking inside).
 	if e.Runner != nil {
@@ -74,6 +74,9 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string)) (digest, runn
 	rcancel()
 	if err != nil {
 		return "", "", "", fmt.Errorf("resolving %s: %w", e.Ref, err)
+	}
+	if onDigestResolved != nil {
+		onDigestResolved(digest)
 	}
 	dir := e.Home.ImageBundleDir(e.Ref.String(), digest)
 	bundle = tart.Bundle(dir)

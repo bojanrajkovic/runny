@@ -86,7 +86,7 @@ var (
 // visible, not just stall-detected, so an operator can tell slow-registry
 // from stuck (the predecessor made them indistinguishable).
 type ImageEnsurer interface {
-	Ensure(ctx context.Context, report func(detail string)) (digest, runnerVersion string, bundle tart.Bundle, err error)
+	Ensure(ctx context.Context, report func(detail string), onDigestResolved func(string)) (digest, runnerVersion string, bundle tart.Bundle, err error)
 }
 
 // Cloner clones a bundle (tart.Clone's seam).
@@ -635,18 +635,25 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	// duration is unknowable — so it runs under the cycle context; its
 	// operations carry their own bounds (resolve timeout, stall watcher).
 	ok := runState(StateEnsureImage, cctx, func() error {
-		digest, runnerVersion, bundle, err := s.deps.Images.Ensure(cctx, s.setDetail)
+		digest, runnerVersion, bundle, err := s.deps.Images.Ensure(cctx, s.setDetail, func(d string) {
+			// Fires as soon as the registry round-trip resolves the digest —
+			// before the pull starts. Publish immediately so WatchStatus
+			// subscribers see the digest mid-pull, not only at CLONE entry.
+			s.mu.Lock()
+			s.status.ImageDigest = d
+			snap := s.status
+			fns := slices.Clone(s.onChange)
+			s.mu.Unlock()
+			s.notify(fns, snap)
+		})
 		if err != nil {
 			return err
 		}
 		rec.ImageDigest = digest
 		rec.RunnerVersion = runnerVersion
-		// Publish to live status from the same values at the same site, so the
-		// audit trail and the live view cannot disagree. No explicit notify:
-		// the next setState broadcasts the snapshot milliseconds later (the
-		// same accepted latency as VM.MAC in BOOT).
+		// RunnerVersion: no explicit notify needed — the next setState
+		// (ENSURE_IMAGE → CLONE) broadcasts it milliseconds later.
 		s.mu.Lock()
-		s.status.ImageDigest = digest
 		s.status.RunnerVersion = runnerVersion
 		s.mu.Unlock()
 		srcBundle = bundle

@@ -32,7 +32,7 @@ type fakeImages struct {
 	mu       sync.Mutex
 }
 
-func (f *fakeImages) Ensure(ctx context.Context, report func(string)) (string, string, tart.Bundle, error) {
+func (f *fakeImages) Ensure(ctx context.Context, report func(string), onDigestResolved func(string)) (string, string, tart.Bundle, error) {
 	if report != nil {
 		report("pulled 1.0 MiB at 1.0 MiB/s")
 	}
@@ -43,6 +43,12 @@ func (f *fakeImages) Ensure(ctx context.Context, report func(string)) (string, s
 	if blocked {
 		<-ctx.Done()
 		return "", "", "", ctx.Err()
+	}
+	// Only fire the callback when Ensure will succeed: models the real
+	// Resolve-then-PullTo ordering where the callback fires iff the registry
+	// round-trip completed (a resolve failure leaves the digest unset).
+	if onDigestResolved != nil && f.err == nil {
+		onDigestResolved("sha256:fake")
 	}
 	return "sha256:fake", "actions-runner-osx-arm64-2.320.0.tar.gz", f.bundle, f.err
 }

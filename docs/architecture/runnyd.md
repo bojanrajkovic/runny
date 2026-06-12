@@ -157,3 +157,10 @@ App, real images), not just under test fakes:
   in-process VM (ADR-0012).
 - Operator surface: recycle deregisters; pause holds; SIGTERM mid-cycle
   leaves zero VMs, zero vm dirs, zero registrations.
+- SSH hardening (ADR-0013), both OSes: SECURE_SSH rotates in about a second
+  per cycle; mid-cycle password SSH to a hardened guest is refused with the
+  password method not even offered (`Permission denied (publickey)`); a pool
+  set `ssh_hardening: off` accepts password auth and skips the state, and
+  rotate/off pools coexist in one daemon with per-pool behavior intact. A
+  transient PROVISION failure after a successful rotation recycles cleanly —
+  the next cycle rotates fresh.

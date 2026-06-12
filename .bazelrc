@@ -9,6 +9,12 @@ common:ci --announce_rc
 common:ci --color=yes
 common:ci --lockfile_mode=error
 
+# Race detector. Slow (instrumented rebuild, ~2-10x runtime), so it is a
+# dedicated config / CI job rather than the default test path. Catches the
+# unsynchronized-shared-state bugs the FSM's goroutine-per-slot design is prone
+# to. Both pure-Go and cgo (vz) packages support -race on the build hosts.
+test:race --@rules_go//go/config:race
+
 # Per-user overrides (gitignored); keep last so it wins.
 try-import %workspace%/user.bazelrc
 

@@ -16,8 +16,8 @@ Three artifacts, one contract:
 - **`runnyctl`** — the CLI over a unix socket: live status and runner logs,
   recycle/pause, per-cycle post-mortems (`why`), environment checks
   (`doctor`).
-- **`RunnyBar`** — a SwiftUI menu-bar app, a sibling client of the same
-  protobuf contract.
+- **`Runny`** — a SwiftUI app (menu-bar popover + main window), a sibling
+  client of the same protobuf contract.
 
 Built because the predecessor converted every transient failure into a
 permanent silent outage. runny's design rule: **no operation is ever

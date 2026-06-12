@@ -6,7 +6,7 @@ The human-developer workflow. Agent-facing guidance and the project-wide index l
 
 - **Toolchain:** mise-managed (`mise install`): Bazel, Go, Node (commitlint only), lefthook — `.mise.toml` is the single home for every tool version, including Bazel's.
 - `npm install` once for the commitlint dev dependency, then `lefthook install` to wire the git hooks.
-- **macOS hosts (ix):** Command Line Tools suffice for the daemon (cgo + Virtualization.framework, verified); full Xcode is required only when building `RunnyBar` (rules_apple needs the SDK; Xcode is never opened — ADR-0007).
+- **macOS hosts (ix):** Command Line Tools suffice for the daemon (cgo + Virtualization.framework, verified); full Xcode is required to build the Runny app (`apps/Runny`) — and therefore for the pre-push hook's `bazel build //...` on a macOS host (rules_apple needs the SDK; Xcode is never opened — ADR-0007).
 
 ## Commands
 
@@ -14,7 +14,7 @@ The human-developer workflow. Agent-facing guidance and the project-wide index l
 | --- | --- |
 | `bazel build //...` | Build everything buildable on this host |
 | `bazel test //...` | Run the test suite |
-| `bazel run //tools/format` | Format the tree (gofumpt, buildifier; swift-format once Swift lands) |
+| `bazel run //tools/format` | Format the tree (gofumpt, buildifier, SwiftFormat — the nicklockwood tool, not apple/swift-format) |
 | `bazel run //:gazelle` | Regenerate BUILD files after import changes |
 
 **Dependency workflow:** `go mod tidy -e` → `bazel run //:gazelle` → `bazel mod tidy`. Add Go deps at latest stable; Renovate keeps pins current.
@@ -25,7 +25,7 @@ The human-developer workflow. Agent-facing guidance and the project-wide index l
 
 ## The Linux ↔ ix dev loop
 
-Primary development happens on the Linux box; everything pure-Go builds and tests there. Darwin-only targets (`internal/vm`'s vz code, `cmd/runnyd`'s final binary, `RunnyBar`) need a macOS arm64 host:
+Primary development happens on the Linux box; everything pure-Go builds and tests there. Darwin-only targets (`internal/vm`'s vz code, `cmd/runnyd`'s final binary, the Runny app) need a macOS arm64 host:
 
 ```
 rsync -a --exclude bazel-\* --exclude node_modules . brajkovic@ix:~/src/runny/

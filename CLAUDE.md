@@ -4,7 +4,7 @@
 
 ## Project
 
-**runny** — an observable macOS GitHub Actions runner daemon: crash-only ephemeral runner VMs on Virtualization.framework, fully compatible with tart's bundle/OCI image format but with no tart binary at runtime. Three artifacts: `runnyd` (Go daemon), `runnyctl` (Go CLI), `RunnyBar` (SwiftUI menu-bar app). See `docs/architecture/` for the shape and `docs/architecture-decisions/` for the decisions behind it.
+**runny** — an observable macOS GitHub Actions runner daemon: crash-only ephemeral runner VMs on Virtualization.framework, fully compatible with tart's bundle/OCI image format but with no tart binary at runtime. Three artifacts: `runnyd` (Go daemon), `runnyctl` (Go CLI), `Runny` (SwiftUI app: menu bar + main window). See `docs/architecture/` for the shape and `docs/architecture-decisions/` for the decisions behind it.
 
 ## Tech stack
 
@@ -14,7 +14,7 @@ Go 1.26 (mise-managed) for daemon + CLI; cgo to Virtualization.framework via `Co
 
 `bazel build //...` · `bazel test //...` · `bazel run //tools/format` · `bazel run //:gazelle` (after changing Go imports). Dependency changes follow CONTRIBUTING.md's workflow exactly — its flag and step order are load-bearing. Full reference and dev setup: `CONTRIBUTING.md`.
 
-**Darwin-only targets** (vz cgo, RunnyBar) build and test only on Darwin. On other hosts, everything pure-Go still builds and tests; for the cross-host loop see CONTRIBUTING.md.
+**Darwin-only targets** (vz cgo, the Runny app) build and test only on Darwin. On other hosts, everything pure-Go still builds and tests; for the cross-host loop see CONTRIBUTING.md.
 
 ## Source tree
 
@@ -32,8 +32,8 @@ Go 1.26 (mise-managed) for daemon + CLI; cgo to Virtualization.framework via `Co
 - `internal/cycle` — per-cycle artifact records (cycle.json) and retention.
 - `internal/logring` — log fan-out: file sink + in-memory rings (daemon log, runner output) behind StreamLogs.
 - `internal/socket` — the gRPC server over the unix socket.
-- `proto/runny/v1` — the contract `runnyctl` and RunnyBar both consume.
-- `apps/RunnyBar` — SwiftUI MenuBarExtra (ADR-0007: no .xcodeproj, ever).
+- `proto/runny/v1` — the contract `runnyctl` and Runny both consume.
+- `apps/Runny` — SwiftUI app: MenuBarExtra popover + main window (ADR-0014; ADR-0007: no .xcodeproj, ever).
 - `tools/` — format runner, nogo, platforms.
 
 For per-directory detail, read that directory's `CLAUDE.md` if present. For current counts and inventories (states, RPCs, config keys), read the source (the FSM table, the proto file, the config schema); this index does not enumerate them.

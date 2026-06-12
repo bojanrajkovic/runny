@@ -10,7 +10,7 @@ guests in-process via Virtualization.framework (`internal/vm`), provisions
 them over deadline-bounded SSH (`internal/sshx` → `internal/guest`),
 registers them with GitHub via JIT config (`internal/github`), and serves the
 `runny.v1` control surface over a unix socket (`internal/socket`) to
-`runnyctl` and `RunnyBar` as equal clients. The layout decision is
+`runnyctl` and the `Runny` app as equal clients. The layout decision is
 [ADR-0006](../architecture-decisions/0006-monorepo-layout-protobuf-contract.md);
 this diagram is the living copy and tracks the code.
 
@@ -26,7 +26,7 @@ flowchart LR
         runnyd --- sock
     end
     ctl["runnyctl (Go CLI)"] -- "protobuf (runny.v1)" --> sock
-    bar["RunnyBar (SwiftUI)"] -- "protobuf (runny.v1)" --> sock
+    app["Runny (SwiftUI)"] -- "protobuf (runny.v1)" --> sock
     runnyd --> gh["GitHub API"]
     runnyd --> ghcr["ghcr.io images"]
 ```

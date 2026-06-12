@@ -97,7 +97,7 @@ What happens (ADR-0014):
   the respawn validates and loads it (a hash-change WARN lands in the
   daemon log); if it no longer parses, the drained daemon **holds** — it
   refuses to exit onto a file the respawn would refuse, keeps serving
-  status with the hold annotation, and revalidates every 30s, so fixing
+  status with the hold annotation, and periodically revalidates, so fixing
   the file is sufficient.
 - `runnyctl doctor` includes a `config-drift` check, so "the file differs
   from the running config" is visible before anyone wonders why behavior

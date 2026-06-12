@@ -124,7 +124,7 @@ re-issued on every status change until each slot is stable (wedged, or
 paused in BACKOFF, which cannot start a job). At convergence a local exit
 gate re-parses the on-disk config: if it no longer parses the daemon
 *holds* (drained, still serving status with the hold annotation,
-revalidating every 30s) rather than handing launchd a file the respawn
+periodically revalidating) rather than handing launchd a file the respawn
 would refuse; otherwise it exits non-zero (`restarting after drain: …`)
 and launchd KeepAlive cold-starts it. The drain cause is visible as
 `GetStatusResponse.draining` (the `DRAINING` banner in runnyctl) and in

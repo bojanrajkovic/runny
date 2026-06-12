@@ -54,6 +54,8 @@ jobs:
 
       # Import the Developer ID cert into a short-lived keychain. Skipped
       # (and the keychain cleanup step no-ops) when the secret is absent.
+      # The identity string is extracted from the keychain after import so
+      # the workflow never hardcodes a specific cert CN.
       - name: import signing certificate
         id: import-cert
         if: ${{ secrets.BUILD_CERTIFICATE_BASE64 != '' }}
@@ -73,6 +75,9 @@ jobs:
           security set-key-partition-list \
             -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychain -d user -s "$KEYCHAIN_PATH"
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | awk -F'"' '/Developer ID Application/{print $2; exit}')
+          echo "codesign_identity=$IDENTITY" >> "$GITHUB_OUTPUT"
 
       # Decode notary credentials into job env vars so --config=notarize can
       # pick them up via --action_env (no value → inherit from environment).
@@ -89,22 +94,11 @@ jobs:
           NOTARY_KEY_ID_VAL: ${{ secrets.NOTARY_KEY_ID }}
           NOTARY_ISSUER_ID_VAL: ${{ secrets.NOTARY_ISSUER_ID }}
 
-      # Signing identity: Developer ID when the cert is present, ad-hoc otherwise.
-      # Both paths are handled by the codesign_binary genrule (tools/sign/sign.bzl).
-      - name: set signing identity
-        id: identity
-        env:
-          CERT: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
-        run: |
-          if [ -n "$CERT" ]; then
-            echo "value=Developer ID Application: Bojan Rajkovic (FP2BC7CW97)" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=-" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: build (cold, stamped, signed, notarized)
         env:
-          CODESIGN_IDENTITY: ${{ steps.identity.outputs.value }}
+          # Developer ID when the cert is present; '-' (ad-hoc) otherwise.
+          # The identity is read from the keychain after import — never hardcoded.
+          CODESIGN_IDENTITY: ${{ steps.import-cert.outputs.codesign_identity || '-' }}
         run: |
           mise x -- bazel build --config=ci --config=release \
             --action_env="CODESIGN_IDENTITY=$CODESIGN_IDENTITY" \

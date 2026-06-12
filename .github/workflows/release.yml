@@ -40,6 +40,14 @@ jobs:
       contents: write # attach assets to the release
       id-token: write # OIDC identity for provenance attestation
       attestations: write # attest-build-provenance stores the attestation
+    # The `secrets` context is NOT available in step `if:` conditions — using
+    # it there is a workflow validation error that fails the file's startup on
+    # every push. Map secret PRESENCE to job-level env (where secrets ARE
+    # allowed) once, and gate the optional signing/notary steps on env, which
+    # `if:` can read. The secret VALUES are still only read where used.
+    env:
+      HAS_SIGNING_CERT: ${{ secrets.BUILD_CERTIFICATE_BASE64 != '' }}
+      HAS_NOTARY_KEY: ${{ secrets.NOTARY_KEY_P8 != '' }}
     outputs:
       version: ${{ steps.package.outputs.version }}
       sha256: ${{ steps.package.outputs.sha256 }}
@@ -58,7 +66,7 @@ jobs:
       # the workflow never hardcodes a specific cert CN.
       - name: import signing certificate
         id: import-cert
-        if: ${{ secrets.BUILD_CERTIFICATE_BASE64 != '' }}
+        if: ${{ env.HAS_SIGNING_CERT == 'true' }}
         env:
           BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
           P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
@@ -84,7 +92,7 @@ jobs:
       # Skipped when the secret is absent; the notarize_binary genrule then
       # sees an empty NOTARY_KEY_B64 and copies the binary unchanged.
       - name: set notarization credentials
-        if: ${{ secrets.NOTARY_KEY_P8 != '' }}
+        if: ${{ env.HAS_NOTARY_KEY == 'true' }}
         run: |
           echo "NOTARY_KEY_B64=$(printf '%s' "$NOTARY_KEY_P8" | base64 | tr -d '\n')" >> "$GITHUB_ENV"
           echo "NOTARY_KEY_ID=$NOTARY_KEY_ID_VAL" >> "$GITHUB_ENV"

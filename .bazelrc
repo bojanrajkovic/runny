@@ -15,6 +15,8 @@ try-import %workspace%/user.bazelrc
 # Stamped builds (releases and branch artifacts): version from git via
 # tools/version.sh (ADR-0010).
 build:release --stamp --workspace_status_command=tools/workspace-status.sh
+# Signals release_build config_setting (strip debug symbols via gc_linkopts).
+build:release --define=release=1
 
 # Developer ID codesigning (opt-in; the cert must be in the active keychain).
 # Combine with --config=release for a release-grade signed binary:

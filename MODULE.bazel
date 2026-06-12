@@ -7,8 +7,13 @@ bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "aspect_rules_lint", version = "2.6.0")
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.2")
 
+# Prebuilt SwiftFormat (nicklockwood) binaries for //tools/format.
+format_tools = use_extension("@aspect_rules_lint//format:extensions.bzl", "tools")
+format_tools.swiftformat()
+use_repo(format_tools, "swiftformat", "swiftformat_mac")
+
 #########################
-# Swift / Apple (RunnyBar app; daemon entitlement signing)
+# Swift / Apple (Runny app; daemon entitlement signing)
 # Toolchains resolve only on macOS hosts; Linux builds of Go targets are unaffected.
 bazel_dep(name = "apple_support", version = "2.6.1")
 bazel_dep(name = "rules_swift", version = "3.6.1")

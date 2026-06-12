@@ -364,6 +364,8 @@ func statusToProto(st statemachine.Status) *runnyv1.SlotStatus {
 		StateEntered:        timestamppb.New(st.StateEntered),
 		CycleId:             st.CycleID,
 		RunnerName:          st.RunnerName,
+		Image:               st.Image,
+		ImageDigest:         st.ImageDigest,
 		Paused:              st.Paused,
 		ConsecutiveFailures: st.ConsecutiveFailures,
 		BackoffSeconds:      st.BackoffSeconds,
@@ -384,6 +386,7 @@ func recordToProto(r *cycle.Record) *runnyv1.CycleRecord {
 	out := &runnyv1.CycleRecord{
 		CycleId:     r.CycleID,
 		Slot:        r.Slot,
+		Image:       r.Image,
 		ImageDigest: r.ImageDigest,
 		Started:     timestamppb.New(r.Started),
 		Finished:    timestamppb.New(r.Finished),

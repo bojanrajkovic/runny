@@ -5,6 +5,7 @@ syntax = "proto3";
 
 package runny.v1;
 
+import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 
 option go_package = "github.com/bojanrajkovic/runny/proto/runny/v1;runnyv1";
@@ -33,6 +34,12 @@ service RunnyService {
   // even while a drain is already in progress: the imminent respawn loads
   // the on-disk file regardless, so the verdict matters most then.
   rpc Reload(ReloadRequest) returns (ReloadResponse);
+  // Inject an operator public key into a slot's live guest. In LISTENING:
+  // freeze the slot in DEBUG (runner verifiably killed, no jobs, no
+  // max-idle). In JOB: install the key immediately (the job is untouched)
+  // and arm a DEBUG hold for job end. In DEBUG: extend the hold / add a
+  // key. Per-guest, per-cycle: the key dies at teardown.
+  rpc InjectDebugKey(InjectDebugKeyRequest) returns (InjectDebugKeyResponse);
 }
 
 // SlotState mirrors internal/statemachine; the FSM is the authority (ADR-0004).
@@ -52,6 +59,10 @@ enum SlotState {
   // Appended (wire compat); sits between AWAIT_SSH and MINT_JIT in cycle
   // order. Numeric order already diverges from cycle order — render by name.
   SLOT_STATE_SECURE_SSH = 12;
+  // Appended (wire compat); render by name (same caveat as SECURE_SSH): a
+  // guest held for operator debugging (runner killed and proven dead,
+  // max-idle suspended).
+  SLOT_STATE_DEBUG = 13;
 }
 
 message VMInfo {
@@ -62,6 +73,11 @@ message VMInfo {
 message JobInfo {
   string name = 1;
   google.protobuf.Timestamp started = 2;
+  // SHA256:… fingerprints of operator debug keys present in (or ambiguously
+  // attempted against) the guest WHILE this job ran. Non-empty means the
+  // job executed with an operator credential in its trust environment;
+  // details and outcomes in CycleRecord.injected_keys.
+  repeated string operator_keys = 3;
 }
 
 message SlotStatus {
@@ -102,6 +118,13 @@ message SlotStatus {
   // (registry not reached, mid-pull, or failed after the digest resolved).
   // Historical cycles carry theirs in CycleRecord.image_digest.
   string image_digest = 15;
+  // Non-zero iff state == DEBUG (cleared the instant DEBUG is left): when
+  // the hold auto-recycles.
+  google.protobuf.Timestamp debug_hold_expires = 16;
+  // True iff state == JOB with a debug hold CURRENTLY armed: the slot will
+  // enter DEBUG (not teardown) when the job ends. Cleared the instant the
+  // hold is disarmed (plain recycle, pause) or DEBUG/TEARDOWN is entered.
+  bool debug_hold_armed = 17;
 }
 
 message GetStatusRequest {}
@@ -145,6 +168,11 @@ message LogLine {
 message RecycleRequest {
   string slot = 1;
   string reason = 2;
+  // Consent to cancel a RUNNING job: if the slot is in JOB, recycle cancels
+  // the job into teardown only when this is set (runnyctl sets it via its
+  // -force guard after observing JOB). Unset, a mid-job recycle disarms any
+  // debug hold and the job runs to its normal end. Ignored outside JOB.
+  bool cancel_running_job = 3;
 }
 
 message RecycleResponse {}
@@ -193,6 +221,24 @@ message CycleRecord {
   // failed before a digest resolved. Empty in records written by older
   // daemons.
   string image = 13;
+  // Operator debug-key activity against this cycle's guest (audit trail;
+  // every attempt, including failed and refused ones).
+  repeated InjectedKey injected_keys = 14;
+}
+
+message InjectedKey {
+  string fingerprint = 1;                   // SHA256:…
+  string comment = 2;                       // from the submitted key; audit-only
+  google.protobuf.Timestamp injected = 3;
+  string reason = 4;
+  // "pending" | "ok" | "armed" | "re-armed" | "refused" | "unreachable" |
+  // "error" | "disarmed"
+  string outcome = 5;
+  string error = 6;
+  // FSM state at the attempt: "LISTENING" | "JOB" | "DEBUG". "JOB" entries
+  // are mid-job contamination events (outcome "armed" = the key landed
+  // while the job ran).
+  string state = 7;
 }
 
 message StateRecord {
@@ -258,4 +304,28 @@ message ReloadResponse {
   // (drainer.Start's return) — clients render it, never re-derive it by
   // string-matching the drain reason.
   bool started_drain = 8;
+}
+
+message InjectDebugKeyRequest {
+  string slot = 1;                    // slot or runner name (findSlot rules)
+  string public_key = 2;              // one authorized_keys line (a .pub file's contents)
+  google.protobuf.Duration hold = 3;  // 0 = limits.max_debug_hold; negative or
+                                      // greater than the cap is REJECTED, not clamped
+  string reason = 4;                  // audit note
+}
+
+message InjectDebugKeyResponse {
+  string user = 1;                            // guest ssh user (pool config)
+  string ip = 2;                              // guest ip
+  string fingerprint = 3;                     // SHA256:… of the installed key
+  // Auto-release deadline. UNSET when armed=true: the hold clock starts at
+  // DEBUG entry (job end), unknowable here; the definitive deadline appears
+  // in SlotStatus.debug_hold_expires then.
+  google.protobuf.Timestamp hold_until = 4;
+  // Pinned guest host keys in known_hosts-able form (ADR-0013); empty when
+  // unpinned (ssh_hardening: off).
+  repeated string host_keys = 5;
+  // True when the key was installed into a RUNNING job and a post-job DEBUG
+  // hold was armed. The key is usable NOW.
+  bool armed = 6;
 }

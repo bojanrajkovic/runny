@@ -6,7 +6,10 @@ proto_library(
     name = "runnyv1_proto",
     srcs = ["runny.proto"],
     visibility = ["//visibility:public"],
-    deps = ["@protobuf//:timestamp_proto"],
+    deps = [
+        "@protobuf//:duration_proto",
+        "@protobuf//:timestamp_proto",
+    ],
 )
 
 go_proto_library(

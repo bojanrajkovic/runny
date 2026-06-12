@@ -54,12 +54,13 @@ func (e *Ensurer) resolveBudget() time.Duration {
 	return defaultResolveTimeout
 }
 
-func (e *Ensurer) Ensure(ctx context.Context, report func(string)) (string, tart.Bundle, error) {
+func (e *Ensurer) Ensure(ctx context.Context, report func(string)) (digest, runnerVersion string, bundle tart.Bundle, err error) {
 	// Runner tarball first: small, fails fast, and shared across slots
 	// (per-file locking inside).
 	if e.Runner != nil {
-		if _, err := EnsureRunnerTarball(ctx, e.Home.RunnerCacheDir(), e.Runner, e.resolveBudget(), e.StallBudget, report, e.log()); err != nil {
-			return "", "", fmt.Errorf("ensuring runner tarball: %w", err)
+		_, runnerVersion, err = EnsureRunnerTarball(ctx, e.Home.RunnerCacheDir(), e.Runner, e.resolveBudget(), e.StallBudget, report, e.log())
+		if err != nil {
+			return "", "", "", fmt.Errorf("ensuring runner tarball: %w", err)
 		}
 	}
 
@@ -69,15 +70,15 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string)) (string, tart
 	// bound — without one, a registry that accepts TCP and goes silent hangs
 	// the slot forever.
 	rctx, rcancel := bounded.WithTimeout(ctx, e.resolveBudget())
-	digest, err := client.Resolve(rctx, e.Ref)
+	digest, err = client.Resolve(rctx, e.Ref)
 	rcancel()
 	if err != nil {
-		return "", "", fmt.Errorf("resolving %s: %w", e.Ref, err)
+		return "", "", "", fmt.Errorf("resolving %s: %w", e.Ref, err)
 	}
 	dir := e.Home.ImageBundleDir(e.Ref.String(), digest)
-	bundle := tart.Bundle(dir)
+	bundle = tart.Bundle(dir)
 	if bundle.Verify() == nil {
-		return digest, bundle, nil // cache hit
+		return digest, runnerVersion, bundle, nil // cache hit
 	}
 
 	e.log().Info("pulling image", "ref", e.Ref.String(), "digest", digest)
@@ -122,13 +123,13 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string)) (string, tart
 	pinned := e.Ref
 	pinned.Digest = digest // pull exactly what we resolved
 	if _, err := client.PullTo(wctx, pinned, dir); err != nil {
-		return "", "", stallErr(wctx, err, fmt.Sprintf("pulling %s", e.Ref))
+		return "", "", "", stallErr(wctx, err, fmt.Sprintf("pulling %s", e.Ref))
 	}
 	if err := bundle.Verify(); err != nil {
-		return "", "", fmt.Errorf("pulled image incomplete: %w", err)
+		return "", "", "", fmt.Errorf("pulled image incomplete: %w", err)
 	}
 	e.log().Info("image cached", "digest", digest)
-	return digest, bundle, nil
+	return digest, runnerVersion, bundle, nil
 }
 
 // progress turns raw byte deltas into operator-visible pull progress: a
@@ -275,12 +276,13 @@ type RunnerResolver func(ctx bounded.Context) (filename, url, sha256 string, err
 var tarballLocks sync.Map // filename -> chan struct{} (capacity-1 semaphore)
 
 // EnsureRunnerTarball makes sure the service-current actions-runner tarball
-// sits in cacheDir (the virtiofs share). Returns the tarball path. The
-// download is stall-watched and progress-reported — no unbounded silent
+// sits in cacheDir (the virtiofs share). Returns the tarball path and the
+// asset filename (the version identifier, e.g. "actions-runner-osx-arm64-2.320.0.tar.gz").
+// The download is stall-watched and progress-reported — no unbounded silent
 // network reads anywhere (a startup-time version of this dead-stalled on a
 // hung GitHub download with no timeout). Superseded same-OS tarballs are
 // removed so guests (which pick by name) never stage a deprecated build.
-func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerResolver, resolveBudget, stallBudget time.Duration, report func(string), log *slog.Logger) (string, error) {
+func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerResolver, resolveBudget, stallBudget time.Duration, report func(string), log *slog.Logger) (string, string, error) {
 	if resolveBudget <= 0 {
 		resolveBudget = defaultResolveTimeout
 	}
@@ -288,7 +290,7 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 	assetName, assetURL, wantSHA, err := resolve(rctx)
 	rcancel()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	semAny, _ := tarballLocks.LoadOrStore(assetName, make(chan struct{}, 1))
@@ -302,14 +304,14 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 		select {
 		case sem <- struct{}{}:
 		case <-ctx.Done():
-			return "", fmt.Errorf("waiting for a concurrent download of %s: %w", assetName, context.Cause(ctx))
+			return "", "", fmt.Errorf("waiting for a concurrent download of %s: %w", assetName, context.Cause(ctx))
 		}
 	}
 	defer func() { <-sem }()
 
 	dest := filepath.Join(cacheDir, assetName)
 	if _, err := os.Stat(dest); err == nil {
-		return dest, nil // already cached
+		return dest, assetName, nil // already cached
 	}
 	// Drop superseded tarballs of the same flavor (osx vs linux prefix).
 	// assetName is GitHub's filename verbatim, so guard the shape — an
@@ -341,20 +343,20 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 
 	dreq, err := http.NewRequestWithContext(wctx, http.MethodGet, assetURL, nil)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	dresp, err := http.DefaultClient.Do(dreq)
 	if err != nil {
-		return "", stallErr(wctx, err, "downloading runner tarball")
+		return "", "", stallErr(wctx, err, "downloading runner tarball")
 	}
 	defer dresp.Body.Close()
 	if dresp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("downloading runner tarball: HTTP %d", dresp.StatusCode)
+		return "", "", fmt.Errorf("downloading runner tarball: HTTP %d", dresp.StatusCode)
 	}
 	tmp := dest + ".partial"
 	f, err := os.Create(tmp)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	prog := newProgress(report, log, stallBudget)
 	body := io.TeeReader(dresp.Body, progressWriter(func(n int64) {
@@ -367,11 +369,11 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 	if err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
-		return "", stallErr(wctx, err, "downloading runner tarball")
+		return "", "", stallErr(wctx, err, "downloading runner tarball")
 	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
-		return "", err
+		return "", "", err
 	}
 	// The tarball is staged into every guest and executed; verify it against
 	// the service-declared checksum when one was given (older GHES may omit
@@ -379,17 +381,17 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 	if wantSHA != "" {
 		if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, wantSHA) {
 			_ = os.Remove(tmp)
-			return "", fmt.Errorf("runner tarball checksum mismatch: downloads endpoint says %s, got %s", wantSHA, got)
+			return "", "", fmt.Errorf("runner tarball checksum mismatch: downloads endpoint says %s, got %s", wantSHA, got)
 		}
 	}
 	if err := os.Rename(tmp, dest); err != nil {
 		_ = os.Remove(tmp)
-		return "", err
+		return "", "", err
 	}
 	if log != nil {
 		log.Info("runner tarball cached", "asset", assetName)
 	}
-	return dest, nil
+	return dest, assetName, nil
 }
 
 // stallErr surfaces the stall cause when the watcher killed a transfer —

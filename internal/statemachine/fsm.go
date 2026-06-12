@@ -86,7 +86,7 @@ var (
 // visible, not just stall-detected, so an operator can tell slow-registry
 // from stuck (the predecessor made them indistinguishable).
 type ImageEnsurer interface {
-	Ensure(ctx context.Context, report func(detail string)) (digest string, bundle tart.Bundle, err error)
+	Ensure(ctx context.Context, report func(detail string)) (digest, runnerVersion string, bundle tart.Bundle, err error)
 }
 
 // Cloner clones a bundle (tart.Clone's seam).
@@ -243,7 +243,11 @@ type Status struct {
 	// ENSURE_IMAGE ("sha256:..."); empty before resolve and in BACKOFF.
 	// Presence = resolved this cycle (the cycle may still fail before
 	// boot). Retained while wedged: the surviving guest still runs it.
-	ImageDigest         string
+	ImageDigest string
+	// RunnerVersion is the asset filename of the actions-runner tarball
+	// ensured this cycle (e.g. "actions-runner-osx-arm64-2.320.0.tar.gz");
+	// empty before ENSURE_IMAGE completes and in BACKOFF.
+	RunnerVersion       string
 	Paused              bool
 	ConsecutiveFailures uint32
 	BackoffSeconds      int64
@@ -405,8 +409,9 @@ func (s *Slot) backoffWait(ctx context.Context) error {
 		st.BackoffSeconds = int64(wait / time.Second)
 		st.CycleID = ""
 		st.RunnerName = "" // the cycle's runner no longer exists
-		// No guest exists; a stale digest after an image bump is misinformation.
+		// No guest exists; stale values after an image/runner bump are misinformation.
 		st.ImageDigest = ""
+		st.RunnerVersion = ""
 		st.VM = cycle.VMInfo{}
 		st.Job = nil
 	})
@@ -630,17 +635,19 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	// duration is unknowable — so it runs under the cycle context; its
 	// operations carry their own bounds (resolve timeout, stall watcher).
 	ok := runState(StateEnsureImage, cctx, func() error {
-		digest, bundle, err := s.deps.Images.Ensure(cctx, s.setDetail)
+		digest, runnerVersion, bundle, err := s.deps.Images.Ensure(cctx, s.setDetail)
 		if err != nil {
 			return err
 		}
 		rec.ImageDigest = digest
-		// Publish to live status from the same value at the same site, so the
+		rec.RunnerVersion = runnerVersion
+		// Publish to live status from the same values at the same site, so the
 		// audit trail and the live view cannot disagree. No explicit notify:
 		// the next setState broadcasts the snapshot milliseconds later (the
 		// same accepted latency as VM.MAC in BOOT).
 		s.mu.Lock()
 		s.status.ImageDigest = digest
+		s.status.RunnerVersion = runnerVersion
 		s.mu.Unlock()
 		srcBundle = bundle
 		return nil

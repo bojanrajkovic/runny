@@ -125,6 +125,10 @@ message SlotStatus {
   // enter DEBUG (not teardown) when the job ends. Cleared the instant the
   // hold is disarmed (plain recycle, pause) or DEBUG/TEARDOWN is entered.
   bool debug_hold_armed = 17;
+  // Asset filename of the actions-runner tarball ensured this cycle
+  // (e.g. "actions-runner-osx-arm64-2.320.0.tar.gz"); set when ENSURE_IMAGE
+  // completes, empty before that and in BACKOFF. Empty from older daemons.
+  string runner_version = 18;
 }
 
 message GetStatusRequest {}
@@ -231,6 +235,11 @@ message CycleRecord {
   // Operator debug-key activity against this cycle's guest (audit trail;
   // every attempt, including failed and refused ones).
   repeated InjectedKey injected_keys = 14;
+  // Asset filename of the actions-runner tarball ensured this cycle
+  // (e.g. "actions-runner-osx-arm64-2.320.0.tar.gz"); empty when the runner
+  // tarball step was skipped or the cycle failed before ENSURE_IMAGE completed.
+  // Empty in records written by older daemons.
+  string runner_version = 15;
 }
 
 message InjectedKey {

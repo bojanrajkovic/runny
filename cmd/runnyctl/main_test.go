@@ -104,7 +104,13 @@ func TestTruncDisplayWidth(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("trunc(%q, %d) = %q, want %q", tc.s, tc.n, got, tc.want)
 		}
-		if w := utf8.RuneCountInString(got); w > tc.n {
+		// A clamped output occupies exactly n columns (the property the
+		// padding depends on); an unclamped input passes through untouched.
+		w := utf8.RuneCountInString(got)
+		if utf8.RuneCountInString(tc.s) > tc.n && w != tc.n {
+			t.Errorf("trunc(%q, %d) clamped width = %d, want exactly %d", tc.s, tc.n, w, tc.n)
+		}
+		if w > tc.n {
 			t.Errorf("trunc(%q, %d) display width = %d, want <= %d", tc.s, tc.n, w, tc.n)
 		}
 	}
@@ -256,6 +262,32 @@ func TestRenderCycleShowsImageRef(t *testing.T) {
 	})
 	if !strings.Contains(buf.String(), "image ghcr.io/test/image:1 |") || strings.Contains(buf.String(), "@") {
 		t.Errorf("failed-before-resolve record must render ref-only, no dangling '@':\n%s", buf.String())
+	}
+
+	// A configured "@sha256:" pin must be stripped from the intent half — the
+	// status cell strips it, and why must too, or a pinned fleet shows a
+	// full pin digest for a cycle that never resolved (and the digest twice
+	// when it did). Resolving a pin returns the pin.
+	const pin = "sha256:ab12cd34ef567890ab12cd34ef567890ab12cd34ef567890ab12cd34ef567890"
+	buf.Reset()
+	c.renderCycle(&runnyv1.CycleRecord{
+		CycleId: "abcd1234", Slot: "mac-1", Result: "failure",
+		Image:   "ghcr.io/test/image@" + pin, // pinned config, registry never reached
+		Started: now, Finished: now,
+	})
+	if got := buf.String(); !strings.Contains(got, "image ghcr.io/test/image |") || strings.Contains(got, "sha256:") {
+		t.Errorf("pinned-but-unresolved cycle must strip the pin, leaving no sha256: on screen:\n%s", got)
+	}
+
+	buf.Reset()
+	c.renderCycle(&runnyv1.CycleRecord{
+		CycleId: "abcd1234", Slot: "mac-1", Result: "success",
+		Image:       "ghcr.io/test/image@" + pin, // pinned config, resolved to the pin
+		ImageDigest: pin,
+		Started:     now, Finished: now,
+	})
+	if got := buf.String(); !strings.Contains(got, "image ghcr.io/test/image @ sha256:ab12cd34ef56") || strings.Count(got, "sha256:") != 1 {
+		t.Errorf("resolved pinned cycle must show the ref once and the short digest once, not the digest twice:\n%s", got)
 	}
 }
 

@@ -194,6 +194,15 @@ func (c *ctl) status(ctx context.Context) error {
 	return nil
 }
 
+// Free-text tail column widths: the JOB cell is padded to jobColWidth so NOTE
+// lines up, and both are clamped so a long job name or failure string can't
+// run the row off the terminal. NOTE is last and unpadded (it overflows
+// gracefully), so its width only clamps.
+const (
+	jobColWidth  = 22
+	noteColWidth = 60
+)
+
 func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 	fmt.Fprintf(c.out, "runnyd %s, up %s\n\n", resp.GetVersion(),
 		durString(time.Since(resp.GetDaemonStarted().AsTime())))
@@ -222,7 +231,7 @@ func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 	// cluster, before the free-text tail (JOB, NOTE).
 	row := func(runner, state, dur, ip, image, job, note string) {
 		line := pad(runner, w) + " " + pad(state, 13) + " " + pad(dur, 9) + " " +
-			pad(ip, 15) + " " + pad(image, wi) + " " + pad(job, 22) + " " + note
+			pad(ip, 15) + " " + pad(image, wi) + " " + pad(job, jobColWidth) + " " + note
 		fmt.Fprintln(c.out, strings.TrimRight(line, " "))
 	}
 	row("RUNNER", "STATE", "FOR", "IP", "IMAGE", "JOB", "NOTE")
@@ -262,7 +271,7 @@ func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 		row(name(s), state,
 			durString(time.Since(s.GetStateEntered().AsTime())),
 			s.GetVm().GetIp(), imageCell(s.GetImage(), s.GetImageDigest()),
-			trunc(job, 22), trunc(note, 60))
+			trunc(job, jobColWidth), trunc(note, noteColWidth))
 	}
 	fmt.Fprintln(c.out, "\n(* = paused; STATE* holds in BACKOFF after the current cycle. WEDGED! = guest survived force-stop; the daemon restarts cold once idle)")
 }
@@ -356,15 +365,21 @@ func (c *ctl) renderCycle(rec *runnyv1.CycleRecord) {
 		verdict = fmt.Sprintf("✗ failed in %s: %s", rec.GetFailureState(), rec.GetFailureError())
 	}
 	fmt.Fprintf(c.out, "cycle %s on %s — %s\n", rec.GetCycleId(), rec.GetSlot(), verdict)
-	// The configured ref (intent) beside the resolved digest (truth); records
-	// written by older daemons carry no ref and render digest-only, and a
-	// cycle that failed before ENSURE_IMAGE resolved carries ref-only.
-	img := trunc(rec.GetImageDigest(), 19)
-	if ref := rec.GetImage(); ref != "" {
+	// The configured ref (intent) beside the resolved digest (truth). A
+	// configured "@sha256:" pin is stripped from the intent half: like the
+	// status cell, a sha256 here means "resolved this cycle", never an echoed
+	// config pin — and since resolving a pin returns the pin, echoing it would
+	// print the digest twice. Records written by older daemons carry no ref
+	// and render digest-only; a cycle that failed before ENSURE_IMAGE resolved
+	// carries ref-only.
+	ref, _ := splitPin(rec.GetImage())
+	img := ref
+	if d := rec.GetImageDigest(); d != "" {
+		short := "sha256:" + shortDigest(d)
 		if img == "" {
-			img = ref
+			img = short
 		} else {
-			img = ref + " @ " + img
+			img = ref + " @ " + short
 		}
 	}
 	fmt.Fprintf(c.out, "  image %s | started %s | total %s\n",
@@ -455,10 +470,10 @@ func trunc(s string, n int) string {
 // final segment render identically — `runnyctl -json status` carries the
 // full ref and digest when that matters.
 func imageCell(ref, digest string) string {
-	if i := strings.LastIndexByte(ref, '/'); i >= 0 {
-		ref = ref[i+1:]
+	name, _ := splitPin(ref)
+	if i := strings.LastIndexByte(name, '/'); i >= 0 {
+		name = name[i+1:]
 	}
-	name, _, _ := strings.Cut(ref, "@sha256:") // strip a configured pin
 	// 25 lets canonical name:tag forms (e.g. macos-sequoia-xcode:16.4)
 	// render whole — clamping would cut the tag, the distinguishing half of
 	// the name on a mixed fleet.
@@ -466,7 +481,22 @@ func imageCell(ref, digest string) string {
 	if digest == "" {
 		return name
 	}
-	return name + "@" + shortHex(strings.TrimPrefix(digest, "sha256:"))
+	return name + "@" + shortDigest(digest)
+}
+
+// splitPin separates a configured "@sha256:..." digest pin from an image ref,
+// returning the ref without the pin and the pin's hex ("" if unpinned). A pin
+// is config intent, not a resolved digest: both image views drop it so a
+// sha256 on screen always means "resolved this cycle", never an echoed pin.
+func splitPin(ref string) (name, pinHex string) {
+	name, pinHex, _ = strings.Cut(ref, "@sha256:")
+	return name, pinHex
+}
+
+// shortDigest renders a digest (with or without the "sha256:" algorithm
+// prefix) as docker-style 12-hex — the one abbreviation both image views use.
+func shortDigest(digest string) string {
+	return shortHex(strings.TrimPrefix(digest, "sha256:"))
 }
 
 // shortHex is the docker-style 12-hex short form of a digest's hex.

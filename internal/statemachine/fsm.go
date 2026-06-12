@@ -211,11 +211,12 @@ func NewSlot(name string, deps Deps) *Slot {
 		name: name,
 		deps: deps,
 		cmds: make(chan Command, 8),
-		// The ref is config, not cycle state: present from construction so a
-		// slot that hasn't transitioned yet shows its image immediately.
-		// setState mutates fields rather than replacing the struct, so the
-		// seed survives every transition.
-		status: Status{Image: deps.Pool.Image},
+		// Slot and Image are slot-constant identity (the name and the configured
+		// ref), not cycle state. Seeded here so a slot that hasn't transitioned
+		// yet still renders a complete row, and re-set on every transition by
+		// setState — so neither depends on this seed surviving a future
+		// struct-replace refactor.
+		status: Status{Slot: name, Image: deps.Pool.Image},
 	}
 }
 
@@ -261,6 +262,7 @@ func (s *Slot) Status() Status {
 func (s *Slot) setState(state State, mut func(*Status)) {
 	s.mu.Lock()
 	s.status.Slot = s.name
+	s.status.Image = s.deps.Pool.Image // slot-constant identity, like Slot
 	s.status.State = state
 	s.status.StateEntered = time.Now()
 	s.status.Detail = ""

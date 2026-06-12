@@ -15,26 +15,37 @@ import (
 
 var hexSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-func TestConfigSHAStableAndHex(t *testing.T) {
+// LoadConfigSHA hashes the exact bytes it parsed in one read, so the audit
+// hash provably describes the validated config. The hash is stable for
+// identical bytes, changes when the file changes, and a missing/invalid file
+// yields an error and an empty hash (no hash for bytes that never validated).
+func TestLoadConfigSHAStableAndHex(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("pools: []\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, validConfigYAML(t, 1, "original"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	a, b := configSHA(path), configSHA(path)
+	_, a, err := home.LoadConfigSHA(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, b, err := home.LoadConfigSHA(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if a != b {
-		t.Errorf("configSHA not stable: %q vs %q", a, b)
+		t.Errorf("LoadConfigSHA not stable: %q vs %q", a, b)
 	}
 	if !hexSHA256.MatchString(a) {
-		t.Errorf("configSHA not 64 lowercase hex chars: %q", a)
+		t.Errorf("LoadConfigSHA not 64 lowercase hex chars: %q", a)
 	}
-	if err := os.WriteFile(path, []byte("pools: [] # edited\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, validConfigYAML(t, 1, "edited comment"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if configSHA(path) == a {
-		t.Error("configSHA unchanged after the file changed")
+	if _, c, _ := home.LoadConfigSHA(path); c == a {
+		t.Error("LoadConfigSHA unchanged after the file changed")
 	}
-	if got := configSHA(filepath.Join(t.TempDir(), "missing.yaml")); got != "" {
-		t.Errorf("configSHA of a missing file = %q, want empty", got)
+	if _, got, err := home.LoadConfigSHA(filepath.Join(t.TempDir(), "missing.yaml")); err == nil || got != "" {
+		t.Errorf("LoadConfigSHA of a missing file = (%q, %v), want empty hash and an error", got, err)
 	}
 }
 

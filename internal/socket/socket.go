@@ -35,6 +35,7 @@ type DoctorCheck struct {
 // drain; this is only the synchronous answer.
 type ReloadResult struct {
 	Accepted            bool
+	StartedDrain        bool
 	FailedChecks        []DoctorCheck
 	Warnings            []DoctorCheck
 	Draining            string
@@ -328,7 +329,13 @@ func (s *Server) Pause(ctx context.Context, req *runnyv1.PauseRequest) (*runnyv1
 	if err != nil {
 		return nil, err
 	}
-	slot.Command(statemachine.Command{Kind: statemachine.CmdPause})
+	// Mirror Recycle: a full command buffer (the drainer saturates
+	// non-converged slots with re-issued pause+recycle pairs) must surface as
+	// an error, never a silent drop reported as success — the
+	// silent-failure-proofness invariant.
+	if !slot.Command(statemachine.Command{Kind: statemachine.CmdPause}) {
+		return nil, fmt.Errorf("slot %s is not accepting commands", req.GetSlot())
+	}
 	resp := &runnyv1.PauseResponse{}
 	// Pause during a drain is allowed (idempotent; the drain wants slots
 	// paused anyway) but the operator must learn it is in-memory: the
@@ -366,6 +373,7 @@ func (s *Server) Reload(ctx context.Context, req *runnyv1.ReloadRequest) (*runny
 	r := s.ReloadFn(ctx, req.GetReason())
 	resp := &runnyv1.ReloadResponse{
 		Accepted:            r.Accepted,
+		StartedDrain:        r.StartedDrain,
 		Draining:            r.Draining,
 		SlotCount:           int32(r.SlotCount),
 		OperatorPausedSlots: r.OperatorPausedSlots,

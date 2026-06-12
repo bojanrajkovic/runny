@@ -183,6 +183,32 @@ func TestDrainerStartFirstReasonWins(t *testing.T) {
 	}
 }
 
+// A second accepted reload (or a reload accepted during a wedge drain) cannot
+// re-Start, but its freshly-validated hash must still supersede the prior
+// cause's acceptedSHA — otherwise the exit gate compares the on-disk file
+// against a wedge's "" (or a stale earlier hash) and mis-warns.
+func TestDrainerUpdateAcceptedSHASupersedes(t *testing.T) {
+	var sawSHA atomic.Value
+	d, _, stopped := newTestDrainer(&stubSlot{st: stableSt})
+	d.exitGate = func(acceptedSHA string) (bool, string) {
+		sawSHA.Store(acceptedSHA)
+		return true, ""
+	}
+	d.Start("wedged guest: a VM survived force-stop (see the slot's cycle record)", "") // wedge: SHA ""
+	d.UpdateAcceptedSHA("validated-reload-sha")                                         // reload accepted mid-drain
+	d.recheck()
+	waitStopped(t, stopped)
+	if got, _ := sawSHA.Load().(string); got != "validated-reload-sha" {
+		t.Errorf("exit gate saw acceptedSHA %q, want the superseding reload hash", got)
+	}
+	// Not draining → no-op (must not stash a hash that would mislead a later drain).
+	d2, _, _ := newTestDrainer(&stubSlot{st: stableSt})
+	d2.UpdateAcceptedSHA("ignored")
+	if d2.acceptedSHA != "" {
+		t.Errorf("UpdateAcceptedSHA set %q while not draining", d2.acceptedSHA)
+	}
+}
+
 func TestDrainerWedgedSlotCountsAsConverged(t *testing.T) {
 	wedged := &stubSlot{st: wedgedSt}
 	idle := &stubSlot{st: stableSt}

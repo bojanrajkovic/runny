@@ -273,6 +273,7 @@ func TestReloadAcceptedCarriesVerdictFields(t *testing.T) {
 		sawReason = reason
 		return ReloadResult{
 			Accepted:            true,
+			StartedDrain:        true,
 			Warnings:            []DoctorCheck{{Name: "local-network", OK: false, Detail: "flake"}},
 			Draining:            "config reload (rpc): new image",
 			SlotCount:           2,
@@ -288,7 +289,7 @@ func TestReloadAcceptedCarriesVerdictFields(t *testing.T) {
 	if sawReason != "new image" {
 		t.Errorf("ReloadFn saw reason %q", sawReason)
 	}
-	if !resp.GetAccepted() || resp.GetSlotCount() != 2 || resp.GetConfigSha256() != "abc123" {
+	if !resp.GetAccepted() || !resp.GetStartedDrain() || resp.GetSlotCount() != 2 || resp.GetConfigSha256() != "abc123" {
 		t.Errorf("verdict fields dropped: %+v", resp)
 	}
 	if resp.GetDraining() != "config reload (rpc): new image" {
@@ -339,6 +340,23 @@ func TestResumeRefusedWhileDraining(t *testing.T) {
 	}
 	if !strings.Contains(status.Convert(err).Message(), "config reload (rpc): x") {
 		t.Errorf("refusal lacks the drain reason: %v", err)
+	}
+}
+
+// A full command buffer must surface as an error, never a silent drop
+// reported as success — the drainer saturates non-converged slots with
+// re-issued pause+recycle pairs, so a mid-drain operator pause can hit a full
+// buffer. (No Run goroutine drains the 8-deep buffer in this test.)
+func TestPauseFullBufferSurfacesError(t *testing.T) {
+	slots := testSlots("mac-1")
+	for i := 0; i < 8; i++ {
+		slots[0].Command(statemachine.Command{Kind: statemachine.CmdPause})
+	}
+	srv := newTestServer(slots, nil, nil, nil)
+	c := dial(t, srv)
+	_, err := c.Pause(t.Context(), &runnyv1.PauseRequest{Slot: "mac-1"})
+	if err == nil || !strings.Contains(status.Convert(err).Message(), "not accepting commands") {
+		t.Errorf("saturated Pause: err = %v, want 'not accepting commands'", err)
 	}
 }
 

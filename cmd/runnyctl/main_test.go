@@ -384,6 +384,7 @@ func TestRenderReloadAccepted(t *testing.T) {
 	c := &ctl{out: &buf}
 	err := c.renderReload(&runnyv1.ReloadResponse{
 		Accepted:            true,
+		StartedDrain:        true,
 		Draining:            "config reload (rpc): new image",
 		SlotCount:           3,
 		OperatorPausedSlots: []string{"mac-2", "lin-1"},
@@ -391,7 +392,7 @@ func TestRenderReloadAccepted(t *testing.T) {
 		Warnings: []*runnyv1.DoctorCheck{
 			{Name: "local-network", Ok: false, Detail: "cannot reach the guest subnet"},
 		},
-	}, "new image")
+	})
 	if err != nil {
 		t.Fatalf("accepted reload returned error: %v", err)
 	}
@@ -413,10 +414,11 @@ func TestRenderReloadAcceptedNoPausedNote(t *testing.T) {
 	c := &ctl{out: &buf}
 	if err := c.renderReload(&runnyv1.ReloadResponse{
 		Accepted:     true,
+		StartedDrain: true,
 		Draining:     "config reload (rpc)",
 		SlotCount:    1,
 		ConfigSha256: testSHA,
-	}, ""); err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(buf.String(), "operator-paused") {
@@ -431,9 +433,10 @@ func TestRenderReloadAcceptedAlreadyDraining(t *testing.T) {
 	c := &ctl{out: &buf}
 	err := c.renderReload(&runnyv1.ReloadResponse{
 		Accepted:     true,
+		StartedDrain: false, // a wedge drain was already running
 		Draining:     "wedged guest: a VM survived force-stop (see the slot's cycle record)",
 		ConfigSha256: testSHA,
-	}, "new image")
+	})
 	if err != nil {
 		t.Fatalf("accepted reload returned error: %v", err)
 	}
@@ -457,7 +460,7 @@ func TestRenderReloadRefused(t *testing.T) {
 		FailedChecks: []*runnyv1.DoctorCheck{
 			{Name: "config-parse", Ok: false, Detail: "yaml: line 3: did not find expected node content"},
 		},
-	}, "")
+	})
 	if err == nil || !strings.Contains(err.Error(), "the running daemon is unchanged") {
 		t.Errorf("refusal error = %v", err)
 	}
@@ -481,7 +484,7 @@ func TestRenderReloadRefusedWhileDraining(t *testing.T) {
 		FailedChecks: []*runnyv1.DoctorCheck{
 			{Name: "config-parse", Ok: false, Detail: "bad yaml"},
 		},
-	}, "")
+	})
 	if err == nil {
 		t.Error("refused reload returned nil error")
 	}

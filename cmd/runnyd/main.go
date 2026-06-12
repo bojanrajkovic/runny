@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"flag"
 	"fmt"
@@ -66,7 +65,7 @@ func run() error {
 	if configPath == "" {
 		configPath = dir.ConfigPath()
 	}
-	cfg, err := home.LoadConfig(configPath)
+	cfg, startupSHA, err := home.LoadConfigSHA(configPath)
 	if err != nil {
 		return err
 	}
@@ -82,6 +81,17 @@ func run() error {
 		}
 		defer lock.Close()
 	}
+
+	// Claim SIGHUP before the startup gauntlet, so its default
+	// terminate-the-process disposition can never hard-kill runnyd mid-startup
+	// — a scripted double-reload (`launchctl kill SIGHUP` twice), or a
+	// foreground runnyd's terminal closing. The consuming goroutine starts
+	// later, once the drainer exists; a signal arriving meanwhile waits in the
+	// buffer and triggers a reload then. -doctor exits before the goroutine,
+	// so the buffered signal is harmless there.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
 
 	// Logging: size-capped file sink + ring buffer, both structured.
 	logFile, err := openRotatingFile(dir.LogFile(), logFileCap)
@@ -99,7 +109,7 @@ func run() error {
 	// the hash it validated, and the respawn logs the hash it loaded — same
 	// hash, same file, provably.
 	logger.Info("runnyd starting", "version", version, "home", dir.String(),
-		"config_sha256", configSHA(configPath))
+		"config_sha256", startupSHA)
 
 	// Sweep the vms dir BEFORE validation: teardown deliberately retains a
 	// wedged guest's clone (ADR-0012), and its divergence can tip
@@ -230,10 +240,14 @@ func run() error {
 		// socketless one. Local file I/O only: no network work at the exit
 		// seam (a refusal there would have no good answer).
 		exitGate: func(acceptedSHA string) (bool, string) {
-			if _, err := home.LoadConfig(configPath); err != nil {
+			// One read: the parse check and the hash describe the same bytes,
+			// so a concurrent atomic replace can't make us hold on version A's
+			// parse while warning about version B's hash (or vice versa).
+			_, sha, err := home.LoadConfigSHA(configPath)
+			if err != nil {
 				return false, fmt.Sprintf("config.yaml no longer parses; the respawn would refuse it: %v", err)
 			}
-			if sha := configSHA(configPath); acceptedSHA != "" && sha != acceptedSHA {
+			if acceptedSHA != "" && sha != acceptedSHA {
 				logger.Warn("config changed during the drain; the respawn will validate and load the newer file",
 					"accepted_sha256", acceptedSHA, "current_sha256", sha)
 			}
@@ -275,31 +289,44 @@ func run() error {
 			}
 		}
 		logger.Info("config reload accepted", "config_sha256", sha)
+		// Operator-paused slots are meaningful only when no drain is active
+		// yet: once a drain (wedge or earlier reload) is running it pauses
+		// every slot as mechanism, so reporting them here would mislabel
+		// drain-paused slots as operator holds and send a log-auditor hunting
+		// for a phantom pause.
 		var pausedSlots []string
-		for _, s := range slots {
-			if st := s.Status(); st.Paused && !st.Wedged {
-				pausedSlots = append(pausedSlots, s.Name())
+		if d.Reason() == "" {
+			for _, s := range slots {
+				if st := s.Status(); st.Paused && !st.Wedged {
+					pausedSlots = append(pausedSlots, s.Name())
+				}
 			}
-		}
-		if len(pausedSlots) > 0 {
-			logger.Warn("operator-paused slots will resume after the respawn (pause is in-memory)",
-				"slots", strings.Join(pausedSlots, ", "))
+			if len(pausedSlots) > 0 {
+				logger.Warn("operator-paused slots will resume after the respawn (pause is in-memory)",
+					"slots", strings.Join(pausedSlots, ", "))
+			}
 		}
 		drainReason := "config reload (" + source + ")"
 		if reason != "" {
 			drainReason += ": " + reason
 		}
-		if !d.Start(drainReason, sha) {
+		startedDrain := d.Start(drainReason, sha)
+		if !startedDrain {
 			// A drain was already active (wedge, or an earlier reload): the
 			// first reason wins on the status surface, but the supplied
 			// reason stays durable in the log — the audit trail never loses
-			// it.
+			// it. Supersede the prior cause's accepted hash with this
+			// freshly-validated file, so the exit gate's "changed during the
+			// drain" comparison is against what was actually vetted (a wedge
+			// records ""; an earlier reload records its own, now stale).
+			d.UpdateAcceptedSHA(sha)
 			logger.Info("reload requested while already draining; supplied reason recorded here",
 				"reason", reason, "draining", d.Reason())
 		}
 		d.recheck() // unblocks a held exit gate when the operator just fixed the file
 		return socket.ReloadResult{
 			Accepted:            true,
+			StartedDrain:        startedDrain,
 			Warnings:            warnings,
 			Draining:            d.Reason(),
 			SlotCount:           len(slots),
@@ -312,15 +339,12 @@ func run() error {
 	}
 	srv.DrainingFn = d.Reason
 
-	// SIGHUP maps to the same validated reload path. A dedicated channel —
-	// it must NOT join signal.NotifyContext above, which would cancel the
-	// root context. Claiming the signal also disarms its default
-	// process-terminate disposition: before this handler, a SIGHUP (or a
-	// foreground runnyd's terminal closing) hard-killed runnyd mid-job;
-	// now it drains gracefully.
-	hup := make(chan os.Signal, 1)
-	signal.Notify(hup, syscall.SIGHUP)
-	defer signal.Stop(hup)
+	// SIGHUP maps to the same validated reload path; the channel was claimed
+	// before the startup gauntlet (above) so the default process-terminate
+	// disposition is already disarmed — a SIGHUP, or a foreground runnyd's
+	// terminal closing, drains gracefully instead of hard-killing mid-job.
+	// The channel is dedicated and never joins signal.NotifyContext, which
+	// would cancel the root context.
 	go func() {
 		for range hup {
 			if d.Reason() != "" {
@@ -403,8 +427,9 @@ func buildClients(cfg *home.Config) (map[ghKey]*github.Client, []*github.Client,
 // same inputs. Each network check self-bounds (checkBudget) regardless of
 // ctx; no SSH or guest calls exist on this path (ADR-0011).
 func preflightReload(ctx context.Context, dir home.Dir, configPath string) (sha string, failed, warnings []socket.DoctorCheck) {
-	sha = configSHA(configPath)
-	newCfg, err := home.LoadConfig(configPath)
+	// One read: the SHA describes exactly the bytes validated below, so the
+	// accepted hash provably names the file version this preflight vetted.
+	newCfg, sha, err := home.LoadConfigSHA(configPath)
 	if err != nil {
 		return sha, []socket.DoctorCheck{{Name: "config-parse", OK: false, Detail: err.Error()}}, nil
 	}
@@ -449,18 +474,6 @@ func splitPreflightChecks(checks []socket.DoctorCheck) (failed, warnings []socke
 		}
 	}
 	return failed, warnings
-}
-
-// configSHA is the SHA-256 (hex) of the raw config file bytes — the audit
-// handle that proves which file version a reload validated and a cold start
-// loaded. Empty when the file is unreadable (the callers' own LoadConfig
-// surfaces that loudly).
-func configSHA(path string) string {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	return fmt.Sprintf("%x", sha256.Sum256(raw))
 }
 
 // failedChecks filters to failures.

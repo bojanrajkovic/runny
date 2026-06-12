@@ -74,6 +74,19 @@ func (d *drainer) Start(reason, configSHA string) bool {
 	return true
 }
 
+// UpdateAcceptedSHA records a newly-validated config hash onto an
+// already-active drain (a second accepted reload, or a reload accepted during
+// a wedge drain), so the exit gate compares the on-disk file against the most
+// recently vetted version rather than the first cause's ("" for a wedge, or a
+// now-superseded earlier reload). No-op when not draining.
+func (d *drainer) UpdateAcceptedSHA(sha string) {
+	d.mu.Lock()
+	if d.reason != "" {
+		d.acceptedSHA = sha
+	}
+	d.mu.Unlock()
+}
+
 // Reason reports the active drain reason ("" = not draining), with the
 // exit-gate hold annotation appended while the gate is refusing.
 func (d *drainer) Reason() string {

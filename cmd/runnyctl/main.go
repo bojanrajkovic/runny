@@ -491,10 +491,10 @@ func (c *ctl) reload(ctx context.Context, reason string) error {
 		}
 		return nil
 	}
-	return c.renderReload(resp, reason)
+	return c.renderReload(resp)
 }
 
-func (c *ctl) renderReload(resp *runnyv1.ReloadResponse, reason string) error {
+func (c *ctl) renderReload(resp *runnyv1.ReloadResponse) error {
 	sha := resp.GetConfigSha256()
 	if len(sha) > 12 {
 		sha = sha[:12]
@@ -505,13 +505,11 @@ func (c *ctl) renderReload(resp *runnyv1.ReloadResponse, reason string) error {
 		}
 	}
 	if resp.GetAccepted() {
-		// Did THIS call start the drain? The daemon's drain reason for it
-		// would be "config reload (rpc)" (+ ": <reason>").
-		mine := "config reload (rpc)"
-		if reason != "" {
-			mine += ": " + reason
-		}
-		if resp.GetDraining() != mine {
+		// Did THIS call start the drain? The daemon answers authoritatively
+		// (started_drain), so the CLI never reconstructs the daemon's internal
+		// drain-reason format to guess — a guess that misfires on duplicate
+		// reasons, an exit-held suffix, or any reword across a version skew.
+		if !resp.GetStartedDrain() {
 			fmt.Fprintf(c.out, "config validated (sha256 %s); daemon already draining (%s) — the respawn will apply this config\n",
 				sha, resp.GetDraining())
 			warn()

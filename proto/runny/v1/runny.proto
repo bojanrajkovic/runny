@@ -252,4 +252,10 @@ message ReloadResponse {
   // the same hash is logged at acceptance and by the respawn's cold start,
   // making "which file version was vetted" provable.
   string config_sha256 = 7;
+  // True iff THIS call started the drain (accepted only). False means a
+  // drain was already running (wedge or earlier reload) and the respawn will
+  // apply this validated config. The daemon knows this authoritatively
+  // (drainer.Start's return) — clients render it, never re-derive it by
+  // string-matching the drain reason.
+  bool started_drain = 8;
 }

@@ -7,7 +7,7 @@ struct RunnyApp: App {
     @State private var activation = ActivationCoordinator()
 
     var body: some Scene {
-        MenuBarExtra("Runny", systemImage: "play.rectangle.on.rectangle") {
+        MenuBarExtra("Runny", image: "MenuBarIcon") {
             MenuBarView()
                 .environment(store)
                 .environment(activation)

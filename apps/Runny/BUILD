@@ -16,6 +16,9 @@ swift_library(
         ["Sources/**/*.swift"],
         allow_empty = True,
     ),
+    # The menu-bar icon catalog (template image, tinted by the system). The
+    # AppIcon catalog is the app bundle's, wired via macos_application.app_icons.
+    data = glob(["Resources/Media.xcassets/**"]),
     module_name = "Runny",
     target_compatible_with = ["@platforms//os:macos"],
     deps = ["//proto/runny/v1:runnyv1_swift_proto"],
@@ -61,6 +64,7 @@ apple_bundle_version(
 
 macos_application(
     name = "Runny",
+    app_icons = glob(["Resources/AppIcon.xcassets/**"]),
     bundle_id = "com.coderinserepeat.runny",
     infoplists = ["Info.plist"],
     minimum_os_version = "15.0",

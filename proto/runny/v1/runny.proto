@@ -81,7 +81,8 @@ message SlotStatus {
   string runner_name = 13;
   // The pool's configured image ref, verbatim from config.yaml `image`
   // (may be a moving tag or a digest pin). Constant for the slot's
-  // lifetime; always set.
+  // lifetime. Set by any daemon that supports this field; a client talking
+  // to an older daemon may see it empty and must tolerate that.
   string image = 14;
   // Resolved manifest digest ("sha256:...") for the current cycle; set when
   // ENSURE_IMAGE completes, empty before that and in BACKOFF. Presence
@@ -89,7 +90,8 @@ message SlotStatus {
   // CLONE or BOOT still carries it; the guest, once booted, runs exactly
   // this digest. A wedged slot retains it — the surviving guest is still
   // running that image. Clients must not synthesize this from a configured
-  // digest pin: empty means the registry was not reached this cycle.
+  // digest pin: empty means ENSURE_IMAGE did not complete this cycle
+  // (registry not reached, mid-pull, or failed after the digest resolved).
   // Historical cycles carry theirs in CycleRecord.image_digest.
   string image_digest = 15;
 }

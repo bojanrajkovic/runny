@@ -853,8 +853,14 @@ func (s *Slot) listenAndRunJob(ctx context.Context, rec *cycle.Record, proc Proc
 					return s.runJob(ctx, rec, proc, guest, racedLine)
 				case done:
 					// The freeze committed (to DEBUG, or to a benign
-					// raced-and-killed teardown) or refused fatally.
-					return false, hstate, herr
+					// raced-and-killed teardown) or refused fatally. The
+					// raced-kill path is the one committed outcome where a job
+					// actually ran: a runner picked up work during the freeze
+					// and was killed, so GitHub considers it busy. jobRan=true
+					// keeps teardown's !jobRan deregister gate from calling
+					// DeleteRunner against that busy runner (§5.1 step 4, §16) —
+					// the same coupling decision 2 rejected for eager-delete.
+					return errors.Is(herr, errDebugRacedJob), hstate, herr
 				}
 				// Refused without committing (audit-write failure): keep
 				// listening.
@@ -1254,7 +1260,7 @@ func (s *Slot) midJobInject(ctx context.Context, rec *cycle.Record, guest Guest,
 			Outcome: "re-armed", State: string(StateJob),
 		})
 		_ = s.writeAuditSidecar(rec)
-		s.setArmedStatus(s.armedDetail(rec, fp))
+		s.setArmedStatus(s.armedDetail(fp, arm.hold))
 		cmd.reply(s.armedReply(guest))
 		return
 	}
@@ -1277,7 +1283,7 @@ func (s *Slot) midJobInject(ctx context.Context, rec *cycle.Record, guest Guest,
 		arm.keys = append(arm.keys, armedKey{fingerprint: fp, landed: true})
 		rec.Job.OperatorKeys = append(rec.Job.OperatorKeys, fp)
 		s.updateAudit(rec, idx, "armed", "")
-		s.setArmedStatus(s.armedDetail(rec, fp))
+		s.setArmedStatus(s.armedDetail(fp, arm.hold))
 		cmd.reply(s.armedReply(guest))
 	case errors.Is(err, ErrGuestUnreachable):
 		// NO Redial (decision 18); record not-landed so a retry re-proves.
@@ -1302,9 +1308,11 @@ func (s *Slot) armedReply(guest Guest) DebugKeyReply {
 	return DebugKeyReply{Armed: true, User: s.deps.Pool.SSHUser, HostKeys: guest.HostKeys()}
 }
 
-// armedDetail is the JOB+armed status line.
-func (s *Slot) armedDetail(rec *cycle.Record, fp string) string {
-	return fmt.Sprintf("debug key installed (%s); holds %s at job end", fp, s.deps.Config.Limits.MaxDebugHold.D())
+// armedDetail is the JOB+armed status line. hold is the operator's requested
+// hold (the one enterPostJobDebug applies at job end), NOT the config cap — the
+// live status must report the hold the slot will actually take.
+func (s *Slot) armedDetail(fp string, hold time.Duration) string {
+	return fmt.Sprintf("debug key installed (%s); holds %s at job end", fp, hold)
 }
 
 // enterPostJobDebug runs the post-job freeze tail (§5.4): verified kill, drain

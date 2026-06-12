@@ -105,6 +105,9 @@ type fakeProc struct {
 	code  int
 	done  chan struct{}
 	once  sync.Once
+
+	waitMu    sync.Mutex
+	waitCalls int
 }
 
 func newFakeProc() *fakeProc {
@@ -112,9 +115,24 @@ func newFakeProc() *fakeProc {
 }
 
 func (p *fakeProc) Lines() <-chan string { return p.lines }
-func (p *fakeProc) Wait() (int, error)   { <-p.done; return p.code, nil }
-func (p *fakeProc) Kill()                { p.exit(p.code) }
-func (p *fakeProc) say(s string)         { p.lines <- s }
+func (p *fakeProc) Wait() (int, error) {
+	p.waitMu.Lock()
+	p.waitCalls++
+	p.waitMu.Unlock()
+	<-p.done
+	return p.code, nil
+}
+func (p *fakeProc) Kill() { p.exit(p.code) }
+
+// waits reports how many times Wait was called — the post-job force-close path
+// (§5.4 step 2) must NOT call Wait, or the FSM goroutine hangs up to
+// max_debug_hold on an orphaned-fd pathology.
+func (p *fakeProc) waits() int {
+	p.waitMu.Lock()
+	defer p.waitMu.Unlock()
+	return p.waitCalls
+}
+func (p *fakeProc) say(s string) { p.lines <- s }
 func (p *fakeProc) exit(code int) {
 	p.once.Do(func() {
 		p.code = code
@@ -136,8 +154,10 @@ type fakeGuest struct {
 	hostKeys      []string
 	stopErr       error // StopRunner returns this (death unproven)
 	stopCalls     int
-	stopBlock     bool  // StopRunner blocks until ctx expires
-	installErr    error // InstallAuthorizedKey returns this
+	stopBlock     bool   // StopRunner blocks until ctx expires
+	stopNoClose   bool   // proven kill but Lines stays open (orphaned-fd pathology)
+	stopSayMarker string // before closing, StopRunner buffers this line (a job that raced the kill)
+	installErr    error  // InstallAuthorizedKey returns this
 	installErrSeq []error
 	installCalls  int
 	installedKeys []string
@@ -173,7 +193,7 @@ func (g *fakeGuest) Close() error { return nil }
 func (g *fakeGuest) StopRunner(ctx bounded.Context) error {
 	g.mu.Lock()
 	g.stopCalls++
-	block, err, proc := g.stopBlock, g.stopErr, g.proc
+	block, err, noClose, marker, proc := g.stopBlock, g.stopErr, g.stopNoClose, g.stopSayMarker, g.proc
 	g.mu.Unlock()
 	if block {
 		<-ctx.Done()
@@ -182,9 +202,18 @@ func (g *fakeGuest) StopRunner(ctx bounded.Context) error {
 	if err != nil {
 		return err // death unproven: the proc stays alive
 	}
-	// A proven kill ends the runner process: its output channel closes, which
-	// the freeze/tail drain waits for (the real sshd session dies with run.sh).
-	if proc != nil {
+	// A proven kill ends the runner LISTENER: its output channel normally
+	// closes, which the freeze/tail drain waits for (the real sshd session dies
+	// with run.sh). stopNoClose models the budget-expiry pathology — the
+	// listener is proven dead (pgrep read-back succeeds) but an orphaned job
+	// descendant still holds the inherited stdout fd, so Lines never closes.
+	// stopSayMarker models a job that raced the LISTENING freeze: a marker is
+	// buffered (after the step-2 drain-check already ran) then the channel
+	// closes, so the post-kill drain (freeze step 4) sees the marker.
+	if proc != nil && marker != "" {
+		proc.say(marker)
+	}
+	if proc != nil && !noClose {
 		proc.exit(0)
 	}
 	return nil
@@ -1297,6 +1326,49 @@ func TestDebugRaceMarkerRefusesAndRunsJob(t *testing.T) {
 	h.waitState(t, StateJob)
 }
 
+func TestDebugRacedKillInPostKillDrainIsBenignNoDeleteRunner(t *testing.T) {
+	// Freeze step 4 (§5.1): the step-2 drain-check found no marker, so the
+	// freeze proceeded to the verified kill — and a job raced in during the
+	// kill, surfacing as a marker in the post-kill drain-to-close. That runner
+	// picked up work and was killed, so GitHub considers it BUSY. The cycle
+	// fails with errDebugRacedJob (benign), and the load-bearing invariant is
+	// that jobRan=true: teardown must NOT call DeleteRunner against the
+	// GitHub-busy runner (the coupling decision 2 rejected). This pins the
+	// blocker-3 fix; without it the raced-kill path returned jobRan=false and
+	// deregistered a busy runner.
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	// The proven kill buffers a "raced" job marker right before closing Lines,
+	// so the step-4 drain (which runs AFTER step-2 saw nothing) catches it.
+	h.guest.stopSayMarker = "Running job: raced"
+	cancel := h.reachListening(t)
+	defer cancel()
+
+	r := h.debugCmd(t, nil)
+	if r.Err == nil || !strings.Contains(r.Err.Error(), "killed by the freeze") {
+		t.Fatalf("want the raced-kill refusal, got %v", r.Err)
+	}
+	// The kill ran (step 3) but the install never did (the race aborted before
+	// step 5).
+	if h.guest.stops() != 1 {
+		t.Errorf("StopRunner calls = %d, want 1", h.guest.stops())
+	}
+	if h.guest.installs() != 0 {
+		t.Error("a raced-kill freeze must not install the key")
+	}
+	h.waitState(t, StateTeardown)
+	bk := h.waitState(t, StateBackoff)
+	// errDebugRacedJob is benign (operator-caused): the streak does not move.
+	if bk.ConsecutiveFailures != 0 {
+		t.Errorf("a raced-kill cycle is benign; failures=%d", bk.ConsecutiveFailures)
+	}
+	// The load-bearing assertion: jobRan=true, so teardown's !jobRan gate keeps
+	// DeleteRunner from firing against a GitHub-busy runner.
+	if len(h.gh.deleted) != 0 {
+		t.Errorf("DeleteRunner called on a raced-kill cycle (%v); the runner is GitHub-busy and must not be deregistered", h.gh.deleted)
+	}
+}
+
 func TestDebugExpiredCommandRejected(t *testing.T) {
 	h := newHarness(t, nil)
 	h.images.maxCalls = 1
@@ -1603,5 +1675,322 @@ func TestPostJobKillUnprovenCounts(t *testing.T) {
 	st := h.waitState(t, StateBackoff)
 	if st.ConsecutiveFailures != 1 {
 		t.Errorf("post-job kill unproven should count; failures=%d", st.ConsecutiveFailures)
+	}
+}
+
+// reachJobArmed boots the slot to JOB, arms a mid-job hold, and returns the
+// cancel func. MaxJobDuration is left to the caller's mutate.
+func (h *harness) reachJobArmed(t *testing.T) context.CancelFunc {
+	t.Helper()
+	cancel := h.start(t)
+	h.waitState(t, StateProvision)
+	h.proc.say("Listening for Jobs")
+	h.waitState(t, StateListening)
+	h.proc.say("Running job: build")
+	h.waitState(t, StateJob)
+	if r := h.debugCmd(t, nil); r.Err != nil {
+		t.Fatalf("arm: %v", r.Err)
+	}
+	if !h.slot.Status().DebugHoldArmed {
+		t.Fatal("precondition: armed")
+	}
+	return cancel
+}
+
+// jobRecord returns the single completed cycle record (the harness runs one
+// cycle then gates the next on backoff).
+func (h *harness) jobRecord(t *testing.T) *cycle.Record {
+	t.Helper()
+	recs := h.records(t)
+	if len(recs) == 0 {
+		t.Fatal("no cycle record written")
+	}
+	return recs[0]
+}
+
+func TestMidJobBudgetExpiryArmsEntersDebug(t *testing.T) {
+	// A budget-expired-but-armed job: the runner is killed (now legitimate —
+	// the FSM already condemned the job), the slot enters DEBUG holding the
+	// corpse, the cycle records the JOB budget failure, and the streak counts
+	// (decision 17/20, §8 row "Job failed / budget expired → hold").
+	h := newHarness(t, func(c *home.Config) {
+		c.Limits.MaxJobDuration = home.Duration(300 * time.Millisecond)
+	})
+	h.images.maxCalls = 1
+	cancel := h.start(t)
+	defer cancel()
+	h.waitState(t, StateProvision)
+	h.proc.say("Listening for Jobs")
+	h.waitState(t, StateListening)
+	h.proc.say("Running job: build")
+	h.waitState(t, StateJob)
+	if r := h.debugCmd(t, nil); r.Err != nil {
+		t.Fatalf("arm: %v", r.Err)
+	}
+	// Say nothing further: the job neither completes nor exits, so jctx fires
+	// the budget and drainForCompletion finds no completion marker.
+	st := h.waitState(t, StateDebug)
+	if st.DebugHoldExpires.IsZero() {
+		t.Error("DebugHoldExpires not set after a budget-expiry hold entry")
+	}
+	// The post-job kill ran (the listener was alive at budget expiry).
+	if h.guest.stops() != 1 {
+		t.Errorf("post-job StopRunner calls = %d, want 1", h.guest.stops())
+	}
+	// Release the hold so the cycle finishes and records.
+	h.slot.Command(Command{Kind: CmdRecycle, Reason: "release"})
+	h.waitState(t, StateTeardown)
+	bk := h.waitState(t, StateBackoff)
+	// The job's budget failure owns the cycle: streak++ (the hold does not
+	// launder it).
+	if bk.ConsecutiveFailures != 1 {
+		t.Errorf("budget-expired armed cycle should count; failures=%d", bk.ConsecutiveFailures)
+	}
+	rec := h.jobRecord(t)
+	if rec.Failure == nil || rec.Failure.State != string(StateJob) {
+		t.Errorf("cycle failure = %+v, want State=JOB (the budget error owns the cycle)", rec.Failure)
+	}
+	if !strings.Contains(rec.Failure.Error, "budget") {
+		t.Errorf("failure error = %q, want a budget message", rec.Failure.Error)
+	}
+}
+
+func TestDrainForCompletionClassifiesCompletedNotBudget(t *testing.T) {
+	// The §3 coin-flip fix, pinned deterministically: when the budget fires
+	// (jctx.Done()) in the SAME window a completion signal is already buffered
+	// in proc.Lines(), drainForCompletion must classify the job as COMPLETED,
+	// never a budget blowout. A blind budget interval would coin-flip this; the
+	// drain-check makes the accounting exact.
+	s := NewSlot("t", Deps{})
+
+	t.Run("buffered completion marker → completed/ok", func(t *testing.T) {
+		p := newFakeProc()
+		p.say("Job build completed with result: Succeeded")
+		done, ok := s.drainForCompletion(p, "cyc")
+		if !done || !ok {
+			t.Errorf("drainForCompletion = (%v, %v), want (true, true) — a buffered marker is a completion", done, ok)
+		}
+	})
+
+	t.Run("channel closed with code 0 → completed/ok", func(t *testing.T) {
+		p := newFakeProc()
+		p.exit(0)
+		done, ok := s.drainForCompletion(p, "cyc")
+		if !done || !ok {
+			t.Errorf("drainForCompletion = (%v, %v), want (true, true)", done, ok)
+		}
+	})
+
+	t.Run("channel closed with nonzero code → completed/not-ok", func(t *testing.T) {
+		p := newFakeProc()
+		p.exit(7)
+		done, ok := s.drainForCompletion(p, "cyc")
+		if !done || ok {
+			t.Errorf("drainForCompletion = (%v, %v), want (true, false)", done, ok)
+		}
+	})
+
+	t.Run("nothing buffered → genuine blowout", func(t *testing.T) {
+		p := newFakeProc()
+		p.say("still working, no completion in sight")
+		done, ok := s.drainForCompletion(p, "cyc")
+		if done || ok {
+			t.Errorf("drainForCompletion = (%v, %v), want (false, false) — a real budget blowout", done, ok)
+		}
+	})
+}
+
+func TestPostJobDrainTimeoutForceClosesNoWait(t *testing.T) {
+	// The FSM-hang fix (§5.4 step 2): when the post-job drain does not close
+	// within its bound (an orphaned job descendant holds the inherited stdout
+	// fd), enterPostJobDebug force-closes the channel and enters DEBUG — and it
+	// must NOT call proc.Wait(), which would block the FSM goroutine up to
+	// max_debug_hold on exactly that pathology (an ADR-0011 violation).
+	h := newHarness(t, func(c *home.Config) {
+		c.Limits.MaxJobDuration = home.Duration(10 * time.Second)
+	})
+	h.images.maxCalls = 1
+	// The proven post-job kill leaves Lines OPEN (orphaned-fd pathology), so
+	// drainToClose times out at 5s and force-closes without Wait.
+	h.guest.stopNoClose = true
+	cancel := h.reachJobArmed(t)
+	defer cancel()
+
+	// A completion marker ends the job; the post-job tail then kills (proven,
+	// but Lines stays open), drains-to-timeout (a fixed 5s in enterPostJobDebug),
+	// force-closes, and enters DEBUG. The 5s drain bound is longer than
+	// waitState's deadline, so poll the slot directly.
+	h.proc.say("Job build completed with result: Succeeded")
+	deadline := time.After(8 * time.Second)
+	for h.slot.Status().State != StateDebug {
+		select {
+		case <-deadline:
+			t.Fatalf("never reached DEBUG after the force-close drain (currently %s)", h.slot.Status().State)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if h.slot.Status().DebugHoldExpires.IsZero() {
+		t.Error("DEBUG entered but DebugHoldExpires unset")
+	}
+	if h.guest.stops() != 1 {
+		t.Errorf("post-job StopRunner calls = %d, want 1", h.guest.stops())
+	}
+	// The load-bearing assertion: the force-close path never harvested Wait.
+	if h.proc.waits() != 0 {
+		t.Errorf("proc.Wait() called %d times on the force-close path; the FSM-hang fix requires zero", h.proc.waits())
+	}
+	// Release the hold explicitly → benign teardown (the default 1h hold would
+	// otherwise outlive the test).
+	h.slot.Command(Command{Kind: CmdRecycle, Reason: "release"})
+	h.waitState(t, StateTeardown)
+}
+
+func TestDebugHeldAfterJobOKResetsStreak(t *testing.T) {
+	// §8: a DELIVERED job followed by a benign hold resets the streak via
+	// debugHeldAfterJobOK — distinct from the heldListening (≥10-min idle)
+	// path. The fixture has NO ≥10-min LISTENING record, so the reset can only
+	// come from the JOB-OK + DEBUG-record carve-out.
+	h := newHarness(t, func(c *home.Config) {
+		c.Limits.MaxJobDuration = home.Duration(10 * time.Second)
+	})
+	h.images.maxCalls = 1
+	// Seed a failing streak so a reset is observable.
+	h.slot.mu.Lock()
+	h.slot.failures = 3
+	h.slot.mu.Unlock()
+	cancel := h.reachJobArmed(t)
+	defer cancel()
+
+	// Job completes → armed → DEBUG. The hold then expires benignly.
+	h.proc.say("Job build completed with result: Succeeded")
+	h.proc.exit(0)
+	h.waitState(t, StateDebug)
+	h.slot.Command(Command{Kind: CmdRecycle, Reason: "done"})
+	h.waitState(t, StateTeardown)
+	bk := h.waitState(t, StateBackoff)
+	if bk.ConsecutiveFailures != 0 {
+		t.Errorf("delivered job + benign hold must reset the streak; failures=%d", bk.ConsecutiveFailures)
+	}
+	rec := h.jobRecord(t)
+	if !debugHeldAfterJobOK(rec) {
+		t.Error("debugHeldAfterJobOK(rec) = false; the reset must come from the JOB-OK + DEBUG carve-out")
+	}
+	if heldListening(rec) {
+		t.Error("fixture unexpectedly has a ≥10-min LISTENING record; the reset must be debugHeldAfterJobOK, not heldListening")
+	}
+}
+
+// --- streak-accounting carve-out unit tests (decisions 18, 20, §8) ---
+// These pin the decided semantics with hand-built records: the runtime paths
+// above exercise the wiring, these pin the classification functions directly
+// (the ≥10-min LISTENING window is impractical to produce at test runtime).
+
+func jobRec(outcome cycle.Outcome) cycle.StateRecord {
+	return cycle.StateRecord{State: string(StateJob), Entered: time.Now().Add(-time.Minute), Left: time.Now(), Outcome: outcome}
+}
+
+func longListeningRec() cycle.StateRecord {
+	return cycle.StateRecord{State: string(StateListening), Entered: time.Now().Add(-11 * time.Minute), Left: time.Now(), Outcome: cycle.OutcomeOK}
+}
+
+func debugRec() cycle.StateRecord {
+	return cycle.StateRecord{State: string(StateDebug), Entered: time.Now().Add(-time.Minute), Left: time.Now(), Outcome: cycle.OutcomeOK}
+}
+
+func TestStreakCarveOuts(t *testing.T) {
+	listeningErr := cycle.InjectedKey{Outcome: "error", State: string(StateListening)}
+	jobErr := cycle.InjectedKey{Outcome: "error", State: string(StateJob)}
+
+	tests := []struct {
+		name              string
+		rec               *cycle.Record
+		wantInjectFailed  bool
+		wantDebugHeldOK   bool
+		wantHeldListening bool
+	}{
+		{
+			name:            "job OK + DEBUG record resets via debugHeldAfterJobOK",
+			rec:             &cycle.Record{States: []cycle.StateRecord{jobRec(cycle.OutcomeOK), debugRec()}},
+			wantDebugHeldOK: true,
+		},
+		{
+			name: "job OK without a DEBUG record does NOT reset via debugHeldAfterJobOK",
+			rec:  &cycle.Record{States: []cycle.StateRecord{jobRec(cycle.OutcomeOK)}},
+		},
+		{
+			name: "failed DEBUG entry (no DEBUG StateRecord) stays out of the reset arm",
+			rec:  &cycle.Record{States: []cycle.StateRecord{jobRec(cycle.OutcomeOK)}},
+			// no DEBUG record → debugHeldAfterJobOK false even though job OK.
+		},
+		{
+			name:              "LISTENING install failure counts WITH a ≥10-min record (heldListening carve-out)",
+			rec:               &cycle.Record{States: []cycle.StateRecord{longListeningRec()}, InjectedKeys: []cycle.InjectedKey{listeningErr}},
+			wantInjectFailed:  true, // injectionFailed overrides the heldListening reset
+			wantHeldListening: true,
+		},
+		{
+			name: "mid-job install failure does NOT count (injectionFailed narrowed to State!=JOB)",
+			rec:  &cycle.Record{States: []cycle.StateRecord{jobRec(cycle.OutcomeError)}, InjectedKeys: []cycle.InjectedKey{jobErr}},
+			// wantInjectFailed stays false: a JOB-state error is not a health signal.
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := injectionFailed(tt.rec); got != tt.wantInjectFailed {
+				t.Errorf("injectionFailed = %v, want %v", got, tt.wantInjectFailed)
+			}
+			if got := debugHeldAfterJobOK(tt.rec); got != tt.wantDebugHeldOK {
+				t.Errorf("debugHeldAfterJobOK = %v, want %v", got, tt.wantDebugHeldOK)
+			}
+			if got := heldListening(tt.rec); got != tt.wantHeldListening {
+				t.Errorf("heldListening = %v, want %v", got, tt.wantHeldListening)
+			}
+		})
+	}
+}
+
+func TestMidJobInstallFailureDoesNotCountStreak(t *testing.T) {
+	// Decision 18: a mid-job install failure followed by a job that FAILS counts
+	// the job's failure but NOT the injection — injectionFailed is narrowed to
+	// State != JOB, so it keeps the streak from double-counting the operator's
+	// errored attempt. Here the job then SUCCEEDS, so the streak resets entirely.
+	h := newHarness(t, func(c *home.Config) {
+		c.Limits.MaxJobDuration = home.Duration(10 * time.Second)
+	})
+	h.images.maxCalls = 1
+	h.guest.installErr = errors.New("ambiguous failure")
+	h.slot.mu.Lock()
+	h.slot.failures = 2
+	h.slot.mu.Unlock()
+	cancel := h.start(t)
+	defer cancel()
+	h.waitState(t, StateProvision)
+	h.proc.say("Listening for Jobs")
+	h.waitState(t, StateListening)
+	h.proc.say("Running job: build")
+	h.waitState(t, StateJob)
+
+	if r := h.debugCmd(t, nil); r.Err == nil {
+		t.Fatal("want a mid-job install failure")
+	}
+	if h.slot.Status().DebugHoldArmed {
+		t.Error("a failed install must not arm")
+	}
+	// The job then succeeds: the cycle is a SUCCESS, streak resets to 0, and the
+	// errored JOB-state injection never counted.
+	h.proc.say("Job build completed with result: Succeeded")
+	h.proc.exit(0)
+	h.waitState(t, StateTeardown)
+	bk := h.waitState(t, StateBackoff)
+	if bk.ConsecutiveFailures != 0 {
+		t.Errorf("a successful job after a mid-job install failure must reset; failures=%d", bk.ConsecutiveFailures)
+	}
+	rec := h.jobRecord(t)
+	if injectionFailed(rec) {
+		t.Error("a JOB-state install error must NOT register as injectionFailed (decision 18)")
+	}
+	// The contamination is still on the record.
+	if rec.Job == nil || len(rec.Job.OperatorKeys) != 1 {
+		t.Errorf("attempted mid-job contamination missing from Job.OperatorKeys: %+v", rec.Job)
 	}
 }

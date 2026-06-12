@@ -30,6 +30,19 @@ type DoctorCheck struct {
 	Detail string
 }
 
+// ReloadResult mirrors runny.v1.ReloadResponse: the verdict of a reload
+// preflight plus the drain it did (or did not) start. The daemon owns the
+// drain; this is only the synchronous answer.
+type ReloadResult struct {
+	Accepted            bool
+	FailedChecks        []DoctorCheck
+	Warnings            []DoctorCheck
+	Draining            string
+	SlotCount           int
+	OperatorPausedSlots []string
+	ConfigSHA256        string
+}
+
 // Server implements runny.v1.RunnyService.
 type Server struct {
 	runnyv1.UnimplementedRunnyServiceServer
@@ -43,6 +56,15 @@ type Server struct {
 	DoctorFn   func(ctx context.Context) []DoctorCheck
 	Started    time.Time
 	Version    string
+	// ReloadFn validates the on-disk config and (on acceptance) starts the
+	// drain toward a respawn. It is called unconditionally — even while a
+	// drain is already active, the verdict matters because the respawn loads
+	// the on-disk file regardless. Nil = Unimplemented (handler unwired).
+	ReloadFn func(ctx context.Context, reason string) ReloadResult
+	// DrainingFn reports the active drain reason ("" = not draining),
+	// including the exit-gate hold annotation when held. Nil = never
+	// draining.
+	DrainingFn func() string
 
 	// watch fan-out
 	mu      sync.Mutex
@@ -117,10 +139,19 @@ func (s *Server) Serve(ctx context.Context, socketPath string) error {
 	return nil
 }
 
+// draining is the nil-tolerant read of DrainingFn.
+func (s *Server) draining() string {
+	if s.DrainingFn == nil {
+		return ""
+	}
+	return s.DrainingFn()
+}
+
 func (s *Server) snapshot() *runnyv1.GetStatusResponse {
 	resp := &runnyv1.GetStatusResponse{
 		DaemonStarted: timestamppb.New(s.Started),
 		Version:       s.Version,
+		Draining:      s.draining(),
 	}
 	for _, slot := range s.Slots {
 		resp.Slots = append(resp.Slots, statusToProto(slot.Status()))
@@ -298,16 +329,55 @@ func (s *Server) Pause(ctx context.Context, req *runnyv1.PauseRequest) (*runnyv1
 		return nil, err
 	}
 	slot.Command(statemachine.Command{Kind: statemachine.CmdPause})
-	return &runnyv1.PauseResponse{}, nil
+	resp := &runnyv1.PauseResponse{}
+	// Pause during a drain is allowed (idempotent; the drain wants slots
+	// paused anyway) but the operator must learn it is in-memory: the
+	// respawn at the drain's end silently clears it, a window that can last
+	// hours (a running job finishes first).
+	if d := s.draining(); d != "" {
+		resp.Note = fmt.Sprintf("daemon is draining for restart (%s); pause is in-memory and will not survive the respawn", d)
+	}
+	return resp, nil
 }
 
 func (s *Server) Resume(ctx context.Context, req *runnyv1.ResumeRequest) (*runnyv1.ResumeResponse, error) {
+	// A resume mid-drain would silently fight the drainer (which re-issues
+	// pause until convergence); refuse with the cause instead.
+	if d := s.draining(); d != "" {
+		return nil, status.Errorf(codes.FailedPrecondition, "daemon is draining: %s; resume after the respawn", d)
+	}
 	slot, err := s.findSlot(req.GetSlot())
 	if err != nil {
 		return nil, err
 	}
 	slot.Command(statemachine.Command{Kind: statemachine.CmdResume})
 	return &runnyv1.ResumeResponse{}, nil
+}
+
+func (s *Server) Reload(ctx context.Context, req *runnyv1.ReloadRequest) (*runnyv1.ReloadResponse, error) {
+	if s.ReloadFn == nil {
+		return nil, status.Error(codes.Unimplemented, "reload is not wired on this server")
+	}
+	// No draining gate: the preflight runs (and its verdict is reported)
+	// even mid-drain — the imminent respawn loads the on-disk file whether
+	// or not it was validated, so "refused because already draining" would
+	// invert the operator's reading. The handler never blocks on
+	// convergence; that is observed via status/watch.
+	r := s.ReloadFn(ctx, req.GetReason())
+	resp := &runnyv1.ReloadResponse{
+		Accepted:            r.Accepted,
+		Draining:            r.Draining,
+		SlotCount:           int32(r.SlotCount),
+		OperatorPausedSlots: r.OperatorPausedSlots,
+		ConfigSha256:        r.ConfigSHA256,
+	}
+	for _, c := range r.FailedChecks {
+		resp.FailedChecks = append(resp.FailedChecks, &runnyv1.DoctorCheck{Name: c.Name, Ok: c.OK, Detail: c.Detail})
+	}
+	for _, c := range r.Warnings {
+		resp.Warnings = append(resp.Warnings, &runnyv1.DoctorCheck{Name: c.Name, Ok: c.OK, Detail: c.Detail})
+	}
+	return resp, nil
 }
 
 func (s *Server) Why(ctx context.Context, req *runnyv1.WhyRequest) (*runnyv1.WhyResponse, error) {

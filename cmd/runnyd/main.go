@@ -11,10 +11,10 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -65,7 +65,7 @@ func run() error {
 	if configPath == "" {
 		configPath = dir.ConfigPath()
 	}
-	cfg, err := home.LoadConfig(configPath)
+	cfg, startupSHA, err := home.LoadConfigSHA(configPath)
 	if err != nil {
 		return err
 	}
@@ -82,6 +82,17 @@ func run() error {
 		defer lock.Close()
 	}
 
+	// Claim SIGHUP before the startup gauntlet, so its default
+	// terminate-the-process disposition can never hard-kill runnyd mid-startup
+	// — a scripted double-reload (`launchctl kill SIGHUP` twice), or a
+	// foreground runnyd's terminal closing. The consuming goroutine starts
+	// later, once the drainer exists; a signal arriving meanwhile waits in the
+	// buffer and triggers a reload then. -doctor exits before the goroutine,
+	// so the buffered signal is harmless there.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+
 	// Logging: size-capped file sink + ring buffer, both structured.
 	logFile, err := openRotatingFile(dir.LogFile(), logFileCap)
 	if err != nil {
@@ -94,37 +105,36 @@ func run() error {
 	runnerRing := logring.NewRing(4096)
 	logger := slog.New(logring.NewHandler(logFile, slog.LevelDebug, ring))
 	slog.SetDefault(logger)
-	logger.Info("runnyd starting", "version", version, "home", dir.String())
+	// config_sha256 chains the audit trail across restarts: a reload logs
+	// the hash it validated, and the respawn logs the hash it loaded — same
+	// hash, same file, provably.
+	logger.Info("runnyd starting", "version", version, "home", dir.String(),
+		"config_sha256", startupSHA)
 
-	// One client per distinct (App, target): pools targeting different orgs
-	// or repos usually carry different Apps (ADR-0009), so credentials are
-	// per-pool with the top-level block as the default.
-	clients := map[ghKey]*github.Client{}
-	var distinctClients []*github.Client
-	clientFor := func(p home.PoolConfig) (*github.Client, error) {
-		key := ghKey{appID: p.GitHub.AppID, target: p.Target}
-		if c, ok := clients[key]; ok {
-			return c, nil
+	// Sweep the vms dir BEFORE validation: teardown deliberately retains a
+	// wedged guest's clone (ADR-0012), and its divergence can tip
+	// disk-headroom under the threshold — validating first would crash-loop
+	// every respawn on a leak only this sweep can free. The sweep depends on
+	// nothing (not prefix, not clients, not network) and runs only on the
+	// real-startup path, under the instance lock — never in -doctor mode,
+	// which is read-only and runs alongside a live daemon whose clones must
+	// not be deleted.
+	if !*checkOnly {
+		if err := os.RemoveAll(dir.VMsDir()); err != nil {
+			return fmt.Errorf("sweeping vms dir: %w", err)
 		}
-		c, err := github.New(github.Config{
-			AppID:          p.GitHub.AppID,
-			PrivateKeyPath: p.GitHub.PrivateKeyPath,
-			APIBase:        p.GitHub.APIBase,
-		}, github.Target(p.Target))
-		if err != nil {
-			return nil, err
-		}
-		clients[key] = c
-		distinctClients = append(distinctClients, c)
-		return c, nil
-	}
-	for _, p := range cfg.Pools {
-		if _, err := clientFor(p); err != nil {
+		if err := dir.Ensure(); err != nil {
 			return err
 		}
+		logger.Info("swept vms dir")
 	}
 
-	doctor := makeDoctor(dir, cfg, distinctClients)
+	clients, distinctClients, err := buildClients(cfg)
+	if err != nil {
+		return err
+	}
+
+	doctor := makeDoctor(dir, configPath, cfg, distinctClients)
 	if *checkOnly {
 		return runDoctor(doctor) // read-only: runs fine alongside a live daemon
 	}
@@ -152,14 +162,9 @@ func run() error {
 	}
 	logger.Info("runner namespace", "prefix", prefix)
 
-	// Sweep: cold start owns the world (ADR-0004). Clones first, then any
-	// offline registrations carrying our prefix, on every target.
-	if err := os.RemoveAll(dir.VMsDir()); err != nil {
-		return fmt.Errorf("sweeping vms dir: %w", err)
-	}
-	if err := dir.Ensure(); err != nil {
-		return err
-	}
+	// Registration sweep: cold start owns the world (ADR-0004). Offline
+	// registrations carrying our prefix, on every target. (The vms-dir sweep
+	// already ran, before validation.)
 	for _, c := range distinctClients {
 		sweepRegistrations(ctx, logger, c, prefix)
 	}
@@ -218,40 +223,154 @@ func run() error {
 		func(slot string) cycle.Store { return cycle.Store{SlotDir: dir.SlotCyclesDir(slot)} },
 		doctor, version)
 
-	// Wedge escalation (ADR-0012): a guest that survives force-stop can only
-	// be reclaimed by process exit (it lives in-process). The wedged slot has
-	// parked itself. Drain the rest of the fleet to a stable idle — pause
-	// holds each slot in BACKOFF after its current cycle (a running job
-	// finishes first), recycle ends LISTENING without waiting out max-idle —
-	// then exit for a launchd cold start. Exiting only from stable states
-	// (parked, or paused in BACKOFF, which cannot start a job) closes the
-	// scan-then-exit race that could kill a job starting mid-scan.
-	var drainStarted, wedgeExit atomic.Bool
-	checkWedge := func(st statemachine.Status) {
-		if !st.Wedged && !drainStarted.Load() {
-			return // nothing wedged; stay off the hot status path
-		}
-		if drainStarted.CompareAndSwap(false, true) {
-			logger.Error("slot wedged: draining remaining slots to idle, then restarting to release the guest")
-			for _, s := range slots {
-				s.Command(statemachine.Command{Kind: statemachine.CmdPause})
-				s.Command(statemachine.Command{Kind: statemachine.CmdRecycle, Reason: "draining for wedge restart"})
+	// Drain coordination: the wedge escalation (ADR-0012 — a guest that
+	// survives force-stop can only be reclaimed by process exit) and the
+	// config reload (ADR-0014) share one drainer. It drives every slot to a
+	// stable state (wedged, or paused in BACKOFF — running jobs finish
+	// first), re-issuing commands on every status change so a dropped
+	// command or the backoffWait timer-vs-pause race cannot stall the
+	// drain, then exits for a launchd cold start.
+	d := &drainer{
+		log:  logger,
+		stop: stop,
+		// The local exit gate, shared by both causes: before handing the
+		// process to launchd, prove the on-disk config still parses — the
+		// respawn loads it whether the drain was for a wedge or a reload,
+		// and holding a drained-but-serving daemon beats a crash-looping
+		// socketless one. Local file I/O only: no network work at the exit
+		// seam (a refusal there would have no good answer).
+		exitGate: func(acceptedSHA string) (bool, string) {
+			// One read: the parse check and the hash describe the same bytes,
+			// so a concurrent atomic replace can't make us hold on version A's
+			// parse while warning about version B's hash (or vice versa).
+			cfg, sha, err := home.LoadConfigSHA(configPath)
+			if err != nil {
+				return false, fmt.Sprintf("config.yaml no longer parses; the respawn would refuse it: %v", err)
 			}
-		}
-		for _, s := range slots {
-			sst := s.Status()
-			if !(sst.Wedged || (sst.Paused && sst.State == statemachine.StateBackoff)) {
-				return // still draining; a later status change re-evaluates
+			// Re-run the local startup checks the respawn hard-fails on: a
+			// mid-drain edit that parses but overflows the darwin guest cap or
+			// the runner-name length would otherwise crash-loop a socketless
+			// respawn. Network checks stay off the exit seam — a refusal there
+			// has no good answer (hold a drained fleet on a GitHub blip?).
+			for _, c := range []socket.DoctorCheck{checkMacOSGuestCap(cfg), checkRunnerNamespace(dir, cfg)} {
+				if !c.OK {
+					return false, fmt.Sprintf("the respawn would refuse %s: %s", c.Name, c.Detail)
+				}
 			}
-		}
-		if wedgeExit.CompareAndSwap(false, true) {
-			logger.Error("fleet idle with a wedged guest; exiting for a cold start")
-			stop()
-		}
+			if acceptedSHA != "" && sha != acceptedSHA {
+				logger.Warn("config changed during the drain; the respawn will validate and load the newer file",
+					"accepted_sha256", acceptedSHA, "current_sha256", sha)
+			}
+			return true, ""
+		},
 	}
 	for _, s := range slots {
-		s.OnChange(checkWedge)
+		d.slots = append(d.slots, s)
+		s.OnChange(d.observe)
 	}
+
+	// Reload entry point (ADR-0014), shared by the Reload RPC and SIGHUP.
+	// Serialized so concurrent callers never run overlapping preflights
+	// (each serialized call still revalidates fresh). It never gates on an
+	// active drain: the imminent respawn loads the on-disk file whether or
+	// not it was validated, so the verdict matters most then. The drain is
+	// daemon-owned, never tied to the caller's context — a runnyctl that
+	// disconnects after acceptance cannot orphan it.
+	var reloadMu sync.Mutex
+	requestReload := func(ctx context.Context, source, reason string) socket.ReloadResult {
+		reloadMu.Lock()
+		defer reloadMu.Unlock()
+		logger.Info("config reload requested", "source", source, "reason", reason)
+		sha, failed, warnings := preflightReload(ctx, dir, configPath)
+		for _, c := range warnings {
+			logger.Warn("reload validation warning (not blocking)", "check", c.Name, "detail", c.Detail)
+		}
+		if len(failed) > 0 {
+			for _, c := range failed {
+				logger.Error("reload validation failed", "check", c.Name, "detail", c.Detail)
+			}
+			logger.Error("config reload refused: the new config failed validation; the running daemon is unchanged",
+				"failed", len(failed), "config_sha256", sha)
+			return socket.ReloadResult{
+				FailedChecks: failed,
+				Warnings:     warnings,
+				Draining:     d.Reason(),
+				ConfigSHA256: sha,
+			}
+		}
+		logger.Info("config reload accepted", "config_sha256", sha)
+		// Operator-paused slots are meaningful only when no drain is active
+		// yet: once a drain (wedge or earlier reload) is running it pauses
+		// every slot as mechanism, so reporting them here would mislabel
+		// drain-paused slots as operator holds and send a log-auditor hunting
+		// for a phantom pause.
+		var pausedSlots []string
+		if d.Reason() == "" {
+			for _, s := range slots {
+				if st := s.Status(); st.Paused && !st.Wedged {
+					pausedSlots = append(pausedSlots, s.Name())
+				}
+			}
+			if len(pausedSlots) > 0 {
+				logger.Warn("operator-paused slots will resume after the respawn (pause is in-memory)",
+					"slots", strings.Join(pausedSlots, ", "))
+			}
+		}
+		drainReason := "config reload (" + source + ")"
+		if reason != "" {
+			drainReason += ": " + reason
+		}
+		startedDrain := d.Start(drainReason, sha)
+		if !startedDrain {
+			// A drain was already active (wedge, or an earlier reload): the
+			// first reason wins on the status surface, but the supplied
+			// reason stays durable in the log — the audit trail never loses
+			// it. Supersede the prior cause's accepted hash with this
+			// freshly-validated file, so the exit gate's "changed during the
+			// drain" comparison is against what was actually vetted (a wedge
+			// records ""; an earlier reload records its own, now stale).
+			d.UpdateAcceptedSHA(sha)
+			logger.Info("reload requested while already draining; supplied reason recorded here",
+				"reason", reason, "draining", d.Reason())
+		}
+		d.recheck() // unblocks a held exit gate when the operator just fixed the file
+		return socket.ReloadResult{
+			Accepted:            true,
+			StartedDrain:        startedDrain,
+			Warnings:            warnings,
+			Draining:            d.Reason(),
+			SlotCount:           len(slots),
+			OperatorPausedSlots: pausedSlots,
+			ConfigSHA256:        sha,
+		}
+	}
+	srv.ReloadFn = func(ctx context.Context, reason string) socket.ReloadResult {
+		return requestReload(ctx, "rpc", reason)
+	}
+	srv.DrainingFn = d.Reason
+
+	// SIGHUP maps to the same validated reload path; the channel was claimed
+	// before the startup gauntlet (above) so the default process-terminate
+	// disposition is already disarmed — a SIGHUP, or a foreground runnyd's
+	// terminal closing, drains gracefully instead of hard-killing mid-job.
+	// The channel is dedicated and never joins signal.NotifyContext, which
+	// would cancel the root context.
+	go func() {
+		for range hup {
+			if d.Reason() != "" {
+				// Drain already running: skip the network preflight (storms
+				// must not burn token mints + registry resolves per signal);
+				// run the cheap local stage only, and scream if it fails —
+				// the respawn will load this file.
+				if _, err := home.LoadConfig(configPath); err != nil {
+					logger.Error("SIGHUP during drain: on-disk config is invalid and the respawn will load it", "err", err)
+				}
+				d.recheck()
+				continue
+			}
+			_ = requestReload(ctx, "SIGHUP", "")
+		}
+	}()
 
 	var wg sync.WaitGroup
 	for _, s := range slots {
@@ -262,23 +381,160 @@ func run() error {
 	err = srv.Serve(ctx, dir.SocketPath())
 	wg.Wait()
 	logger.Info("runnyd stopped")
-	if wedgeExit.Load() && err == nil {
-		// Non-zero exit so launchd (KeepAlive) restarts us; the cold start
-		// sweeps the vms dir and reclaims the leaked guest.
-		err = errors.New("restarting to release a wedged guest: a VM survived force-stop (see the slot's cycle record)")
+	if d.Exited() && err == nil {
+		// Non-zero exit so launchd (KeepAlive) restarts us — deliberately
+		// not a success exit, which a future SuccessfulExit-style plist
+		// tweak would leave down silently. The cold start sweeps the vms
+		// dir (reclaiming a leaked guest) and loads the on-disk config.
+		err = fmt.Errorf("restarting after drain: %s", d.Reason())
 	}
 	return err
 }
 
-// failedChecks filters to failures.
+// poolClientError attributes a GitHub client construction failure to its
+// pool, so the reload preflight can name the failing check.
+type poolClientError struct {
+	Pool string
+	Err  error
+}
+
+func (e *poolClientError) Error() string { return fmt.Sprintf("pool %s: %v", e.Pool, e.Err) }
+func (e *poolClientError) Unwrap() error { return e.Err }
+
+// buildClients constructs one GitHub client per distinct (App, target):
+// pools targeting different orgs or repos usually carry different Apps
+// (ADR-0009), so credentials are per-pool. Used by startup and by the
+// reload preflight — client construction runs BEFORE the doctor suite at
+// startup, so the preflight must replay it too (a deleted private key
+// would pass a parse-only preflight and crash-loop the respawn).
+func buildClients(cfg *home.Config) (map[ghKey]*github.Client, []*github.Client, error) {
+	clients := map[ghKey]*github.Client{}
+	var distinct []*github.Client
+	for _, p := range cfg.Pools {
+		key := ghKey{appID: p.GitHub.AppID, target: p.Target}
+		if _, ok := clients[key]; ok {
+			continue
+		}
+		c, err := github.New(github.Config{
+			AppID:          p.GitHub.AppID,
+			PrivateKeyPath: p.GitHub.PrivateKeyPath,
+			APIBase:        p.GitHub.APIBase,
+		}, github.Target(p.Target))
+		if err != nil {
+			return nil, nil, &poolClientError{Pool: p.Name, Err: err}
+		}
+		clients[key] = c
+		distinct = append(distinct, c)
+	}
+	return clients, distinct, nil
+}
+
+// preflightReload runs the full startup gauntlet against the on-disk
+// config — config-parse (LoadConfig: strict parse + defaults + validate),
+// github-client:<pool> (client construction), then the whole doctor suite
+// against the candidate config and clients — so a reload can only be
+// accepted when the respawn's own startup validation would pass on the
+// same inputs. Each network check self-bounds (checkBudget) regardless of
+// ctx; no SSH or guest calls exist on this path (ADR-0011).
+func preflightReload(ctx context.Context, dir home.Dir, configPath string) (sha string, failed, warnings []socket.DoctorCheck) {
+	// One read: the SHA describes exactly the bytes validated below, so the
+	// accepted hash provably names the file version this preflight vetted.
+	newCfg, sha, err := home.LoadConfigSHA(configPath)
+	if err != nil {
+		return sha, []socket.DoctorCheck{{Name: "config-parse", OK: false, Detail: err.Error()}}, nil
+	}
+	_, newClients, err := buildClients(newCfg)
+	if err != nil {
+		name := "github-client"
+		var pe *poolClientError
+		if errors.As(err, &pe) {
+			name += ":" + pe.Pool
+		}
+		return sha, []socket.DoctorCheck{{Name: name, OK: false, Detail: err.Error()}}, nil
+	}
+	failed, warnings = splitPreflightChecks(makeDoctor(dir, configPath, newCfg, newClients)(ctx))
+	return sha, failed, warnings
+}
+
+// splitPreflightChecks post-filters the gauntlet's results into the reload
+// verdict, adjusting for the preflight running in a different environment
+// (guests up) than the respawn (cold):
+//
+//   - local-network only asserts when a vmnet interface is up — true at
+//     reload time, false at the respawn's cold start, where it reports
+//     informational green. A flake here must not refuse a reload over a
+//     check the respawn cannot fail and no config edit can affect; it
+//     becomes a warning.
+//   - disk-headroom stays a refusal (fail-safe), but at preflight it counts
+//     live clones' divergence that the drain + respawn sweep will free, so
+//     the detail says why the number may differ.
+func splitPreflightChecks(checks []socket.DoctorCheck) (failed, warnings []socket.DoctorCheck) {
+	for _, c := range checks {
+		if c.OK {
+			continue
+		}
+		switch c.Name {
+		case "local-network":
+			warnings = append(warnings, c)
+		case "disk-headroom":
+			c.Detail += " (measured with guests running; the respawn sweeps clones before re-checking — free space or retry)"
+			failed = append(failed, c)
+		default:
+			failed = append(failed, c)
+		}
+	}
+	return failed, warnings
+}
+
+// failedChecks filters to the failures that should block daemon startup.
+// config-drift is excluded: it is informational (the file on disk differs
+// from the running config), and the respawn re-reads the file AFTER the
+// vms-sweep window — a concurrent re-template (Ansible) would otherwise
+// crash-loop startup on a check that does not affect whether THIS config
+// runs. It stays visible via `runnyctl doctor`, just not as a startup gate.
 func failedChecks(checks []socket.DoctorCheck) []socket.DoctorCheck {
 	var out []socket.DoctorCheck
 	for _, c := range checks {
-		if !c.OK {
+		if !c.OK && c.Name != "config-drift" {
 			out = append(out, c)
 		}
 	}
 	return out
+}
+
+// checkMacOSGuestCap and checkRunnerNamespace are the pure-local, deterministic
+// startup checks the exit gate re-runs against a mid-drain-edited config (the
+// respawn hard-fails on them, so a parse-only gate would let an edit that
+// overflows the guest cap or the runner-name length crash-loop the socketless
+// respawn). Shared with makeDoctor so the gate and startup agree by construction.
+func checkMacOSGuestCap(cfg *home.Config) socket.DoctorCheck {
+	darwinCount := 0
+	for _, p := range cfg.Pools {
+		if p.OS == "darwin" {
+			darwinCount += p.Count
+		}
+	}
+	if darwinCount <= macOSGuestCap {
+		return socket.DoctorCheck{
+			Name: "macos-guest-cap", OK: true,
+			Detail: fmt.Sprintf("%d darwin slot(s) ≤ cap %d", darwinCount, macOSGuestCap),
+		}
+	}
+	return socket.DoctorCheck{Name: "macos-guest-cap", OK: false, Detail: fmt.Sprintf(
+		"darwin pools total %d slots, exceeding Virtualization.framework's %d-macOS-guest cap; the extra slots could never boot",
+		darwinCount, macOSGuestCap,
+	)}
+}
+
+func checkRunnerNamespace(dir home.Dir, cfg *home.Config) socket.DoctorCheck {
+	prefix, err := dir.InstancePrefix()
+	if err != nil {
+		return socket.DoctorCheck{Name: "runner-namespace", OK: false, Detail: err.Error()}
+	}
+	if err := home.ValidateRunnerNames(prefix, cfg.Pools); err != nil {
+		return socket.DoctorCheck{Name: "runner-namespace", OK: false, Detail: err.Error()}
+	}
+	return socket.DoctorCheck{Name: "runner-namespace", OK: true, Detail: prefix}
 }
 
 func runDoctor(doctor func(context.Context) []socket.DoctorCheck) error {
@@ -313,7 +569,7 @@ type ghKey struct {
 	target home.TargetConfig
 }
 
-func makeDoctor(dir home.Dir, cfg *home.Config, clients []*github.Client) func(context.Context) []socket.DoctorCheck {
+func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*github.Client) func(context.Context) []socket.DoctorCheck {
 	return func(ctx context.Context) []socket.DoctorCheck {
 		var checks []socket.DoctorCheck
 		add := func(name string, ok bool, detail string) {
@@ -326,35 +582,29 @@ func makeDoctor(dir home.Dir, cfg *home.Config, clients []*github.Client) func(c
 			add("platform", false, fmt.Sprintf("%s/%s — VMs require darwin/arm64", runtime.GOOS, runtime.GOARCH))
 		}
 
+		// Config drift: behavior comes from the config loaded at startup
+		// (cfg), not the file on disk. Post-defaulting struct equality —
+		// comment/reorder edits don't false-positive. Trivially green at
+		// startup (the file was just loaded), so it can never block daemon
+		// entry; under reload validation cfg IS the on-disk candidate, so
+		// drift can never block the reload it recommends.
+		if onDisk, err := home.LoadConfig(configPath); err != nil {
+			add("config-drift", false, err.Error())
+		} else if !reflect.DeepEqual(onDisk, cfg) {
+			add("config-drift", false, "config.yaml differs from the running config; apply with `runnyctl reload`")
+		} else {
+			add("config-drift", true, "config.yaml matches the running config")
+		}
+
 		// Runner namespace: derives (and persists, first run) the instance
 		// prefix — which also proves instance-id is writable, a startup
 		// requirement a doctor pass must not paper over — and validates the
 		// assembled runner names against GitHub's length cap, which would
 		// otherwise surface as a permanent non-retryable 422 loop at MINT_JIT.
-		if prefix, err := dir.InstancePrefix(); err != nil {
-			add("runner-namespace", false, err.Error())
-		} else if err := home.ValidateRunnerNames(prefix, cfg.Pools); err != nil {
-			add("runner-namespace", false, err.Error())
-		} else {
-			add("runner-namespace", true, prefix)
-		}
-
 		// The Virtualization.framework concurrent-guest cap applies to macOS
-		// guests only; linux pools are bounded by memory, not licensing.
-		darwinCount := 0
-		for _, p := range cfg.Pools {
-			if p.OS == "darwin" {
-				darwinCount += p.Count
-			}
-		}
-		if darwinCount <= macOSGuestCap {
-			add("macos-guest-cap", true, fmt.Sprintf("%d darwin slot(s) ≤ cap %d", darwinCount, macOSGuestCap))
-		} else {
-			add("macos-guest-cap", false, fmt.Sprintf(
-				"darwin pools total %d slots, exceeding Virtualization.framework's %d-macOS-guest cap; the extra slots could never boot",
-				darwinCount, macOSGuestCap,
-			))
-		}
+		// guests only; linux pools are bounded by memory, not licensing. Both
+		// are shared with the exit gate (pure-local, deterministic).
+		checks = append(checks, checkRunnerNamespace(dir, cfg), checkMacOSGuestCap(cfg))
 
 		// Local Network (TCC): a LaunchDaemon or background-reparented runnyd
 		// is silently denied vmnet access, so guest dials fail "no route to

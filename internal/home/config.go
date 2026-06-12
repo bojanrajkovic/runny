@@ -1,6 +1,7 @@
 package home
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -161,6 +162,31 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading config: %w", err)
 	}
+	return parseConfig(raw, path)
+}
+
+// LoadConfigSHA loads the config and returns the SHA-256 (hex) of the exact
+// bytes it parsed. Reading and hashing once makes the audit hash provably
+// describe the validated config: a separate re-read could hash a different
+// version under a concurrent atomic replace — the deploy-script workflow a
+// reload serves — silently breaking the accept-then-respawn hash chain.
+func LoadConfigSHA(path string) (*Config, string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("reading config: %w", err)
+	}
+	// Hash the exact bytes read, before parsing — so the refusal path can
+	// still name the rejected file version, while the accept path's hash
+	// provably describes what validated (both from this one read).
+	sha := fmt.Sprintf("%x", sha256.Sum256(raw))
+	cfg, err := parseConfig(raw, path)
+	if err != nil {
+		return nil, sha, err
+	}
+	return cfg, sha, nil
+}
+
+func parseConfig(raw []byte, path string) (*Config, error) {
 	var c Config
 	if err := yaml.UnmarshalWithOptions(raw, &c, yaml.Strict()); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)

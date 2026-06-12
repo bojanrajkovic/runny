@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
@@ -307,5 +309,222 @@ func TestRenderStatusNoRetryWhenBackoffElapsed(t *testing.T) {
 	})
 	if strings.Contains(buf.String(), "retry in") {
 		t.Errorf("printed a retry countdown for elapsed backoff:\n%s", buf.String())
+	}
+}
+
+func TestUsageMentionsReload(t *testing.T) {
+	if !strings.Contains(usage, "reload") {
+		t.Error("usage does not mention the reload command")
+	}
+}
+
+// A draining daemon shows a banner naming the cause and the slots the drain
+// is still waiting on (anything not wedged and not paused-in-BACKOFF).
+func TestRenderStatusShowsDrainingBanner(t *testing.T) {
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	c.renderStatus(&runnyv1.GetStatusResponse{
+		Version:       "test",
+		DaemonStarted: timestamppb.New(time.Now()),
+		Draining:      "config reload (rpc): new image",
+		Slots: []*runnyv1.SlotStatus{
+			{ // still draining: a job is running
+				Slot:         "mac-1",
+				State:        runnyv1.SlotState_SLOT_STATE_JOB,
+				StateEntered: timestamppb.New(time.Now()),
+			},
+			{ // converged: paused in BACKOFF
+				Slot:         "mac-2",
+				State:        runnyv1.SlotState_SLOT_STATE_BACKOFF,
+				StateEntered: timestamppb.New(time.Now()),
+				Paused:       true,
+			},
+			{ // converged: wedged
+				Slot:         "lin-1",
+				State:        runnyv1.SlotState_SLOT_STATE_TEARDOWN,
+				StateEntered: timestamppb.New(time.Now()),
+				Wedged:       true,
+			},
+		},
+	})
+	out := buf.String()
+	if !strings.Contains(out, "DRAINING: config reload (rpc): new image") {
+		t.Errorf("no draining banner:\n%s", out)
+	}
+	if !strings.Contains(out, "waiting on: mac-1 (JOB)") {
+		t.Errorf("banner does not name the holdout:\n%s", out)
+	}
+	for _, converged := range []string{"waiting on: mac-2", "mac-2 (", "lin-1 ("} {
+		if strings.Contains(out, converged) {
+			t.Errorf("banner lists a converged slot (%q):\n%s", converged, out)
+		}
+	}
+}
+
+func TestRenderStatusNoBannerWhenNotDraining(t *testing.T) {
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	c.renderStatus(&runnyv1.GetStatusResponse{
+		DaemonStarted: timestamppb.New(time.Now()),
+		Slots: []*runnyv1.SlotStatus{{
+			Slot:         "mac-1",
+			State:        runnyv1.SlotState_SLOT_STATE_LISTENING,
+			StateEntered: timestamppb.New(time.Now()),
+		}},
+	})
+	if strings.Contains(buf.String(), "DRAINING") {
+		t.Errorf("banner shown with no drain active:\n%s", buf.String())
+	}
+}
+
+const testSHA = "4a5b6c7d8e9f00112233445566778899aabbccddeeff00112233445566778899"
+
+// Acceptance renders everything from the response — slot count, truncated
+// sha, the operator-paused-slots note, warnings — with no second RPC.
+func TestRenderReloadAccepted(t *testing.T) {
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	err := c.renderReload(&runnyv1.ReloadResponse{
+		Accepted:            true,
+		StartedDrain:        true,
+		Draining:            "config reload (rpc): new image",
+		SlotCount:           3,
+		OperatorPausedSlots: []string{"mac-2", "lin-1"},
+		ConfigSha256:        testSHA,
+		Warnings: []*runnyv1.DoctorCheck{
+			{Name: "local-network", Ok: false, Detail: "cannot reach the guest subnet"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("accepted reload returned error: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"reload accepted: config validated (sha256 4a5b6c7d8e9f); draining 3 slot(s)",
+		"running jobs finish first",
+		"note: operator-paused slots resume after the respawn: mac-2, lin-1",
+		"warning: local-network — cannot reach the guest subnet",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("accepted output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderReloadAcceptedNoPausedNote(t *testing.T) {
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	if err := c.renderReload(&runnyv1.ReloadResponse{
+		Accepted:     true,
+		StartedDrain: true,
+		Draining:     "config reload (rpc)",
+		SlotCount:    1,
+		ConfigSha256: testSHA,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "operator-paused") {
+		t.Errorf("paused-slots note printed with an empty list:\n%s", buf.String())
+	}
+}
+
+// Accepted while another drain was already running: the config is validated
+// but THIS call did not start the drain — say which drain will apply it.
+func TestRenderReloadAcceptedAlreadyDraining(t *testing.T) {
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	err := c.renderReload(&runnyv1.ReloadResponse{
+		Accepted:     true,
+		StartedDrain: false, // a wedge drain was already running
+		Draining:     "wedged guest: a VM survived force-stop (see the slot's cycle record)",
+		ConfigSha256: testSHA,
+	})
+	if err != nil {
+		t.Fatalf("accepted reload returned error: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "daemon already draining (wedged guest:") ||
+		!strings.Contains(out, "the respawn will apply this config") {
+		t.Errorf("already-draining acceptance not rendered:\n%s", out)
+	}
+	if strings.Contains(out, "reload accepted: config validated") {
+		t.Errorf("already-draining acceptance claimed to have started the drain:\n%s", out)
+	}
+}
+
+// Refusal renders the failed checks with the doctor table and exits
+// non-zero with the daemon-unchanged summary.
+func TestRenderReloadRefused(t *testing.T) {
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	err := c.renderReload(&runnyv1.ReloadResponse{
+		Accepted: false,
+		FailedChecks: []*runnyv1.DoctorCheck{
+			{Name: "config-parse", Ok: false, Detail: "yaml: line 3: did not find expected node content"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "the running daemon is unchanged") {
+		t.Errorf("refusal error = %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "config-parse") || !strings.Contains(out, "FAIL") {
+		t.Errorf("refusal did not render the check table:\n%s", out)
+	}
+	if strings.Contains(out, "WARNING: the daemon is already draining") {
+		t.Errorf("no-drain refusal printed the mid-drain warning:\n%s", out)
+	}
+}
+
+// Refusal while a drain is active must scream: the respawn WILL load the
+// invalid file.
+func TestRenderReloadRefusedWhileDraining(t *testing.T) {
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	err := c.renderReload(&runnyv1.ReloadResponse{
+		Accepted: false,
+		Draining: "config reload (SIGHUP)",
+		FailedChecks: []*runnyv1.DoctorCheck{
+			{Name: "config-parse", Ok: false, Detail: "bad yaml"},
+		},
+	})
+	if err == nil {
+		t.Error("refused reload returned nil error")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "WARNING: the daemon is already draining (config reload (SIGHUP)) and the respawn WILL load this invalid config") {
+		t.Errorf("mid-drain refusal warning missing:\n%s", out)
+	}
+}
+
+// fakeClient stubs just the RPCs a test drives; everything else panics via
+// the embedded nil interface.
+type fakeClient struct {
+	runnyv1.RunnyServiceClient
+	pauseResp *runnyv1.PauseResponse
+}
+
+func (f *fakeClient) Pause(ctx context.Context, in *runnyv1.PauseRequest, opts ...grpc.CallOption) (*runnyv1.PauseResponse, error) {
+	return f.pauseResp, nil
+}
+
+func TestPausePrintsNote(t *testing.T) {
+	var buf bytes.Buffer
+	c := &ctl{out: &buf, client: &fakeClient{pauseResp: &runnyv1.PauseResponse{
+		Note: "daemon is draining for restart (config reload (rpc)); pause is in-memory and will not survive the respawn",
+	}}}
+	if err := c.pause(context.Background(), "mac-1"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "note: daemon is draining for restart") {
+		t.Errorf("pause note not printed:\n%s", buf.String())
+	}
+
+	buf.Reset()
+	c.client = &fakeClient{pauseResp: &runnyv1.PauseResponse{}}
+	if err := c.pause(context.Background(), "mac-1"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "note:") {
+		t.Errorf("empty note printed a note line:\n%s", buf.String())
 	}
 }

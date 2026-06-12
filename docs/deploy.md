@@ -41,7 +41,8 @@ runnyctl doctor                    # the running daemon's checks, incl. local-ne
 Run `install.sh` from a GUI session, not a bare SSH shell. The agent label is
 `com.coderinserepeat.runnyd`; stop it with `launchctl bootout gui/$(id -u)/com.coderinserepeat.runnyd`,
 never by killing the process (KeepAlive would respawn it — that is deliberate,
-it is what makes the ADR-0012 wedge restart work).
+it is what makes the ADR-0012 wedge restart and the ADR-0014 config reload
+work).
 
 ## Production install (via the tap)
 
@@ -63,6 +64,54 @@ short-lived installation token scoped to `homebrew-tap`; it no-ops until those
 secrets exist. That App is deliberately *not* the runtime runner-registration
 App — release/CI and prod-host/runner-admin are separate blast radii.
 `tools/deploy/install.sh` remains the path for running a from-checkout build.
+
+## Applying config changes
+
+runnyd reads `~/.runny/config.yaml` once, at startup. To apply an edit
+gracefully:
+
+```sh
+# edit ~/.runny/config.yaml, then:
+runnyctl reload -reason "why"
+# or, unix muscle memory (same validated path, verdict in the daemon log):
+launchctl kill SIGHUP gui/$(id -u)/com.coderinserepeat.runnyd
+```
+
+What happens (ADR-0014):
+
+- **Validation first.** The reload re-runs every startup check against the
+  new file (parse, GitHub client construction per pool, the full doctor
+  suite). If the respawned daemon would refuse to start, the reload is
+  refused with the failing checks and the running daemon is untouched.
+- **Drain, then respawn.** On acceptance every slot drains to a stable
+  idle — **running jobs finish first** — then runnyd exits and launchd
+  (KeepAlive, which is load-bearing here as for the wedge restart)
+  cold-starts it on the new config. `runnyctl status`/`watch` show a
+  `DRAINING` banner naming the cause and the holdout slots; a multi-hour
+  job legitimately holds the reload (`runnyctl recycle <slot>` is the
+  explicit override — the system never kills a job on its own).
+- **Operator pauses do not survive the respawn.** Pause is in-memory; the
+  acceptance output lists any paused slots, and a `runnyctl pause` issued
+  mid-drain warns about it.
+- **Don't re-edit the file mid-drain.** If the edited file still parses,
+  the respawn validates and loads it (a hash-change WARN lands in the
+  daemon log); if it no longer parses, the drained daemon **holds** — it
+  refuses to exit onto a file the respawn would refuse, keeps serving
+  status with the hold annotation, and periodically revalidates, so fixing
+  the file is sufficient.
+- `runnyctl doctor` includes a `config-drift` check, so "the file differs
+  from the running config" is visible before anyone wonders why behavior
+  doesn't match it.
+
+A foreground `runnyd` (no launchd) exits after the drain with
+`restarting after drain: …` and stays down — the respawn is launchd's job.
+Relatedly, since SIGHUP is claimed for reload, a foreground runnyd whose
+terminal closes now drains gracefully instead of dying instantly;
+SIGINT/SIGTERM still shut down.
+
+The blunt fallback remains: `runnyctl pause` every slot, wait until each
+sits paused in BACKOFF (`runnyctl status`), then
+`brew services restart runny`. Same effect, no validation.
 
 ## Troubleshooting: Local Network permission
 
@@ -97,10 +146,11 @@ Hardened guests (the default, `ssh_hardening: rotate` — see
 rest of the cycle: mid-cycle `ssh admin@<guest-ip>` fails with
 `Permission denied` by design, and the per-cycle private key lives only in
 runnyd's memory. For interactive debugging, set `ssh_hardening: off` on the
-pool and **restart the daemon** (`brew services restart runny` — runnyd reads
-config once at startup; a recycle alone keeps the old setting), then SSH into
-a fresh guest with the pool password. Re-enable hardening and restart again
-when done. (On-demand operator key injection into a live hardened guest is
+pool and apply it with **`runnyctl reload`** (see "Applying config changes" —
+runnyd reads config once at startup, so a recycle alone keeps the old
+setting, and a bare `brew services restart runny` kills in-flight jobs),
+then SSH into a fresh guest with the pool password. Re-enable hardening and
+reload again when done. (On-demand operator key injection into a live hardened guest is
 tracked in [#39](https://github.com/bojanrajkovic/runny/issues/39).)
 
 ## Migrating from another runner manager

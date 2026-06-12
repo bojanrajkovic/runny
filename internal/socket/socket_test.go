@@ -234,6 +234,163 @@ func TestDoctorPassesThroughChecks(t *testing.T) {
 	}
 }
 
+// Reload without a wired ReloadFn must scream Unimplemented, not pretend an
+// empty verdict.
+func TestReloadUnwiredIsUnimplemented(t *testing.T) {
+	c := dial(t, newTestServer(testSlots("mac-1"), nil, nil, nil))
+	_, err := c.Reload(t.Context(), &runnyv1.ReloadRequest{})
+	if status.Code(err) != codes.Unimplemented {
+		t.Errorf("unwired Reload: code = %v, want Unimplemented", status.Code(err))
+	}
+}
+
+func TestReloadRefusedCarriesFailedChecks(t *testing.T) {
+	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	srv.ReloadFn = func(ctx context.Context, reason string) ReloadResult {
+		return ReloadResult{
+			Accepted:     false,
+			FailedChecks: []DoctorCheck{{Name: "config-parse", OK: false, Detail: "bad yaml"}},
+		}
+	}
+	c := dial(t, srv)
+	resp, err := c.Reload(t.Context(), &runnyv1.ReloadRequest{Reason: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetAccepted() {
+		t.Error("refused reload reported accepted")
+	}
+	fc := resp.GetFailedChecks()
+	if len(fc) != 1 || fc[0].GetName() != "config-parse" || fc[0].GetOk() || fc[0].GetDetail() != "bad yaml" {
+		t.Errorf("failed_checks = %+v", fc)
+	}
+}
+
+func TestReloadAcceptedCarriesVerdictFields(t *testing.T) {
+	srv := newTestServer(testSlots("mac-1", "mac-2"), nil, nil, nil)
+	var sawReason string
+	srv.ReloadFn = func(ctx context.Context, reason string) ReloadResult {
+		sawReason = reason
+		return ReloadResult{
+			Accepted:            true,
+			StartedDrain:        true,
+			Warnings:            []DoctorCheck{{Name: "local-network", OK: false, Detail: "flake"}},
+			Draining:            "config reload (rpc): new image",
+			SlotCount:           2,
+			OperatorPausedSlots: []string{"mac-2"},
+			ConfigSHA256:        "abc123",
+		}
+	}
+	c := dial(t, srv)
+	resp, err := c.Reload(t.Context(), &runnyv1.ReloadRequest{Reason: "new image"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sawReason != "new image" {
+		t.Errorf("ReloadFn saw reason %q", sawReason)
+	}
+	if !resp.GetAccepted() || !resp.GetStartedDrain() || resp.GetSlotCount() != 2 || resp.GetConfigSha256() != "abc123" {
+		t.Errorf("verdict fields dropped: %+v", resp)
+	}
+	if resp.GetDraining() != "config reload (rpc): new image" {
+		t.Errorf("draining = %q", resp.GetDraining())
+	}
+	if len(resp.GetOperatorPausedSlots()) != 1 || resp.GetOperatorPausedSlots()[0] != "mac-2" {
+		t.Errorf("operator_paused_slots = %v", resp.GetOperatorPausedSlots())
+	}
+	if len(resp.GetWarnings()) != 1 || resp.GetWarnings()[0].GetName() != "local-network" {
+		t.Errorf("warnings = %+v", resp.GetWarnings())
+	}
+}
+
+// Reload must never gate on an active drain: the respawn loads the on-disk
+// file regardless, so the verdict matters most then (design decision 8).
+func TestReloadWhileDrainingStillCallsReloadFn(t *testing.T) {
+	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	srv.DrainingFn = func() string { return "wedged guest: a VM survived force-stop" }
+	called := false
+	srv.ReloadFn = func(ctx context.Context, reason string) ReloadResult {
+		called = true
+		return ReloadResult{
+			Accepted:     false,
+			FailedChecks: []DoctorCheck{{Name: "config-parse", OK: false, Detail: "bad yaml"}},
+			Draining:     "wedged guest: a VM survived force-stop",
+		}
+	}
+	c := dial(t, srv)
+	resp, err := c.Reload(t.Context(), &runnyv1.ReloadRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Error("Reload gated on the drain state instead of calling ReloadFn")
+	}
+	if resp.GetDraining() == "" {
+		t.Error("draining not surfaced on a refused-while-draining reload")
+	}
+}
+
+func TestResumeRefusedWhileDraining(t *testing.T) {
+	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	srv.DrainingFn = func() string { return "config reload (rpc): x" }
+	c := dial(t, srv)
+	_, err := c.Resume(t.Context(), &runnyv1.ResumeRequest{Slot: "mac-1"})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Errorf("Resume while draining: code = %v, want FailedPrecondition", status.Code(err))
+	}
+	if !strings.Contains(status.Convert(err).Message(), "config reload (rpc): x") {
+		t.Errorf("refusal lacks the drain reason: %v", err)
+	}
+}
+
+// A full command buffer must surface as an error, never a silent drop
+// reported as success — the drainer saturates non-converged slots with
+// re-issued pause+recycle pairs, so a mid-drain operator pause can hit a full
+// buffer. (No Run goroutine drains the 8-deep buffer in this test.)
+func TestPauseFullBufferSurfacesError(t *testing.T) {
+	slots := testSlots("mac-1")
+	for i := 0; i < 8; i++ {
+		slots[0].Command(statemachine.Command{Kind: statemachine.CmdPause})
+	}
+	srv := newTestServer(slots, nil, nil, nil)
+	c := dial(t, srv)
+	_, err := c.Pause(t.Context(), &runnyv1.PauseRequest{Slot: "mac-1"})
+	if err == nil || !strings.Contains(status.Convert(err).Message(), "not accepting commands") {
+		t.Errorf("saturated Pause: err = %v, want 'not accepting commands'", err)
+	}
+}
+
+func TestPauseNoteOnlyWhileDraining(t *testing.T) {
+	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	c := dial(t, srv)
+	resp, err := c.Pause(t.Context(), &runnyv1.PauseRequest{Slot: "mac-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetNote() != "" {
+		t.Errorf("pause note while not draining: %q", resp.GetNote())
+	}
+	srv.DrainingFn = func() string { return "config reload (rpc): x" }
+	resp, err = c.Pause(t.Context(), &runnyv1.PauseRequest{Slot: "mac-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(resp.GetNote(), "will not survive the respawn") {
+		t.Errorf("pause note while draining = %q", resp.GetNote())
+	}
+}
+
+func TestSnapshotCarriesDraining(t *testing.T) {
+	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	if got := srv.snapshot().GetDraining(); got != "" {
+		t.Errorf("draining = %q with no DrainingFn", got)
+	}
+	srv.DrainingFn = func() string { return "config reload (SIGHUP)" }
+	if got := srv.snapshot().GetDraining(); got != "config reload (SIGHUP)" {
+		t.Errorf("draining = %q", got)
+	}
+}
+
 func TestWatchStatusSendsInitialThenOnNotify(t *testing.T) {
 	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
 	c := dial(t, srv)

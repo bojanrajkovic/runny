@@ -39,6 +39,18 @@ Three parts, in escalating order:
    dir and, the process having exited, the leaked guest is gone. Convergence
    is bounded by the existing max-job-duration budget.
 
+## Addendum (2026-06-11, ADR-0014)
+
+The wedge drain now rides the shared drainer that the config reload
+(ADR-0014) also uses: commands are re-issued on every status change until
+convergence (the original issue-once drain could stall on a dropped
+command or on backoffWait's timer-vs-pause select race), the exit passes a
+local exit gate (the on-disk config must still parse — the respawn loads
+it for the wedge cause too), and the cold start sweeps the vms dir
+*before* validating, closing the crash loop where a wedge-retained clone's
+divergence tipped `disk-headroom` under the threshold before the sweep
+that would free it could run.
+
 ## Rejected alternatives
 
 - **Exit immediately on wedge**: simplest and most crash-only, but kills a

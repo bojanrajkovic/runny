@@ -25,6 +25,14 @@ service RunnyService {
   rpc Why(WhyRequest) returns (WhyResponse);
   // Re-run startup validation on demand.
   rpc Doctor(DoctorRequest) returns (DoctorResponse);
+  // Validate the on-disk config with the same checks a cold start applies,
+  // then drain every slot to stable idle (running jobs finish first) and
+  // exit for a launchd respawn on the new config. Refused — with the
+  // failing checks and the running daemon untouched — when the new config
+  // would not survive startup validation. Runs (and reports) validation
+  // even while a drain is already in progress: the imminent respawn loads
+  // the on-disk file regardless, so the verdict matters most then.
+  rpc Reload(ReloadRequest) returns (ReloadResponse);
 }
 
 // SlotState mirrors internal/statemachine; the FSM is the authority (ADR-0004).
@@ -102,6 +110,14 @@ message GetStatusResponse {
   repeated SlotStatus slots = 1;
   google.protobuf.Timestamp daemon_started = 2;
   string version = 3;
+  // Non-empty while the daemon is draining toward a restart (wedged guest,
+  // ADR-0012, or config reload): the reason every slot is pausing/recycling.
+  // Slots converge to paused BACKOFF (or wedged), then the daemon exits and
+  // launchd cold-starts it. Clients derive the still-draining slots from
+  // `slots` (any slot not wedged and not paused-in-BACKOFF). May carry a
+  // hold annotation when the exit gate is refusing to exit onto a config
+  // that no longer parses.
+  string draining = 4;
 }
 
 message WatchStatusRequest {}
@@ -137,7 +153,12 @@ message PauseRequest {
   string slot = 1;
 }
 
-message PauseResponse {}
+message PauseResponse {
+  // Non-empty while the daemon is draining toward a restart: warns that
+  // pause is in-memory and will not survive the imminent respawn. Old
+  // clients ignore it (wire-compatible).
+  string note = 1;
+}
 
 message ResumeRequest {
   string slot = 1;
@@ -197,4 +218,38 @@ message DoctorCheck {
 
 message DoctorResponse {
   repeated DoctorCheck checks = 1;
+}
+
+message ReloadRequest {
+  // Recorded in the daemon log and as each slot's recycle reason.
+  string reason = 1;
+}
+
+message ReloadResponse {
+  // True when the on-disk config passed validation and the daemon is
+  // draining toward a respawn that will load it (whether this call started
+  // the drain or one was already running). False = refused; see
+  // failed_checks. When false AND draining is non-empty, the daemon is
+  // already draining and the respawn WILL load the invalid file — fix it
+  // before the drain converges.
+  bool accepted = 1;
+  // The checks that failed against the new config (config-parse,
+  // github-client:<pool>, and the doctor suite). Empty when accepted.
+  repeated DoctorCheck failed_checks = 2;
+  // Environment-sensitive results that do not block the reload (e.g.
+  // local-network, which cannot fail a cold start and no config edit can
+  // affect). Render, don't gate on.
+  repeated DoctorCheck warnings = 3;
+  // The active drain reason after this call: this reload's, or the
+  // pre-existing drain's (wedge / earlier reload) when one was running.
+  string draining = 4;
+  // Slots being drained (accepted only).
+  int32 slot_count = 5;
+  // Slots that were operator-paused at acceptance; their pause is
+  // in-memory and clears at the respawn.
+  repeated string operator_paused_slots = 6;
+  // SHA-256 (hex) of the raw config file bytes the preflight validated;
+  // the same hash is logged at acceptance and by the respawn's cold start,
+  // making "which file version was vetted" provable.
+  string config_sha256 = 7;
 }

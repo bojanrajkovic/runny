@@ -243,9 +243,19 @@ func run() error {
 			// One read: the parse check and the hash describe the same bytes,
 			// so a concurrent atomic replace can't make us hold on version A's
 			// parse while warning about version B's hash (or vice versa).
-			_, sha, err := home.LoadConfigSHA(configPath)
+			cfg, sha, err := home.LoadConfigSHA(configPath)
 			if err != nil {
 				return false, fmt.Sprintf("config.yaml no longer parses; the respawn would refuse it: %v", err)
+			}
+			// Re-run the local startup checks the respawn hard-fails on: a
+			// mid-drain edit that parses but overflows the darwin guest cap or
+			// the runner-name length would otherwise crash-loop a socketless
+			// respawn. Network checks stay off the exit seam — a refusal there
+			// has no good answer (hold a drained fleet on a GitHub blip?).
+			for _, c := range []socket.DoctorCheck{checkMacOSGuestCap(cfg), checkRunnerNamespace(dir, cfg)} {
+				if !c.OK {
+					return false, fmt.Sprintf("the respawn would refuse %s: %s", c.Name, c.Detail)
+				}
 			}
 			if acceptedSHA != "" && sha != acceptedSHA {
 				logger.Warn("config changed during the drain; the respawn will validate and load the newer file",
@@ -476,15 +486,55 @@ func splitPreflightChecks(checks []socket.DoctorCheck) (failed, warnings []socke
 	return failed, warnings
 }
 
-// failedChecks filters to failures.
+// failedChecks filters to the failures that should block daemon startup.
+// config-drift is excluded: it is informational (the file on disk differs
+// from the running config), and the respawn re-reads the file AFTER the
+// vms-sweep window — a concurrent re-template (Ansible) would otherwise
+// crash-loop startup on a check that does not affect whether THIS config
+// runs. It stays visible via `runnyctl doctor`, just not as a startup gate.
 func failedChecks(checks []socket.DoctorCheck) []socket.DoctorCheck {
 	var out []socket.DoctorCheck
 	for _, c := range checks {
-		if !c.OK {
+		if !c.OK && c.Name != "config-drift" {
 			out = append(out, c)
 		}
 	}
 	return out
+}
+
+// checkMacOSGuestCap and checkRunnerNamespace are the pure-local, deterministic
+// startup checks the exit gate re-runs against a mid-drain-edited config (the
+// respawn hard-fails on them, so a parse-only gate would let an edit that
+// overflows the guest cap or the runner-name length crash-loop the socketless
+// respawn). Shared with makeDoctor so the gate and startup agree by construction.
+func checkMacOSGuestCap(cfg *home.Config) socket.DoctorCheck {
+	darwinCount := 0
+	for _, p := range cfg.Pools {
+		if p.OS == "darwin" {
+			darwinCount += p.Count
+		}
+	}
+	if darwinCount <= macOSGuestCap {
+		return socket.DoctorCheck{
+			Name: "macos-guest-cap", OK: true,
+			Detail: fmt.Sprintf("%d darwin slot(s) ≤ cap %d", darwinCount, macOSGuestCap),
+		}
+	}
+	return socket.DoctorCheck{Name: "macos-guest-cap", OK: false, Detail: fmt.Sprintf(
+		"darwin pools total %d slots, exceeding Virtualization.framework's %d-macOS-guest cap; the extra slots could never boot",
+		darwinCount, macOSGuestCap,
+	)}
+}
+
+func checkRunnerNamespace(dir home.Dir, cfg *home.Config) socket.DoctorCheck {
+	prefix, err := dir.InstancePrefix()
+	if err != nil {
+		return socket.DoctorCheck{Name: "runner-namespace", OK: false, Detail: err.Error()}
+	}
+	if err := home.ValidateRunnerNames(prefix, cfg.Pools); err != nil {
+		return socket.DoctorCheck{Name: "runner-namespace", OK: false, Detail: err.Error()}
+	}
+	return socket.DoctorCheck{Name: "runner-namespace", OK: true, Detail: prefix}
 }
 
 func runDoctor(doctor func(context.Context) []socket.DoctorCheck) error {
@@ -551,30 +601,10 @@ func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*gi
 		// requirement a doctor pass must not paper over — and validates the
 		// assembled runner names against GitHub's length cap, which would
 		// otherwise surface as a permanent non-retryable 422 loop at MINT_JIT.
-		if prefix, err := dir.InstancePrefix(); err != nil {
-			add("runner-namespace", false, err.Error())
-		} else if err := home.ValidateRunnerNames(prefix, cfg.Pools); err != nil {
-			add("runner-namespace", false, err.Error())
-		} else {
-			add("runner-namespace", true, prefix)
-		}
-
 		// The Virtualization.framework concurrent-guest cap applies to macOS
-		// guests only; linux pools are bounded by memory, not licensing.
-		darwinCount := 0
-		for _, p := range cfg.Pools {
-			if p.OS == "darwin" {
-				darwinCount += p.Count
-			}
-		}
-		if darwinCount <= macOSGuestCap {
-			add("macos-guest-cap", true, fmt.Sprintf("%d darwin slot(s) ≤ cap %d", darwinCount, macOSGuestCap))
-		} else {
-			add("macos-guest-cap", false, fmt.Sprintf(
-				"darwin pools total %d slots, exceeding Virtualization.framework's %d-macOS-guest cap; the extra slots could never boot",
-				darwinCount, macOSGuestCap,
-			))
-		}
+		// guests only; linux pools are bounded by memory, not licensing. Both
+		// are shared with the exit gate (pure-local, deterministic).
+		checks = append(checks, checkRunnerNamespace(dir, cfg), checkMacOSGuestCap(cfg))
 
 		// Local Network (TCC): a LaunchDaemon or background-reparented runnyd
 		// is silently denied vmnet access, so guest dials fail "no route to

@@ -49,6 +49,37 @@ func TestLoadConfigSHAStableAndHex(t *testing.T) {
 	}
 }
 
+// config-drift is informational and must never block daemon startup: the
+// respawn re-reads the file after the vms-sweep window, so a concurrent
+// re-template would otherwise crash-loop on a check that does not affect
+// whether THIS config runs.
+func TestFailedChecksExcludesConfigDrift(t *testing.T) {
+	got := failedChecks([]socket.DoctorCheck{
+		{Name: "config-drift", OK: false, Detail: "differs from the running config"},
+		{Name: "macos-guest-cap", OK: false, Detail: "over cap"},
+		{Name: "platform", OK: true},
+	})
+	if len(got) != 1 || got[0].Name != "macos-guest-cap" {
+		t.Errorf("failedChecks = %+v, want only macos-guest-cap (config-drift excluded)", got)
+	}
+}
+
+// The exit gate re-runs this local check, so a mid-drain edit that overflows
+// the darwin guest cap holds the drain instead of crash-looping the respawn.
+func TestCheckMacOSGuestCap(t *testing.T) {
+	over := checkMacOSGuestCap(&home.Config{Pools: []home.PoolConfig{{Name: "mac", OS: "darwin", Count: macOSGuestCap + 1}}})
+	if over.OK {
+		t.Errorf("guest cap over by one reported OK: %+v", over)
+	}
+	ok := checkMacOSGuestCap(&home.Config{Pools: []home.PoolConfig{
+		{Name: "mac", OS: "darwin", Count: 1},
+		{Name: "lin", OS: "linux", Count: 99}, // linux doesn't count toward the cap
+	}})
+	if !ok.OK {
+		t.Errorf("within-cap darwin + linux reported failure: %+v", ok)
+	}
+}
+
 // The preflight post-filter (ADR-0014 decision 7): a failing local-network
 // becomes a warning (the respawn's cold start cannot fail it and no config
 // edit affects it); a failing disk-headroom keeps its refusal slot with the

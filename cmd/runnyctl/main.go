@@ -563,6 +563,9 @@ func (c *ctl) renderCycle(rec *runnyv1.CycleRecord) {
 		img,
 		rec.GetStarted().AsTime().Local().Format(time.RFC3339),
 		durString(rec.GetFinished().AsTime().Sub(rec.GetStarted().AsTime())))
+	if v := rec.GetRunnerVersion(); v != "" {
+		fmt.Fprintf(c.out, "  runner %s\n", runnerVersionDisplay(v))
+	}
 	if rec.GetVm().GetIp() != "" {
 		fmt.Fprintf(c.out, "  vm %s (%s)\n", rec.GetVm().GetIp(), rec.GetVm().GetMac())
 	}
@@ -757,6 +760,17 @@ func imageCell(ref, digest string) string {
 func splitPin(ref string) (name, pinHex string) {
 	name, pinHex, _ = strings.Cut(ref, "@sha256:")
 	return name, pinHex
+}
+
+// runnerVersionDisplay extracts the semver from an asset filename like
+// "actions-runner-osx-arm64-2.320.0.tar.gz" → "2.320.0". Falls back to the
+// full filename for any shape that doesn't match.
+func runnerVersionDisplay(assetName string) string {
+	s := strings.TrimSuffix(assetName, ".tar.gz")
+	if i := strings.LastIndexByte(s, '-'); i >= 0 {
+		return s[i+1:]
+	}
+	return assetName
 }
 
 // shortDigest renders a digest (with or without the "sha256:" algorithm

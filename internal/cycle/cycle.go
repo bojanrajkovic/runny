@@ -41,8 +41,13 @@ type Record struct {
 	Slot    string `json:"slot"`
 	// Image is the pool's configured ref at cycle time (intent);
 	// ImageDigest is what resolved (truth).
-	Image       string        `json:"image,omitempty"`
-	ImageDigest string        `json:"image_digest,omitempty"`
+	Image       string `json:"image,omitempty"`
+	ImageDigest string `json:"image_digest,omitempty"`
+	// RunnerVersion is the asset filename of the actions-runner tarball ensured
+	// this cycle (e.g. "actions-runner-osx-arm64-2.320.0.tar.gz"); empty when
+	// the runner tarball step was skipped (no Runner configured) or the cycle
+	// failed before ENSURE_IMAGE completed.
+	RunnerVersion string `json:"runner_version,omitempty"`
 	Started     time.Time     `json:"started"`
 	Finished    time.Time     `json:"finished"`
 	Result      Result        `json:"result"`

@@ -32,7 +32,7 @@ type fakeImages struct {
 	mu       sync.Mutex
 }
 
-func (f *fakeImages) Ensure(ctx context.Context, report func(string)) (string, tart.Bundle, error) {
+func (f *fakeImages) Ensure(ctx context.Context, report func(string)) (string, string, tart.Bundle, error) {
 	if report != nil {
 		report("pulled 1.0 MiB at 1.0 MiB/s")
 	}
@@ -42,9 +42,9 @@ func (f *fakeImages) Ensure(ctx context.Context, report func(string)) (string, t
 	f.mu.Unlock()
 	if blocked {
 		<-ctx.Done()
-		return "", "", ctx.Err()
+		return "", "", "", ctx.Err()
 	}
-	return "sha256:fake", f.bundle, f.err
+	return "sha256:fake", "actions-runner-osx-arm64-2.320.0.tar.gz", f.bundle, f.err
 }
 
 type fakeMachine struct {

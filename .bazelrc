@@ -15,3 +15,10 @@ try-import %workspace%/user.bazelrc
 # Stamped builds (releases and branch artifacts): version from git via
 # tools/version.sh (ADR-0010).
 build:release --stamp --workspace_status_command=tools/workspace-status.sh
+
+# Developer ID codesigning (opt-in; the cert must be in the active keychain).
+# Combine with --config=release for a release-grade signed binary:
+#   bazel build --config=release --config=developer-id //cmd/runnyd:runnyd_signed
+# The identity string is the CN of the Developer ID Application certificate;
+# verify with: security find-identity -v -p codesigning
+build:developer-id --action_env="CODESIGN_IDENTITY=Developer ID Application: Bojan Rajkovic (FP2BC7CW97)"

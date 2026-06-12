@@ -194,6 +194,15 @@ func (c *ctl) status(ctx context.Context) error {
 	return nil
 }
 
+// Free-text tail column widths: the JOB cell is padded to jobColWidth so NOTE
+// lines up, and both are clamped so a long job name or failure string can't
+// run the row off the terminal. NOTE is last and unpadded (it overflows
+// gracefully), so its width only clamps.
+const (
+	jobColWidth  = 22
+	noteColWidth = 60
+)
+
 func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 	fmt.Fprintf(c.out, "runnyd %s, up %s\n\n", resp.GetVersion(),
 		durString(time.Since(resp.GetDaemonStarted().AsTime())))
@@ -222,7 +231,7 @@ func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 	// cluster, before the free-text tail (JOB, NOTE).
 	row := func(runner, state, dur, ip, image, job, note string) {
 		line := pad(runner, w) + " " + pad(state, 13) + " " + pad(dur, 9) + " " +
-			pad(ip, 15) + " " + pad(image, wi) + " " + pad(job, 22) + " " + note
+			pad(ip, 15) + " " + pad(image, wi) + " " + pad(job, jobColWidth) + " " + note
 		fmt.Fprintln(c.out, strings.TrimRight(line, " "))
 	}
 	row("RUNNER", "STATE", "FOR", "IP", "IMAGE", "JOB", "NOTE")
@@ -262,7 +271,7 @@ func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 		row(name(s), state,
 			durString(time.Since(s.GetStateEntered().AsTime())),
 			s.GetVm().GetIp(), imageCell(s.GetImage(), s.GetImageDigest()),
-			trunc(job, 22), trunc(note, 60))
+			trunc(job, jobColWidth), trunc(note, noteColWidth))
 	}
 	fmt.Fprintln(c.out, "\n(* = paused; STATE* holds in BACKOFF after the current cycle. WEDGED! = guest survived force-stop; the daemon restarts cold once idle)")
 }

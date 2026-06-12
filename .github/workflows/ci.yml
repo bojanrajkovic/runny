@@ -118,21 +118,17 @@ jobs:
           # No tool-install cache either: cold means cold. Tools come from
           # their pinned upstream releases, not a poisonable cache entry.
           cache: false
-      - name: build (cold, stamped)
-        run: mise x -- bazel build --config=ci --config=release //cmd/runnyd //cmd/runnyctl
-      - name: sign runnyd (ad-hoc, virtualization entitlement)
-        # Ad-hoc signatures honor the virtualization entitlement on any host;
-        # Developer ID signing waits on cert secrets (see CONTRIBUTING.md).
+      - name: build (cold, stamped, ad-hoc signed)
+        # codesign_binary defaults to ad-hoc ('-') when CODESIGN_IDENTITY is
+        # unset; Developer ID signing requires cert secrets on the release
+        # environment (see CONTRIBUTING.md "Codesigning tiers").
         run: |
+          mise x -- bazel build --config=ci --config=release \
+            //cmd/runnyd:runnyd_signed //cmd/runnyctl:runnyctl_signed
           VERSION="$(mise x -- tools/version.sh)"
           echo "runny version: $VERSION"
-          cp bazel-bin/cmd/runnyd/runnyd_/runnyd runnyd
-          cp bazel-bin/cmd/runnyctl/runnyctl_/runnyctl runnyctl
-          chmod +w runnyd
-          codesign -s - --entitlements tools/sign/runnyd.entitlements --force runnyd
-          # The sign step exits 0 even for a plist whose key is wrong;
-          # assert the entitlement actually embedded (CI security).
-          codesign -d --entitlements - runnyd | grep -q com.apple.security.virtualization
+          cp bazel-bin/cmd/runnyd/runnyd_signed.bin runnyd
+          cp bazel-bin/cmd/runnyctl/runnyctl_signed.bin runnyctl
           ./runnyctl version
       - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
         if: github.event_name == 'push'

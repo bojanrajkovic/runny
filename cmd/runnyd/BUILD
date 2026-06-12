@@ -92,8 +92,8 @@ stamped_go_binary(
 codesign_binary(
     name = "runnyd_signed",
     binary = ":runnyd",
-    entitlements = "//tools/sign:runnyd.entitlements",
     entitlement_key = "com.apple.security.virtualization",
+    entitlements = "//tools/sign:runnyd.entitlements",
     visibility = ["//visibility:public"],
 )
 

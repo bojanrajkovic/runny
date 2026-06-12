@@ -101,9 +101,11 @@ jobs:
           fi
 
       - name: build (cold, stamped, signed, notarized)
+        env:
+          CODESIGN_IDENTITY: ${{ steps.identity.outputs.value }}
         run: |
           mise x -- bazel build --config=ci --config=release \
-            --action_env="CODESIGN_IDENTITY=${{ steps.identity.outputs.value }}" \
+            --action_env="CODESIGN_IDENTITY=$CODESIGN_IDENTITY" \
             --config=notarize \
             //cmd/runnyd:runnyd_notarized //cmd/runnyctl:runnyctl_notarized
 

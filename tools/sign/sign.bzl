@@ -126,7 +126,7 @@ def notarize_binary(name, binary, **kwargs):
         srcs = [binary],
         outs = [name + ".bin"],
         cmd = """
-            if [ -z "$$NOTARY_KEY_B64" ]; then
+            if [ -z "$${{NOTARY_KEY_B64:-}}" ]; then
                 cp $(location {binary}) $@
                 exit 0
             fi
@@ -134,12 +134,12 @@ def notarize_binary(name, binary, **kwargs):
             trap 'rm -rf "$$NOTARY_TMPDIR"' EXIT
             KEY="$$NOTARY_TMPDIR/key.p8"
             ZIP="$$NOTARY_TMPDIR/submit.zip"
-            printf '%s' "$$NOTARY_KEY_B64" | base64 --decode > "$$KEY"
+            printf '%s' "$${{NOTARY_KEY_B64:-}}" | base64 --decode > "$$KEY"
             zip -j "$$ZIP" $(location {binary})
             xcrun notarytool submit "$$ZIP" \\
                 --key "$$KEY" \\
-                --key-id "$$NOTARY_KEY_ID" \\
-                --issuer "$$NOTARY_ISSUER_ID" \\
+                --key-id "$${{NOTARY_KEY_ID:-}}" \\
+                --issuer "$${{NOTARY_ISSUER_ID:-}}" \\
                 --wait
             cp $(location {binary}) $@
         """.format(binary = binary),

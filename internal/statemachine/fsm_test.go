@@ -160,6 +160,13 @@ func (g *fakeGuest) Close() error { return nil }
 type fakeDialer struct {
 	guest *fakeGuest
 	err   error
+
+	mu          sync.Mutex
+	rotated     *fakeGuest // Rotate's return when set; nil hands back g
+	rotateErr   error
+	rotateBlock bool // Rotate blocks until ctx expiry (a wedged guest)
+	rotateCalls int
+	rotateGoos  string
 }
 
 func (d *fakeDialer) WaitFor(ctx bounded.Context, addr string) (Guest, error) {
@@ -167,6 +174,31 @@ func (d *fakeDialer) WaitFor(ctx bounded.Context, addr string) (Guest, error) {
 		return nil, d.err
 	}
 	return d.guest, nil
+}
+
+func (d *fakeDialer) Rotate(ctx bounded.Context, addr string, g Guest, goos string) (Guest, error) {
+	d.mu.Lock()
+	d.rotateCalls++
+	d.rotateGoos = goos
+	rotated, err, block := d.rotated, d.rotateErr, d.rotateBlock
+	d.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, err
+	}
+	if rotated != nil {
+		return rotated, nil
+	}
+	return g, nil
+}
+
+func (d *fakeDialer) rotations() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.rotateCalls
 }
 
 type fakeGitHub struct {
@@ -222,6 +254,7 @@ type harness struct {
 	vmF     *fakeVM
 	proc    *fakeProc
 	guest   *fakeGuest
+	dialer  *fakeDialer
 	gh      *fakeGitHub
 	images  *fakeImages
 	dir     home.Dir
@@ -255,6 +288,10 @@ func (h *harness) start(t *testing.T) context.CancelFunc {
 }
 
 func newHarness(t *testing.T, mutate func(*home.Config)) *harness {
+	return newHarnessPool(t, mutate, nil)
+}
+
+func newHarnessPool(t *testing.T, mutate func(*home.Config), mutatePool func(*home.PoolConfig)) *harness {
 	t.Helper()
 	dir := home.Dir(t.TempDir())
 	if err := dir.Ensure(); err != nil {
@@ -269,6 +306,9 @@ func newHarness(t *testing.T, mutate func(*home.Config)) *harness {
 		Labels:        []string{"self-hosted"},
 		RunnerGroupID: 1,
 		Target:        home.TargetConfig{Owner: "o", Repo: "r"},
+		// Mirror the production default: cycles flow through SECURE_SSH
+		// unless a test opts out via mutatePool.
+		SSHHardening: home.SSHHardeningRotate,
 	}
 	set := func(d *home.Duration, v time.Duration) { *d = home.Duration(v) }
 	set(&cfg.Deadlines.Clone, time.Second)
@@ -276,6 +316,7 @@ func newHarness(t *testing.T, mutate func(*home.Config)) *harness {
 	set(&cfg.Deadlines.AwaitIP, 500*time.Millisecond)
 	set(&cfg.Deadlines.AwaitSSH, time.Second)
 	set(&cfg.Deadlines.MintJIT, time.Second)
+	set(&cfg.Deadlines.SecureSSH, time.Second)
 	set(&cfg.Deadlines.Provision, time.Second)
 	set(&cfg.Deadlines.Teardown, 2*time.Second)
 	set(&cfg.Limits.MaxJobDuration, 2*time.Second)
@@ -288,6 +329,9 @@ func newHarness(t *testing.T, mutate func(*home.Config)) *harness {
 	if mutate != nil {
 		mutate(cfg)
 	}
+	if mutatePool != nil {
+		mutatePool(&pool)
+	}
 
 	proc := newFakeProc()
 	h := &harness{
@@ -299,6 +343,7 @@ func newHarness(t *testing.T, mutate func(*home.Config)) *harness {
 		dir:    dir,
 		states: make(chan Status, 256),
 	}
+	h.dialer = &fakeDialer{guest: h.guest}
 	deps := Deps{
 		Home:           dir,
 		Config:         cfg,
@@ -310,7 +355,7 @@ func newHarness(t *testing.T, mutate func(*home.Config)) *harness {
 			return os.MkdirAll(dst, 0o755)
 		},
 		GitHub: h.gh,
-		Dial:   &fakeDialer{guest: h.guest},
+		Dial:   h.dialer,
 		OnRunnerLine: func(slot, cycleID, line string) {
 			h.linesMu.Lock()
 			h.runnerLines = append(h.runnerLines, slot+" "+cycleID+" "+line)
@@ -799,6 +844,168 @@ func TestRunnerNameShape(t *testing.T) {
 	parts := strings.Split(name, "-")
 	if !strings.HasPrefix(name, "runny-runner-1-") || len(parts[len(parts)-1]) != 8 {
 		t.Errorf("runner name = %q", name)
+	}
+}
+
+// SECURE_SSH success must swap the cycle onto the rotated session: the
+// runner launches over the new guest, never the password one, and the cycle
+// record carries the state as OK.
+func TestSecureSSHRotatesGuest(t *testing.T) {
+	h := newHarness(t, nil)
+	rotatedProc := newFakeProc()
+	rotated := &fakeGuest{proc: rotatedProc}
+	h.dialer.mu.Lock()
+	h.dialer.rotated = rotated
+	h.dialer.mu.Unlock()
+	cancel := h.start(t)
+	_ = cancel
+
+	h.waitState(t, StateProvision)
+	rotatedProc.say(markerListening)
+	h.waitState(t, StateListening)
+	rotatedProc.say("Running job: build")
+	h.waitState(t, StateJob)
+	rotatedProc.say("Job build completed with result: Succeeded")
+	rotatedProc.exit(0)
+	h.waitState(t, StateBackoff)
+	cancel()
+	<-h.runDone
+
+	// The runner was staged over the rotated session, with the pool's OS.
+	rotated.mu.Lock()
+	rotatedGoos := rotated.goos
+	rotated.mu.Unlock()
+	if rotatedGoos != "darwin" {
+		t.Errorf("rotated guest goos = %q; runner did not launch over the rotated session", rotatedGoos)
+	}
+	h.guest.mu.Lock()
+	originalGoos := h.guest.goos
+	h.guest.mu.Unlock()
+	if originalGoos != "" {
+		t.Error("runner launched over the password session despite rotation")
+	}
+	if got := h.dialer.rotations(); got < 1 {
+		t.Errorf("rotations = %d, want >= 1", got)
+	}
+
+	var rec *cycle.Record
+	for _, r := range h.records(t) {
+		if r.Result == cycle.ResultSuccess {
+			rec = r
+		}
+	}
+	if rec == nil {
+		t.Fatal("no success record")
+	}
+	var found bool
+	for _, sr := range rec.States {
+		if sr.State == string(StateSecureSSH) && sr.Outcome == cycle.OutcomeOK {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no OK SECURE_SSH record in %+v", rec.States)
+	}
+}
+
+// ssh_hardening off must skip the state entirely: no Rotate call, no
+// SECURE_SSH record — the off-path cycle is byte-identical to the
+// pre-rotation daemon.
+func TestSecureSSHOffSkips(t *testing.T) {
+	h := newHarnessPool(t, nil, func(p *home.PoolConfig) {
+		p.SSHHardening = home.SSHHardeningOff
+	})
+	cancel := h.start(t)
+	_ = cancel
+
+	h.waitState(t, StateProvision)
+	h.proc.say(markerListening)
+	h.waitState(t, StateListening)
+	h.slot.Command(Command{Kind: CmdRecycle, Reason: "test done"})
+	h.waitState(t, StateBackoff)
+	cancel()
+	<-h.runDone
+
+	if got := h.dialer.rotations(); got != 0 {
+		t.Errorf("rotations = %d with hardening off", got)
+	}
+	for _, r := range h.records(t) {
+		for _, sr := range r.States {
+			if sr.State == string(StateSecureSSH) {
+				t.Errorf("SECURE_SSH recorded despite hardening off: %+v", sr)
+			}
+		}
+	}
+}
+
+// Rotation failure (image lacks sudo, sshd_config.d, systemd...) is a normal
+// cycle failure: teardown, attributed to SECURE_SSH, with the post-mortem
+// pulled over the still-open password session.
+func TestSecureSSHFailureTearsDownAttributed(t *testing.T) {
+	h := newHarness(t, nil)
+	h.dialer.mu.Lock()
+	h.dialer.rotateErr = errors.New("rotate: installing cycle key: exit 1: sudo: command not found")
+	h.dialer.mu.Unlock()
+	cancel := h.start(t)
+	_ = cancel
+
+	h.waitState(t, StateSecureSSH)
+	h.waitState(t, StateTeardown)
+	st := h.waitState(t, StateBackoff)
+	if st.ConsecutiveFailures != 1 {
+		t.Errorf("failures = %d, want 1", st.ConsecutiveFailures)
+	}
+	cancel()
+	<-h.runDone
+
+	// A gated second cycle may have started before cancel landed; find the
+	// SECURE_SSH-attributed failure rather than assuming it is newest.
+	var rec *cycle.Record
+	for _, r := range h.records(t) {
+		if r.Failure != nil && r.Failure.State == string(StateSecureSSH) {
+			rec = r
+		}
+	}
+	if rec == nil {
+		t.Fatalf("no SECURE_SSH-attributed failure in %+v", h.records(t))
+	}
+	if !strings.Contains(rec.Failure.Error, "sudo: command not found") {
+		t.Errorf("failure error = %q; the step name must survive into the record", rec.Failure.Error)
+	}
+	// The password session was still the cycle's guest; post-mortem rode it.
+	if !h.guest.pulled {
+		t.Error("post-mortem not pulled over the password session after rotation failure")
+	}
+}
+
+// A guest that wedges mid-rotation is bounded by the state deadline and the
+// record says deadline, not error — slow-vs-stuck must stay distinguishable.
+func TestSecureSSHDeadlineBounds(t *testing.T) {
+	h := newHarness(t, nil)
+	h.dialer.mu.Lock()
+	h.dialer.rotateBlock = true
+	h.dialer.mu.Unlock()
+	cancel := h.start(t)
+	_ = cancel
+
+	h.waitState(t, StateSecureSSH)
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+	cancel()
+	<-h.runDone
+
+	// Scan every record: a gated second cycle interrupted by cancel writes
+	// an OutcomeError record that may sort newer than the deadline one.
+	var found bool
+	for _, rec := range h.records(t) {
+		for _, sr := range rec.States {
+			if sr.State == string(StateSecureSSH) && sr.Outcome == cycle.OutcomeDeadline {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Errorf("SECURE_SSH not recorded as deadline expiry: %+v", h.records(t))
 	}
 }
 

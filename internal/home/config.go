@@ -55,6 +55,13 @@ type PoolConfig struct {
 	// because guest responsiveness varies by image and load; a guest under
 	// teardown pressure may need more headroom than the 3s default.
 	SSHTimeout Duration `yaml:"ssh_timeout"`
+	// SSHHardening selects what happens to guest SSH after the first
+	// authenticated session (ADR-0013). "rotate" (the default) mints a
+	// per-cycle in-memory keypair, installs it, disables password auth, and
+	// reconnects with the key and pinned host keys — the SECURE_SSH state.
+	// "off" keeps password auth for the whole cycle (interactive debugging;
+	// images whose sshd can't take the drop-in).
+	SSHHardening string `yaml:"ssh_hardening"`
 	// CPUCores and RAMGB override the guest's CPU count and memory, which
 	// otherwise come from the image's baked config.json (e.g. cirruslabs
 	// images ship a conservative 2c/4GiB). Zero means "use the image's
@@ -63,6 +70,12 @@ type PoolConfig struct {
 	CPUCores uint `yaml:"cpu_cores"`
 	RAMGB    uint `yaml:"ram_gb"`
 }
+
+// PoolConfig.SSHHardening values.
+const (
+	SSHHardeningRotate = "rotate"
+	SSHHardeningOff    = "off"
+)
 
 // TargetConfig holds exactly one of: Org, or Owner+Repo.
 type TargetConfig struct {
@@ -91,6 +104,11 @@ type Deadlines struct {
 	MintJIT   Duration `yaml:"mint_jit"`
 	Provision Duration `yaml:"provision"`
 	Teardown  Duration `yaml:"teardown"`
+	// SecureSSH bounds the per-cycle key rotation (host-key capture, key
+	// install + sshd config flip, reconnect — ADR-0013): two short execs and
+	// a redial against a guest that just answered AWAIT_SSH, so the budget is
+	// small; a guest that can't finish in it is wedged, not slow.
+	SecureSSH Duration `yaml:"secure_ssh"`
 	// PullStall is the progress-based budget for ENSURE_IMAGE: no layer bytes
 	// for this long = stuck (a slow pull is expected, a silent one is not).
 	PullStall Duration `yaml:"pull_stall"`
@@ -178,6 +196,9 @@ func (c *Config) applyDefaults() {
 			p.SSHPassword = "admin"
 		}
 		def(&p.SSHTimeout, 3*time.Second)
+		if p.SSHHardening == "" {
+			p.SSHHardening = SSHHardeningRotate
+		}
 		if len(p.Labels) == 0 {
 			switch p.OS {
 			case "darwin":
@@ -194,6 +215,7 @@ func (c *Config) applyDefaults() {
 	def(&c.Deadlines.MintJIT, 30*time.Second)
 	def(&c.Deadlines.Provision, 180*time.Second)
 	def(&c.Deadlines.Teardown, 60*time.Second)
+	def(&c.Deadlines.SecureSSH, 15*time.Second)
 	def(&c.Deadlines.PullStall, 3*time.Minute)
 	def(&c.Deadlines.Resolve, 60*time.Second)
 	def(&c.Limits.MaxJobDuration, 2*time.Hour)
@@ -241,6 +263,10 @@ func (c *Config) validate() error {
 		if p.GitHub.PrivateKeyPath == "" {
 			errs = append(errs, fmt.Errorf("%s: github.private_key_path is required", at))
 		}
+		if p.SSHHardening != SSHHardeningRotate && p.SSHHardening != SSHHardeningOff {
+			errs = append(errs, fmt.Errorf("%s: ssh_hardening must be %q or %q, got %q",
+				at, SSHHardeningRotate, SSHHardeningOff, p.SSHHardening))
+		}
 		hasOrg, hasRepo := p.Target.Org != "", p.Target.Owner != "" || p.Target.Repo != ""
 		switch {
 		case hasOrg && hasRepo:
@@ -261,6 +287,7 @@ func (c *Config) validate() error {
 		"deadlines.mint_jit":        c.Deadlines.MintJIT,
 		"deadlines.provision":       c.Deadlines.Provision,
 		"deadlines.teardown":        c.Deadlines.Teardown,
+		"deadlines.secure_ssh":      c.Deadlines.SecureSSH,
 		"deadlines.pull_stall":      c.Deadlines.PullStall,
 		"deadlines.resolve":         c.Deadlines.Resolve,
 		"limits.max_job_duration":   c.Limits.MaxJobDuration,

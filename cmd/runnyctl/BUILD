@@ -43,6 +43,7 @@ go_test(
     embed = [":runnyctl_lib"],
     deps = [
         "//proto/runny/v1:runny",
+        "@org_golang_google_grpc//:grpc",
         "@org_golang_google_protobuf//types/known/timestamppb",
     ],
 )

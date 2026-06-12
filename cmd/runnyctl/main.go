@@ -40,6 +40,10 @@ commands:
                       destroy SLOT's current cycle and start fresh
   pause SLOT          hold SLOT after its current cycle drains
   resume SLOT         release a paused SLOT
+  reload [-reason WHY]
+                      validate the config on disk; if valid, drain the
+                      fleet (running jobs finish first) and restart
+                      runnyd on it (clears operator pauses)
   why SLOT [-cycles N]
                       render SLOT's recent cycle timelines
 
@@ -115,11 +119,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		_, err = c.client.Pause(ctx, &runnyv1.PauseRequest{Slot: slot})
-		if err == nil {
-			fmt.Fprintf(c.out, "%s pausing (takes effect after the current cycle)\n", slot)
-		}
-		return err
+		return c.pause(ctx, slot)
 	case "resume":
 		fs := flag.NewFlagSet("resume", flag.ExitOnError)
 		slot, err := slotArg(fs, rest)
@@ -131,6 +131,14 @@ func run() error {
 			fmt.Fprintf(c.out, "%s resumed\n", slot)
 		}
 		return err
+	case "reload":
+		fs := flag.NewFlagSet("reload", flag.ExitOnError)
+		reason := fs.String("reason", "", "reason recorded in the daemon log and cycle records")
+		_ = fs.Parse(rest)
+		if fs.NArg() != 0 {
+			return fmt.Errorf("reload takes no positional arguments")
+		}
+		return c.reload(ctx, *reason)
 	case "why":
 		fs := flag.NewFlagSet("why", flag.ExitOnError)
 		cycles := fs.Int("cycles", 1, "how many recent cycles")
@@ -208,6 +216,24 @@ func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 		durString(time.Since(resp.GetDaemonStarted().AsTime())))
 	slots := append([]*runnyv1.SlotStatus{}, resp.GetSlots()...)
 	sort.Slice(slots, func(i, j int) bool { return slots[i].GetSlot() < slots[j].GetSlot() })
+	// The drain banner: why every slot is pausing/recycling, and which
+	// slots the drain is still waiting on (anything not wedged and not
+	// paused-in-BACKOFF — the stable states that cannot start a job).
+	if d := resp.GetDraining(); d != "" {
+		var waiting []string
+		for _, s := range slots {
+			if s.GetWedged() || (s.GetPaused() && s.GetState() == runnyv1.SlotState_SLOT_STATE_BACKOFF) {
+				continue
+			}
+			waiting = append(waiting,
+				s.GetSlot()+" ("+strings.TrimPrefix(s.GetState().String(), "SLOT_STATE_")+")")
+		}
+		banner := "DRAINING: " + d
+		if len(waiting) > 0 {
+			banner += " — waiting on: " + strings.Join(waiting, ", ")
+		}
+		fmt.Fprintf(c.out, "%s\n\n", banner)
+	}
 	// RUNNER shows the GitHub-visible name of the live cycle's runner —
 	// what the org runners page lists — falling back to the bare slot in
 	// BACKOFF (no runner exists; the slot is still the recycle/pause handle).
@@ -417,18 +443,90 @@ func (c *ctl) doctor(ctx context.Context) error {
 	if c.json {
 		return c.emit(resp)
 	}
+	if bad := c.renderChecks(resp.GetChecks()); bad > 0 {
+		return fmt.Errorf("%d check(s) failed", bad)
+	}
+	return nil
+}
+
+// renderChecks prints the doctor check table and returns the failure count.
+func (c *ctl) renderChecks(checks []*runnyv1.DoctorCheck) int {
 	bad := 0
-	for _, ch := range resp.GetChecks() {
+	for _, ch := range checks {
 		mark := "ok  "
 		if !ch.GetOk() {
 			mark, bad = "FAIL", bad+1
 		}
 		fmt.Fprintf(c.out, "%-28s %s %s\n", ch.GetName(), mark, ch.GetDetail())
 	}
-	if bad > 0 {
-		return fmt.Errorf("%d check(s) failed", bad)
+	return bad
+}
+
+func (c *ctl) pause(ctx context.Context, slot string) error {
+	resp, err := c.client.Pause(ctx, &runnyv1.PauseRequest{Slot: slot})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "%s pausing (takes effect after the current cycle)\n", slot)
+	if n := resp.GetNote(); n != "" {
+		fmt.Fprintf(c.out, "note: %s\n", n)
 	}
 	return nil
+}
+
+func (c *ctl) reload(ctx context.Context, reason string) error {
+	// The preflight re-runs every startup check synchronously; without this
+	// line a slow registry reads as a hang.
+	fmt.Fprintln(os.Stderr, "validating config against startup checks (network checks may take up to a minute)…")
+	resp, err := c.client.Reload(ctx, &runnyv1.ReloadRequest{Reason: reason})
+	if err != nil {
+		return err
+	}
+	if c.json {
+		if err := c.emit(resp); err != nil {
+			return err
+		}
+		if !resp.GetAccepted() {
+			return fmt.Errorf("reload refused")
+		}
+		return nil
+	}
+	return c.renderReload(resp, reason)
+}
+
+func (c *ctl) renderReload(resp *runnyv1.ReloadResponse, reason string) error {
+	sha := resp.GetConfigSha256()
+	if len(sha) > 12 {
+		sha = sha[:12]
+	}
+	for _, w := range resp.GetWarnings() {
+		fmt.Fprintf(c.out, "warning: %s — %s\n", w.GetName(), w.GetDetail())
+	}
+	if resp.GetAccepted() {
+		// Did THIS call start the drain? The daemon's drain reason for it
+		// would be "config reload (rpc)" (+ ": <reason>").
+		mine := "config reload (rpc)"
+		if reason != "" {
+			mine += ": " + reason
+		}
+		if resp.GetDraining() != mine {
+			fmt.Fprintf(c.out, "config validated (sha256 %s); daemon already draining (%s) — the respawn will apply this config\n",
+				sha, resp.GetDraining())
+			return nil
+		}
+		fmt.Fprintf(c.out, "reload accepted: config validated (sha256 %s); draining %d slot(s)\n", sha, resp.GetSlotCount())
+		fmt.Fprintln(c.out, "running jobs finish first — watch with `runnyctl watch`")
+		fmt.Fprintln(c.out, "the daemon exits and respawns on the new config once idle")
+		if paused := resp.GetOperatorPausedSlots(); len(paused) > 0 {
+			fmt.Fprintf(c.out, "note: operator-paused slots resume after the respawn: %s\n", strings.Join(paused, ", "))
+		}
+		return nil
+	}
+	c.renderChecks(resp.GetFailedChecks())
+	if d := resp.GetDraining(); d != "" {
+		fmt.Fprintf(c.out, "WARNING: the daemon is already draining (%s) and the respawn WILL load this invalid config — fix ~/.runny/config.yaml before the drain converges, or the respawn will crash-loop (visible in launchd.err.log; diagnose with runnyd -doctor)\n", d)
+	}
+	return fmt.Errorf("reload refused: the new config failed validation; the running daemon is unchanged")
 }
 
 func streamErr(err error) error {

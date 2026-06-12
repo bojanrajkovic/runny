@@ -109,8 +109,13 @@ go_test(
     srcs = [
         "drain_test.go",
         "localnet_test.go",
+        "reload_test.go",
         "rotate_test.go",
     ],
     embed = [":runnyd_lib"],
-    deps = ["//internal/statemachine"],
+    deps = [
+        "//internal/home",
+        "//internal/socket",
+        "//internal/statemachine",
+    ],
 )

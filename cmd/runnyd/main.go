@@ -6,11 +6,13 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -117,35 +119,12 @@ func run() error {
 		logger.Info("swept vms dir")
 	}
 
-	// One client per distinct (App, target): pools targeting different orgs
-	// or repos usually carry different Apps (ADR-0009), so credentials are
-	// per-pool with the top-level block as the default.
-	clients := map[ghKey]*github.Client{}
-	var distinctClients []*github.Client
-	clientFor := func(p home.PoolConfig) (*github.Client, error) {
-		key := ghKey{appID: p.GitHub.AppID, target: p.Target}
-		if c, ok := clients[key]; ok {
-			return c, nil
-		}
-		c, err := github.New(github.Config{
-			AppID:          p.GitHub.AppID,
-			PrivateKeyPath: p.GitHub.PrivateKeyPath,
-			APIBase:        p.GitHub.APIBase,
-		}, github.Target(p.Target))
-		if err != nil {
-			return nil, err
-		}
-		clients[key] = c
-		distinctClients = append(distinctClients, c)
-		return c, nil
-	}
-	for _, p := range cfg.Pools {
-		if _, err := clientFor(p); err != nil {
-			return err
-		}
+	clients, distinctClients, err := buildClients(cfg)
+	if err != nil {
+		return err
 	}
 
-	doctor := makeDoctor(dir, cfg, distinctClients)
+	doctor := makeDoctor(dir, configPath, cfg, distinctClients)
 	if *checkOnly {
 		return runDoctor(doctor) // read-only: runs fine alongside a live daemon
 	}
@@ -266,6 +245,99 @@ func run() error {
 		s.OnChange(d.observe)
 	}
 
+	// Reload entry point (ADR-0014), shared by the Reload RPC and SIGHUP.
+	// Serialized so concurrent callers never run overlapping preflights
+	// (each serialized call still revalidates fresh). It never gates on an
+	// active drain: the imminent respawn loads the on-disk file whether or
+	// not it was validated, so the verdict matters most then. The drain is
+	// daemon-owned, never tied to the caller's context — a runnyctl that
+	// disconnects after acceptance cannot orphan it.
+	var reloadMu sync.Mutex
+	requestReload := func(ctx context.Context, source, reason string) socket.ReloadResult {
+		reloadMu.Lock()
+		defer reloadMu.Unlock()
+		logger.Info("config reload requested", "source", source, "reason", reason)
+		sha, failed, warnings := preflightReload(ctx, dir, configPath)
+		for _, c := range warnings {
+			logger.Warn("reload validation warning (not blocking)", "check", c.Name, "detail", c.Detail)
+		}
+		if len(failed) > 0 {
+			for _, c := range failed {
+				logger.Error("reload validation failed", "check", c.Name, "detail", c.Detail)
+			}
+			logger.Error("config reload refused: the new config failed validation; the running daemon is unchanged",
+				"failed", len(failed), "config_sha256", sha)
+			return socket.ReloadResult{
+				FailedChecks: failed,
+				Warnings:     warnings,
+				Draining:     d.Reason(),
+				ConfigSHA256: sha,
+			}
+		}
+		logger.Info("config reload accepted", "config_sha256", sha)
+		var pausedSlots []string
+		for _, s := range slots {
+			if st := s.Status(); st.Paused && !st.Wedged {
+				pausedSlots = append(pausedSlots, s.Name())
+			}
+		}
+		if len(pausedSlots) > 0 {
+			logger.Warn("operator-paused slots will resume after the respawn (pause is in-memory)",
+				"slots", strings.Join(pausedSlots, ", "))
+		}
+		drainReason := "config reload (" + source + ")"
+		if reason != "" {
+			drainReason += ": " + reason
+		}
+		if !d.Start(drainReason, sha) {
+			// A drain was already active (wedge, or an earlier reload): the
+			// first reason wins on the status surface, but the supplied
+			// reason stays durable in the log — the audit trail never loses
+			// it.
+			logger.Info("reload requested while already draining; supplied reason recorded here",
+				"reason", reason, "draining", d.Reason())
+		}
+		d.recheck() // unblocks a held exit gate when the operator just fixed the file
+		return socket.ReloadResult{
+			Accepted:            true,
+			Warnings:            warnings,
+			Draining:            d.Reason(),
+			SlotCount:           len(slots),
+			OperatorPausedSlots: pausedSlots,
+			ConfigSHA256:        sha,
+		}
+	}
+	srv.ReloadFn = func(ctx context.Context, reason string) socket.ReloadResult {
+		return requestReload(ctx, "rpc", reason)
+	}
+	srv.DrainingFn = d.Reason
+
+	// SIGHUP maps to the same validated reload path. A dedicated channel —
+	// it must NOT join signal.NotifyContext above, which would cancel the
+	// root context. Claiming the signal also disarms its default
+	// process-terminate disposition: before this handler, a SIGHUP (or a
+	// foreground runnyd's terminal closing) hard-killed runnyd mid-job;
+	// now it drains gracefully.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	go func() {
+		for range hup {
+			if d.Reason() != "" {
+				// Drain already running: skip the network preflight (storms
+				// must not burn token mints + registry resolves per signal);
+				// run the cheap local stage only, and scream if it fails —
+				// the respawn will load this file.
+				if _, err := home.LoadConfig(configPath); err != nil {
+					logger.Error("SIGHUP during drain: on-disk config is invalid and the respawn will load it", "err", err)
+				}
+				d.recheck()
+				continue
+			}
+			_ = requestReload(ctx, "SIGHUP", "")
+		}
+	}()
+
 	var wg sync.WaitGroup
 	for _, s := range slots {
 		wg.Go(func() { s.Run(ctx) })
@@ -283,6 +355,100 @@ func run() error {
 		err = fmt.Errorf("restarting after drain: %s", d.Reason())
 	}
 	return err
+}
+
+// poolClientError attributes a GitHub client construction failure to its
+// pool, so the reload preflight can name the failing check.
+type poolClientError struct {
+	Pool string
+	Err  error
+}
+
+func (e *poolClientError) Error() string { return fmt.Sprintf("pool %s: %v", e.Pool, e.Err) }
+func (e *poolClientError) Unwrap() error { return e.Err }
+
+// buildClients constructs one GitHub client per distinct (App, target):
+// pools targeting different orgs or repos usually carry different Apps
+// (ADR-0009), so credentials are per-pool. Used by startup and by the
+// reload preflight — client construction runs BEFORE the doctor suite at
+// startup, so the preflight must replay it too (a deleted private key
+// would pass a parse-only preflight and crash-loop the respawn).
+func buildClients(cfg *home.Config) (map[ghKey]*github.Client, []*github.Client, error) {
+	clients := map[ghKey]*github.Client{}
+	var distinct []*github.Client
+	for _, p := range cfg.Pools {
+		key := ghKey{appID: p.GitHub.AppID, target: p.Target}
+		if _, ok := clients[key]; ok {
+			continue
+		}
+		c, err := github.New(github.Config{
+			AppID:          p.GitHub.AppID,
+			PrivateKeyPath: p.GitHub.PrivateKeyPath,
+			APIBase:        p.GitHub.APIBase,
+		}, github.Target(p.Target))
+		if err != nil {
+			return nil, nil, &poolClientError{Pool: p.Name, Err: err}
+		}
+		clients[key] = c
+		distinct = append(distinct, c)
+	}
+	return clients, distinct, nil
+}
+
+// preflightReload runs the full startup gauntlet against the on-disk
+// config — config-parse (LoadConfig: strict parse + defaults + validate),
+// github-client:<pool> (client construction), then the whole doctor suite
+// against the candidate config and clients — so a reload can only be
+// accepted when the respawn's own startup validation would pass on the
+// same inputs. Each network check self-bounds (checkBudget) regardless of
+// ctx; no SSH or guest calls exist on this path (ADR-0011).
+func preflightReload(ctx context.Context, dir home.Dir, configPath string) (sha string, failed, warnings []socket.DoctorCheck) {
+	sha = configSHA(configPath)
+	newCfg, err := home.LoadConfig(configPath)
+	if err != nil {
+		return sha, []socket.DoctorCheck{{Name: "config-parse", OK: false, Detail: err.Error()}}, nil
+	}
+	_, newClients, err := buildClients(newCfg)
+	if err != nil {
+		name := "github-client"
+		var pe *poolClientError
+		if errors.As(err, &pe) {
+			name += ":" + pe.Pool
+		}
+		return sha, []socket.DoctorCheck{{Name: name, OK: false, Detail: err.Error()}}, nil
+	}
+	failed, warnings = splitPreflightChecks(makeDoctor(dir, configPath, newCfg, newClients)(ctx))
+	return sha, failed, warnings
+}
+
+// splitPreflightChecks post-filters the gauntlet's results into the reload
+// verdict, adjusting for the preflight running in a different environment
+// (guests up) than the respawn (cold):
+//
+//   - local-network only asserts when a vmnet interface is up — true at
+//     reload time, false at the respawn's cold start, where it reports
+//     informational green. A flake here must not refuse a reload over a
+//     check the respawn cannot fail and no config edit can affect; it
+//     becomes a warning.
+//   - disk-headroom stays a refusal (fail-safe), but at preflight it counts
+//     live clones' divergence that the drain + respawn sweep will free, so
+//     the detail says why the number may differ.
+func splitPreflightChecks(checks []socket.DoctorCheck) (failed, warnings []socket.DoctorCheck) {
+	for _, c := range checks {
+		if c.OK {
+			continue
+		}
+		switch c.Name {
+		case "local-network":
+			warnings = append(warnings, c)
+		case "disk-headroom":
+			c.Detail += " (measured with guests running; the respawn sweeps clones before re-checking — free space or retry)"
+			failed = append(failed, c)
+		default:
+			failed = append(failed, c)
+		}
+	}
+	return failed, warnings
 }
 
 // configSHA is the SHA-256 (hex) of the raw config file bytes — the audit
@@ -340,7 +506,7 @@ type ghKey struct {
 	target home.TargetConfig
 }
 
-func makeDoctor(dir home.Dir, cfg *home.Config, clients []*github.Client) func(context.Context) []socket.DoctorCheck {
+func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*github.Client) func(context.Context) []socket.DoctorCheck {
 	return func(ctx context.Context) []socket.DoctorCheck {
 		var checks []socket.DoctorCheck
 		add := func(name string, ok bool, detail string) {
@@ -351,6 +517,20 @@ func makeDoctor(dir home.Dir, cfg *home.Config, clients []*github.Client) func(c
 			add("platform", true, "darwin/arm64")
 		} else {
 			add("platform", false, fmt.Sprintf("%s/%s — VMs require darwin/arm64", runtime.GOOS, runtime.GOARCH))
+		}
+
+		// Config drift: behavior comes from the config loaded at startup
+		// (cfg), not the file on disk. Post-defaulting struct equality —
+		// comment/reorder edits don't false-positive. Trivially green at
+		// startup (the file was just loaded), so it can never block daemon
+		// entry; under reload validation cfg IS the on-disk candidate, so
+		// drift can never block the reload it recommends.
+		if onDisk, err := home.LoadConfig(configPath); err != nil {
+			add("config-drift", false, err.Error())
+		} else if !reflect.DeepEqual(onDisk, cfg) {
+			add("config-drift", false, "config.yaml differs from the running config; apply with `runnyctl reload`")
+		} else {
+			add("config-drift", true, "config.yaml matches the running config")
 		}
 
 		// Runner namespace: derives (and persists, first run) the instance

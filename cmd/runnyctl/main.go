@@ -357,10 +357,15 @@ func (c *ctl) renderCycle(rec *runnyv1.CycleRecord) {
 	}
 	fmt.Fprintf(c.out, "cycle %s on %s — %s\n", rec.GetCycleId(), rec.GetSlot(), verdict)
 	// The configured ref (intent) beside the resolved digest (truth); records
-	// written by older daemons carry no ref and render digest-only.
+	// written by older daemons carry no ref and render digest-only, and a
+	// cycle that failed before ENSURE_IMAGE resolved carries ref-only.
 	img := trunc(rec.GetImageDigest(), 19)
 	if ref := rec.GetImage(); ref != "" {
-		img = ref + " @ " + img
+		if img == "" {
+			img = ref
+		} else {
+			img = ref + " @ " + img
+		}
 	}
 	fmt.Fprintf(c.out, "  image %s | started %s | total %s\n",
 		img,

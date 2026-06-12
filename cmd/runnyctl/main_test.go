@@ -247,6 +247,16 @@ func TestRenderCycleShowsImageRef(t *testing.T) {
 	if !strings.Contains(buf.String(), "image sha256:fake") || strings.Contains(buf.String(), " @ ") {
 		t.Errorf("old-daemon record must render digest-only:\n%s", buf.String())
 	}
+
+	buf.Reset()
+	c.renderCycle(&runnyv1.CycleRecord{
+		CycleId: "abcd1234", Slot: "mac-1", Result: "failure",
+		Image:   "ghcr.io/test/image:1",
+		Started: now, Finished: now,
+	})
+	if !strings.Contains(buf.String(), "image ghcr.io/test/image:1 |") || strings.Contains(buf.String(), "@") {
+		t.Errorf("failed-before-resolve record must render ref-only, no dangling '@':\n%s", buf.String())
+	}
 }
 
 // Backoff already elapsed (or no backoff) must not print a negative/zero

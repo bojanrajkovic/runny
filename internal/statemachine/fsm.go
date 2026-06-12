@@ -163,7 +163,15 @@ type Status struct {
 	CycleID      string
 	// RunnerName is the GitHub-visible name of the current cycle's runner
 	// (<prefix>-<slot>-<cycle8>); empty in BACKOFF, when no runner exists.
-	RunnerName          string
+	RunnerName string
+	// Image is the pool's configured image ref (config.yaml `image`,
+	// verbatim); constant for the slot's lifetime.
+	Image string
+	// ImageDigest is the digest resolved by the current cycle's
+	// ENSURE_IMAGE ("sha256:..."); empty before resolve and in BACKOFF.
+	// Presence = resolved this cycle (the cycle may still fail before
+	// boot). Retained while wedged: the surviving guest still runs it.
+	ImageDigest         string
 	Paused              bool
 	ConsecutiveFailures uint32
 	BackoffSeconds      int64
@@ -203,6 +211,11 @@ func NewSlot(name string, deps Deps) *Slot {
 		name: name,
 		deps: deps,
 		cmds: make(chan Command, 8),
+		// The ref is config, not cycle state: present from construction so a
+		// slot that hasn't transitioned yet shows its image immediately.
+		// setState mutates fields rather than replacing the struct, so the
+		// seed survives every transition.
+		status: Status{Image: deps.Pool.Image},
 	}
 }
 
@@ -304,6 +317,8 @@ func (s *Slot) backoffWait(ctx context.Context) error {
 		st.BackoffSeconds = int64(wait / time.Second)
 		st.CycleID = ""
 		st.RunnerName = "" // the cycle's runner no longer exists
+		// No guest exists; a stale digest after an image bump is misinformation.
+		st.ImageDigest = ""
 		st.VM = cycle.VMInfo{}
 		st.Job = nil
 	})
@@ -399,6 +414,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	rec := &cycle.Record{
 		CycleID: cycle.NewID(),
 		Slot:    s.name,
+		Image:   s.deps.Pool.Image, // intent recorded at cycle start, before any state runs
 		Started: time.Now(),
 	}
 	runnerName := fmt.Sprintf("%s-%s-%s", s.deps.InstancePrefix, s.name, rec.CycleID)
@@ -499,6 +515,13 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 			return err
 		}
 		rec.ImageDigest = digest
+		// Publish to live status from the same value at the same site, so the
+		// audit trail and the live view cannot disagree. No explicit notify:
+		// the next setState broadcasts the snapshot milliseconds later (the
+		// same accepted latency as VM.MAC in BOOT).
+		s.mu.Lock()
+		s.status.ImageDigest = digest
+		s.mu.Unlock()
 		srcBundle = bundle
 		return nil
 	})

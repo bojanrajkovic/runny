@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -207,11 +208,24 @@ func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 		}
 		return s.GetSlot()
 	}
-	w := len("RUNNER")
+	w := cellWidth("RUNNER")
 	for _, s := range slots {
-		w = max(w, len(name(s)))
+		w = max(w, cellWidth(name(s)))
 	}
-	fmt.Fprintf(c.out, "%-*s %-13s %-9s %-15s %-22s %s\n", w, "RUNNER", "STATE", "FOR", "IP", "JOB", "NOTE")
+	wi := cellWidth("IMAGE")
+	for _, s := range slots {
+		wi = max(wi, cellWidth(imageCell(s.GetImage(), s.GetImageDigest())))
+	}
+	// Cells are padded to display width (not byte length: a clamped cell ends
+	// in a multi-byte ellipsis) and joined by single spaces; NOTE is last and
+	// unpadded so it overflows gracefully. IMAGE sits with the identity/guest
+	// cluster, before the free-text tail (JOB, NOTE).
+	row := func(runner, state, dur, ip, image, job, note string) {
+		line := pad(runner, w) + " " + pad(state, 13) + " " + pad(dur, 9) + " " +
+			pad(ip, 15) + " " + pad(image, wi) + " " + pad(job, 22) + " " + note
+		fmt.Fprintln(c.out, strings.TrimRight(line, " "))
+	}
+	row("RUNNER", "STATE", "FOR", "IP", "IMAGE", "JOB", "NOTE")
 	for _, s := range slots {
 		state := strings.TrimPrefix(s.GetState().String(), "SLOT_STATE_")
 		if s.GetPaused() {
@@ -245,10 +259,10 @@ func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 				}
 			}
 		}
-		fmt.Fprintf(c.out, "%-*s %-13s %-9s %-15s %-22s %s\n",
-			w, name(s), state,
+		row(name(s), state,
 			durString(time.Since(s.GetStateEntered().AsTime())),
-			s.GetVm().GetIp(), trunc(job, 22), trunc(note, 60))
+			s.GetVm().GetIp(), imageCell(s.GetImage(), s.GetImageDigest()),
+			trunc(job, 22), trunc(note, 60))
 	}
 	fmt.Fprintln(c.out, "\n(* = paused; STATE* holds in BACKOFF after the current cycle. WEDGED! = guest survived force-stop; the daemon restarts cold once idle)")
 }
@@ -342,8 +356,19 @@ func (c *ctl) renderCycle(rec *runnyv1.CycleRecord) {
 		verdict = fmt.Sprintf("✗ failed in %s: %s", rec.GetFailureState(), rec.GetFailureError())
 	}
 	fmt.Fprintf(c.out, "cycle %s on %s — %s\n", rec.GetCycleId(), rec.GetSlot(), verdict)
+	// The configured ref (intent) beside the resolved digest (truth); records
+	// written by older daemons carry no ref and render digest-only, and a
+	// cycle that failed before ENSURE_IMAGE resolved carries ref-only.
+	img := trunc(rec.GetImageDigest(), 19)
+	if ref := rec.GetImage(); ref != "" {
+		if img == "" {
+			img = ref
+		} else {
+			img = ref + " @ " + img
+		}
+	}
 	fmt.Fprintf(c.out, "  image %s | started %s | total %s\n",
-		trunc(rec.GetImageDigest(), 19),
+		img,
 		rec.GetStarted().AsTime().Local().Format(time.RFC3339),
 		durString(rec.GetFinished().AsTime().Sub(rec.GetStarted().AsTime())))
 	if rec.GetVm().GetIp() != "" {
@@ -412,8 +437,54 @@ func durString(d time.Duration) string {
 }
 
 func trunc(s string, n int) string {
-	if len(s) <= n {
+	if utf8.RuneCountInString(s) <= n {
 		return s
 	}
-	return s[:n-1] + "…"
+	return string([]rune(s)[:n-1]) + "…"
+}
+
+// imageCell renders the IMAGE column: the configured ref's last path
+// segment, plus "@" + the resolved digest's first 12 hex iff the wire
+// carried image_digest — i.e. iff ENSURE_IMAGE resolved this cycle. The
+// digest half is never truncated (it is the distinguishing part); the ref
+// half is clamped. A configured "@sha256:" pin is stripped from the cell:
+// rendering it would make "resolved this cycle" and "config echoed,
+// registry never reached" byte-identical on pinned fleets (a resolve of a
+// pin always returns the pin), corrupting the cell's one rule. Registry
+// and namespace are also dropped, so cross-registry refs with the same
+// final segment render identically — `runnyctl -json status` carries the
+// full ref and digest when that matters.
+func imageCell(ref, digest string) string {
+	if i := strings.LastIndexByte(ref, '/'); i >= 0 {
+		ref = ref[i+1:]
+	}
+	name, _, _ := strings.Cut(ref, "@sha256:") // strip a configured pin
+	// 25 lets canonical name:tag forms (e.g. macos-sequoia-xcode:16.4)
+	// render whole — clamping would cut the tag, the distinguishing half of
+	// the name on a mixed fleet.
+	name = trunc(name, 25)
+	if digest == "" {
+		return name
+	}
+	return name + "@" + shortHex(strings.TrimPrefix(digest, "sha256:"))
+}
+
+// shortHex is the docker-style 12-hex short form of a digest's hex.
+func shortHex(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
+}
+
+// cellWidth is a cell's display width. All table content is ASCII except
+// trunc's ellipsis (one column), so rune count is the display width.
+func cellWidth(s string) int { return utf8.RuneCountInString(s) }
+
+// pad right-pads s with spaces to display width w.
+func pad(s string, w int) string {
+	if d := w - cellWidth(s); d > 0 {
+		return s + strings.Repeat(" ", d)
+	}
+	return s
 }

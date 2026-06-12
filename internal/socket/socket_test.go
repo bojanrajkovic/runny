@@ -38,12 +38,14 @@ func TestStateToProtoIsExhaustive(t *testing.T) {
 
 func TestStatusToProtoCarriesWedgedAndDetail(t *testing.T) {
 	st := statemachine.Status{
-		Slot:       "mac-1",
-		State:      statemachine.StateTeardown,
-		Detail:     "guest survived force-stop",
-		Wedged:     true,
-		CycleID:    "abcd1234",
-		RunnerName: "host-a1b2c3d4-mac-1-abcd1234",
+		Slot:        "mac-1",
+		State:       statemachine.StateTeardown,
+		Detail:      "guest survived force-stop",
+		Wedged:      true,
+		CycleID:     "abcd1234",
+		RunnerName:  "host-a1b2c3d4-mac-1-abcd1234",
+		Image:       "ghcr.io/test/image:1",
+		ImageDigest: "sha256:fake",
 	}
 	pb := statusToProto(st)
 	if !pb.GetWedged() || pb.GetDetail() != st.Detail || pb.GetSlot() != "mac-1" {
@@ -51,6 +53,27 @@ func TestStatusToProtoCarriesWedgedAndDetail(t *testing.T) {
 	}
 	if pb.GetRunnerName() != st.RunnerName {
 		t.Errorf("RunnerName dropped: %q", pb.GetRunnerName())
+	}
+	if pb.GetImage() != st.Image || pb.GetImageDigest() != st.ImageDigest {
+		t.Errorf("image fields dropped: image=%q digest=%q", pb.GetImage(), pb.GetImageDigest())
+	}
+}
+
+// recordToProto must carry the configured ref (intent) alongside the
+// resolved digest (truth) — the post-mortem pair `runnyctl why` renders.
+func TestRecordToProtoCarriesImage(t *testing.T) {
+	r := &cycle.Record{
+		CycleID:     "abcd1234",
+		Slot:        "mac-1",
+		Image:       "ghcr.io/test/image:1",
+		ImageDigest: "sha256:fake",
+	}
+	pb := recordToProto(r)
+	if pb.GetImage() != r.Image {
+		t.Errorf("Image dropped: %q", pb.GetImage())
+	}
+	if pb.GetImageDigest() != r.ImageDigest {
+		t.Errorf("ImageDigest dropped: %q", pb.GetImageDigest())
 	}
 }
 

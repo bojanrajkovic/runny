@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"flag"
 	"fmt"
@@ -94,7 +95,29 @@ func run() error {
 	runnerRing := logring.NewRing(4096)
 	logger := slog.New(logring.NewHandler(logFile, slog.LevelDebug, ring))
 	slog.SetDefault(logger)
-	logger.Info("runnyd starting", "version", version, "home", dir.String())
+	// config_sha256 chains the audit trail across restarts: a reload logs
+	// the hash it validated, and the respawn logs the hash it loaded — same
+	// hash, same file, provably.
+	logger.Info("runnyd starting", "version", version, "home", dir.String(),
+		"config_sha256", configSHA(configPath))
+
+	// Sweep the vms dir BEFORE validation: teardown deliberately retains a
+	// wedged guest's clone (ADR-0012), and its divergence can tip
+	// disk-headroom under the threshold — validating first would crash-loop
+	// every respawn on a leak only this sweep can free. The sweep depends on
+	// nothing (not prefix, not clients, not network) and runs only on the
+	// real-startup path, under the instance lock — never in -doctor mode,
+	// which is read-only and runs alongside a live daemon whose clones must
+	// not be deleted.
+	if !*checkOnly {
+		if err := os.RemoveAll(dir.VMsDir()); err != nil {
+			return fmt.Errorf("sweeping vms dir: %w", err)
+		}
+		if err := dir.Ensure(); err != nil {
+			return err
+		}
+		logger.Info("swept vms dir")
+	}
 
 	// One client per distinct (App, target): pools targeting different orgs
 	// or repos usually carry different Apps (ADR-0009), so credentials are
@@ -152,14 +175,9 @@ func run() error {
 	}
 	logger.Info("runner namespace", "prefix", prefix)
 
-	// Sweep: cold start owns the world (ADR-0004). Clones first, then any
-	// offline registrations carrying our prefix, on every target.
-	if err := os.RemoveAll(dir.VMsDir()); err != nil {
-		return fmt.Errorf("sweeping vms dir: %w", err)
-	}
-	if err := dir.Ensure(); err != nil {
-		return err
-	}
+	// Registration sweep: cold start owns the world (ADR-0004). Offline
+	// registrations carrying our prefix, on every target. (The vms-dir sweep
+	// already ran, before validation.)
 	for _, c := range distinctClients {
 		sweepRegistrations(ctx, logger, c, prefix)
 	}
@@ -268,6 +286,18 @@ func run() error {
 		err = errors.New("restarting to release a wedged guest: a VM survived force-stop (see the slot's cycle record)")
 	}
 	return err
+}
+
+// configSHA is the SHA-256 (hex) of the raw config file bytes — the audit
+// handle that proves which file version a reload validated and a cold start
+// loaded. Empty when the file is unreadable (the callers' own LoadConfig
+// surfaces that loudly).
+func configSHA(path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(raw))
 }
 
 // failedChecks filters to failures.

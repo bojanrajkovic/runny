@@ -233,7 +233,7 @@ func (s *Server) StreamLogs(req *runnyv1.StreamLogsRequest, stream grpc.ServerSt
 	case req.GetSlot() != "":
 		slot, err := s.findSlot(req.GetSlot())
 		if err != nil {
-			return status.Error(codes.NotFound, err.Error())
+			return err
 		}
 		// Filter on the RESOLVED name: req may carry a runner name, which
 		// would never match the slot attr the ring entries carry.
@@ -333,37 +333,45 @@ func (s *Server) findSlot(name string) (*statemachine.Slot, error) {
 			for i, m := range matches {
 				names[i] = m.Name()
 			}
-			return nil, fmt.Errorf("runner name %q is ambiguous between slots %v — use the slot name", name, names)
+			return nil, status.Errorf(codes.InvalidArgument, "runner name %q is ambiguous between slots %v — use the slot name", name, names)
 		}
 	}
-	return nil, fmt.Errorf("no slot matches %q (use the slot name, or a runner name as shown by status)", name)
+	return nil, status.Errorf(codes.NotFound, "no slot matches %q (use the slot name, or a runner name as shown by status)", name)
+}
+
+// command resolves a slot handle and injects cmd. The rejection is
+// Unavailable (matching InjectDebugKey): a full command buffer drains itself
+// within a cycle step, so retry-policy conventions treat it as retryable,
+// unlike FailedPrecondition. The message names the RESOLVED slot — req may
+// carry a runner name, and an error naming a nonexistent slot sends the
+// operator grepping for the wrong thing.
+func (s *Server) command(handle string, cmd statemachine.Command) error {
+	slot, err := s.findSlot(handle)
+	if err != nil {
+		return err
+	}
+	if !slot.Command(cmd) {
+		return status.Errorf(codes.Unavailable, "slot %s is not accepting commands", slot.Name())
+	}
+	return nil
 }
 
 func (s *Server) Recycle(ctx context.Context, req *runnyv1.RecycleRequest) (*runnyv1.RecycleResponse, error) {
-	slot, err := s.findSlot(req.GetSlot())
-	if err != nil {
-		return nil, err
-	}
-	if !slot.Command(statemachine.Command{
+	if err := s.command(req.GetSlot(), statemachine.Command{
 		Kind: statemachine.CmdRecycle, Reason: req.GetReason(),
 		CancelJob: req.GetCancelRunningJob(),
-	}) {
-		return nil, fmt.Errorf("slot %s is not accepting commands", req.GetSlot())
+	}); err != nil {
+		return nil, err
 	}
 	return &runnyv1.RecycleResponse{}, nil
 }
 
 func (s *Server) Pause(ctx context.Context, req *runnyv1.PauseRequest) (*runnyv1.PauseResponse, error) {
-	slot, err := s.findSlot(req.GetSlot())
-	if err != nil {
+	// A full command buffer (the drainer saturates non-converged slots with
+	// re-issued pause+recycle pairs) must surface as an error, never a silent
+	// drop reported as success — the silent-failure-proofness invariant.
+	if err := s.command(req.GetSlot(), statemachine.Command{Kind: statemachine.CmdPause}); err != nil {
 		return nil, err
-	}
-	// Mirror Recycle: a full command buffer (the drainer saturates
-	// non-converged slots with re-issued pause+recycle pairs) must surface as
-	// an error, never a silent drop reported as success — the
-	// silent-failure-proofness invariant.
-	if !slot.Command(statemachine.Command{Kind: statemachine.CmdPause}) {
-		return nil, fmt.Errorf("slot %s is not accepting commands", req.GetSlot())
 	}
 	resp := &runnyv1.PauseResponse{}
 	// Pause during a drain is allowed (idempotent; the drain wants slots
@@ -382,11 +390,9 @@ func (s *Server) Resume(ctx context.Context, req *runnyv1.ResumeRequest) (*runny
 	if d := s.draining(); d != "" {
 		return nil, status.Errorf(codes.FailedPrecondition, "daemon is draining: %s; resume after the respawn", d)
 	}
-	slot, err := s.findSlot(req.GetSlot())
-	if err != nil {
+	if err := s.command(req.GetSlot(), statemachine.Command{Kind: statemachine.CmdResume}); err != nil {
 		return nil, err
 	}
-	slot.Command(statemachine.Command{Kind: statemachine.CmdResume})
 	return &runnyv1.ResumeResponse{}, nil
 }
 
@@ -450,7 +456,8 @@ func (s *Server) Doctor(ctx context.Context, _ *runnyv1.DoctorRequest) (*runnyv1
 func (s *Server) InjectDebugKey(ctx context.Context, req *runnyv1.InjectDebugKeyRequest) (*runnyv1.InjectDebugKeyResponse, error) {
 	slot, err := s.findSlot(req.GetSlot())
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		// findSlot already returns a typed NotFound/InvalidArgument.
+		return nil, err
 	}
 	pub, comment, _, rest, err := ssh.ParseAuthorizedKey([]byte(req.GetPublicKey()))
 	if err != nil {

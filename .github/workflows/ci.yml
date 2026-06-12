@@ -121,14 +121,20 @@ jobs:
       - name: build (cold, stamped, ad-hoc signed)
         # codesign_binary defaults to ad-hoc ('-') when CODESIGN_IDENTITY is
         # unset; Developer ID signing requires cert secrets on the release
-        # environment (see CONTRIBUTING.md "Codesigning tiers").
+        # environment (see CONTRIBUTING.md "Codesigning tiers"). The app dmg
+        # additionally needs --embed_label so apple_bundle_version stamps
+        # CFBundleShortVersionString/CFBundleVersion (ADR-0010: every build
+        # anywhere is identifiable).
         run: |
-          mise x -- bazel build --config=ci --config=release \
-            //cmd/runnyd:runnyd_signed //cmd/runnyctl:runnyctl_signed
           VERSION="$(mise x -- tools/version.sh)"
           echo "runny version: $VERSION"
+          mise x -- bazel build --config=ci --config=release \
+            --embed_label="$VERSION" \
+            //cmd/runnyd:runnyd_signed //cmd/runnyctl:runnyctl_signed \
+            //apps/Runny:Runny_dmg
           cp bazel-bin/cmd/runnyd/runnyd_signed.bin runnyd
           cp bazel-bin/cmd/runnyctl/runnyctl_signed.bin runnyctl
+          cp bazel-bin/apps/Runny/Runny_dmg.dmg Runny.dmg
           ./runnyctl version
       - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
         if: github.event_name == 'push'
@@ -136,9 +142,11 @@ jobs:
           subject-path: |
             runnyd
             runnyctl
+            Runny.dmg
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: runny-darwin-arm64
           path: |
             runnyd
             runnyctl
+            Runny.dmg

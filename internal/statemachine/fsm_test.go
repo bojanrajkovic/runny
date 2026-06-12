@@ -418,6 +418,13 @@ func TestHappyCycleThroughJob(t *testing.T) {
 	if want := "runny-runner-1-" + st.CycleID; st.RunnerName != want {
 		t.Errorf("RunnerName = %q, want %q", st.RunnerName, want)
 	}
+	// The live cycle carries both the configured ref and the resolved digest.
+	if st.Image != "ghcr.io/test/image:1" {
+		t.Errorf("Image = %q, want the configured pool ref", st.Image)
+	}
+	if st.ImageDigest != "sha256:fake" {
+		t.Errorf("ImageDigest = %q, want the resolved digest", st.ImageDigest)
+	}
 
 	h.proc.say("Job build completed with result: Succeeded")
 	h.proc.exit(0)
@@ -427,6 +434,14 @@ func TestHappyCycleThroughJob(t *testing.T) {
 	st = h.waitState(t, StateBackoff)
 	if st.ConsecutiveFailures != 0 {
 		t.Error("failures should reset after success")
+	}
+	// BACKOFF clears the digest (no guest exists; a stale digest after an
+	// image bump is misinformation) but keeps the slot-constant ref.
+	if st.ImageDigest != "" {
+		t.Errorf("ImageDigest = %q in BACKOFF, want cleared", st.ImageDigest)
+	}
+	if st.Image != "ghcr.io/test/image:1" {
+		t.Errorf("Image = %q in BACKOFF, want the configured ref retained", st.Image)
 	}
 	cancel()
 	<-h.runDone // store is quiescent only once Run exits
@@ -472,6 +487,14 @@ func TestHappyCycleThroughJob(t *testing.T) {
 	}
 	if rec.Job == nil {
 		t.Error("job not recorded")
+	}
+	// The record carries intent (the configured ref) alongside truth (the
+	// resolved digest).
+	if rec.Image != "ghcr.io/test/image:1" {
+		t.Errorf("record Image = %q, want the configured pool ref", rec.Image)
+	}
+	if rec.ImageDigest != "sha256:fake" {
+		t.Errorf("record ImageDigest = %q, want the resolved digest", rec.ImageDigest)
 	}
 	// Job ran → JIT runner self-removes → no explicit deletion.
 	if len(h.gh.deleted) != 0 {
@@ -746,6 +769,13 @@ func TestStopFailureWedgesSlot(t *testing.T) {
 	if !st.Wedged {
 		t.Error("status.Wedged = false, want true")
 	}
+	// A wedged slot RETAINS its digest: the zombie occupying a guest-cap
+	// slot is literally still executing that image, and showing it is the
+	// honest answer. Pinned so a future "clear everything on park" refactor
+	// trips loudly.
+	if st.ImageDigest != "sha256:fake" {
+		t.Errorf("ImageDigest = %q after wedge, want retained — the surviving guest still runs it", st.ImageDigest)
+	}
 	if h.vmF.boots != 1 {
 		t.Errorf("boots = %d; a wedged slot must not retry boots", h.vmF.boots)
 	}
@@ -825,6 +855,54 @@ func TestTeardownBoundedDespiteWedgedDiagPull(t *testing.T) {
 	h.vmF.machine.mu.Unlock()
 	if !stopped {
 		t.Error("teardown never stopped the machine")
+	}
+}
+
+// The configured ref is config, not cycle state: it must be visible before
+// Run ever starts (and immediately after a daemon restart).
+func TestStatusCarriesImageFromConstruction(t *testing.T) {
+	h := newHarness(t, nil)
+	if got := h.slot.Status().Image; got != "ghcr.io/test/image:1" {
+		t.Errorf("Status().Image = %q before Run, want the configured pool ref", got)
+	}
+	if got := h.slot.Status().ImageDigest; got != "" {
+		t.Errorf("Status().ImageDigest = %q before any cycle, want empty", got)
+	}
+}
+
+// A cycle that fails before Ensure returns must never expose a digest in
+// live status — empty digest means "the registry was not reached this
+// cycle". The record still carries the configured ref: intent is recorded
+// at cycle start, so even a cycle that died mid-pull says what it was
+// pulling.
+func TestEnsureFailureExposesNoDigestButRecordsRef(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.err = errors.New("registry unreachable")
+	cancel := h.start(t)
+	_ = cancel
+
+	st := h.waitState(t, StateTeardown)
+	if st.ImageDigest != "" {
+		t.Errorf("ImageDigest = %q after a failed pull, want empty", st.ImageDigest)
+	}
+	st = h.waitState(t, StateBackoff)
+	if st.ImageDigest != "" {
+		t.Errorf("ImageDigest = %q in BACKOFF after a failed pull, want empty", st.ImageDigest)
+	}
+	cancel()
+	<-h.runDone
+
+	recs := h.records(t)
+	if len(recs) == 0 {
+		t.Fatal("no cycle records written")
+	}
+	for _, rec := range recs {
+		if rec.Image != "ghcr.io/test/image:1" {
+			t.Errorf("record Image = %q, want the configured ref even when the pull failed", rec.Image)
+		}
+		if rec.ImageDigest != "" {
+			t.Errorf("record ImageDigest = %q, want empty: nothing resolved", rec.ImageDigest)
+		}
 	}
 }
 

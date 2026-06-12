@@ -36,8 +36,11 @@ const (
 // Record is the cycle.json schema. It mirrors runny.v1.CycleRecord; the proto
 // is the wire shape, this is the disk shape, and the daemon converts.
 type Record struct {
-	CycleID     string        `json:"cycle_id"`
-	Slot        string        `json:"slot"`
+	CycleID string `json:"cycle_id"`
+	Slot    string `json:"slot"`
+	// Image is the pool's configured ref at cycle time (intent);
+	// ImageDigest is what resolved (truth).
+	Image       string        `json:"image,omitempty"`
 	ImageDigest string        `json:"image_digest,omitempty"`
 	Started     time.Time     `json:"started"`
 	Finished    time.Time     `json:"finished"`

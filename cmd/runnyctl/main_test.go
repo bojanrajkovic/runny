@@ -528,3 +528,127 @@ func TestPausePrintsNote(t *testing.T) {
 		t.Errorf("empty note printed a note line:\n%s", buf.String())
 	}
 }
+
+// A DEBUG slot shows its auto-release countdown; an armed JOB slot shows the
+// hold is armed (issue #39).
+func TestRenderStatusDebugAndArmed(t *testing.T) {
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	c.renderStatus(&runnyv1.GetStatusResponse{
+		Version:       "test",
+		DaemonStarted: timestamppb.New(time.Now().Add(-time.Hour)),
+		Slots: []*runnyv1.SlotStatus{
+			{
+				Slot:             "mac-1",
+				State:            runnyv1.SlotState_SLOT_STATE_DEBUG,
+				StateEntered:     timestamppb.New(time.Now()),
+				DebugHoldExpires: timestamppb.New(time.Now().Add(90 * time.Minute)),
+			},
+			{
+				Slot:           "mac-2",
+				State:          runnyv1.SlotState_SLOT_STATE_JOB,
+				StateEntered:   timestamppb.New(time.Now()),
+				DebugHoldArmed: true,
+				Job:            &runnyv1.JobInfo{Name: "build"},
+			},
+		},
+	})
+	out := buf.String()
+	if !strings.Contains(out, "DEBUG") || !strings.Contains(out, "auto-releases in") {
+		t.Errorf("DEBUG slot did not render countdown:\n%s", out)
+	}
+	if !strings.Contains(out, "debug hold armed") {
+		t.Errorf("armed JOB slot did not render the armed note:\n%s", out)
+	}
+}
+
+// why's contamination line: the job ran with operator keys, and each attempt's
+// state + outcome is rendered.
+func TestRenderCycleContamination(t *testing.T) {
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	c.renderCycle(&runnyv1.CycleRecord{
+		CycleId: "abcd1234", Slot: "mac-1", Result: "failure",
+		FailureState: "JOB", FailureError: "exceeded budget",
+		Started:  timestamppb.New(time.Now()),
+		Finished: timestamppb.New(time.Now()),
+		Job:      &runnyv1.JobInfo{Name: "build", OperatorKeys: []string{"SHA256:abc"}},
+		InjectedKeys: []*runnyv1.InjectedKey{
+			{Fingerprint: "SHA256:abc", Outcome: "armed", State: "JOB", Reason: "wedged"},
+		},
+	})
+	out := buf.String()
+	if !strings.Contains(out, "ran with operator key(s) SHA256:abc") {
+		t.Errorf("job line missing operator-key contamination:\n%s", out)
+	}
+	if !strings.Contains(out, "debug key") || !strings.Contains(out, "[JOB]") || !strings.Contains(out, "armed") {
+		t.Errorf("injected-key line missing state/outcome:\n%s", out)
+	}
+}
+
+// fakeRecycleClient embeds the generated client (so it satisfies the full
+// interface) and overrides only GetStatus and Recycle to exercise the recycle
+// guard (decision 14/15).
+type fakeRecycleClient struct {
+	runnyv1.RunnyServiceClient
+	status   *runnyv1.GetStatusResponse
+	recycled *runnyv1.RecycleRequest
+}
+
+func (f *fakeRecycleClient) GetStatus(_ context.Context, _ *runnyv1.GetStatusRequest, _ ...grpc.CallOption) (*runnyv1.GetStatusResponse, error) {
+	return f.status, nil
+}
+
+func (f *fakeRecycleClient) Recycle(_ context.Context, req *runnyv1.RecycleRequest, _ ...grpc.CallOption) (*runnyv1.RecycleResponse, error) {
+	f.recycled = req
+	return &runnyv1.RecycleResponse{}, nil
+}
+
+func TestRecycleGuardsDebugAndJob(t *testing.T) {
+	statusWith := func(state runnyv1.SlotState) *runnyv1.GetStatusResponse {
+		return &runnyv1.GetStatusResponse{Slots: []*runnyv1.SlotStatus{{
+			Slot: "mac-1", State: state, StateEntered: timestamppb.New(time.Now()),
+			Job: &runnyv1.JobInfo{Name: "build"},
+		}}}
+	}
+
+	// DEBUG without -force is refused, with no Recycle sent.
+	fc := &fakeRecycleClient{status: statusWith(runnyv1.SlotState_SLOT_STATE_DEBUG)}
+	c := &ctl{client: fc, out: &bytes.Buffer{}}
+	if err := c.recycle(context.Background(), "mac-1", "x", false); err == nil {
+		t.Error("DEBUG recycle without -force should be refused")
+	}
+	if fc.recycled != nil {
+		t.Error("a refused DEBUG recycle must not send Recycle")
+	}
+
+	// JOB without -force is refused.
+	fc = &fakeRecycleClient{status: statusWith(runnyv1.SlotState_SLOT_STATE_JOB)}
+	c = &ctl{client: fc, out: &bytes.Buffer{}}
+	if err := c.recycle(context.Background(), "mac-1", "x", false); err == nil {
+		t.Error("JOB recycle without -force should be refused")
+	}
+	if fc.recycled != nil {
+		t.Error("a refused JOB recycle must not send Recycle")
+	}
+
+	// JOB with -force sets cancel_running_job (the operator OBSERVED JOB).
+	fc = &fakeRecycleClient{status: statusWith(runnyv1.SlotState_SLOT_STATE_JOB)}
+	c = &ctl{client: fc, out: &bytes.Buffer{}}
+	if err := c.recycle(context.Background(), "mac-1", "x", true); err != nil {
+		t.Fatalf("forced JOB recycle: %v", err)
+	}
+	if fc.recycled == nil || !fc.recycled.GetCancelRunningJob() {
+		t.Errorf("forced JOB recycle did not set cancel_running_job: %+v", fc.recycled)
+	}
+
+	// LISTENING needs no force and never sets cancel_running_job.
+	fc = &fakeRecycleClient{status: statusWith(runnyv1.SlotState_SLOT_STATE_LISTENING)}
+	c = &ctl{client: fc, out: &bytes.Buffer{}}
+	if err := c.recycle(context.Background(), "mac-1", "x", false); err != nil {
+		t.Fatalf("LISTENING recycle: %v", err)
+	}
+	if fc.recycled == nil || fc.recycled.GetCancelRunningJob() {
+		t.Errorf("LISTENING recycle must not cancel a job: %+v", fc.recycled)
+	}
+}

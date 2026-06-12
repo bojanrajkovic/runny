@@ -6,13 +6,15 @@ This is the rubric every other doc in this repo points at: where each kind of kn
 
 Every fact has exactly one home. Non-duplication is the credibility test: the moment a fact lives in two places, a reader can't tell which copy is current, and both lose authority. When two docs would describe the same thing, one links to the other instead of repeating it.
 
-Concretely: the state machine, the on-disk layout, and the system shape live in `docs/architecture/` (with their governing diagrams in the ADRs that own the decisions — ADR-0004, ADR-0006). A package's contracts and sharp edges live in that package's `CLAUDE.md`. If you catch yourself copying a paragraph, stop and link instead.
+Concretely: the state machine, the on-disk layout, and the system shape live in `docs/architecture/` — including their **living diagrams**, which are current-shape content and maintained like the prose around them. A package's contracts and sharp edges live in that package's `CLAUDE.md`. If you catch yourself copying a paragraph, stop and link instead.
+
+A diagram inside an ADR is not the living copy and does not violate the one-home rule: it is a **frozen decision-time snapshot**, never updated, showing what the system looked like when the decision was made (see §2). The living copy in `docs/architecture/` is the only one that tracks the code.
 
 ## 2. Genre boundaries
 
 **`docs/architecture/`** is the current shape: components, how they fit, why the structure is what it is. Maintained; tracks the code. No history, no "we used to".
 
-**`docs/architecture-decisions/`** holds durable decisions, one per file, each with the alternatives that were weighed. Write an ADR when both hold: a **real fork** existed (a different reasonable engineer could have chosen otherwise, with lasting consequences) and the decision **constrains the built artifact** — code, tests, repo layout, or an enforced convention. Mechanical process stays in `CONTRIBUTING.md` even when it had a fork. Amendments are graded: a dated **Amended:** banner for substance changes, a light note for framing shifts, nothing for renames; supersede/superseded back-pointers land on both ADRs in the same commit.
+**`docs/architecture-decisions/`** holds durable decisions, one per file, each with the alternatives that were weighed. Write an ADR when both hold: a **real fork** existed (a different reasonable engineer could have chosen otherwise, with lasting consequences) and the decision **constrains the built artifact** — code, tests, repo layout, or an enforced convention. Mechanical process stays in `CONTRIBUTING.md` even when it had a fork. Amendments are graded: a dated **Amended:** banner for substance changes, a light note for framing shifts, nothing for renames; supersede/superseded back-pointers land on both ADRs in the same commit. **Diagrams in ADRs are frozen decision-time snapshots** — they show the shape the decision was made against and are never edited afterwards; the living diagram lives in `docs/architecture/` (§1). A new state or component is not an amendment to the ADR that froze an older shape.
 
 Pre-implementation planning is not a tracked genre. Decisions worth keeping graduate into an ADR (or the architecture docs); the working notes that produced them stay outside the repo. The bootstrap-era design plan was retired (2026-06-09) once its durable content had graduated — git history keeps the text.
 
@@ -26,7 +28,7 @@ Pre-implementation planning is not a tracked genre. Decisions worth keeping grad
 
 ## 3. Reference content is read from source, never enumerated in prose
 
-Counts and lists drift the instant code changes. The canonical sources here:
+Counts and lists drift the instant code changes. This rule is about counts and key inventories in *prose*; a maintained transition diagram is current-shape content under the same docs-ride-the-commit discipline as the rest of `docs/architecture/`, not an enumeration. The canonical sources here:
 
 - **The FSM** (`internal/statemachine`) — the authority on states, transitions, and deadline defaults. No doc states a state count.
 - **The proto file** (`proto/runny/v1`) — the authority on the control surface. No doc lists the RPCs.

@@ -52,6 +52,14 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if got := p.SSHTimeout.D(); got != 3*time.Second {
 		t.Errorf("SSHTimeout = %v, want 3s", got)
 	}
+	// Hardening defaults ON: the password is a bootstrap credential, not the
+	// cycle's (ADR-0013). Opting out is explicit.
+	if p.SSHHardening != SSHHardeningRotate {
+		t.Errorf("SSHHardening = %q, want %q", p.SSHHardening, SSHHardeningRotate)
+	}
+	if got := c.Deadlines.SecureSSH.D(); got != 15*time.Second {
+		t.Errorf("SecureSSH = %v, want 15s", got)
+	}
 	if p.Target.IsOrg() {
 		t.Error("owner/repo target misread as org")
 	}
@@ -64,6 +72,7 @@ func TestLoadConfigMixedPools(t *testing.T) {
     count: 3
     cpu_cores: 6
     ram_gb: 12
+    ssh_hardening: off
     target:
       org: example-org
     github:
@@ -90,6 +99,14 @@ func TestLoadConfigMixedPools(t *testing.T) {
 	if lin.GitHub.APIBase != "https://api.github.com" {
 		t.Errorf("api_base default not applied per pool: %q", lin.GitHub.APIBase)
 	}
+	// The opt-out must survive YAML 1.1's `off`→boolean trap unquoted — that
+	// is the form operators will write.
+	if lin.SSHHardening != SSHHardeningOff {
+		t.Errorf("SSHHardening = %q, want %q", lin.SSHHardening, SSHHardeningOff)
+	}
+	if c.Pools[0].SSHHardening != SSHHardeningRotate {
+		t.Errorf("default pool hardening = %q, want rotate", c.Pools[0].SSHHardening)
+	}
 	// Hardware sizing overrides parse; the mac pool left them unset (zero =
 	// use the image's baked value).
 	if lin.CPUCores != 6 || lin.RAMGB != 12 {
@@ -114,6 +131,8 @@ func TestLoadConfigValidation(t *testing.T) {
 		{"negative deadline", minimalConfig + "deadlines:\n  pull_stall: -30s\n", "must be positive"},
 		{"negative limit", minimalConfig + "limits:\n  max_idle: -1h\n", "must be positive"},
 		{"negative ssh timeout", strings.Replace(minimalConfig, "count: 2", "count: 2\n    ssh_timeout: -3s", 1), "ssh_timeout must be positive"},
+		{"bad ssh hardening", strings.Replace(minimalConfig, "count: 2", "count: 2\n    ssh_hardening: maybe", 1), `ssh_hardening must be "rotate" or "off"`},
+		{"negative secure_ssh", minimalConfig + "deadlines:\n  secure_ssh: -15s\n", "secure_ssh must be positive"},
 	}
 	for _, tc := range cases {
 		_, err := LoadConfig(writeConfig(t, tc.yaml))

@@ -32,6 +32,7 @@ const (
 	StateBoot        State = "BOOT"
 	StateAwaitIP     State = "AWAIT_IP"
 	StateAwaitSSH    State = "AWAIT_SSH"
+	StateSecureSSH   State = "SECURE_SSH"
 	StateMintJIT     State = "MINT_JIT"
 	StateProvision   State = "PROVISION"
 	StateListening   State = "LISTENING"
@@ -44,8 +45,8 @@ const (
 // (it sits directly below them so a new state is hard to miss).
 var States = []State{
 	StateBackoff, StateEnsureImage, StateClone, StateBoot, StateAwaitIP,
-	StateAwaitSSH, StateMintJIT, StateProvision, StateListening, StateJob,
-	StateTeardown,
+	StateAwaitSSH, StateSecureSSH, StateMintJIT, StateProvision,
+	StateListening, StateJob, StateTeardown,
 }
 
 // Runner-output markers (the actions runner's run.sh wording).
@@ -105,6 +106,13 @@ type Guest interface {
 // Dialer establishes Guest sessions (sshx's seam).
 type Dialer interface {
 	WaitFor(ctx bounded.Context, addr string) (Guest, error)
+	// Rotate hardens an authenticated session (ADR-0013, the SECURE_SSH
+	// state): mint a per-cycle key, install it in the guest, disable
+	// password auth, reconnect keyed with host keys pinned. Returns the new
+	// session; on success the old one is closed, on failure the caller
+	// still owns g (teardown pulls diag over it, then closes it). goos
+	// selects the per-OS rotation script.
+	Rotate(ctx bounded.Context, addr string, g Guest, goos string) (Guest, error)
 }
 
 // Deps wires a slot to the world. Everything is an interface or func so the
@@ -537,6 +545,23 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	if ok {
 		ok = enter(StateAwaitSSH, cfg.Deadlines.AwaitSSH.D(), func(c bounded.Context) error {
 			g, err := s.deps.Dial.WaitFor(c, ip+":22")
+			if err != nil {
+				return err
+			}
+			guest = g
+			return nil
+		})
+	}
+	// SECURE_SSH must precede MINT_JIT, strictly: the JIT config — the
+	// GitHub credential — must never exist while the guest still accepts
+	// password auth (ADR-0013). Only an explicit `off` skips the state; the
+	// gate fails closed, so a zero-value SSHHardening (a Deps.Pool that never
+	// saw config defaulting) rotates rather than silently un-hardening. With
+	// `off`, the cycle record carries no SECURE_SSH entry and the cycle is
+	// byte-identical to the pre-rotation daemon.
+	if ok && s.deps.Pool.SSHHardening != home.SSHHardeningOff {
+		ok = enter(StateSecureSSH, cfg.Deadlines.SecureSSH.D(), func(c bounded.Context) error {
+			g, err := s.deps.Dial.Rotate(c, ip+":22", guest, s.deps.Pool.OS)
 			if err != nil {
 				return err
 			}

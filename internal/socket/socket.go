@@ -349,6 +349,7 @@ var stateToProto = map[statemachine.State]runnyv1.SlotState{
 	statemachine.StateBoot:        runnyv1.SlotState_SLOT_STATE_BOOT,
 	statemachine.StateAwaitIP:     runnyv1.SlotState_SLOT_STATE_AWAIT_IP,
 	statemachine.StateAwaitSSH:    runnyv1.SlotState_SLOT_STATE_AWAIT_SSH,
+	statemachine.StateSecureSSH:   runnyv1.SlotState_SLOT_STATE_SECURE_SSH,
 	statemachine.StateMintJIT:     runnyv1.SlotState_SLOT_STATE_MINT_JIT,
 	statemachine.StateProvision:   runnyv1.SlotState_SLOT_STATE_PROVISION,
 	statemachine.StateListening:   runnyv1.SlotState_SLOT_STATE_LISTENING,

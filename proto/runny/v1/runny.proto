@@ -108,15 +108,16 @@ message SlotStatus {
   // lifetime. Set by any daemon that supports this field; a client talking
   // to an older daemon may see it empty and must tolerate that.
   string image = 14;
-  // Resolved manifest digest ("sha256:...") for the current cycle; set when
-  // ENSURE_IMAGE completes, empty before that and in BACKOFF. Presence
-  // means "resolved this cycle", not "a guest booted": a cycle failing in
-  // CLONE or BOOT still carries it; the guest, once booted, runs exactly
-  // this digest. A wedged slot retains it — the surviving guest is still
-  // running that image. Clients must not synthesize this from a configured
-  // digest pin: empty means ENSURE_IMAGE did not complete this cycle
-  // (registry not reached, mid-pull, or failed after the digest resolved).
-  // Historical cycles carry theirs in CycleRecord.image_digest.
+  // Resolved manifest digest ("sha256:...") for the current cycle; set as
+  // soon as the registry round-trip resolves the digest — before the pull
+  // starts. Empty before that and in BACKOFF. Presence means "digest
+  // resolved this cycle", not "a guest booted" or "pull complete": a slot
+  // mid-pull or failing in CLONE or BOOT still carries it; the guest, once
+  // booted, runs exactly this digest. A wedged slot retains it — the
+  // surviving guest is still running that image. Clients must not
+  // synthesize this from a configured digest pin: empty means the registry
+  // round-trip has not completed this cycle. Historical cycles carry theirs
+  // in CycleRecord.image_digest.
   string image_digest = 15;
   // Non-zero iff state == DEBUG (cleared the instant DEBUG is left): when
   // the hold auto-recycles.

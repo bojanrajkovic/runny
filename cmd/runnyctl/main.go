@@ -398,21 +398,30 @@ func (c *ctl) recycle(ctx context.Context, slot, reason string, force bool) erro
 	// didn't see.
 	cancelJob := false
 	resp, err := c.client.GetStatus(ctx, &runnyv1.GetStatusRequest{})
-	if err == nil {
-		if st := findSlotStatus(resp, slot); st != nil {
-			switch st.GetState() {
-			case runnyv1.SlotState_SLOT_STATE_DEBUG:
-				if !force {
-					return fmt.Errorf("slot %s is holding for debug; pass -force to recycle (this destroys the held guest)", slot)
-				}
-			case runnyv1.SlotState_SLOT_STATE_JOB:
-				if !force {
-					job := st.GetJob().GetName()
-					return fmt.Errorf("slot %s is running job %q (%s); recycling cancels it — pass -force",
-						slot, job, durString(time.Since(st.GetStateEntered().AsTime())))
-				}
-				cancelJob = true
+	if err != nil {
+		// The guard is best-effort client-side UX, but a plain recycle still
+		// releases a DEBUG hold daemon-side (holdForDebug's CmdRecycle arm has
+		// no -force check). Without -force we cannot tell whether this recycle
+		// would destroy a held guest, so refuse rather than silently proceeding
+		// — a status blip must not let an unintended recycle through. With
+		// -force the operator has already consented to whatever shape the slot
+		// is in, so proceed.
+		if !force {
+			return fmt.Errorf("cannot read slot status to check for a debug hold or running job (%w); pass -force to recycle anyway", err)
+		}
+	} else if st := findSlotStatus(resp, slot); st != nil {
+		switch st.GetState() {
+		case runnyv1.SlotState_SLOT_STATE_DEBUG:
+			if !force {
+				return fmt.Errorf("slot %s is holding for debug; pass -force to recycle (this destroys the held guest)", slot)
 			}
+		case runnyv1.SlotState_SLOT_STATE_JOB:
+			if !force {
+				job := st.GetJob().GetName()
+				return fmt.Errorf("slot %s is running job %q (%s); recycling cancels it — pass -force",
+					slot, job, durString(time.Since(st.GetStateEntered().AsTime())))
+			}
+			cancelJob = true
 		}
 	}
 	_, err = c.client.Recycle(ctx, &runnyv1.RecycleRequest{Slot: slot, Reason: reason, CancelRunningJob: cancelJob})

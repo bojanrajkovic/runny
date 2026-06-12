@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -591,11 +592,15 @@ func TestRenderCycleContamination(t *testing.T) {
 // guard (decision 14/15).
 type fakeRecycleClient struct {
 	runnyv1.RunnyServiceClient
-	status   *runnyv1.GetStatusResponse
-	recycled *runnyv1.RecycleRequest
+	status    *runnyv1.GetStatusResponse
+	statusErr error
+	recycled  *runnyv1.RecycleRequest
 }
 
 func (f *fakeRecycleClient) GetStatus(_ context.Context, _ *runnyv1.GetStatusRequest, _ ...grpc.CallOption) (*runnyv1.GetStatusResponse, error) {
+	if f.statusErr != nil {
+		return nil, f.statusErr
+	}
 	return f.status, nil
 }
 
@@ -650,5 +655,31 @@ func TestRecycleGuardsDebugAndJob(t *testing.T) {
 	}
 	if fc.recycled == nil || fc.recycled.GetCancelRunningJob() {
 		t.Errorf("LISTENING recycle must not cancel a job: %+v", fc.recycled)
+	}
+
+	// GetStatus failure without -force REFUSES rather than silently degrading:
+	// the guard cannot tell whether the recycle would destroy a debug hold, and
+	// a plain recycle releases a hold daemon-side regardless.
+	fc = &fakeRecycleClient{statusErr: errors.New("status rpc blip")}
+	c = &ctl{client: fc, out: &bytes.Buffer{}}
+	if err := c.recycle(context.Background(), "mac-1", "x", false); err == nil {
+		t.Error("recycle should refuse when status is unreadable and -force is absent")
+	}
+	if fc.recycled != nil {
+		t.Error("a status-blip recycle without -force must not send Recycle")
+	}
+
+	// GetStatus failure WITH -force proceeds: the operator consented to whatever
+	// shape the slot is in.
+	fc = &fakeRecycleClient{statusErr: errors.New("status rpc blip")}
+	c = &ctl{client: fc, out: &bytes.Buffer{}}
+	if err := c.recycle(context.Background(), "mac-1", "x", true); err != nil {
+		t.Fatalf("forced recycle through a status blip: %v", err)
+	}
+	if fc.recycled == nil {
+		t.Error("a forced recycle through a status blip must still send Recycle")
+	}
+	if fc.recycled.GetCancelRunningJob() {
+		t.Error("a forced recycle with unreadable status must not blindly cancel a job")
 	}
 }

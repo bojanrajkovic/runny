@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/bojanrajkovic/runny/internal/home"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
@@ -36,8 +38,20 @@ commands:
   logs [SLOT] [-daemon] [-replay N] [-follow=false]
                       stream runner output (all slots, or just SLOT);
                       -daemon streams runnyd's own log instead
-  recycle SLOT [-reason WHY]
-                      destroy SLOT's current cycle and start fresh
+  recycle SLOT [-reason WHY] [-force]
+                      destroy SLOT's current cycle and start fresh;
+                      -force is required to recycle a DEBUG hold or to
+                      cancel a RUNNING job
+  debug SLOT [-pubkey FILE] [-hold DUR] [-reason TEXT]
+                      inject FILE's public key (default ~/.ssh/id_ed25519.pub)
+                      into SLOT's live guest. Idle (LISTENING): the slot
+                      freezes in DEBUG — runner killed (verified), no jobs,
+                      max-idle suspended. Running a job (JOB): the key is
+                      installed immediately (the job is NOT touched) and the
+                      slot holds in DEBUG when the job ends. Rerun with the
+                      same key to extend; a new key to add. Release with
+                      'runnyctl recycle SLOT -force' (auto-releases after
+                      -hold; default/cap limits.max_debug_hold).
   pause SLOT          hold SLOT after its current cycle drains
   resume SLOT         release a paused SLOT
   reload [-reason WHY]
@@ -108,11 +122,22 @@ func run() error {
 	case "recycle":
 		fs := flag.NewFlagSet("recycle", flag.ExitOnError)
 		reason := fs.String("reason", "operator request", "reason recorded in the cycle")
+		force := fs.Bool("force", false, "recycle a DEBUG hold, or cancel a RUNNING job")
 		slot, err := slotArg(fs, rest)
 		if err != nil {
 			return err
 		}
-		return c.recycle(ctx, slot, *reason)
+		return c.recycle(ctx, slot, *reason, *force)
+	case "debug":
+		fs := flag.NewFlagSet("debug", flag.ExitOnError)
+		pubkey := fs.String("pubkey", "", "public key file (default ~/.ssh/id_ed25519.pub)")
+		hold := fs.Duration("hold", 0, "auto-release after this long (0 = limits.max_debug_hold)")
+		reason := fs.String("reason", "", "audit note")
+		slot, err := slotArg(fs, rest)
+		if err != nil {
+			return err
+		}
+		return c.debug(ctx, slot, *pubkey, *hold, *reason)
 	case "pause":
 		fs := flag.NewFlagSet("pause", flag.ExitOnError)
 		slot, err := slotArg(fs, rest)
@@ -280,6 +305,14 @@ func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 		if d := s.GetDetail(); d != "" {
 			note = d // live annotation beats stale failure text
 		}
+		// A DEBUG hold shows its auto-release countdown; an armed JOB shows
+		// that the hold will catch the corpse at job end (issue #39).
+		if s.GetState() == runnyv1.SlotState_SLOT_STATE_DEBUG && s.GetDebugHoldExpires() != nil {
+			note = "auto-releases in " + durString(time.Until(s.GetDebugHoldExpires().AsTime())) + "; recycle to release"
+		}
+		if s.GetDebugHoldArmed() {
+			note = "debug hold armed (enters DEBUG at job end)"
+		}
 		// In BACKOFF the useful number is when the slot retries, not how long
 		// it has already waited (the FOR column). Surface the remaining
 		// backoff: backoff total minus time already in the state.
@@ -358,12 +391,130 @@ func (c *ctl) logs(ctx context.Context, replay int, follow, daemon bool, slot st
 	}
 }
 
-func (c *ctl) recycle(ctx context.Context, slot, reason string) error {
-	_, err := c.client.Recycle(ctx, &runnyv1.RecycleRequest{Slot: slot, Reason: reason})
+func (c *ctl) recycle(ctx context.Context, slot, reason string, force bool) error {
+	// Guard DEBUG and JOB: both need -force, and JOB additionally requires the
+	// cancel_running_job consent flag — which runnyctl sets only after
+	// OBSERVING JOB, so a send-time race can never cancel a job the operator
+	// didn't see.
+	cancelJob := false
+	resp, err := c.client.GetStatus(ctx, &runnyv1.GetStatusRequest{})
+	if err != nil {
+		// The guard is best-effort client-side UX, but a plain recycle still
+		// releases a DEBUG hold daemon-side (holdForDebug's CmdRecycle arm has
+		// no -force check). Without -force we cannot tell whether this recycle
+		// would destroy a held guest, so refuse rather than silently proceeding
+		// — a status blip must not let an unintended recycle through. With
+		// -force the operator has already consented to whatever shape the slot
+		// is in, so proceed.
+		if !force {
+			return fmt.Errorf("cannot read slot status to check for a debug hold or running job (%w); pass -force to recycle anyway", err)
+		}
+	} else if st := findSlotStatus(resp, slot); st != nil {
+		switch st.GetState() {
+		case runnyv1.SlotState_SLOT_STATE_DEBUG:
+			if !force {
+				return fmt.Errorf("slot %s is holding for debug; pass -force to recycle (this destroys the held guest)", slot)
+			}
+		case runnyv1.SlotState_SLOT_STATE_JOB:
+			if !force {
+				job := st.GetJob().GetName()
+				return fmt.Errorf("slot %s is running job %q (%s); recycling cancels it — pass -force",
+					slot, job, durString(time.Since(st.GetStateEntered().AsTime())))
+			}
+			cancelJob = true
+		}
+	}
+	_, err = c.client.Recycle(ctx, &runnyv1.RecycleRequest{Slot: slot, Reason: reason, CancelRunningJob: cancelJob})
 	if err == nil {
 		fmt.Fprintf(c.out, "%s recycling: %s\n", slot, reason)
 	}
 	return err
+}
+
+// findSlotStatus returns the status for the named slot (by slot name or runner
+// name), or nil.
+func findSlotStatus(resp *runnyv1.GetStatusResponse, name string) *runnyv1.SlotStatus {
+	for _, s := range resp.GetSlots() {
+		if s.GetSlot() == name || s.GetRunnerName() == name {
+			return s
+		}
+	}
+	return nil
+}
+
+func (c *ctl) debug(ctx context.Context, slot, pubkeyFile string, hold time.Duration, reason string) error {
+	if pubkeyFile == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("resolving home dir for default pubkey: %w", err)
+		}
+		pubkeyFile = filepath.Join(home, ".ssh", "id_ed25519.pub")
+	}
+	keyBytes, err := os.ReadFile(pubkeyFile)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", pubkeyFile, err)
+	}
+
+	// The client deadline MUST outlast the daemon's handler wait, which is
+	// config-derived (reconcile_interval + secure_ssh). A hardcoded value
+	// shorter than it makes the daemon outlive the client: the operator is told
+	// "nothing injected" while the FSM installs the key. Read the daemon's own
+	// computed wait from GetStatus and add slack; fall back to a generous
+	// default only when talking to a daemon that predates the field.
+	clientWait := 135 * time.Second
+	if st, err := c.client.GetStatus(ctx, &runnyv1.GetStatusRequest{}); err == nil {
+		if w := st.GetInjectHandlerWait().AsDuration(); w > 0 {
+			clientWait = w + 10*time.Second
+		}
+	}
+	dctx, cancel := context.WithTimeout(ctx, clientWait)
+	defer cancel()
+	req := &runnyv1.InjectDebugKeyRequest{
+		Slot: slot, PublicKey: string(keyBytes), Reason: reason,
+	}
+	if hold > 0 {
+		req.Hold = durationpb.New(hold)
+	}
+	resp, err := c.client.InjectDebugKey(dctx, req)
+	if err != nil {
+		return err
+	}
+	if c.json {
+		return c.emit(resp)
+	}
+	c.renderDebug(slot, resp)
+	return nil
+}
+
+func (c *ctl) renderDebug(slot string, resp *runnyv1.InjectDebugKeyResponse) {
+	conn := fmt.Sprintf("ssh %s@%s", resp.GetUser(), resp.GetIp())
+	if resp.GetArmed() {
+		fmt.Fprintf(c.out, "%s: debug key %s installed into a RUNNING job\n", slot, resp.GetFingerprint())
+		fmt.Fprintln(c.out, "  the job now executes with an operator credential present — recorded in the cycle's audit trail")
+		fmt.Fprintf(c.out, "  connect:  %s\n", conn)
+		c.renderHostKeys(resp.GetHostKeys())
+		fmt.Fprintln(c.out, "  hold:     starts when the job ends")
+		fmt.Fprintf(c.out, "  release:  runnyctl recycle %s -force   ·   extend: re-run this command\n", slot)
+		return
+	}
+	fmt.Fprintf(c.out, "%s: debug key %s installed; the slot is frozen in DEBUG\n", slot, resp.GetFingerprint())
+	fmt.Fprintf(c.out, "  connect:  %s\n", conn)
+	c.renderHostKeys(resp.GetHostKeys())
+	if hu := resp.GetHoldUntil(); hu != nil {
+		fmt.Fprintf(c.out, "  hold:     auto-releases %s (in %s)\n",
+			hu.AsTime().Local().Format(time.RFC3339), durString(time.Until(hu.AsTime())))
+	}
+	fmt.Fprintf(c.out, "  release:  runnyctl recycle %s -force   ·   extend: re-run this command\n", slot)
+}
+
+func (c *ctl) renderHostKeys(keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	fmt.Fprintln(c.out, "  host keys (append to known_hosts to pin):")
+	for _, k := range keys {
+		fmt.Fprintf(c.out, "    %s\n", k)
+	}
 }
 
 func (c *ctl) why(ctx context.Context, slot string, cycles int) error {
@@ -416,7 +567,11 @@ func (c *ctl) renderCycle(rec *runnyv1.CycleRecord) {
 		fmt.Fprintf(c.out, "  vm %s (%s)\n", rec.GetVm().GetIp(), rec.GetVm().GetMac())
 	}
 	if rec.GetJob() != nil {
-		fmt.Fprintf(c.out, "  job %q\n", rec.GetJob().GetName())
+		line := fmt.Sprintf("  job %q", rec.GetJob().GetName())
+		if ks := rec.GetJob().GetOperatorKeys(); len(ks) > 0 {
+			line += " · ran with operator key(s) " + strings.Join(ks, ", ")
+		}
+		fmt.Fprintln(c.out, line)
 	}
 	for _, sr := range rec.GetStates() {
 		state := strings.TrimPrefix(sr.GetState().String(), "SLOT_STATE_")
@@ -429,6 +584,16 @@ func (c *ctl) renderCycle(rec *runnyv1.CycleRecord) {
 		default:
 			fmt.Fprintf(c.out, "    %-13s %8s  ERROR: %s\n", state, d, sr.GetError())
 		}
+	}
+	for _, k := range rec.GetInjectedKeys() {
+		line := fmt.Sprintf("  debug key %-9s [%s] %s", k.GetOutcome(), k.GetState(), k.GetFingerprint())
+		if r := k.GetReason(); r != "" {
+			line += " — " + r
+		}
+		if e := k.GetError(); e != "" {
+			line += ": " + e
+		}
+		fmt.Fprintln(c.out, line)
 	}
 	for _, a := range rec.GetArtifacts() {
 		fmt.Fprintf(c.out, "  artifact: %s (in the cycle dir under ~/.runny/cycles)\n", a)

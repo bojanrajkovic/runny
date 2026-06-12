@@ -12,12 +12,15 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/bojanrajkovic/runny/internal/cycle"
+	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/logring"
 	"github.com/bojanrajkovic/runny/internal/statemachine"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
@@ -66,6 +69,9 @@ type Server struct {
 	// including the exit-gate hold annotation when held. Nil = never
 	// draining.
 	DrainingFn func() string
+	// Config carries the limits InjectDebugKey validates against (hold cap,
+	// the queue/service bounds for the synchronous wait).
+	Config *home.Config
 
 	// watch fan-out
 	mu      sync.Mutex
@@ -76,6 +82,7 @@ type Server struct {
 // NewServer wires the slots' OnChange into the watch fan-out.
 func NewServer(slots []*statemachine.Slot, ring, runnerRing *logring.Ring,
 	stores func(string) cycle.Store, doctor func(context.Context) []DoctorCheck, version string,
+	cfg *home.Config,
 ) *Server {
 	s := &Server{
 		Slots:      slots,
@@ -85,6 +92,7 @@ func NewServer(slots []*statemachine.Slot, ring, runnerRing *logring.Ring,
 		DoctorFn:   doctor,
 		Started:    time.Now(),
 		Version:    version,
+		Config:     cfg,
 		watches:    map[int]chan struct{}{},
 	}
 	for _, slot := range slots {
@@ -154,10 +162,28 @@ func (s *Server) snapshot() *runnyv1.GetStatusResponse {
 		Version:       s.Version,
 		Draining:      s.draining(),
 	}
+	// The config-derived InjectDebugKey wait, so `runnyctl debug` can size its
+	// client deadline to outlast the daemon (else a timeout lies — see #0).
+	if s.Config != nil {
+		_, handlerWait := s.injectBounds()
+		resp.InjectHandlerWait = durationpb.New(handlerWait)
+	}
 	for _, slot := range s.Slots {
 		resp.Slots = append(resp.Slots, statusToProto(slot.Status()))
 	}
 	return resp
+}
+
+// injectBounds derives the InjectDebugKey timing from config: queueBound is the
+// FSM's worst-case dequeue latency (one in-flight reconcile), handlerWait the
+// daemon's total synchronous wait (dequeue + per-command work + slack). Exposed
+// on GetStatus so a client waits at least handlerWait — a shorter client
+// deadline on a host with raised reconcile_interval/secure_ssh makes the daemon
+// outlive the client and report "nothing injected" while the key installs.
+func (s *Server) injectBounds() (queueBound, handlerWait time.Duration) {
+	queueBound = s.Config.Limits.ReconcileInterval.D() + 5*time.Second
+	serviceBound := 3*s.Config.Deadlines.SecureSSH.D() + 10*time.Second
+	return queueBound, queueBound + serviceBound + 5*time.Second
 }
 
 func (s *Server) GetStatus(ctx context.Context, _ *runnyv1.GetStatusRequest) (*runnyv1.GetStatusResponse, error) {
@@ -318,7 +344,10 @@ func (s *Server) Recycle(ctx context.Context, req *runnyv1.RecycleRequest) (*run
 	if err != nil {
 		return nil, err
 	}
-	if !slot.Command(statemachine.Command{Kind: statemachine.CmdRecycle, Reason: req.GetReason()}) {
+	if !slot.Command(statemachine.Command{
+		Kind: statemachine.CmdRecycle, Reason: req.GetReason(),
+		CancelJob: req.GetCancelRunningJob(),
+	}) {
 		return nil, fmt.Errorf("slot %s is not accepting commands", req.GetSlot())
 	}
 	return &runnyv1.RecycleResponse{}, nil
@@ -399,7 +428,7 @@ func (s *Server) Why(ctx context.Context, req *runnyv1.WhyRequest) (*runnyv1.Why
 	}
 	// The store is keyed by the RESOLVED slot name: req may carry a runner
 	// name, which as a store key would silently read an empty directory.
-	recs, err := s.Stores(slot.Name()).Recent(n)
+	recs, err := s.Stores(slot.Name()).Recent(n, slot.Status().CycleID)
 	if err != nil {
 		return nil, err
 	}
@@ -418,6 +447,74 @@ func (s *Server) Doctor(ctx context.Context, _ *runnyv1.DoctorRequest) (*runnyv1
 	return resp, nil
 }
 
+func (s *Server) InjectDebugKey(ctx context.Context, req *runnyv1.InjectDebugKeyRequest) (*runnyv1.InjectDebugKeyResponse, error) {
+	slot, err := s.findSlot(req.GetSlot())
+	if err != nil {
+		return nil, status.Error(codes.NotFound, err.Error())
+	}
+	pub, comment, _, rest, err := ssh.ParseAuthorizedKey([]byte(req.GetPublicKey()))
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "parsing public key: %v", err)
+	}
+	if len(rest) != 0 {
+		return nil, status.Error(codes.InvalidArgument, "public_key must contain exactly one key")
+	}
+
+	hold := req.GetHold().AsDuration()
+	holdCap := s.Config.Limits.MaxDebugHold.D()
+	switch {
+	case hold == 0:
+		hold = holdCap
+	case hold < 0:
+		return nil, status.Error(codes.InvalidArgument, "hold must not be negative")
+	case hold > holdCap:
+		return nil, status.Errorf(codes.InvalidArgument, "hold %v exceeds limits.max_debug_hold (%v)", hold, holdCap)
+	}
+
+	st := slot.Status()
+	if st.Wedged || (st.State != statemachine.StateListening &&
+		st.State != statemachine.StateJob && st.State != statemachine.StateDebug) {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"slot %s is %s; key injection needs a live guest (LISTENING, JOB, or DEBUG)", slot.Name(), st.State)
+	}
+
+	// Re-marshal to the canonical "type base64" line: no client bytes ever
+	// reach a guest shell.
+	line := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub)))
+	fp := ssh.FingerprintSHA256(pub)
+	queueBound, handlerWait := s.injectBounds()
+
+	reply := make(chan statemachine.DebugKeyReply, 1)
+	if !slot.Command(statemachine.Command{
+		Kind: statemachine.CmdDebugKey, Reason: req.GetReason(),
+		PubKey: line, Fingerprint: fp, Comment: comment, Hold: hold,
+		CycleID: st.CycleID, SeenState: st.State, // both pins from the same read
+		Expires: time.Now().Add(queueBound), Reply: reply,
+	}) {
+		return nil, status.Errorf(codes.Unavailable, "slot %s is not accepting commands", slot.Name())
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, status.FromContextError(ctx.Err()).Err()
+	case <-time.After(handlerWait):
+		return nil, status.Error(codes.DeadlineExceeded,
+			"no response from the slot; nothing was injected and this request has expired — re-run debug")
+	case r := <-reply:
+		if r.Err != nil {
+			return nil, status.Error(codes.FailedPrecondition, r.Err.Error())
+		}
+		resp := &runnyv1.InjectDebugKeyResponse{
+			User: r.User, Ip: st.VM.IP, Fingerprint: fp,
+			HostKeys: r.HostKeys, Armed: r.Armed,
+		}
+		if !r.Armed {
+			resp.HoldUntil = timestamppb.New(r.HoldUntil)
+		}
+		return resp, nil
+	}
+}
+
 // ---- proto conversion --------------------------------------------------------
 
 var stateToProto = map[statemachine.State]runnyv1.SlotState{
@@ -433,6 +530,7 @@ var stateToProto = map[statemachine.State]runnyv1.SlotState{
 	statemachine.StateListening:   runnyv1.SlotState_SLOT_STATE_LISTENING,
 	statemachine.StateJob:         runnyv1.SlotState_SLOT_STATE_JOB,
 	statemachine.StateTeardown:    runnyv1.SlotState_SLOT_STATE_TEARDOWN,
+	statemachine.StateDebug:       runnyv1.SlotState_SLOT_STATE_DEBUG,
 }
 
 func statusToProto(st statemachine.Status) *runnyv1.SlotStatus {
@@ -450,12 +548,19 @@ func statusToProto(st statemachine.Status) *runnyv1.SlotStatus {
 		LastFailure:         st.LastFailure,
 		Detail:              st.Detail,
 		Wedged:              st.Wedged,
+		DebugHoldArmed:      st.DebugHoldArmed,
+	}
+	if !st.DebugHoldExpires.IsZero() {
+		out.DebugHoldExpires = timestamppb.New(st.DebugHoldExpires)
 	}
 	if st.VM.MAC != "" || st.VM.IP != "" {
 		out.Vm = &runnyv1.VMInfo{Mac: st.VM.MAC, Ip: st.VM.IP}
 	}
 	if st.Job != nil {
-		out.Job = &runnyv1.JobInfo{Name: st.Job.Name, Started: timestamppb.New(st.Job.Started)}
+		out.Job = &runnyv1.JobInfo{
+			Name: st.Job.Name, Started: timestamppb.New(st.Job.Started),
+			OperatorKeys: st.Job.OperatorKeys,
+		}
 	}
 	return out
 }
@@ -482,7 +587,21 @@ func recordToProto(r *cycle.Record) *runnyv1.CycleRecord {
 		})
 	}
 	if r.Job != nil {
-		out.Job = &runnyv1.JobInfo{Name: r.Job.Name, Started: timestamppb.New(r.Job.Started)}
+		out.Job = &runnyv1.JobInfo{
+			Name: r.Job.Name, Started: timestamppb.New(r.Job.Started),
+			OperatorKeys: r.Job.OperatorKeys,
+		}
+	}
+	for _, k := range r.InjectedKeys {
+		out.InjectedKeys = append(out.InjectedKeys, &runnyv1.InjectedKey{
+			Fingerprint: k.Fingerprint,
+			Comment:     k.Comment,
+			Injected:    timestamppb.New(k.Injected),
+			Reason:      k.Reason,
+			Outcome:     k.Outcome,
+			Error:       k.Error,
+			State:       k.State,
+		})
 	}
 	if r.Failure != nil {
 		out.FailureState = r.Failure.State

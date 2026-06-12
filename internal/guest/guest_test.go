@@ -44,6 +44,10 @@ type rotateServer struct {
 	failInstall       bool // the install exec exits 1 (no sudo, say)
 	failAuthorize     bool // the install "runs" but the key never authorizes
 	forceKeepPassword bool // no drop-in name wins (image quirk); password stays
+	failStopRunner    bool // StopRunner exits nonzero (kill unproven)
+	failDebugInstall  bool // InstallAuthorizedKey's read-back grep fails
+	stopCalls         int
+	debugInstalls     int
 }
 
 func (s *rotateServer) lastScript(t *testing.T) string {
@@ -146,9 +150,36 @@ func (s *rotateServer) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 			_, _ = ch.SendRequest("exit-status", false, b)
 		}
 		switch {
+		case strings.Contains(payload.Cmd, "jitconfig"):
+			// StopRunner: report the listener already dead (pgrep finds
+			// nothing → the while loop never runs → exit 0), unless the test
+			// forces a survival.
+			s.mu.Lock()
+			killUnproven := s.failStopRunner
+			s.stopCalls++
+			s.mu.Unlock()
+			if killUnproven {
+				fmt.Fprintln(ch.Stderr(), "runny: runner still alive after SIGKILL")
+				exit(1)
+			} else {
+				exit(0)
+			}
 		case strings.Contains(payload.Cmd, "ssh_host_"):
 			_, _ = ch.Write(ssh.MarshalAuthorizedKey(s.hostPub))
 			exit(0)
+		case strings.Contains(payload.Cmd, "grep -qF"):
+			// InstallAuthorizedKey: the printf-append + grep read-back form
+			// (the read-back grep is its distinguishing marker).
+			s.mu.Lock()
+			s.debugInstalls++
+			fail := s.failDebugInstall
+			s.mu.Unlock()
+			if fail {
+				fmt.Fprintln(ch.Stderr(), "grep: no match")
+				exit(1)
+			} else {
+				exit(0)
+			}
 		case strings.Contains(payload.Cmd, "authorized_keys"):
 			s.mu.Lock()
 			s.scripts = append(s.scripts, payload.Cmd)
@@ -419,5 +450,104 @@ func TestParseHostKeysLoudFailures(t *testing.T) {
 	keys, err := parseHostKeys(append(line, line...))
 	if err != nil || len(keys) != 2 {
 		t.Errorf("parseHostKeys(2 lines) = %d keys, %v", len(keys), err)
+	}
+}
+
+// StopRunner proves the listener dead: a clean exit succeeds, a nonzero exit
+// (kill unproven) is a loud error (issue #39).
+func TestStopRunner(t *testing.T) {
+	srv := newRotateServer(t)
+	d := testDialer()
+	g, err := d.WaitFor(testCtx(t), srv.addr)
+	if err != nil {
+		t.Fatalf("WaitFor: %v", err)
+	}
+	if err := g.(*Guest).StopRunner(testCtx(t)); err != nil {
+		t.Fatalf("StopRunner (proven dead): %v", err)
+	}
+	srv.mu.Lock()
+	srv.failStopRunner = true
+	srv.mu.Unlock()
+	if err := g.(*Guest).StopRunner(testCtx(t)); err == nil {
+		t.Fatal("StopRunner must fail when the kill is unproven")
+	}
+}
+
+// The stop script's [-]-jitconfig pattern matches the listener argv without
+// matching its own literal text.
+func TestStopRunnerPatternIsSelfExcluding(t *testing.T) {
+	if !strings.Contains(stopRunnerScript, `[-]-jitconfig`) {
+		t.Error("stop script must use the self-excluding bracket pattern")
+	}
+	if strings.Contains(stopRunnerScript, `'--jitconfig'`) {
+		t.Error("stop script must not contain the literal --jitconfig (it would self-match)")
+	}
+}
+
+// InstallAuthorizedKey appends and read-back-greps; a failed read-back is a
+// loud error.
+func TestInstallAuthorizedKey(t *testing.T) {
+	srv := newRotateServer(t)
+	d := testDialer()
+	g, err := d.WaitFor(testCtx(t), srv.addr)
+	if err != nil {
+		t.Fatalf("WaitFor: %v", err)
+	}
+	if err := g.(*Guest).InstallAuthorizedKey(testCtx(t), "ssh-ed25519 AAAAOPKEY op@host"); err != nil {
+		t.Fatalf("InstallAuthorizedKey: %v", err)
+	}
+	srv.mu.Lock()
+	srv.failDebugInstall = true
+	srv.mu.Unlock()
+	if err := g.(*Guest).InstallAuthorizedKey(testCtx(t), "ssh-ed25519 AAAAOPKEY op@host"); err == nil {
+		t.Fatal("InstallAuthorizedKey must fail when the read-back fails")
+	}
+}
+
+// HostKeys renders pinned host keys in known_hosts form, host from the addr.
+func TestHostKeysKnownHostsForm(t *testing.T) {
+	srv := newRotateServer(t)
+	d := testDialer()
+	g, err := d.WaitFor(testCtx(t), srv.addr)
+	if err != nil {
+		t.Fatalf("WaitFor: %v", err)
+	}
+	// An unhardened guest (no pins) returns nil.
+	if hk := g.(*Guest).HostKeys(); hk != nil {
+		t.Errorf("unpinned HostKeys = %v, want nil", hk)
+	}
+	// After rotation, the pinned host key renders as "<host> <type> <b64>".
+	rg, err := d.Rotate(testCtx(t), srv.addr, g, "linux")
+	if err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	host, _, _ := net.SplitHostPort(srv.addr)
+	hk := rg.(*Guest).HostKeys()
+	if len(hk) != 1 {
+		t.Fatalf("HostKeys = %v, want 1 pinned key", hk)
+	}
+	if !strings.HasPrefix(hk[0], host+" ssh-ed25519 ") {
+		t.Errorf("HostKeys[0] = %q, want %q-prefixed known_hosts line", hk[0], host)
+	}
+}
+
+// Redial re-establishes the keyed session against the retained config.
+func TestRedialSwapsClient(t *testing.T) {
+	srv := newRotateServer(t)
+	d := testDialer()
+	g, err := d.WaitFor(testCtx(t), srv.addr)
+	if err != nil {
+		t.Fatalf("WaitFor: %v", err)
+	}
+	rg, err := d.Rotate(testCtx(t), srv.addr, g, "linux")
+	if err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	if err := rg.(*Guest).Redial(testCtx(t)); err != nil {
+		t.Fatalf("Redial: %v", err)
+	}
+	// The redialed (keyed, pinned) session still execs.
+	if err := rg.(*Guest).StopRunner(testCtx(t)); err != nil {
+		t.Errorf("exec over redialed session failed: %v", err)
 	}
 }

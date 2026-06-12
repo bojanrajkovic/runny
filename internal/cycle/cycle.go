@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -51,6 +52,9 @@ type Record struct {
 	Failure     *Failure      `json:"failure,omitempty"`
 	// Artifacts are file names retained next to cycle.json (failure cycles).
 	Artifacts []string `json:"artifacts,omitempty"`
+	// InjectedKeys is the operator debug-key audit trail for this cycle: one
+	// entry per attempt (issue #39), including failed and refused ones.
+	InjectedKeys []InjectedKey `json:"injected_keys,omitempty"`
 }
 
 type StateRecord struct {
@@ -69,12 +73,37 @@ type VMInfo struct {
 type JobInfo struct {
 	Name    string    `json:"name"`
 	Started time.Time `json:"started"`
+	// OperatorKeys are SHA256:… fingerprints of operator debug keys present
+	// in — or ambiguously attempted against — the guest while this job ran
+	// (issue #39). Reading the job record alone answers "did this job run
+	// with an operator credential installed?".
+	OperatorKeys []string `json:"operator_keys,omitempty"`
 }
 
 type Failure struct {
 	State string `json:"state"`
 	Error string `json:"error"`
 }
+
+// InjectedKey records one operator debug-key attempt against a cycle's guest
+// (issue #39). The disk shape mirrors runny.v1.InjectedKey.
+type InjectedKey struct {
+	Fingerprint string    `json:"fingerprint"`
+	Comment     string    `json:"comment,omitempty"`
+	Injected    time.Time `json:"injected"`
+	Reason      string    `json:"reason,omitempty"`
+	// Outcome: pending|ok|armed|re-armed|refused|unreachable|error|disarmed.
+	Outcome string `json:"outcome"`
+	Error   string `json:"error,omitempty"`
+	// State at the attempt: LISTENING|JOB|DEBUG.
+	State string `json:"state"`
+}
+
+// OperatorAccessFile is the write-ahead audit sidecar's name in a cycle dir
+// (issue #39): it carries the InjectedKeys before cycle.json lands, so a
+// daemon crash mid-attempt does not erase the evidence that an operator
+// credential was about to enter (or did enter) a guest.
+const OperatorAccessFile = "operator-access.json"
 
 // NewID mints a short cycle id (8 hex chars), unique enough per slot.
 func NewID() string {
@@ -124,8 +153,39 @@ func (s Store) Write(r *Record) error {
 	return nil
 }
 
-// Recent returns up to n most-recent records for the slot, newest first.
-func (s Store) Recent(n int) ([]*Record, error) {
+// WriteArtifact atomically writes one named artifact into the record's cycle
+// dir (tmp-rename, like Write) and ensures it is listed in r.Artifacts. Used
+// WRITE-AHEAD for operator-access.json (issue #39): cycle.json lands only at
+// finishCycle, and a daemon crash must not erase even the INTENT that an
+// operator credential was about to enter a guest.
+func (s Store) WriteArtifact(r *Record, name string, data []byte) error {
+	dir, err := s.Dir(r)
+	if err != nil {
+		return err
+	}
+	tmp := filepath.Join(dir, "."+name+".tmp")
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("writing %s: %w", name, err)
+	}
+	if err := os.Rename(tmp, filepath.Join(dir, name)); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("placing %s: %w", name, err)
+	}
+	if !slices.Contains(r.Artifacts, name) {
+		r.Artifacts = append(r.Artifacts, name)
+	}
+	return nil
+}
+
+// Recent returns up to n most-recent records for the slot, newest first. A
+// cycle dir that holds an operator-access.json but no cycle.json (a daemon
+// crash mid-attempt or mid-hold, issue #39) is surfaced as a synthesized stub
+// record so the orphaned credential evidence appears in `runnyctl why`
+// instead of only sitting on disk until retention deletes it unseen.
+// liveCycleID is the slot's currently-running cycle (empty if none): its
+// cycle.json is not written until the cycle ends, so without this it would be
+// synthesized as a phantom orphan-failure on every healthy in-progress cycle.
+func (s Store) Recent(n int, liveCycleID string) ([]*Record, error) {
 	entries, err := os.ReadDir(s.SlotDir)
 	if os.IsNotExist(err) {
 		return nil, nil
@@ -146,8 +206,15 @@ func (s Store) Recent(n int) ([]*Record, error) {
 	}
 	recs := make([]*Record, 0, len(names))
 	for _, name := range names {
-		raw, err := os.ReadFile(filepath.Join(s.SlotDir, name, "cycle.json"))
+		dir := filepath.Join(s.SlotDir, name)
+		raw, err := os.ReadFile(filepath.Join(dir, "cycle.json"))
 		if err != nil {
+			// A live cycle has no cycle.json yet (it lands at finishCycle) but
+			// may already carry a write-ahead sidecar; that is an in-progress
+			// cycle, not a crash-orphan, so never synthesize a failure for it.
+			if stub := s.synthesizeOrphan(dir); stub != nil && stub.CycleID != liveCycleID {
+				recs = append(recs, stub)
+			}
 			continue // half-written or foreign dir; skip rather than fail Why
 		}
 		var r Record
@@ -157,6 +224,38 @@ func (s Store) Recent(n int) ([]*Record, error) {
 		recs = append(recs, &r)
 	}
 	return recs, nil
+}
+
+// synthesizeOrphan builds a stub Record from a cycle dir that has an
+// operator-access.json but no readable cycle.json (issue #39). It returns nil
+// when the sidecar is absent or unparseable: only credential evidence is worth
+// surfacing this way, and a corrupt sidecar is not actionable.
+func (s Store) synthesizeOrphan(dir string) *Record {
+	raw, err := os.ReadFile(filepath.Join(dir, OperatorAccessFile))
+	if err != nil {
+		return nil
+	}
+	var keys []InjectedKey
+	if err := json.Unmarshal(raw, &keys); err != nil || len(keys) == 0 {
+		return nil
+	}
+	// The dir name is <RFC3339-started>-<cycleID>; recover both for the stub.
+	base := filepath.Base(dir)
+	cycleID := base
+	if i := strings.LastIndexByte(base, '-'); i >= 0 {
+		cycleID = base[i+1:]
+	}
+	started := keys[0].Injected
+	return &Record{
+		CycleID:      cycleID,
+		Slot:         filepath.Base(s.SlotDir),
+		Started:      started,
+		Finished:     started,
+		Result:       ResultFailure,
+		Failure:      &Failure{State: "?", Error: "daemon died with operator credential evidence on disk"},
+		InjectedKeys: keys,
+		Artifacts:    []string{OperatorAccessFile},
+	}
 }
 
 // Prune enforces retention: keep at most keepCount cycles and remove

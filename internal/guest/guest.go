@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -38,12 +39,18 @@ func (d Dialer) WaitFor(ctx bounded.Context, addr string) (statemachine.Guest, e
 	if err != nil {
 		return nil, err
 	}
-	return &Guest{c: c}, nil
+	return &Guest{c: c, addr: addr, cfg: d.SSH, interval: d.interval()}, nil
 }
 
-// Guest is one authenticated session into a booted runner VM.
+// Guest is one authenticated session into a booted runner VM. It retains the
+// addr and sshx.Config that built its current client so it can Redial after a
+// transport death (a guest reboot mid-DEBUG, issue #39) and so HostKeys can
+// surface the pins (ADR-0013).
 type Guest struct {
-	c *sshx.Client
+	c        *sshx.Client
+	addr     string
+	cfg      sshx.Config
+	interval time.Duration
 }
 
 // The rotation scripts install the per-cycle public key and shut password
@@ -158,9 +165,11 @@ func (d Dialer) Rotate(ctx bounded.Context, addr string, g statemachine.Guest, g
 		return nil, err
 	}
 
-	// All proven; the password session has done its one job per cycle.
+	// All proven; the password session has done its one job per cycle. The new
+	// Guest retains the keyed config (Signer + pinned HostKeys) so Redial and
+	// HostKeys work against the hardened session (issue #39).
 	_ = pg.c.Close()
-	return &Guest{c: c}, nil
+	return &Guest{c: c, addr: addr, cfg: cfg, interval: d.interval()}, nil
 }
 
 // verifyPasswordAuthDead attempts password auth and requires ErrAuthRejected.
@@ -291,6 +300,125 @@ func (g *Guest) PullDiag(ctx bounded.Context) ([]byte, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// stopRunnerScript kills the runner LISTENER tree and proves it dead. Every
+// process in that tree carries "--jitconfig <blob>" in argv; the [-]-bracket
+// makes the ERE match "--jitconfig" without matching the pattern's own literal
+// text. Exit 0 = proven dead; 1 = survived SIGKILL; 2 = verification tool
+// failure. TERM→KILL at 3s, hard bound ~6s — inside secure_ssh (15s).
+//
+// Scope: the proof targets the listener (the job-eligibility surface).
+// Runner.Worker and job-step processes do not reliably carry --jitconfig and
+// may survive the pkill; a dead listener plus single-use JIT is the
+// no-new-jobs guarantee (ADR-0014). pkill/pgrep ship on both guest OSes.
+const stopRunnerScript = `PAT='[-]-jitconfig'
+alive() {
+  pgrep -f "$PAT" >/dev/null 2>&1
+  case $? in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) echo "runny: pgrep failed; cannot verify runner death" >&2; exit 2 ;;
+  esac
+}
+pkill -TERM -f "$PAT" 2>/dev/null
+i=0
+while alive; do
+  i=$((i+1))
+  [ "$i" -eq 12 ] && pkill -KILL -f "$PAT" 2>/dev/null
+  if [ "$i" -gt 24 ]; then echo "runny: runner still alive after SIGKILL" >&2; exit 1; fi
+  sleep 0.25
+done
+`
+
+// installDebugKeyScript appends one server-canonicalized authorized_keys line
+// (type+base64 only, so single-quoting is shell-safe) and greps it back to
+// prove it landed.
+const installDebugKeyScript = `set -e
+umask 077
+mkdir -p "$HOME/.ssh"
+printf '%%s\n' '%s' >> "$HOME/.ssh/authorized_keys"
+grep -qF -- '%s' "$HOME/.ssh/authorized_keys"
+`
+
+// StopRunner kills the runner listener tree and PROVES it dead (issue #39).
+// Any nonzero exit or exec error = death unproven; the caller refuses the
+// freeze/hold and fails into teardown.
+func (g *Guest) StopRunner(ctx bounded.Context) error {
+	out, code, err := g.c.Output(ctx, stopRunnerScript)
+	if err != nil {
+		return fmt.Errorf("stopping runner: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("stopping runner: kill unproven (exit %d): %s", code, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// InstallAuthorizedKey appends one authorized_keys line and proves it landed
+// (issue #39). line must be a server-canonicalized "type base64" form. A
+// session-open failure (the command provably never reached the guest) is
+// translated to statemachine.ErrGuestUnreachable; everything past session-open
+// stays ambiguous.
+func (g *Guest) InstallAuthorizedKey(ctx bounded.Context, line string) error {
+	// Dial a fresh, short-lived connection for the install — never the
+	// supervision client g.c. During a mid-job injection g.c carries the live
+	// runner Proc, and newSession sets a deadline on the SHARED net.Conn, which
+	// would fire on the runner's idle read and tear the job's connection down
+	// (worst in the stuck-job case this feature targets). A separate conn keeps
+	// the install's deadline on its own socket. Same per-cycle credentials and
+	// host pins (g.cfg) the Rotate/Redial reconnects already use; a dial failure
+	// is "provably never reached the guest" → ErrGuestUnreachable.
+	c, err := sshx.WaitFor(ctx, g.addr, g.cfg, g.interval)
+	if err != nil {
+		return fmt.Errorf("installing debug key: %w: %w", statemachine.ErrGuestUnreachable, err)
+	}
+	defer func() { _ = c.Close() }()
+	script := fmt.Sprintf(installDebugKeyScript, line, line)
+	out, code, err := c.Output(ctx, script)
+	if err != nil {
+		if errors.Is(err, sshx.ErrSessionOpen) {
+			return fmt.Errorf("installing debug key: %w: %w", statemachine.ErrGuestUnreachable, err)
+		}
+		return fmt.Errorf("installing debug key: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("installing debug key: read-back failed (exit %d): %s", code, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// HostKeys returns the guest's pinned host keys in known_hosts form (issue
+// #39): "<addr-host> <type> <base64>". Empty when the guest is unhardened
+// (ssh_hardening: off, no pins captured).
+func (g *Guest) HostKeys() []string {
+	if len(g.cfg.HostKeys) == 0 {
+		return nil
+	}
+	host := g.addr
+	if h, _, err := net.SplitHostPort(g.addr); err == nil {
+		host = h
+	}
+	out := make([]string, 0, len(g.cfg.HostKeys))
+	for _, k := range g.cfg.HostKeys {
+		line := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(k)))
+		out = append(out, host+" "+line)
+	}
+	return out
+}
+
+// Redial re-establishes the session after a transport death (a guest reboot
+// mid-DEBUG, issue #39), reusing the retained config (Signer + pinned host
+// keys). NEVER called during JOB (decision 18). The old client is best-effort
+// closed; on success the client is swapped.
+func (g *Guest) Redial(ctx bounded.Context) error {
+	c, err := sshx.WaitFor(ctx, g.addr, g.cfg, g.interval)
+	if err != nil {
+		return fmt.Errorf("redial: %w", err)
+	}
+	_ = g.c.Close()
+	g.c = c
+	return nil
 }
 
 func (g *Guest) Close() error { return g.c.Close() }

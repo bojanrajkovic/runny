@@ -31,6 +31,16 @@ import (
 // flipped config takes effect.
 var ErrAuthRejected = errors.New("ssh auth rejected")
 
+// ErrSessionOpen marks a failure to open a session channel — the exec never
+// started, so no command bytes reached the guest. It distinguishes "the
+// transport is down" (the channel-open await timed out or the connection
+// dropped) from "the command ran and failed". internal/guest translates only
+// this into statemachine.ErrGuestUnreachable: a mid-job injection that fails
+// at session-open provably never touched the guest, so the job is untouched
+// and the slot is not redialed (decision 18). Everything past session-open
+// stays ambiguous.
+var ErrSessionOpen = errors.New("ssh session open failed")
+
 // Config carries guest credentials and the per-attempt budget.
 type Config struct {
 	User     string
@@ -192,7 +202,10 @@ func (c *Client) newSession() (*ssh.Session, error) {
 func (c *Client) Output(ctx bounded.Context, cmd string) ([]byte, int, error) {
 	sess, err := c.newSession()
 	if err != nil {
-		return nil, -1, fmt.Errorf("ssh session: %w", err)
+		// Session-open failed: the exec never started, so no bytes reached the
+		// guest. Mark it ErrSessionOpen so a caller mid-job can tell "provably
+		// never sent" from "ran and failed" (decision 18).
+		return nil, -1, fmt.Errorf("ssh session: %w: %w", ErrSessionOpen, err)
 	}
 
 	type result struct {

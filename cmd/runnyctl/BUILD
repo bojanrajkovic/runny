@@ -16,13 +16,8 @@ go_library(
         "@org_golang_google_grpc//credentials/insecure",
         "@org_golang_google_protobuf//encoding/protojson",
         "@org_golang_google_protobuf//proto",
+        "@org_golang_google_protobuf//types/known/durationpb",
     ],
-)
-
-stamped_go_binary(
-    name = "runnyctl",
-    embed = [":runnyctl_lib"],
-    visibility = ["//visibility:public"],
 )
 
 codesign_binary(
@@ -46,4 +41,10 @@ go_test(
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_protobuf//types/known/timestamppb",
     ],
+)
+
+stamped_go_binary(
+    name = "runnyctl",
+    embed = [":runnyctl_lib"],
+    visibility = ["//visibility:public"],
 )

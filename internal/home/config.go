@@ -127,6 +127,13 @@ type Limits struct {
 	BackoffCap  Duration `yaml:"backoff_cap"`
 	// ReconcileInterval is the LISTENING-state GitHub registration check.
 	ReconcileInterval Duration `yaml:"reconcile_interval"`
+	// MaxDebugHold is the default and the cap for a DEBUG hold (runnyctl
+	// debug -hold): the auto-release backstop for a forgotten held guest,
+	// which occupies a macOS guest-cap slot. For a mid-job injection the
+	// clock starts when the job ends, so worst-case slot occupancy is
+	// max_job_duration + max_debug_hold. Out-of-range (negative, over-cap)
+	// are rejected, not clamped; zero means "default".
+	MaxDebugHold Duration `yaml:"max_debug_hold"`
 }
 
 type Retention struct {
@@ -249,6 +256,7 @@ func (c *Config) applyDefaults() {
 	def(&c.Limits.BackoffBase, 5*time.Second)
 	def(&c.Limits.BackoffCap, 5*time.Minute)
 	def(&c.Limits.ReconcileInterval, 60*time.Second)
+	def(&c.Limits.MaxDebugHold, 2*time.Hour)
 	if c.Retention.CyclesPerSlot == 0 {
 		c.Retention.CyclesPerSlot = 50
 	}
@@ -321,6 +329,7 @@ func (c *Config) validate() error {
 		"limits.backoff_base":       c.Limits.BackoffBase,
 		"limits.backoff_cap":        c.Limits.BackoffCap,
 		"limits.reconcile_interval": c.Limits.ReconcileInterval,
+		"limits.max_debug_hold":     c.Limits.MaxDebugHold,
 		"retention.max_age":         c.Retention.MaxAge,
 	} {
 		if d <= 0 {

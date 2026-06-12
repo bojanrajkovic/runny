@@ -455,8 +455,19 @@ func (c *ctl) debug(ctx context.Context, slot, pubkeyFile string, hold time.Dura
 		return fmt.Errorf("reading %s: %w", pubkeyFile, err)
 	}
 
-	// Client deadline = the daemon's handler wait (125s) + 10s slack.
-	dctx, cancel := context.WithTimeout(ctx, 135*time.Second)
+	// The client deadline MUST outlast the daemon's handler wait, which is
+	// config-derived (reconcile_interval + secure_ssh). A hardcoded value
+	// shorter than it makes the daemon outlive the client: the operator is told
+	// "nothing injected" while the FSM installs the key. Read the daemon's own
+	// computed wait from GetStatus and add slack; fall back to a generous
+	// default only when talking to a daemon that predates the field.
+	clientWait := 135 * time.Second
+	if st, err := c.client.GetStatus(ctx, &runnyv1.GetStatusRequest{}); err == nil {
+		if w := st.GetInjectHandlerWait().AsDuration(); w > 0 {
+			clientWait = w + 10*time.Second
+		}
+	}
+	dctx, cancel := context.WithTimeout(ctx, clientWait)
 	defer cancel()
 	req := &runnyv1.InjectDebugKeyRequest{
 		Slot: slot, PublicKey: string(keyBytes), Reason: reason,

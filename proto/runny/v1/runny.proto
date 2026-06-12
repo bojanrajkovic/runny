@@ -141,6 +141,13 @@ message GetStatusResponse {
   // hold annotation when the exit gate is refusing to exit onto a config
   // that no longer parses.
   string draining = 4;
+  // The daemon's worst-case synchronous wait for an InjectDebugKey call,
+  // derived from config (reconcile_interval + secure_ssh). A client issuing
+  // `debug` must set its own deadline to at least this — otherwise on a host
+  // with raised deadlines the daemon outlives the client, and the operator is
+  // told "nothing was injected" while the key is actually installed. Zero from
+  // a daemon that predates this field; clients fall back to a built-in default.
+  google.protobuf.Duration inject_handler_wait = 5;
 }
 
 message WatchStatusRequest {}

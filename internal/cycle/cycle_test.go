@@ -28,7 +28,7 @@ func TestWriteAndRecent(t *testing.T) {
 			t.Fatalf("Write: %v", err)
 		}
 	}
-	recs, err := s.Recent(2)
+	recs, err := s.Recent(2, "")
 	if err != nil {
 		t.Fatalf("Recent: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestWriteAndRecent(t *testing.T) {
 
 func TestRecentEmptySlot(t *testing.T) {
 	s := Store{SlotDir: filepath.Join(t.TempDir(), "never-ran")}
-	recs, err := s.Recent(5)
+	recs, err := s.Recent(5, "")
 	if err != nil || recs != nil {
 		t.Errorf("want nil, nil for missing dir; got %v, %v", recs, err)
 	}
@@ -57,7 +57,7 @@ func TestPruneByCount(t *testing.T) {
 	if err := s.Prune(2, 0, base.Add(time.Hour)); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	recs, _ := s.Recent(0)
+	recs, _ := s.Recent(0, "")
 	if len(recs) != 2 {
 		t.Errorf("after prune: %d records, want 2", len(recs))
 	}
@@ -72,7 +72,7 @@ func TestPruneByAge(t *testing.T) {
 	if err := s.Prune(0, 7*24*time.Hour, fresh.Add(time.Hour)); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	recs, _ := s.Recent(0)
+	recs, _ := s.Recent(0, "")
 	if len(recs) != 1 || recs[0].CycleID != "fresh001" {
 		t.Errorf("age prune kept wrong set: %+v", recs)
 	}
@@ -89,7 +89,7 @@ func TestInjectedKeysRoundTrip(t *testing.T) {
 	if err := s.Write(rec); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	recs, err := s.Recent(1)
+	recs, err := s.Recent(1, "")
 	if err != nil || len(recs) != 1 {
 		t.Fatalf("Recent: %v, %d", err, len(recs))
 	}
@@ -114,7 +114,7 @@ func TestOldCycleJSONLoads(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "cycle.json"), []byte(old), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	recs, err := s.Recent(1)
+	recs, err := s.Recent(1, "")
 	if err != nil || len(recs) != 1 {
 		t.Fatalf("Recent: %v, %d", err, len(recs))
 	}
@@ -170,7 +170,7 @@ func TestRecentSynthesizesOrphanedSidecar(t *testing.T) {
 	}
 	// Remove the cycle.json the orphan dir would have (WriteArtifact created
 	// only the dir + sidecar; no cycle.json was written for the orphan).
-	recs, err := s.Recent(0)
+	recs, err := s.Recent(0, "")
 	if err != nil {
 		t.Fatalf("Recent: %v", err)
 	}
@@ -190,6 +190,27 @@ func TestRecentSynthesizesOrphanedSidecar(t *testing.T) {
 	}
 }
 
+// A live in-progress cycle has a write-ahead sidecar but no cycle.json yet
+// (it lands at finishCycle) — it must NOT be synthesized as a phantom orphan
+// failure. Passing its CycleID as the live cycle suppresses the stub; the same
+// dir surfaces as an orphan only once it is no longer live (a crash).
+func TestRecentSuppressesLiveCycleOrphan(t *testing.T) {
+	s := Store{SlotDir: filepath.Join(t.TempDir(), "runner-1")}
+	base := time.Date(2026, 6, 9, 22, 0, 0, 0, time.UTC)
+	live := record("runner-1", "live0001", base, ResultFailure)
+	keys := []InjectedKey{{Fingerprint: "SHA256:abc", Injected: base, Outcome: "armed", State: "JOB"}}
+	data, _ := json.Marshal(keys)
+	if err := s.WriteArtifact(live, OperatorAccessFile, data); err != nil {
+		t.Fatal(err)
+	}
+	if recs, err := s.Recent(0, "live0001"); err != nil || len(recs) != 0 {
+		t.Errorf("live cycle synthesized as an orphan: recs=%+v err=%v", recs, err)
+	}
+	if recs, _ := s.Recent(0, ""); len(recs) != 1 {
+		t.Errorf("crashed orphan (no live cycle) should surface: recs=%+v", recs)
+	}
+}
+
 func TestPruneAgesOrphanedSidecar(t *testing.T) {
 	// The §9 bound: Recent surfaces an orphaned sidecar, but Prune still ages
 	// it under normal retention (an interrupted attempt is not kept forever).
@@ -204,7 +225,7 @@ func TestPruneAgesOrphanedSidecar(t *testing.T) {
 	if err := s.Prune(0, 7*24*time.Hour, fresh); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	recs, _ := s.Recent(0)
+	recs, _ := s.Recent(0, "")
 	if len(recs) != 0 {
 		t.Errorf("aged orphan still present: %+v", recs)
 	}

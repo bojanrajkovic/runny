@@ -947,7 +947,12 @@ func (s *Slot) runJob(ctx context.Context, rec *cycle.Record, proc Proc, guest G
 		holdState, holdErr := s.enterPostJobDebug(ctx, rec, proc, guest, arm)
 		if !jobOK {
 			// The job's failure owns the cycle (§8): the DEBUG StateRecord is
-			// on the record, but the failure is the job's.
+			// on the record, but the failure is the job's. A failed post-job
+			// hold (unproven kill) is recorded in the audit trail; surface it
+			// to the daemon log too, since the cycle's failure is the job's.
+			if holdErr != nil {
+				s.deps.Log.Warn("post-job debug hold failed on a job that also failed; job error owns the cycle, hold failure is in the audit trail", "hold_err", holdErr)
+			}
 			return true, StateJob, jobErr
 		}
 		return true, holdState, holdErr
@@ -1349,6 +1354,10 @@ func (s *Slot) enterPostJobDebug(ctx context.Context, rec *cycle.Record, proc Pr
 			Error: "post-job kill unproven: " + err.Error(),
 		})
 		_ = s.writeAuditSidecar(rec)
+		// The hold is NOT entered — an unproven kill must not hold a
+		// job-eligible guest. Clear the armed status now so DebugHoldArmed can't
+		// linger into teardown.
+		s.clearArmedStatus(arm, "post-job kill unproven; tearing down")
 		return StateDebug, fmt.Errorf("debug hold entry: %w", errDebugInjectFailed)
 	}
 

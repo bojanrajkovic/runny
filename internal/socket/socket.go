@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/bojanrajkovic/runny/internal/cycle"
@@ -161,10 +162,28 @@ func (s *Server) snapshot() *runnyv1.GetStatusResponse {
 		Version:       s.Version,
 		Draining:      s.draining(),
 	}
+	// The config-derived InjectDebugKey wait, so `runnyctl debug` can size its
+	// client deadline to outlast the daemon (else a timeout lies — see #0).
+	if s.Config != nil {
+		_, handlerWait := s.injectBounds()
+		resp.InjectHandlerWait = durationpb.New(handlerWait)
+	}
 	for _, slot := range s.Slots {
 		resp.Slots = append(resp.Slots, statusToProto(slot.Status()))
 	}
 	return resp
+}
+
+// injectBounds derives the InjectDebugKey timing from config: queueBound is the
+// FSM's worst-case dequeue latency (one in-flight reconcile), handlerWait the
+// daemon's total synchronous wait (dequeue + per-command work + slack). Exposed
+// on GetStatus so a client waits at least handlerWait — a shorter client
+// deadline on a host with raised reconcile_interval/secure_ssh makes the daemon
+// outlive the client and report "nothing injected" while the key installs.
+func (s *Server) injectBounds() (queueBound, handlerWait time.Duration) {
+	queueBound = s.Config.Limits.ReconcileInterval.D() + 5*time.Second
+	serviceBound := 3*s.Config.Deadlines.SecureSSH.D() + 10*time.Second
+	return queueBound, queueBound + serviceBound + 5*time.Second
 }
 
 func (s *Server) GetStatus(ctx context.Context, _ *runnyv1.GetStatusRequest) (*runnyv1.GetStatusResponse, error) {
@@ -409,7 +428,7 @@ func (s *Server) Why(ctx context.Context, req *runnyv1.WhyRequest) (*runnyv1.Why
 	}
 	// The store is keyed by the RESOLVED slot name: req may carry a runner
 	// name, which as a store key would silently read an empty directory.
-	recs, err := s.Stores(slot.Name()).Recent(n)
+	recs, err := s.Stores(slot.Name()).Recent(n, slot.Status().CycleID)
 	if err != nil {
 		return nil, err
 	}
@@ -463,8 +482,7 @@ func (s *Server) InjectDebugKey(ctx context.Context, req *runnyv1.InjectDebugKey
 	// reach a guest shell.
 	line := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub)))
 	fp := ssh.FingerprintSHA256(pub)
-	queueBound := s.Config.Limits.ReconcileInterval.D() + 5*time.Second
-	serviceBound := 3*s.Config.Deadlines.SecureSSH.D() + 10*time.Second
+	queueBound, handlerWait := s.injectBounds()
 
 	reply := make(chan statemachine.DebugKeyReply, 1)
 	if !slot.Command(statemachine.Command{
@@ -479,7 +497,7 @@ func (s *Server) InjectDebugKey(ctx context.Context, req *runnyv1.InjectDebugKey
 	select {
 	case <-ctx.Done():
 		return nil, status.FromContextError(ctx.Err()).Err()
-	case <-time.After(queueBound + serviceBound + 5*time.Second):
+	case <-time.After(handlerWait):
 		return nil, status.Error(codes.DeadlineExceeded,
 			"no response from the slot; nothing was injected and this request has expired — re-run debug")
 	case r := <-reply:

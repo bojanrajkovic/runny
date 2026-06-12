@@ -504,7 +504,7 @@ func (h *harness) waitState(t *testing.T, want State) Status {
 
 func (h *harness) records(t *testing.T) []*cycle.Record {
 	t.Helper()
-	recs, err := cycle.Store{SlotDir: h.dir.SlotCyclesDir("runner-1")}.Recent(0)
+	recs, err := cycle.Store{SlotDir: h.dir.SlotCyclesDir("runner-1")}.Recent(0, "")
 	if err != nil {
 		t.Fatal(err)
 	}

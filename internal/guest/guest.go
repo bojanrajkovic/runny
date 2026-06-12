@@ -361,8 +361,21 @@ func (g *Guest) StopRunner(ctx bounded.Context) error {
 // translated to statemachine.ErrGuestUnreachable; everything past session-open
 // stays ambiguous.
 func (g *Guest) InstallAuthorizedKey(ctx bounded.Context, line string) error {
+	// Dial a fresh, short-lived connection for the install — never the
+	// supervision client g.c. During a mid-job injection g.c carries the live
+	// runner Proc, and newSession sets a deadline on the SHARED net.Conn, which
+	// would fire on the runner's idle read and tear the job's connection down
+	// (worst in the stuck-job case this feature targets). A separate conn keeps
+	// the install's deadline on its own socket. Same per-cycle credentials and
+	// host pins (g.cfg) the Rotate/Redial reconnects already use; a dial failure
+	// is "provably never reached the guest" → ErrGuestUnreachable.
+	c, err := sshx.WaitFor(ctx, g.addr, g.cfg, g.interval)
+	if err != nil {
+		return fmt.Errorf("installing debug key: %w: %w", statemachine.ErrGuestUnreachable, err)
+	}
+	defer func() { _ = c.Close() }()
 	script := fmt.Sprintf(installDebugKeyScript, line, line)
-	out, code, err := g.c.Output(ctx, script)
+	out, code, err := c.Output(ctx, script)
 	if err != nil {
 		if errors.Is(err, sshx.ErrSessionOpen) {
 			return fmt.Errorf("installing debug key: %w: %w", statemachine.ErrGuestUnreachable, err)

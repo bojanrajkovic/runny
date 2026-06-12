@@ -182,7 +182,10 @@ func (s Store) WriteArtifact(r *Record, name string, data []byte) error {
 // crash mid-attempt or mid-hold, issue #39) is surfaced as a synthesized stub
 // record so the orphaned credential evidence appears in `runnyctl why`
 // instead of only sitting on disk until retention deletes it unseen.
-func (s Store) Recent(n int) ([]*Record, error) {
+// liveCycleID is the slot's currently-running cycle (empty if none): its
+// cycle.json is not written until the cycle ends, so without this it would be
+// synthesized as a phantom orphan-failure on every healthy in-progress cycle.
+func (s Store) Recent(n int, liveCycleID string) ([]*Record, error) {
 	entries, err := os.ReadDir(s.SlotDir)
 	if os.IsNotExist(err) {
 		return nil, nil
@@ -206,7 +209,10 @@ func (s Store) Recent(n int) ([]*Record, error) {
 		dir := filepath.Join(s.SlotDir, name)
 		raw, err := os.ReadFile(filepath.Join(dir, "cycle.json"))
 		if err != nil {
-			if stub := s.synthesizeOrphan(dir); stub != nil {
+			// A live cycle has no cycle.json yet (it lands at finishCycle) but
+			// may already carry a write-ahead sidecar; that is an in-progress
+			// cycle, not a crash-orphan, so never synthesize a failure for it.
+			if stub := s.synthesizeOrphan(dir); stub != nil && stub.CycleID != liveCycleID {
 				recs = append(recs, stub)
 			}
 			continue // half-written or foreign dir; skip rather than fail Why

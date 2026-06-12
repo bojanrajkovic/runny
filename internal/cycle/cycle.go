@@ -47,14 +47,14 @@ type Record struct {
 	// this cycle (e.g. "actions-runner-osx-arm64-2.320.0.tar.gz"); empty when
 	// the runner tarball step was skipped (no Runner configured) or the cycle
 	// failed before ENSURE_IMAGE completed.
-	RunnerVersion string `json:"runner_version,omitempty"`
-	Started     time.Time     `json:"started"`
-	Finished    time.Time     `json:"finished"`
-	Result      Result        `json:"result"`
-	States      []StateRecord `json:"states"`
-	VM          VMInfo        `json:"vm,omitzero"`
-	Job         *JobInfo      `json:"job,omitempty"`
-	Failure     *Failure      `json:"failure,omitempty"`
+	RunnerVersion string        `json:"runner_version,omitempty"`
+	Started       time.Time     `json:"started"`
+	Finished      time.Time     `json:"finished"`
+	Result        Result        `json:"result"`
+	States        []StateRecord `json:"states"`
+	VM            VMInfo        `json:"vm,omitzero"`
+	Job           *JobInfo      `json:"job,omitempty"`
+	Failure       *Failure      `json:"failure,omitempty"`
 	// Artifacts are file names retained next to cycle.json (failure cycles).
 	Artifacts []string `json:"artifacts,omitempty"`
 	// InjectedKeys is the operator debug-key audit trail for this cycle: one

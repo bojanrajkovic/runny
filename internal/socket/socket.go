@@ -568,16 +568,16 @@ func statusToProto(st statemachine.Status) *runnyv1.SlotStatus {
 
 func recordToProto(r *cycle.Record) *runnyv1.CycleRecord {
 	out := &runnyv1.CycleRecord{
-		CycleId:     r.CycleID,
-		Slot:        r.Slot,
+		CycleId:       r.CycleID,
+		Slot:          r.Slot,
 		Image:         r.Image,
 		ImageDigest:   r.ImageDigest,
 		RunnerVersion: r.RunnerVersion,
-		Started:     timestamppb.New(r.Started),
-		Finished:    timestamppb.New(r.Finished),
-		Result:      string(r.Result),
-		Vm:          &runnyv1.VMInfo{Mac: r.VM.MAC, Ip: r.VM.IP},
-		Artifacts:   r.Artifacts,
+		Started:       timestamppb.New(r.Started),
+		Finished:      timestamppb.New(r.Finished),
+		Result:        string(r.Result),
+		Vm:            &runnyv1.VMInfo{Mac: r.VM.MAC, Ip: r.VM.IP},
+		Artifacts:     r.Artifacts,
 	}
 	for _, sr := range r.States {
 		out.States = append(out.States, &runnyv1.StateRecord{

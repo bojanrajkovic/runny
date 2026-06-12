@@ -6,6 +6,7 @@ package statemachine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -38,6 +39,7 @@ const (
 	StateListening   State = "LISTENING"
 	StateJob         State = "JOB"
 	StateTeardown    State = "TEARDOWN"
+	StateDebug       State = "DEBUG"
 )
 
 // States lists every State the FSM can report. The proto-mapping
@@ -46,7 +48,7 @@ const (
 var States = []State{
 	StateBackoff, StateEnsureImage, StateClone, StateBoot, StateAwaitIP,
 	StateAwaitSSH, StateSecureSSH, StateMintJIT, StateProvision,
-	StateListening, StateJob, StateTeardown,
+	StateListening, StateJob, StateTeardown, StateDebug,
 }
 
 // Runner-output markers (the actions runner's run.sh wording).
@@ -60,6 +62,23 @@ const (
 // Cycles it ends are recorded as failures (the timeline is truthful) but are
 // benign for backoff accounting: an operator action is not a health signal.
 var errOperatorRecycle = errors.New("recycled by operator")
+
+// Debug-key injection sentinels (issue #39).
+var (
+	// errDebugExpired: a DEBUG hold ran out — benign for backoff.
+	errDebugExpired = errors.New("debug hold expired")
+	// errDebugRacedJob: a job was assigned during the LISTENING freeze and
+	// died with the verified kill — benign, operator-caused.
+	errDebugRacedJob = errors.New("job raced the debug freeze")
+	// errDebugInjectFailed: a freeze or hold-entry touched the guest and
+	// failed, or death could not be proven — this counts toward the streak.
+	errDebugInjectFailed = errors.New("debug key injection failed")
+	// ErrGuestUnreachable: the guest seam proved the command never reached
+	// the guest (a session-open failure). internal/guest wraps sshx's
+	// ErrSessionOpen with it; mid-job, it means "nothing was sent" so the job
+	// is untouched and the slot is not redialed (decision 18).
+	ErrGuestUnreachable = errors.New("guest unreachable")
+)
 
 // ImageEnsurer makes sure the configured image is cached locally and returns
 // its digest and bundle dir (ENSURE_IMAGE's work). report receives live
@@ -100,6 +119,21 @@ type Guest interface {
 	StartRunner(ctx context.Context, jit, goos string) (Proc, error)
 	// PullDiag fetches the tail of the runner's _diag logs (post-mortem).
 	PullDiag(ctx bounded.Context) ([]byte, error)
+	// StopRunner kills the runner listener tree and PROVES it dead (a pgrep
+	// read-back loop). Any nonzero exit or exec error = death unproven, and
+	// the caller refuses the freeze/hold (issue #39, decision 2).
+	StopRunner(ctx bounded.Context) error
+	// InstallAuthorizedKey appends one authorized_keys line and proves it
+	// landed (a grep read-back). A session-open failure is wrapped with
+	// ErrGuestUnreachable (the command provably never reached the guest).
+	InstallAuthorizedKey(ctx bounded.Context, line string) error
+	// HostKeys returns the pinned guest host keys in known_hosts form; empty
+	// when the guest is unhardened (ssh_hardening: off, ADR-0013).
+	HostKeys() []string
+	// Redial re-establishes the session after transport death (a guest
+	// reboot). NEVER called during JOB — it closes the client carrying the
+	// running proc (decision 18).
+	Redial(ctx bounded.Context) error
 	Close() error
 }
 
@@ -145,6 +179,20 @@ type Deps struct {
 type Command struct {
 	Kind   CommandKind
 	Reason string
+	// CancelJob applies to CmdRecycle only: consent to cancel a RUNNING job
+	// (decision 14). runnyctl sets it via its -force guard after observing
+	// JOB. Without it, a mid-job recycle disarms any debug hold and the job
+	// runs to its normal end.
+	CancelJob bool
+	// The fields below apply to CmdDebugKey only (issue #39).
+	PubKey      string             // canonical authorized_keys line (re-marshaled, shell-safe)
+	Fingerprint string             // SHA256:… (computed server-side)
+	Comment     string             // submitted key's comment, audit only — never reaches the guest
+	Hold        time.Duration      // validated server-side; <=0 never reaches the FSM
+	CycleID     string             // the cycle the operator saw; consumers reject a mismatch
+	SeenState   State              // the state the operator saw (consent pin, decision 15)
+	Expires     time.Time          // enqueue + queueBound; consumers reject a late dequeue
+	Reply       chan DebugKeyReply // buffered 1; replied via select/default
 }
 
 type CommandKind int
@@ -153,7 +201,31 @@ const (
 	CmdRecycle CommandKind = iota
 	CmdPause
 	CmdResume
+	CmdDebugKey
 )
+
+// DebugKeyReply is the synchronous answer to a CmdDebugKey, sent back over the
+// command's buffered Reply channel (issue #39).
+type DebugKeyReply struct {
+	Err       error
+	User      string
+	HostKeys  []string
+	HoldUntil time.Time // zero when Armed
+	Armed     bool      // mid-job install: key live NOW, hold starts at job end
+}
+
+// reply sends r over the command's buffered (size-1) Reply channel without
+// ever blocking: a CmdDebugKey whose handler already gave up (timeout) leaves
+// nobody reading, and the FSM goroutine must never wedge on it.
+func (c Command) reply(r DebugKeyReply) {
+	if c.Reply == nil {
+		return
+	}
+	select {
+	case c.Reply <- r:
+	default:
+	}
+}
 
 // Status is the live snapshot the control surface renders.
 type Status struct {
@@ -184,6 +256,13 @@ type Status struct {
 	// Virtualization.framework guest slot. The slot is parked; only a daemon
 	// restart (cold start) reclaims the guest (ADR-0012).
 	Wedged bool
+	// DebugHoldExpires is the auto-release deadline of a DEBUG hold; non-zero
+	// only in DEBUG, cleared the instant DEBUG is left (issue #39).
+	DebugHoldExpires time.Time
+	// DebugHoldArmed is true iff state == JOB with a debug hold currently
+	// armed: the slot will enter DEBUG (not teardown) at job end. Cleared the
+	// instant the hold is disarmed or DEBUG/TEARDOWN is entered (issue #39).
+	DebugHoldArmed bool
 }
 
 // Slot drives one runner slot's lifecycle.
@@ -266,6 +345,13 @@ func (s *Slot) setState(state State, mut func(*Status)) {
 	s.status.State = state
 	s.status.StateEntered = time.Now()
 	s.status.Detail = ""
+	// Reset block: a debug hold's status belongs to exactly one state's
+	// lifetime. Clearing both here means DebugHoldExpires/DebugHoldArmed
+	// vanish the instant DEBUG or TEARDOWN (or any other state) is entered;
+	// the mut below re-sets DebugHoldExpires when this transition IS into
+	// DEBUG (issue #39).
+	s.status.DebugHoldExpires = time.Time{}
+	s.status.DebugHoldArmed = false
 	if mut != nil {
 		mut(&s.status)
 	}
@@ -324,6 +410,22 @@ func (s *Slot) backoffWait(ctx context.Context) error {
 		st.VM = cycle.VMInfo{}
 		st.Job = nil
 	})
+	// Drain any command stranded by the previous cycle's TEARDOWN (the one
+	// consumer-less window) BEFORE arming the timer. A plain CmdRecycle left
+	// here would otherwise race a zero backoff timer and reach this cycle's
+	// runCycle watcher, canceling a healthy boot (the stale-recycle class,
+	// §0); discarding it makes "recycle a slot that no longer exists" the
+	// no-op handleIdleCommand already treats it as. A CmdDebugKey is replied
+	// "expired"; pause/resume are idempotent and applied (issue #39).
+drain:
+	for {
+		select {
+		case cmd := <-s.cmds:
+			s.handleIdleCommand(cmd)
+		default:
+			break drain
+		}
+	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	ready := false
@@ -350,6 +452,14 @@ func (s *Slot) handleIdleCommand(cmd Command) {
 		s.setPaused(false)
 	case CmdRecycle:
 		// Nothing to recycle while idle.
+	case CmdDebugKey:
+		// No guest exists in BACKOFF. An expired command (the common stranded
+		// case) reads as expired; an unexpired one as the precise reason.
+		if !cmd.Expires.IsZero() && time.Now().After(cmd.Expires) {
+			cmd.reply(DebugKeyReply{Err: errors.New("command expired; nothing was injected")})
+			return
+		}
+		cmd.reply(DebugKeyReply{Err: errors.New("no guest exists in BACKOFF; key injection needs LISTENING, JOB, or DEBUG")})
 	}
 }
 
@@ -447,6 +557,14 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 					s.setPaused(true)
 				case CmdResume:
 					s.setPaused(false)
+				case CmdDebugKey:
+					// Boot-path states have no usable hardened guest yet
+					// (issue #39): reply and do nothing.
+					if !cmd.Expires.IsZero() && time.Now().After(cmd.Expires) {
+						cmd.reply(DebugKeyReply{Err: errors.New("command expired; nothing was injected")})
+					} else {
+						cmd.reply(DebugKeyReply{Err: errors.New("slot is mid-boot; key injection needs LISTENING, JOB, or DEBUG")})
+					}
 				}
 			}
 		}
@@ -638,7 +756,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	// the cycle watcher retires first.
 	if ok {
 		stopWatcher()
-		jobRan, failState, failErr = s.listenAndRunJob(cctx, rec, proc, runnerName)
+		jobRan, failState, failErr = s.listenAndRunJob(cctx, rec, proc, guest, runnerName)
 		ok = failState == ""
 	}
 
@@ -667,6 +785,11 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 			benign = true
 		} else if errors.Is(failErr, errOperatorRecycle) || ctx.Err() != nil {
 			benign = true
+		} else if errors.Is(failErr, errDebugExpired) || errors.Is(failErr, errDebugRacedJob) {
+			// A DEBUG hold that ran out, or a job that raced the LISTENING
+			// freeze and died with the verified kill: operator-caused, not a
+			// health signal (issue #39, §5.6).
+			benign = true
 		}
 	}
 	benign = benign && !wedged
@@ -686,8 +809,9 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 }
 
 // listenAndRunJob handles LISTENING and JOB. Returns jobRan and, on failure,
-// the failing state + error (empty state = clean completion).
-func (s *Slot) listenAndRunJob(ctx context.Context, rec *cycle.Record, proc Proc, runnerName string) (bool, State, error) {
+// the failing state + error (empty state = clean completion). A DEBUG hold
+// (issue #39) is reported as a benign failure carrying StateDebug.
+func (s *Slot) listenAndRunJob(ctx context.Context, rec *cycle.Record, proc Proc, guest Guest, runnerName string) (bool, State, error) {
 	cfg := s.deps.Config
 	s.setState(StateListening, nil)
 	lrec := cycle.StateRecord{State: string(StateListening), Entered: time.Now()}
@@ -717,6 +841,23 @@ func (s *Slot) listenAndRunJob(ctx context.Context, rec *cycle.Record, proc Proc
 				s.setPaused(true) // takes effect at next BACKOFF
 			case CmdResume:
 				s.setPaused(false)
+			case CmdDebugKey:
+				// The LISTENING freeze (§5.1).
+				done, racedLine, hstate, herr := s.freezeForDebug(ctx, rec, proc, guest, cmd, finishListening)
+				switch {
+				case racedLine != "":
+					// A job started before the request was serviced: fall into
+					// the normal JOB transition with the buffered marker; the
+					// freeze left the job untouched (decision 15).
+					finishListening(cycle.OutcomeOK, "")
+					return s.runJob(ctx, rec, proc, guest, racedLine)
+				case done:
+					// The freeze committed (to DEBUG, or to a benign
+					// raced-and-killed teardown) or refused fatally.
+					return false, hstate, herr
+				}
+				// Refused without committing (audit-write failure): keep
+				// listening.
 			}
 
 		case <-maxIdle.C:
@@ -752,35 +893,79 @@ func (s *Slot) listenAndRunJob(ctx context.Context, rec *cycle.Record, proc Proc
 			if !strings.Contains(line, markerJobStarted) {
 				continue
 			}
-			// → JOB
 			finishListening(cycle.OutcomeOK, "")
-			jobName := strings.TrimSpace(line[strings.Index(line, markerJobStarted)+len(markerJobStarted):])
-			job := &cycle.JobInfo{Name: jobName, Started: time.Now()}
-			rec.Job = job
-			s.setState(StateJob, func(st *Status) { st.Job = job })
-			jrec := cycle.StateRecord{State: string(StateJob), Entered: time.Now()}
-
-			jctx, cancel := context.WithTimeout(ctx, cfg.Limits.MaxJobDuration.D())
-			ok, err := s.watchJob(jctx, proc, rec.CycleID)
-			cancel()
-			jrec.Left = time.Now()
-			if ok {
-				jrec.Outcome = cycle.OutcomeOK
-				rec.States = append(rec.States, jrec)
-				return true, "", nil
-			}
-			jrec.Outcome, jrec.Error = cycle.OutcomeError, err.Error()
-			rec.States = append(rec.States, jrec)
-			return true, StateJob, err
+			return s.runJob(ctx, rec, proc, guest, line)
 		}
 	}
 }
 
-func (s *Slot) watchJob(ctx context.Context, proc Proc, cycleID string) (bool, error) {
+// runJob drives JOB and, at job end, either tears down or enters a post-job
+// DEBUG hold (issue #39). markerLine is the "Running job:" line. ctx is the
+// CYCLE context (cctx): the job budget bounds only watchJob's jctx, never the
+// operator's mid-job work (§3).
+func (s *Slot) runJob(ctx context.Context, rec *cycle.Record, proc Proc, guest Guest, markerLine string) (bool, State, error) {
+	cfg := s.deps.Config
+	jobName := strings.TrimSpace(markerLine[strings.Index(markerLine, markerJobStarted)+len(markerJobStarted):])
+	job := &cycle.JobInfo{Name: jobName, Started: time.Now()}
+	rec.Job = job
+	s.setState(StateJob, func(st *Status) { st.Job = job })
+	jrec := cycle.StateRecord{State: string(StateJob), Entered: time.Now()}
+
+	arm := &debugArm{}
+	jctx, jcancel := context.WithTimeout(ctx, cfg.Limits.MaxJobDuration.D())
+	jobOK, jobErr := s.watchJob(jctx, ctx, rec, proc, guest, arm)
+	jcancel()
+	jrec.Left = time.Now()
+	if jobOK {
+		jrec.Outcome = cycle.OutcomeOK
+	} else {
+		jrec.Outcome, jrec.Error = cycle.OutcomeError, jobErr.Error()
+	}
+	rec.States = append(rec.States, jrec)
+
+	switch {
+	case !arm.armed:
+		// Never armed, or disarmed mid-job: today's returns, verbatim.
+	case errors.Is(jobErr, errOperatorRecycle):
+		// Cancel consent killed the job: recycle means destroy, hold included.
+		s.auditDisarm(rec, "operator recycle canceled the job", slog.LevelInfo)
+	case ctx.Err() != nil:
+		// Daemon shutdown / cycle cancel: a hold would record a fake DEBUG
+		// window.
+		s.auditDisarm(rec, "daemon shutdown", slog.LevelInfo)
+	case s.isPaused():
+		// Decision 19 backstop (a re-arm after pause's disarm, or pause racing
+		// the very last loop iteration): pause wins.
+		s.auditDisarm(rec, "slot paused", slog.LevelError)
+	default:
+		holdState, holdErr := s.enterPostJobDebug(ctx, rec, proc, guest, arm)
+		if !jobOK {
+			// The job's failure owns the cycle (§8): the DEBUG StateRecord is
+			// on the record, but the failure is the job's.
+			return true, StateJob, jobErr
+		}
+		return true, holdState, holdErr
+	}
+
+	if jobOK {
+		return true, "", nil
+	}
+	return true, StateJob, jobErr
+}
+
+func (s *Slot) watchJob(jctx, cctx context.Context, rec *cycle.Record, proc Proc, guest Guest, arm *debugArm) (bool, error) {
 	for {
 		select {
-		case <-ctx.Done():
-			return false, fmt.Errorf("job exceeded budget: %w", context.Cause(ctx))
+		case <-jctx.Done():
+			// Budget expiry OR daemon shutdown (cctx). Drain-check FIRST
+			// (closes the ~20s coin-flip window, §3): a completion marker or
+			// channel-close buffered in Lines means the job COMPLETED near the
+			// boundary, not a budget blowout.
+			if done, ok := s.drainForCompletion(proc, rec.CycleID); done {
+				return ok, nil
+			}
+			return false, fmt.Errorf("job exceeded budget: %w", context.Cause(jctx))
+
 		case line, open := <-proc.Lines():
 			if !open {
 				// Ephemeral runners exit right after the job; treat exit
@@ -792,12 +977,565 @@ func (s *Slot) watchJob(ctx context.Context, proc Proc, cycleID string) (bool, e
 				}
 				return false, fmt.Errorf("runner exited mid-job (code %d)", code)
 			}
-			s.emitRunnerLine(cycleID, line)
+			s.emitRunnerLine(rec.CycleID, line)
 			if strings.Contains(line, markerJobCompleted) {
 				return true, nil
 			}
+
+		case cmd := <-s.cmds:
+			switch cmd.Kind {
+			case CmdPause:
+				s.setPaused(true)
+				if arm.armed { // disarm NOW + audit + clear status (decision 19)
+					s.auditDisarm(rec, "slot paused", slog.LevelError)
+					s.clearArmedStatus(arm, jobDetail(rec))
+				}
+			case CmdResume:
+				s.setPaused(false)
+			case CmdRecycle:
+				if cmd.CancelJob {
+					return false, fmt.Errorf("%w: %s (running job canceled)", errOperatorRecycle, cmd.Reason)
+				}
+				if arm.armed { // plain recycle disarms + audit + clear status (§0)
+					s.auditDisarm(rec, "recycled without cancel consent", slog.LevelWarn)
+					s.clearArmedStatus(arm, jobDetail(rec))
+				}
+			case CmdDebugKey:
+				s.midJobInject(cctx, rec, guest, arm, cmd)
+			}
 		}
 	}
+}
+
+// ---- debug-key injection (issue #39) ---------------------------------------
+
+// armedKey records ONE mid-job install attempt and whether it provably landed
+// (grep read-back ok). The `landed` bit is load-bearing: a retry of the same
+// fingerprint after an AMBIGUOUS error must NOT take the exec-free re-arm path
+// (decision 18's "an errored attempt never arms"). A naive []string would
+// conflate landed and errored installs.
+type armedKey struct {
+	fingerprint string
+	landed      bool // true iff InstallAuthorizedKey returned nil (read-back proven)
+}
+
+// debugArm is the per-cycle armed-hold state, owned by the FSM goroutine
+// (never escapes runJob/watchJob; no locking). In-memory only.
+type debugArm struct {
+	armed bool
+	hold  time.Duration // latest command wins
+	keys  []armedKey    // attempted this job, with per-attempt landed outcome
+}
+
+func (a *debugArm) landed(fp string) bool {
+	for _, k := range a.keys {
+		if k.fingerprint == fp && k.landed {
+			return true
+		}
+	}
+	return false
+}
+
+// auditState writes the cycle's InjectedKeys to the operator-access.json
+// sidecar (best-effort). Called after every audit mutation so the on-disk
+// trail tracks memory; cycle.json itself lands only at finishCycle.
+func (s *Slot) writeAuditSidecar(rec *cycle.Record) error {
+	data, err := json.MarshalIndent(rec.InjectedKeys, "", "  ")
+	if err != nil {
+		return err
+	}
+	store := cycle.Store{SlotDir: s.deps.Home.SlotCyclesDir(s.name)}
+	return store.WriteArtifact(rec, cycle.OperatorAccessFile, data)
+}
+
+// appendPending appends a write-AHEAD "pending" audit entry and atomically
+// writes the sidecar BEFORE any byte reaches the guest. The returned index
+// addresses the entry for later updates. On write failure it removes the
+// entry and returns ok=false: "no audit, no injection" (decision 4).
+func (s *Slot) appendPending(rec *cycle.Record, cmd Command, state State) (int, bool) {
+	rec.InjectedKeys = append(rec.InjectedKeys, cycle.InjectedKey{
+		Fingerprint: cmd.Fingerprint,
+		Comment:     cmd.Comment,
+		Injected:    time.Now(),
+		Reason:      cmd.Reason,
+		Outcome:     "pending",
+		State:       string(state),
+	})
+	idx := len(rec.InjectedKeys) - 1
+	if err := s.writeAuditSidecar(rec); err != nil {
+		rec.InjectedKeys = rec.InjectedKeys[:idx]
+		s.deps.Log.Error("debug: write-ahead audit failed; injection refused", "err", err)
+		return 0, false
+	}
+	return idx, true
+}
+
+// updateAudit sets an entry's outcome/error and rewrites the sidecar
+// (best-effort; the guest already changed, so a write failure only loses the
+// on-disk copy until finishCycle rewrites from memory — decision 4).
+func (s *Slot) updateAudit(rec *cycle.Record, idx int, outcome, errStr string) {
+	rec.InjectedKeys[idx].Outcome = outcome
+	rec.InjectedKeys[idx].Error = errStr
+	if err := s.writeAuditSidecar(rec); err != nil {
+		s.deps.Log.Error("debug: post-exec audit rewrite failed", "err", err)
+	}
+}
+
+// auditDisarm appends a "disarmed" entry recording why an armed hold was
+// cancelled without DEBUG entry, and rewrites the sidecar (best-effort).
+func (s *Slot) auditDisarm(rec *cycle.Record, cause string, level slog.Level) {
+	rec.InjectedKeys = append(rec.InjectedKeys, cycle.InjectedKey{
+		Injected: time.Now(),
+		Outcome:  "disarmed",
+		Error:    cause,
+		State:    string(StateJob),
+	})
+	if err := s.writeAuditSidecar(rec); err != nil {
+		s.deps.Log.Error("debug: disarm audit rewrite failed", "err", err)
+	}
+	s.deps.Log.Log(context.Background(), level, "debug hold disarmed", "cause", cause)
+}
+
+// clearArmedStatus disarms in memory, clears Status.DebugHoldArmed, and
+// rewrites Detail to the plain JOB line — used on every mid-job disarm (plain
+// recycle, pause-while-armed). NOT setState (we are in JOB; StateEntered must
+// not move). Mirrors the locked helper that SET the flag at arm time.
+func (s *Slot) clearArmedStatus(arm *debugArm, detail string) {
+	arm.armed = false
+	s.mu.Lock()
+	s.status.DebugHoldArmed = false
+	s.status.Detail = detail
+	snap := s.status
+	fns := slices.Clone(s.onChange)
+	s.mu.Unlock()
+	s.notify(fns, snap)
+}
+
+// setArmedStatus sets Status.DebugHoldArmed and Detail at arm time (the locked
+// mutate-and-notify mirror of clearArmedStatus; NOT setState).
+func (s *Slot) setArmedStatus(detail string) {
+	s.mu.Lock()
+	s.status.DebugHoldArmed = true
+	s.status.Detail = detail
+	snap := s.status
+	fns := slices.Clone(s.onChange)
+	s.mu.Unlock()
+	s.notify(fns, snap)
+}
+
+// jobDetail is the plain JOB status line (no armed annotation).
+func jobDetail(rec *cycle.Record) string {
+	if rec.Job != nil {
+		return fmt.Sprintf("running job %q", rec.Job.Name)
+	}
+	return ""
+}
+
+// freezeForDebug runs the LISTENING freeze sequence (§5.1). Returns:
+//   - racedLine != "": a job marker was seen; the caller transitions to JOB.
+//   - done: the freeze committed (DEBUG hold entered, or a benign raced kill /
+//     fatal refusal); hstate/herr carry the cycle outcome.
+//   - neither: refused without committing (audit-write failure); keep listening.
+func (s *Slot) freezeForDebug(ctx context.Context, rec *cycle.Record, proc Proc, guest Guest, cmd Command,
+	finishListening func(cycle.Outcome, string),
+) (done bool, racedLine string, hstate State, herr error) {
+	secureSSH := s.deps.Config.Deadlines.SecureSSH.D()
+
+	// 0. Guards.
+	if !cmd.Expires.IsZero() && time.Now().After(cmd.Expires) {
+		cmd.reply(DebugKeyReply{Err: errors.New("command expired; nothing was injected")})
+		return false, "", "", nil
+	}
+	if cmd.CycleID != "" && cmd.CycleID != rec.CycleID {
+		cmd.reply(DebugKeyReply{Err: fmt.Errorf("cycle %s already ended; nothing was injected", cmd.CycleID)})
+		return false, "", "", nil
+	}
+
+	// 1. Write-ahead audit.
+	idx, ok := s.appendPending(rec, cmd, StateListening)
+	if !ok {
+		cmd.reply(DebugKeyReply{Err: errors.New("audit write failed; injection refused")})
+		return false, "", "", nil
+	}
+
+	// 2. Drain-check for a raced job marker / idle runner-exit.
+	if line, closed, marker := s.drainListeningLines(proc, rec.CycleID); marker {
+		s.updateAudit(rec, idx, "refused", "job started before service")
+		cmd.reply(DebugKeyReply{Err: errors.New(
+			"a job started before your request was serviced; nothing was injected — re-run debug to inject into the running job",
+		)})
+		return false, line, "", nil
+	} else if closed {
+		code, _ := proc.Wait()
+		s.updateAudit(rec, idx, "refused", "runner exited while idle")
+		cmd.reply(DebugKeyReply{Err: errors.New("the runner exited before the key could be installed; nothing was injected")})
+		finishListening(cycle.OutcomeError, fmt.Sprintf("runner exited (code %d) while idle", code))
+		return true, "", StateListening, fmt.Errorf("runner exited (code %d) while listening", code)
+	}
+
+	// 3. Verified kill — before install, so the operator key never coexists
+	// with a live (or ambiguously alive) runner.
+	if err := s.boundedGuest(ctx, secureSSH, guest.StopRunner); err != nil {
+		s.updateAudit(rec, idx, "error", err.Error())
+		cmd.reply(DebugKeyReply{Err: fmt.Errorf("could not verify the runner is dead; nothing was injected: %w", err)})
+		finishListening(cycle.OutcomeError, "debug freeze: runner kill unproven")
+		return true, "", StateListening, fmt.Errorf("debug freeze kill: %w", errDebugInjectFailed)
+	}
+
+	// 4. Drain Lines TO CLOSE (the process is proven dead), bounded 5s. A
+	// marker here means a job raced and died with the kill — benign.
+	if marker, closed := s.drainToClose(proc, rec.CycleID, 5*time.Second); marker {
+		rec.Job = &cycle.JobInfo{Name: "(raced the debug freeze)", Started: time.Now()}
+		s.updateAudit(rec, idx, "refused", "job raced the freeze and died with the kill")
+		cmd.reply(DebugKeyReply{Err: errors.New("a job started and was killed by the freeze; nothing was injected")})
+		finishListening(cycle.OutcomeOK, "")
+		return true, "", StateJob, fmt.Errorf("%w", errDebugRacedJob)
+	} else if !closed {
+		s.updateAudit(rec, idx, "error", "runner output did not close after kill")
+		cmd.reply(DebugKeyReply{Err: errors.New("the runner did not close after the kill; nothing was injected")})
+		finishListening(cycle.OutcomeError, "debug freeze: runner did not close")
+		return true, "", StateListening, fmt.Errorf("debug freeze drain: %w", errDebugInjectFailed)
+	}
+
+	// 5. Install.
+	if err := s.boundedGuestArg(ctx, secureSSH, cmd.PubKey, guest.InstallAuthorizedKey); err != nil {
+		s.updateAudit(rec, idx, "error", err.Error())
+		cmd.reply(DebugKeyReply{Err: fmt.Errorf("installing the key failed: %w", err)})
+		finishListening(cycle.OutcomeError, "debug freeze: key install failed")
+		return true, "", StateListening, fmt.Errorf("debug freeze install: %w", errDebugInjectFailed)
+	}
+
+	// 6. Success → DEBUG.
+	s.updateAudit(rec, idx, "ok", "")
+	holdUntil := time.Now().Add(cmd.Hold)
+	cmd.reply(DebugKeyReply{User: s.deps.Pool.SSHUser, HostKeys: guest.HostKeys(), HoldUntil: holdUntil})
+	finishListening(cycle.OutcomeOK, "")
+	st, err := s.holdForDebug(ctx, rec, guest, holdUntil)
+	return true, "", st, err
+}
+
+// midJobInject installs an operator key into a RUNNING job's guest WITHOUT
+// touching the runner, and arms a post-job DEBUG hold (§5.3). The job is never
+// frozen or killed. ctx is the CYCLE context (cctx), not jctx (§3).
+func (s *Slot) midJobInject(ctx context.Context, rec *cycle.Record, guest Guest, arm *debugArm, cmd Command) {
+	secureSSH := s.deps.Config.Deadlines.SecureSSH.D()
+	fp := cmd.Fingerprint
+
+	// 0. Guards.
+	if !cmd.Expires.IsZero() && time.Now().After(cmd.Expires) {
+		cmd.reply(DebugKeyReply{Err: errors.New("command expired; nothing was injected")})
+		return
+	}
+	if cmd.CycleID != "" && cmd.CycleID != rec.CycleID {
+		cmd.reply(DebugKeyReply{Err: fmt.Errorf("cycle %s already ended; nothing was injected", cmd.CycleID)})
+		return
+	}
+	if cmd.SeenState != StateJob {
+		// A command aimed at a LISTENING slot that raced into JOB: refuse —
+		// converting it into a mid-job injection would write contamination
+		// into a CI job's permanent record without consent (decision 15).
+		rec.InjectedKeys = append(rec.InjectedKeys, cycle.InjectedKey{
+			Fingerprint: fp, Comment: cmd.Comment, Injected: time.Now(), Reason: cmd.Reason,
+			Outcome: "refused", State: string(StateJob),
+			Error: "operator saw " + string(cmd.SeenState) + ", not JOB",
+		})
+		_ = s.writeAuditSidecar(rec)
+		cmd.reply(DebugKeyReply{Err: errors.New(
+			"a job started before your request was serviced; nothing was injected — re-run debug to inject into the running job",
+		)})
+		return
+	}
+
+	// 1. RE-ARM (exec-free) ONLY for a PROVEN-LANDED key.
+	if arm.landed(fp) {
+		arm.hold = cmd.Hold
+		rec.InjectedKeys = append(rec.InjectedKeys, cycle.InjectedKey{
+			Fingerprint: fp, Comment: cmd.Comment, Injected: time.Now(), Reason: cmd.Reason,
+			Outcome: "re-armed", State: string(StateJob),
+		})
+		_ = s.writeAuditSidecar(rec)
+		s.setArmedStatus(s.armedDetail(rec, fp))
+		cmd.reply(s.armedReply(guest))
+		return
+	}
+
+	// 2. Write-ahead audit.
+	idx, ok := s.appendPending(rec, cmd, StateJob)
+	if !ok {
+		cmd.reply(DebugKeyReply{Err: errors.New("audit write failed; injection refused")})
+		return
+	}
+
+	// 3. Install over the cycle's live session (a fresh channel; the runner
+	// proc and the job are untouched). cctx, NOT jctx (§3).
+	err := s.boundedGuestArg(ctx, secureSSH, cmd.PubKey, guest.InstallAuthorizedKey)
+	switch {
+	case err == nil:
+		// 4. Success: arm.
+		arm.armed = true
+		arm.hold = cmd.Hold
+		arm.keys = append(arm.keys, armedKey{fingerprint: fp, landed: true})
+		rec.Job.OperatorKeys = append(rec.Job.OperatorKeys, fp)
+		s.updateAudit(rec, idx, "armed", "")
+		s.setArmedStatus(s.armedDetail(rec, fp))
+		cmd.reply(s.armedReply(guest))
+	case errors.Is(err, ErrGuestUnreachable):
+		// NO Redial (decision 18); record not-landed so a retry re-proves.
+		arm.keys = append(arm.keys, armedKey{fingerprint: fp, landed: false})
+		s.updateAudit(rec, idx, "unreachable", err.Error())
+		cmd.reply(DebugKeyReply{Err: fmt.Errorf("guest session unreachable; nothing was injected and the job continues: %w", err)})
+	default:
+		// Ambiguous: the key may or may not have landed. Record contamination,
+		// do NOT arm, the job continues (decision 18).
+		arm.keys = append(arm.keys, armedKey{fingerprint: fp, landed: false})
+		rec.Job.OperatorKeys = append(rec.Job.OperatorKeys, fp)
+		s.updateAudit(rec, idx, "error", err.Error())
+		cmd.reply(DebugKeyReply{Err: fmt.Errorf("install failed (key state unknown); the job continues: %w", err)})
+	}
+}
+
+// armedReply is the mid-job armed reply: key live NOW, hold starts at job end
+// so HoldUntil is zero (decision 16). The paused-while-arming warning
+// (decision 19) is rendered by runnyctl from the slot's paused status, not
+// carried here.
+func (s *Slot) armedReply(guest Guest) DebugKeyReply {
+	return DebugKeyReply{Armed: true, User: s.deps.Pool.SSHUser, HostKeys: guest.HostKeys()}
+}
+
+// armedDetail is the JOB+armed status line.
+func (s *Slot) armedDetail(rec *cycle.Record, fp string) string {
+	return fmt.Sprintf("debug key installed (%s); holds %s at job end", fp, s.deps.Config.Limits.MaxDebugHold.D())
+}
+
+// enterPostJobDebug runs the post-job freeze tail (§5.4): verified kill, drain
+// toward close (force-close tolerated), then the DEBUG hold. The clock starts
+// at DEBUG entry (decision 16).
+func (s *Slot) enterPostJobDebug(ctx context.Context, rec *cycle.Record, proc Proc, guest Guest, arm *debugArm) (State, error) {
+	secureSSH := s.deps.Config.Deadlines.SecureSSH.D()
+
+	// 1. Verified kill, always. At job end the kill prohibition has expired.
+	if err := s.boundedGuest(ctx, secureSSH, guest.StopRunner); err != nil {
+		rec.InjectedKeys = append(rec.InjectedKeys, cycle.InjectedKey{
+			Injected: time.Now(), Outcome: "error", State: string(StateJob),
+			Error: "post-job kill unproven: " + err.Error(),
+		})
+		_ = s.writeAuditSidecar(rec)
+		return StateDebug, fmt.Errorf("debug hold entry: %w", errDebugInjectFailed)
+	}
+
+	// 2. Drain toward close, bounded 5s, force-close WITHOUT Wait on timeout
+	// (the FSM-hang fix, §5.4 step 2).
+	if _, closed := s.drainToClose(proc, rec.CycleID, 5*time.Second); !closed {
+		proc.Kill() // force-close the client-side channel; do NOT call Wait
+		s.deps.Log.Debug("debug: post-job drain did not close; force-closed, exit code unknowable")
+	}
+
+	// 3. DEBUG hold; the clock starts NOW.
+	holdUntil := time.Now().Add(arm.hold)
+	return s.holdForDebug(ctx, rec, guest, holdUntil)
+}
+
+// holdForDebug is the frozen DEBUG loop (§5.5); both entry paths share it.
+// max-idle is gone by construction; release is destruction.
+func (s *Slot) holdForDebug(ctx context.Context, rec *cycle.Record, guest Guest, holdUntil time.Time) (State, error) {
+	secureSSH := s.deps.Config.Deadlines.SecureSSH.D()
+	s.setState(StateDebug, func(st *Status) {
+		st.DebugHoldExpires = holdUntil
+		st.Detail = fmt.Sprintf("held for debug; release: runnyctl recycle %s", s.name)
+	})
+	dr := cycle.StateRecord{State: string(StateDebug), Entered: time.Now()}
+	finish := func(outcome cycle.Outcome, errStr string) {
+		dr.Left, dr.Outcome, dr.Error = time.Now(), outcome, errStr
+		rec.States = append(rec.States, dr)
+	}
+
+	hold := time.NewTimer(time.Until(holdUntil))
+	defer hold.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			finish(cycle.OutcomeError, "daemon shutdown")
+			return StateDebug, ctx.Err()
+		case <-hold.C:
+			finish(cycle.OutcomeOK, "")
+			return StateDebug, fmt.Errorf("%w", errDebugExpired)
+		case cmd := <-s.cmds:
+			switch cmd.Kind {
+			case CmdRecycle:
+				finish(cycle.OutcomeOK, "")
+				return StateDebug, fmt.Errorf("%w: %s", errOperatorRecycle, cmd.Reason)
+			case CmdPause:
+				s.setPaused(true) // holds in the NEXT BACKOFF; the hold itself untouched
+			case CmdResume:
+				s.setPaused(false)
+			case CmdDebugKey:
+				s.debugReArm(ctx, rec, guest, cmd, hold, secureSSH, finish)
+				if dr.Left.IsZero() {
+					continue // still holding
+				}
+				return StateDebug, fmt.Errorf("debug hold install: %w", errDebugInjectFailed)
+			}
+		}
+	}
+}
+
+// debugReArm handles a CmdDebugKey dequeued in DEBUG (§5.5): re-arm an
+// already-installed key exec-free, or install a new key. On a fatal install
+// error it calls finish() (setting dr.Left) so the caller ends the hold.
+func (s *Slot) debugReArm(ctx context.Context, rec *cycle.Record, guest Guest, cmd Command,
+	hold *time.Timer, secureSSH time.Duration, finish func(cycle.Outcome, string),
+) {
+	if !cmd.Expires.IsZero() && time.Now().After(cmd.Expires) {
+		cmd.reply(DebugKeyReply{Err: errors.New("command expired; nothing was injected")})
+		return
+	}
+	if cmd.CycleID != "" && cmd.CycleID != rec.CycleID {
+		cmd.reply(DebugKeyReply{Err: fmt.Errorf("cycle %s already ended; nothing was injected", cmd.CycleID)})
+		return
+	}
+	// reset moves the auto-release deadline to now+cmd.Hold and publishes it,
+	// returning the new deadline for the reply.
+	reset := func() time.Time {
+		newUntil := time.Now().Add(cmd.Hold)
+		hold.Reset(time.Until(newUntil))
+		s.mu.Lock()
+		s.status.DebugHoldExpires = newUntil
+		snap := s.status
+		fns := slices.Clone(s.onChange)
+		s.mu.Unlock()
+		s.notify(fns, snap)
+		return newUntil
+	}
+
+	// RE-ARM (exec-free): the fingerprint already has an ok/armed/re-armed
+	// entry this cycle (survives a guest reboot).
+	if s.keyInstalledThisCycle(rec, cmd.Fingerprint) {
+		newUntil := reset()
+		rec.InjectedKeys = append(rec.InjectedKeys, cycle.InjectedKey{
+			Fingerprint: cmd.Fingerprint, Comment: cmd.Comment, Injected: time.Now(), Reason: cmd.Reason,
+			Outcome: "re-armed", State: string(StateDebug),
+		})
+		_ = s.writeAuditSidecar(rec)
+		cmd.reply(DebugKeyReply{User: s.deps.Pool.SSHUser, HostKeys: guest.HostKeys(), HoldUntil: newUntil})
+		return
+	}
+
+	// NEW KEY: write-ahead, then install with a one-shot Redial retry.
+	idx, ok := s.appendPending(rec, cmd, StateDebug)
+	if !ok {
+		cmd.reply(DebugKeyReply{Err: errors.New("audit write failed; injection refused")})
+		return
+	}
+	err := s.boundedGuestArg(ctx, secureSSH, cmd.PubKey, guest.InstallAuthorizedKey)
+	if errors.Is(err, ErrGuestUnreachable) {
+		if rerr := s.boundedGuest(ctx, secureSSH, guest.Redial); rerr == nil {
+			err = s.boundedGuestArg(ctx, secureSSH, cmd.PubKey, guest.InstallAuthorizedKey)
+		}
+	}
+	switch {
+	case err == nil:
+		newUntil := reset()
+		s.updateAudit(rec, idx, "ok", "")
+		cmd.reply(DebugKeyReply{User: s.deps.Pool.SSHUser, HostKeys: guest.HostKeys(), HoldUntil: newUntil})
+	case errors.Is(err, ErrGuestUnreachable):
+		s.updateAudit(rec, idx, "unreachable", err.Error())
+		cmd.reply(DebugKeyReply{Err: errors.New(
+			"guest session is down (rebooted?); hold unchanged — extend with the already-installed key, or release with recycle",
+		)})
+	default:
+		s.updateAudit(rec, idx, "error", err.Error())
+		cmd.reply(DebugKeyReply{Err: fmt.Errorf("installing the key failed: %w", err)})
+		finish(cycle.OutcomeError, "debug hold: key install failed")
+	}
+}
+
+// keyInstalledThisCycle reports whether fp has an ok/armed/re-armed audit
+// entry this cycle — the DEBUG re-arm consults outcomes, not raw membership.
+func (s *Slot) keyInstalledThisCycle(rec *cycle.Record, fp string) bool {
+	for _, k := range rec.InjectedKeys {
+		if k.Fingerprint == fp && (k.Outcome == "ok" || k.Outcome == "armed" || k.Outcome == "re-armed") {
+			return true
+		}
+	}
+	return false
+}
+
+// drainForCompletion non-blockingly drains proc.Lines after jctx fires: a
+// buffered completion marker or a channel-close means the job COMPLETED near
+// the budget boundary (§3 coin-flip fix). Returns done=true with the
+// completion verdict, or done=false (a genuine blowout).
+func (s *Slot) drainForCompletion(proc Proc, cycleID string) (done, ok bool) {
+	for {
+		select {
+		case line, open := <-proc.Lines():
+			if !open {
+				code, _ := proc.Wait()
+				return true, code == 0
+			}
+			s.emitRunnerLine(cycleID, line)
+			if strings.Contains(line, markerJobCompleted) {
+				return true, true
+			}
+		default:
+			return false, false
+		}
+	}
+}
+
+// drainListeningLines non-blockingly drains proc.Lines during the LISTENING
+// freeze (§5.1 step 2), forwarding each line. Returns the job marker line (if
+// any), whether the channel closed, and whether a marker was seen.
+func (s *Slot) drainListeningLines(proc Proc, cycleID string) (jobLine string, closed, marker bool) {
+	for {
+		select {
+		case line, open := <-proc.Lines():
+			if !open {
+				return "", true, false
+			}
+			s.emitRunnerLine(cycleID, line)
+			if strings.Contains(line, markerJobStarted) {
+				return line, false, true
+			}
+		default:
+			return "", false, false
+		}
+	}
+}
+
+// drainToClose drains proc.Lines toward close, bounded by d, forwarding lines.
+// Returns whether a job marker appeared and whether the channel closed.
+func (s *Slot) drainToClose(proc Proc, cycleID string, d time.Duration) (marker, closed bool) {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	for {
+		select {
+		case line, open := <-proc.Lines():
+			if !open {
+				return marker, true
+			}
+			s.emitRunnerLine(cycleID, line)
+			if strings.Contains(line, markerJobStarted) {
+				marker = true
+			}
+		case <-timer.C:
+			return marker, false
+		}
+	}
+}
+
+// boundedGuest calls a guest method that takes only a bounded.Context.
+func (s *Slot) boundedGuest(ctx context.Context, d time.Duration, f func(bounded.Context) error) error {
+	bctx, cancel := bounded.WithTimeout(ctx, d)
+	defer cancel()
+	return f(bctx)
+}
+
+// boundedGuestArg calls a guest method that takes a bounded.Context and a
+// string argument.
+func (s *Slot) boundedGuestArg(ctx context.Context, d time.Duration, arg string, f func(bounded.Context, string) error) error {
+	bctx, cancel := bounded.WithTimeout(ctx, d)
+	defer cancel()
+	return f(bctx, arg)
 }
 
 // emitRunnerLine forwards one line of guest runner output to the configured
@@ -914,7 +1652,8 @@ func (s *Slot) finishCycle(rec *cycle.Record, benign bool) {
 
 	s.mu.Lock()
 	switch {
-	case rec.Result == cycle.ResultSuccess || heldListening(rec):
+	case rec.Result == cycle.ResultSuccess ||
+		((heldListening(rec) || debugHeldAfterJobOK(rec)) && !injectionFailed(rec)):
 		s.failures = 0
 		s.status.LastFailure = ""
 	case benign:
@@ -935,6 +1674,37 @@ func (s *Slot) finishCycle(rec *cycle.Record, benign bool) {
 func heldListening(rec *cycle.Record) bool {
 	for _, sr := range rec.States {
 		if sr.State == string(StateListening) && sr.Left.Sub(sr.Entered) >= 10*time.Minute {
+			return true
+		}
+	}
+	return false
+}
+
+// debugHeldAfterJobOK resets backoff for a delivered-job-then-benign-hold
+// cycle (issue #39, §8): it requires BOTH a JOB StateRecord with Outcome ok
+// AND a DEBUG StateRecord. The DEBUG-record requirement keeps a failed DEBUG
+// entry (errDebugInjectFailed writes no DEBUG StateRecord) out of the reset
+// arm.
+func debugHeldAfterJobOK(rec *cycle.Record) bool {
+	jobOK, debugSeen := false, false
+	for _, sr := range rec.States {
+		if sr.State == string(StateJob) && sr.Outcome == cycle.OutcomeOK {
+			jobOK = true
+		}
+		if sr.State == string(StateDebug) {
+			debugSeen = true
+		}
+	}
+	return jobOK && debugSeen
+}
+
+// injectionFailed: any InjectedKeys entry with Outcome "error" AND State !=
+// "JOB" (decision 18: mid-job exec failures are not a health signal; LISTENING
+// and DEBUG "error" entries count as before). "refused"/"unreachable"/
+// "re-armed"/"disarmed" never count.
+func injectionFailed(rec *cycle.Record) bool {
+	for _, k := range rec.InjectedKeys {
+		if k.Outcome == "error" && k.State != string(StateJob) {
 			return true
 		}
 	}

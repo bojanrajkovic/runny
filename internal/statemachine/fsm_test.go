@@ -131,7 +131,20 @@ type fakeGuest struct {
 	diagBlock bool // PullDiag blocks until ctx expires (a wedged guest)
 	pulled    bool
 	goos      string
-	mu        sync.Mutex
+
+	// Debug-key injection seam (issue #39).
+	hostKeys      []string
+	stopErr       error // StopRunner returns this (death unproven)
+	stopCalls     int
+	stopBlock     bool  // StopRunner blocks until ctx expires
+	installErr    error // InstallAuthorizedKey returns this
+	installErrSeq []error
+	installCalls  int
+	installedKeys []string
+	redialErr     error
+	redialCalls   int
+
+	mu sync.Mutex
 }
 
 func (g *fakeGuest) StartRunner(ctx context.Context, jit, goos string) (Proc, error) {
@@ -156,6 +169,73 @@ func (g *fakeGuest) PullDiag(ctx bounded.Context) ([]byte, error) {
 	return g.diag, g.diagErr
 }
 func (g *fakeGuest) Close() error { return nil }
+
+func (g *fakeGuest) StopRunner(ctx bounded.Context) error {
+	g.mu.Lock()
+	g.stopCalls++
+	block, err, proc := g.stopBlock, g.stopErr, g.proc
+	g.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if err != nil {
+		return err // death unproven: the proc stays alive
+	}
+	// A proven kill ends the runner process: its output channel closes, which
+	// the freeze/tail drain waits for (the real sshd session dies with run.sh).
+	if proc != nil {
+		proc.exit(0)
+	}
+	return nil
+}
+
+func (g *fakeGuest) InstallAuthorizedKey(ctx bounded.Context, line string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	n := g.installCalls
+	g.installCalls++
+	if n < len(g.installErrSeq) {
+		if err := g.installErrSeq[n]; err != nil {
+			return err
+		}
+	} else if g.installErr != nil {
+		return g.installErr
+	}
+	g.installedKeys = append(g.installedKeys, line)
+	return nil
+}
+
+func (g *fakeGuest) HostKeys() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.hostKeys
+}
+
+func (g *fakeGuest) Redial(ctx bounded.Context) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.redialCalls++
+	return g.redialErr
+}
+
+func (g *fakeGuest) stops() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.stopCalls
+}
+
+func (g *fakeGuest) installs() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.installCalls
+}
+
+func (g *fakeGuest) redials() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.redialCalls
+}
 
 type fakeDialer struct {
 	guest *fakeGuest
@@ -1087,4 +1167,441 @@ func TestSecureSSHDeadlineBounds(t *testing.T) {
 	}
 }
 
-var _ = fmt.Sprintf // keep fmt for debug edits
+// ---- debug-key injection (issue #39) ---------------------------------------
+
+// debugCmd issues a CmdDebugKey and returns the reply (with a timeout). It
+// fills CycleID/SeenState from the slot's current status so the consent pins
+// match by default; callers override fields via mutate.
+func (h *harness) debugCmd(t *testing.T, mutate func(*Command)) DebugKeyReply {
+	t.Helper()
+	st := h.slot.Status()
+	reply := make(chan DebugKeyReply, 1)
+	cmd := Command{
+		Kind:        CmdDebugKey,
+		Reason:      "test",
+		PubKey:      "ssh-ed25519 AAAAOPKEY op@host",
+		Fingerprint: "SHA256:testfp",
+		Comment:     "op@host",
+		Hold:        time.Hour,
+		CycleID:     st.CycleID,
+		SeenState:   st.State,
+		Expires:     time.Now().Add(time.Minute),
+		Reply:       reply,
+	}
+	if mutate != nil {
+		mutate(&cmd)
+	}
+	if !h.slot.Command(cmd) {
+		t.Fatal("command buffer full")
+	}
+	select {
+	case r := <-reply:
+		return r
+	case <-time.After(5 * time.Second):
+		t.Fatal("no debug reply within 5s")
+		return DebugKeyReply{}
+	}
+}
+
+// reachListening boots the slot to LISTENING and returns the cancel func.
+func (h *harness) reachListening(t *testing.T) context.CancelFunc {
+	t.Helper()
+	cancel := h.start(t)
+	h.waitState(t, StateProvision)
+	h.proc.say("Listening for Jobs")
+	h.waitState(t, StateListening)
+	return cancel
+}
+
+func TestDebugFreezeFromListening(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	h.guest.hostKeys = []string{"192.168.64.9 ssh-ed25519 AAAAHOST"}
+	cancel := h.reachListening(t)
+	defer cancel()
+
+	r := h.debugCmd(t, nil)
+	if r.Err != nil {
+		t.Fatalf("freeze failed: %v", r.Err)
+	}
+	if r.Armed {
+		t.Error("LISTENING freeze must not be Armed")
+	}
+	if r.HoldUntil.IsZero() {
+		t.Error("LISTENING freeze reply missing HoldUntil")
+	}
+	if len(r.HostKeys) != 1 {
+		t.Errorf("host keys not returned: %v", r.HostKeys)
+	}
+	st := h.waitState(t, StateDebug)
+	if st.DebugHoldExpires.IsZero() {
+		t.Error("DebugHoldExpires not set in DEBUG")
+	}
+	if h.guest.stops() != 1 {
+		t.Errorf("StopRunner called %d times, want 1 (verified kill before install)", h.guest.stops())
+	}
+	if h.guest.installs() != 1 {
+		t.Errorf("InstallAuthorizedKey called %d times, want 1", h.guest.installs())
+	}
+}
+
+func TestDebugFreezeKillUnprovenTearsDown(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	h.guest.stopErr = errors.New("pgrep failed")
+	cancel := h.reachListening(t)
+	defer cancel()
+
+	r := h.debugCmd(t, nil)
+	if r.Err == nil {
+		t.Fatal("want error when kill is unproven")
+	}
+	// Never install when the kill is unproven.
+	if h.guest.installs() != 0 {
+		t.Errorf("installed despite unproven kill: %d", h.guest.installs())
+	}
+	h.waitState(t, StateTeardown)
+}
+
+func TestDebugRaceMarkerRefusesAndRunsJob(t *testing.T) {
+	// A job marker that arrives just before the freeze is serviced must leave
+	// the job untouched: either the LISTENING select reads the marker first
+	// (clean JOB transition, freeze never runs) or the freeze's drain-check
+	// catches it (refusal). Both are correct; both leave the guest untouched.
+	// The select between proc.Lines() and s.cmds is random, so this asserts
+	// the invariant common to both branches.
+	h := newHarness(t, func(c *home.Config) {
+		c.Limits.MaxJobDuration = home.Duration(10 * time.Second)
+	})
+	h.images.maxCalls = 1
+	cancel := h.reachListening(t)
+	defer cancel()
+
+	h.proc.say("Running job: build")
+	time.Sleep(50 * time.Millisecond)
+	r := h.debugCmd(t, nil)
+	// The job is never frozen or killed by a raced LISTENING command.
+	if h.guest.stops() != 0 {
+		t.Errorf("a raced marker killed the runner (StopRunner called %d)", h.guest.stops())
+	}
+	if r.Err != nil {
+		// Drain-check refusal: nothing was injected.
+		if !strings.Contains(r.Err.Error(), "re-run debug") {
+			t.Errorf("freeze drain-check refusal had the wrong message: %v", r.Err)
+		}
+		if h.guest.installs() != 0 {
+			t.Error("a refused freeze must not install")
+		}
+	}
+	// Either way the slot ends up running the job.
+	h.waitState(t, StateJob)
+}
+
+func TestDebugExpiredCommandRejected(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	cancel := h.reachListening(t)
+	defer cancel()
+
+	r := h.debugCmd(t, func(c *Command) { c.Expires = time.Now().Add(-time.Second) })
+	if r.Err == nil || !strings.Contains(r.Err.Error(), "expired") {
+		t.Fatalf("want expired rejection, got %v", r.Err)
+	}
+	if h.guest.installs() != 0 {
+		t.Error("an expired command must not touch the guest")
+	}
+}
+
+func TestDebugStaleCycleRejected(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	cancel := h.reachListening(t)
+	defer cancel()
+
+	r := h.debugCmd(t, func(c *Command) { c.CycleID = "deadbeef" })
+	if r.Err == nil || !strings.Contains(r.Err.Error(), "already ended") {
+		t.Fatalf("want stale-cycle rejection, got %v", r.Err)
+	}
+}
+
+func TestMidJobInjectArmsHold(t *testing.T) {
+	h := newHarness(t, func(c *home.Config) {
+		c.Limits.MaxJobDuration = home.Duration(10 * time.Second)
+	})
+	h.images.maxCalls = 1
+	cancel := h.start(t)
+	defer cancel()
+	h.waitState(t, StateProvision)
+	h.proc.say("Listening for Jobs")
+	h.waitState(t, StateListening)
+	h.proc.say("Running job: build")
+	h.waitState(t, StateJob)
+
+	r := h.debugCmd(t, nil)
+	if r.Err != nil {
+		t.Fatalf("mid-job inject failed: %v", r.Err)
+	}
+	if !r.Armed {
+		t.Error("mid-job inject must be Armed")
+	}
+	if !r.HoldUntil.IsZero() {
+		t.Error("armed reply must have zero HoldUntil (clock starts at job end)")
+	}
+	// The runner is NOT touched mid-job.
+	if h.guest.stops() != 0 {
+		t.Errorf("StopRunner called during JOB (%d); the job must be untouched", h.guest.stops())
+	}
+	if h.guest.installs() != 1 {
+		t.Errorf("InstallAuthorizedKey called %d times, want 1", h.guest.installs())
+	}
+	// DebugHoldArmed visible in status during the job.
+	if !h.slot.Status().DebugHoldArmed {
+		t.Error("DebugHoldArmed not set after a mid-job arm")
+	}
+	// Job completes → DEBUG, hold clock starts at entry.
+	h.proc.say("Job build completed with result: Succeeded")
+	h.proc.exit(0)
+	st := h.waitState(t, StateDebug)
+	if st.DebugHoldArmed {
+		t.Error("DebugHoldArmed not cleared at DEBUG entry")
+	}
+	if st.DebugHoldExpires.IsZero() {
+		t.Error("DebugHoldExpires not set at DEBUG entry")
+	}
+	if h.guest.stops() != 1 {
+		t.Errorf("post-job StopRunner not called once: %d", h.guest.stops())
+	}
+	// The job's operator key is on the record.
+	recJob := h.slot.Status().Job
+	if recJob == nil || len(recJob.OperatorKeys) != 1 {
+		t.Errorf("job operator keys = %+v", recJob)
+	}
+}
+
+func TestMidJobPlainRecycleDisarmsImmediately(t *testing.T) {
+	h := newHarness(t, func(c *home.Config) {
+		c.Limits.MaxJobDuration = home.Duration(10 * time.Second)
+	})
+	h.images.maxCalls = 1
+	cancel := h.start(t)
+	defer cancel()
+	h.waitState(t, StateProvision)
+	h.proc.say("Listening for Jobs")
+	h.waitState(t, StateListening)
+	h.proc.say("Running job: build")
+	h.waitState(t, StateJob)
+	h.debugCmd(t, nil)
+	if !h.slot.Status().DebugHoldArmed {
+		t.Fatal("precondition: armed")
+	}
+
+	// Plain recycle (no CancelJob): disarms immediately, job survives.
+	h.slot.Command(Command{Kind: CmdRecycle, Reason: "no force"})
+	deadline := time.After(2 * time.Second)
+	for h.slot.Status().DebugHoldArmed {
+		select {
+		case <-deadline:
+			t.Fatal("DebugHoldArmed not cleared after a plain recycle")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	// The job still finishes; the slot tears down at job end (NOT into DEBUG).
+	h.proc.say("Job build completed with result: Succeeded")
+	h.proc.exit(0)
+	h.waitState(t, StateTeardown)
+}
+
+func TestMidJobCancelJobKillsJob(t *testing.T) {
+	h := newHarness(t, func(c *home.Config) {
+		c.Limits.MaxJobDuration = home.Duration(10 * time.Second)
+	})
+	h.images.maxCalls = 1
+	cancel := h.start(t)
+	defer cancel()
+	h.waitState(t, StateProvision)
+	h.proc.say("Listening for Jobs")
+	h.waitState(t, StateListening)
+	h.proc.say("Running job: build")
+	h.waitState(t, StateJob)
+	h.debugCmd(t, nil)
+
+	h.slot.Command(Command{Kind: CmdRecycle, Reason: "force", CancelJob: true})
+	h.waitState(t, StateTeardown)
+	// jobRan=true → no DeleteRunner against a GitHub-busy runner.
+	if len(h.gh.deleted) != 0 {
+		t.Errorf("DeleteRunner called on a canceled mid-job recycle: %v", h.gh.deleted)
+	}
+}
+
+func TestMidJobInstallFailureDoesNotArm(t *testing.T) {
+	h := newHarness(t, func(c *home.Config) {
+		c.Limits.MaxJobDuration = home.Duration(10 * time.Second)
+	})
+	h.images.maxCalls = 1
+	h.guest.installErr = errors.New("ambiguous failure")
+	cancel := h.start(t)
+	defer cancel()
+	h.waitState(t, StateProvision)
+	h.proc.say("Listening for Jobs")
+	h.waitState(t, StateListening)
+	h.proc.say("Running job: build")
+	h.waitState(t, StateJob)
+
+	r := h.debugCmd(t, nil)
+	if r.Err == nil {
+		t.Fatal("want error on a failed mid-job install")
+	}
+	if h.slot.Status().DebugHoldArmed {
+		t.Error("a failed install must not arm")
+	}
+	// The job continues and completes → teardown (not DEBUG).
+	h.proc.say("Job build completed with result: Succeeded")
+	h.proc.exit(0)
+	h.waitState(t, StateTeardown)
+}
+
+func TestMidJobRetryAfterAmbiguousErrorReinstalls(t *testing.T) {
+	h := newHarness(t, func(c *home.Config) {
+		c.Limits.MaxJobDuration = home.Duration(10 * time.Second)
+	})
+	h.images.maxCalls = 1
+	// First install fails ambiguously; the second succeeds.
+	h.guest.installErrSeq = []error{errors.New("ambiguous"), nil}
+	cancel := h.start(t)
+	defer cancel()
+	h.waitState(t, StateProvision)
+	h.proc.say("Listening for Jobs")
+	h.waitState(t, StateListening)
+	h.proc.say("Running job: build")
+	h.waitState(t, StateJob)
+
+	if r := h.debugCmd(t, nil); r.Err == nil {
+		t.Fatal("first attempt should fail")
+	}
+	// Retry of the SAME fingerprint after an ambiguous error must run the full
+	// install again (not the exec-free re-arm).
+	r := h.debugCmd(t, nil)
+	if r.Err != nil {
+		t.Fatalf("retry failed: %v", r.Err)
+	}
+	if !r.Armed {
+		t.Error("retry should arm after a proven install")
+	}
+	if h.guest.installs() != 2 {
+		t.Errorf("retry did not re-run install: installs=%d, want 2", h.guest.installs())
+	}
+}
+
+func TestMidJobSeenStateMismatchRefused(t *testing.T) {
+	h := newHarness(t, func(c *home.Config) {
+		c.Limits.MaxJobDuration = home.Duration(10 * time.Second)
+	})
+	h.images.maxCalls = 1
+	cancel := h.start(t)
+	defer cancel()
+	h.waitState(t, StateProvision)
+	h.proc.say("Listening for Jobs")
+	h.waitState(t, StateListening)
+	h.proc.say("Running job: build")
+	h.waitState(t, StateJob)
+
+	// Operator saw LISTENING but the command is dequeued in JOB.
+	r := h.debugCmd(t, func(c *Command) { c.SeenState = StateListening })
+	if r.Err == nil || !strings.Contains(r.Err.Error(), "re-run debug") {
+		t.Fatalf("want consent refusal, got %v", r.Err)
+	}
+	if h.guest.installs() != 0 {
+		t.Error("a SeenState mismatch must not touch the guest")
+	}
+}
+
+func TestMidJobGuestUnreachableNoRedial(t *testing.T) {
+	h := newHarness(t, func(c *home.Config) {
+		c.Limits.MaxJobDuration = home.Duration(10 * time.Second)
+	})
+	h.images.maxCalls = 1
+	h.guest.installErr = fmt.Errorf("session: %w", ErrGuestUnreachable)
+	cancel := h.start(t)
+	defer cancel()
+	h.waitState(t, StateProvision)
+	h.proc.say("Listening for Jobs")
+	h.waitState(t, StateListening)
+	h.proc.say("Running job: build")
+	h.waitState(t, StateJob)
+
+	r := h.debugCmd(t, nil)
+	if r.Err == nil {
+		t.Fatal("want unreachable error")
+	}
+	if h.guest.redials() != 0 {
+		t.Errorf("Redial called mid-job (%d); decision 18 forbids it", h.guest.redials())
+	}
+}
+
+func TestDebugRecycleFromDebugIsBenign(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	cancel := h.reachListening(t)
+	defer cancel()
+
+	if r := h.debugCmd(t, nil); r.Err != nil {
+		t.Fatalf("freeze: %v", r.Err)
+	}
+	h.waitState(t, StateDebug)
+	h.slot.Command(Command{Kind: CmdRecycle, Reason: "done debugging"})
+	h.waitState(t, StateTeardown)
+	st := h.waitState(t, StateBackoff)
+	// A LISTENING freeze with a brief hold and a benign exit: the streak does
+	// not increment (heldListening is false for <10min, but errDebugExpired /
+	// recycle are benign).
+	if st.ConsecutiveFailures != 0 {
+		t.Errorf("recycle from DEBUG should be benign; failures=%d", st.ConsecutiveFailures)
+	}
+}
+
+func TestDebugReArmInDebugNoExec(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	cancel := h.reachListening(t)
+	defer cancel()
+
+	if r := h.debugCmd(t, nil); r.Err != nil {
+		t.Fatalf("freeze: %v", r.Err)
+	}
+	h.waitState(t, StateDebug)
+	installsBefore := h.guest.installs()
+	// Re-arm with the SAME fingerprint: no guest exec.
+	r := h.debugCmd(t, nil)
+	if r.Err != nil {
+		t.Fatalf("re-arm: %v", r.Err)
+	}
+	if h.guest.installs() != installsBefore {
+		t.Errorf("re-arm of an installed key ran an exec: installs %d→%d", installsBefore, h.guest.installs())
+	}
+}
+
+func TestPostJobKillUnprovenCounts(t *testing.T) {
+	h := newHarness(t, func(c *home.Config) {
+		c.Limits.MaxJobDuration = home.Duration(10 * time.Second)
+	})
+	h.images.maxCalls = 1
+	cancel := h.start(t)
+	defer cancel()
+	h.waitState(t, StateProvision)
+	h.proc.say("Listening for Jobs")
+	h.waitState(t, StateListening)
+	h.proc.say("Running job: build")
+	h.waitState(t, StateJob)
+	if r := h.debugCmd(t, nil); r.Err != nil {
+		t.Fatalf("arm: %v", r.Err)
+	}
+	// The post-job kill fails: no DEBUG StateRecord, errDebugInjectFailed.
+	h.guest.stopErr = errors.New("post-job pgrep failed")
+	h.proc.say("Job build completed with result: Succeeded")
+	h.proc.exit(0)
+	h.waitState(t, StateTeardown)
+	st := h.waitState(t, StateBackoff)
+	if st.ConsecutiveFailures != 1 {
+		t.Errorf("post-job kill unproven should count; failures=%d", st.ConsecutiveFailures)
+	}
+}

@@ -80,12 +80,11 @@ struct DaemonCard: View {
         VStack(alignment: .leading, spacing: 4) {
             MenuBarHeader()
             if case .connected = store.connection, let last = store.lastUpdate {
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    Text("updated \(SlotPresentation.duration(context.date.timeIntervalSince(last))) ago")
-                        .font(.caption2)
-                        .monospacedDigit()
-                        .foregroundStyle(.tertiary)
+                TickingText { now in
+                    "updated \(SlotPresentation.duration(now.timeIntervalSince(last))) ago"
                 }
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
             }
         }
         .padding(8)
@@ -101,7 +100,7 @@ struct SidebarSlotRow: View {
     var body: some View {
         HStack(spacing: 6) {
             Circle()
-                .fill(slot.wedged ? Color.red : slot.state.tint)
+                .fill(slot.effectiveTint)
                 .frame(width: 7, height: 7)
             VStack(alignment: .leading, spacing: 1) {
                 Text(SlotPresentation.displayName(slot))
@@ -126,9 +125,11 @@ struct DoctorPane: View {
                     .font(.title2)
                     .fontWeight(.semibold)
                 if let ranAt = store.doctorRanAt {
-                    Text("last run \(SlotPresentation.duration(Date().timeIntervalSince(ranAt))) ago")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    TickingText { now in
+                        "last run \(SlotPresentation.duration(now.timeIntervalSince(ranAt))) ago"
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button(store.doctorRunning ? "Running…" : "Run Checks") {

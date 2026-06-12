@@ -47,3 +47,10 @@ extension Runny_V1_SlotState {
         }
     }
 }
+
+extension Runny_V1_SlotStatus {
+    /// The one slot-health color rule: wedged overrides everything.
+    var effectiveTint: Color {
+        wedged ? .red : state.tint
+    }
+}

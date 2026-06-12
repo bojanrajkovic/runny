@@ -41,6 +41,9 @@ final class DaemonStore {
         let requestedAt: Date
         /// Cycle at request time; a recycle is confirmed when it changes.
         let cycleID: String
+
+        /// One wording for every surface that renders an in-flight command.
+        var displayText: String { "\(kind.rawValue) requested…" }
     }
 
     private(set) var connection: ConnectionState = .connecting
@@ -63,6 +66,7 @@ final class DaemonStore {
     private(set) var client: RunnyClient?
 
     private var supervisor: Task<Void, Never>?
+    private var sleepTask: Task<Void, Never>?
     private var retryNow = false
     private var attemptLastMessage: Date?
     private var failedAttemptsSinceConnected = 0
@@ -75,10 +79,14 @@ final class DaemonStore {
 
     func start() {
         guard supervisor == nil else { return }
-        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in self?.requestRetryNow() }
+        // App-lifetime observer: registered once, survives restart() — a
+        // re-register per restart leaks a block in NSWorkspace's center.
+        if wakeObserver == nil {
+            wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.requestRetryNow() }
+            }
         }
         watchHomeDirectory()
         supervisor = Task { await superviseForever() }
@@ -98,6 +106,7 @@ final class DaemonStore {
 
     private func requestRetryNow() {
         retryNow = true
+        sleepTask?.cancel()
     }
 
     /// Watches the home directory so socket-file appearance retries
@@ -131,7 +140,9 @@ final class DaemonStore {
         while !Task.isCancelled {
             let attemptClient = RunnyClient(socketPath: RunnyHome.socketPath)
             let outcome = await runStream(attemptClient)
-            client = nil
+            // Identity check: a cancelled supervisor unwinding late must not
+            // null out a successor's healthy client (restart() races this).
+            if client === attemptClient { client = nil }
             await attemptClient.shutdown()
             if Task.isCancelled { return }
 
@@ -161,12 +172,14 @@ final class DaemonStore {
         }
     }
 
-    /// Sleeps in short slices so wake/socket-appearance can cut it short.
+    /// One cancellable sleep — wake/socket-appearance cancel it for an
+    /// instant retry. No polling: zero wakeups while idle.
     private func sleepInterruptibly(_ seconds: TimeInterval) async {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline, !Task.isCancelled, !retryNow {
-            try? await Task.sleep(for: .milliseconds(250))
-        }
+        guard !retryNow else { return }
+        let sleeper = Task { try? await Task.sleep(for: .seconds(seconds)) }
+        sleepTask = sleeper
+        await sleeper.value
+        sleepTask = nil
     }
 
     private func runStream(_ attemptClient: RunnyClient) async -> StreamOutcome {
@@ -236,15 +249,17 @@ final class DaemonStore {
     private func confirmPending() {
         let now = Date()
         for (slotName, command) in pending {
-            guard let slot = slots.first(where: { $0.slot == slotName }) else { continue }
+            let slot = slots.first(where: { $0.slot == slotName })
             let confirmed: Bool = switch command.kind {
-            case .pause: slot.paused
-            case .resume: !slot.paused
-            case .recycle: slot.cycleID != command.cycleID
+            case .pause: slot?.paused ?? false
+            case .resume: !(slot?.paused ?? true)
+            case .recycle: slot.map { $0.cycleID != command.cycleID } ?? false
             }
             if confirmed {
                 pending.removeValue(forKey: slotName)
             } else if now.timeIntervalSince(command.requestedAt) > Self.confirmationBound {
+                // Expiry happens here only — even for slots the daemon no
+                // longer reports — so the entry can't outlive its meaning.
                 pending.removeValue(forKey: slotName)
                 commandError =
                     "\(command.kind.rawValue) of \(slotName) not confirmed after \(Int(Self.confirmationBound))s — the daemon accepted it but the slot hasn't reflected it"
@@ -252,15 +267,14 @@ final class DaemonStore {
         }
     }
 
+    /// Read-only: views call this from their bodies, and mutating observed
+    /// state mid-render is undefined behavior. Entries past the confirmation
+    /// bound read as absent; confirmPending owns the actual removal.
     func pendingCommand(for slot: String) -> PendingCommand? {
-        // Lazy expiry so a stalled stream can't pin "pending…" forever.
-        if let command = pending[slot],
-           Date().timeIntervalSince(command.requestedAt) > Self.confirmationBound * 2
-        {
-            pending.removeValue(forKey: slot)
-            return nil
-        }
-        return pending[slot]
+        guard let command = pending[slot],
+              Date().timeIntervalSince(command.requestedAt) <= Self.confirmationBound
+        else { return nil }
+        return command
     }
 
     private func run(_ kind: PendingCommand.Kind, slot: Runny_V1_SlotStatus,
@@ -301,7 +315,8 @@ final class DaemonStore {
         _ error: Error, kind: PendingCommand.Kind, slot: String
     ) -> String {
         switch error.grpcCode {
-        case .failedPrecondition:
+        case .resourceExhausted:
+            // The slot's command buffer is full — transient, self-draining.
             "\(slot) is not accepting commands right now — try again shortly"
         case .notFound:
             "no slot named \(slot)"

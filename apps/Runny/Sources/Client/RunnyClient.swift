@@ -10,21 +10,22 @@ import RunnyV1
 /// DaemonStore's supervision (establishment bound + staleness watchdog) —
 /// nothing here is allowed to hang silently (the project invariant, ported).
 final class RunnyClient: @unchecked Sendable {
-    private let group: EventLoopGroup
     private let channel: ClientConnection
     let stub: Runny_V1_RunnyServiceAsyncClient
-    let socketPath: String
 
     /// Deadline tiers: snappy for commands, roomier for disk-touching RPCs.
     static let commandTimeout = TimeAmount.seconds(5)
     static let queryTimeout = TimeAmount.seconds(10)
 
+    /// App-lifetime group: the supervisor creates a client per reconnect
+    /// attempt, and a per-client group would spawn and tear down an OS
+    /// thread every ≤30s for as long as the daemon is down.
+    private static let group = PlatformSupport.makeEventLoopGroup(loopCount: 1)
+
     init(socketPath: String) {
-        self.socketPath = socketPath
-        group = PlatformSupport.makeEventLoopGroup(loopCount: 1)
         var configuration = ClientConnection.Configuration.default(
             target: .unixDomainSocket(socketPath),
-            eventLoopGroup: group
+            eventLoopGroup: Self.group
         )
         // The channel's own dial retries stay tight; reconnect pacing is
         // DaemonStore's job, with visible state — not a hidden channel loop.
@@ -37,10 +38,6 @@ final class RunnyClient: @unchecked Sendable {
 
     private static func options(_ timeout: TimeAmount) -> CallOptions {
         CallOptions(timeLimit: .timeout(timeout))
-    }
-
-    func getStatus() async throws -> Runny_V1_GetStatusResponse {
-        try await stub.getStatus(.init(), callOptions: Self.options(Self.commandTimeout))
     }
 
     /// The long-lived status stream. No time limit here by design: the
@@ -96,9 +93,10 @@ final class RunnyClient: @unchecked Sendable {
     }
 
     func shutdown() async {
+        // Forceful close (verified in grpc-swift v1): in-flight calls fail
+        // fast, never hang — a borrowed stale client errors promptly. The
+        // shared group lives for the app's lifetime.
         try? await channel.close().get()
-        // Callback form: present across the NIO versions rules_swift pins.
-        group.shutdownGracefully { _ in }
     }
 }
 

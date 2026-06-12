@@ -43,7 +43,7 @@ struct SlotDetailView: View {
                     .truncationMode(.middle)
                 Spacer()
                 if let pending = store.pendingCommand(for: slot.slot) {
-                    Text("\(pending.kind.rawValue) requested…")
+                    Text(pending.displayText)
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
@@ -53,23 +53,21 @@ struct SlotDetailView: View {
             }
             HStack(spacing: 8) {
                 StateBadge(slot: slot)
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    Text("for \(SlotPresentation.duration(SlotPresentation.timeInState(slot, now: context.date)))")
-                        .font(.callout)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
+                TickingText { now in
+                    "for \(SlotPresentation.duration(SlotPresentation.timeInState(slot, now: now)))"
                 }
+                .font(.callout)
+                .foregroundStyle(.secondary)
                 if slot.hasJob {
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        Label(
-                            "\(slot.job.name) · \(SlotPresentation.duration(context.date.timeIntervalSince(slot.job.started.dateValue)))",
-                            systemImage: "hammer"
-                        )
-                        .font(.callout)
-                        .monospacedDigit()
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+                    HStack(spacing: 4) {
+                        Image(systemName: "hammer")
+                        TickingText { now in
+                            "\(slot.job.name) · \(SlotPresentation.duration(now.timeIntervalSince(slot.job.started.dateValue)))"
+                        }
                     }
+                    .font(.callout)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 }
                 if slot.hasVm, !slot.vm.ip.isEmpty {
                     Label(slot.vm.ip, systemImage: "network")
@@ -79,15 +77,14 @@ struct SlotDetailView: View {
                 }
                 Spacer()
             }
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                let note = SlotPresentation.note(slot, now: context.date)
-                if !note.isEmpty {
-                    Text(note)
-                        .font(.callout)
-                        .foregroundStyle(slot.lastFailure.isEmpty ? .secondary : Color.orange)
-                        .lineLimit(2)
-                        .truncationMode(.tail)
+            if !SlotPresentation.note(slot, now: Date()).isEmpty {
+                TickingText { now in
+                    SlotPresentation.note(slot, now: now)
                 }
+                .font(.callout)
+                .foregroundStyle(slot.lastFailure.isEmpty ? .secondary : Color.orange)
+                .lineLimit(2)
+                .truncationMode(.tail)
             }
         }
     }
@@ -102,11 +99,8 @@ struct StateBadge: View {
             .fontWeight(.semibold)
             .padding(.horizontal, 8)
             .padding(.vertical, 2)
-            .background(
-                Capsule().fill(
-                    (slot.wedged ? Color.red : slot.state.tint).opacity(0.18))
-            )
-            .foregroundStyle(slot.wedged ? Color.red : slot.state.tint)
+            .background(Capsule().fill(slot.effectiveTint.opacity(0.18)))
+            .foregroundStyle(slot.effectiveTint)
     }
 }
 

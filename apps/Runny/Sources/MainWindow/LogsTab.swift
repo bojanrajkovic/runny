@@ -70,26 +70,43 @@ struct LogTextView: NSViewRepresentable {
     final class Coordinator {
         weak var textView: NSTextView?
         private var renderedThroughID = -1
+        /// (line id, rendered character count), oldest first — lets the text
+        /// view shed its prefix in lockstep with the model's ring. Append-only
+        /// storage would otherwise grow unboundedly on a long-lived follow
+        /// while the model dutifully trims to 5000 lines.
+        private var renderedLengths: [(id: Int, length: Int)] = []
 
         func render(lines: [LogStreamModel.Line], daemonMode: Bool, in scrollView: NSScrollView) {
             guard let textView, let storage = textView.textStorage else { return }
 
-            // The model trims its ring from the front; if our baseline got
-            // trimmed away (or the model was swapped), rebuild wholesale.
-            let fresh: [LogStreamModel.Line]
-            if let first = lines.first, first.id > renderedThroughID + 1, renderedThroughID >= 0 {
+            let wasAtBottom = isPinnedToBottom(scrollView)
+
+            // Trim the prefix the model's ring has already dropped.
+            if let firstID = lines.first?.id {
+                var dropChars = 0
+                var dropCount = 0
+                for entry in renderedLengths where entry.id < firstID {
+                    dropChars += entry.length
+                    dropCount += 1
+                }
+                if dropCount > 0 {
+                    storage.deleteCharacters(in: NSRange(location: 0, length: dropChars))
+                    renderedLengths.removeFirst(dropCount)
+                }
+            } else if !renderedLengths.isEmpty {
                 storage.setAttributedString(NSAttributedString())
+                renderedLengths.removeAll()
                 renderedThroughID = -1
-                fresh = lines
-            } else {
-                fresh = lines.filter { $0.id > renderedThroughID }
             }
+
+            let fresh = lines.filter { $0.id > renderedThroughID }
             guard !fresh.isEmpty else { return }
 
-            let wasAtBottom = isPinnedToBottom(scrollView)
             let batch = NSMutableAttributedString()
             for line in fresh {
-                batch.append(Self.format(line, daemonMode: daemonMode))
+                let formatted = Self.format(line, daemonMode: daemonMode)
+                batch.append(formatted)
+                renderedLengths.append((id: line.id, length: formatted.length))
                 renderedThroughID = line.id
             }
             storage.append(batch)

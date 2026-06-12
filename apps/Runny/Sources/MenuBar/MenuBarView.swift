@@ -11,6 +11,12 @@ struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 0) {
             MenuBarHeader()
                 .padding(Metrics.pad)
+            // Command failures must be visible HERE: the main window's alert
+            // doesn't exist while only the popover is open, and a recycle
+            // that fails invisibly is a silent failure.
+            if let error = store.commandError {
+                CommandErrorBanner(text: error)
+            }
             Divider()
             if store.slots.isEmpty {
                 emptyState
@@ -58,6 +64,34 @@ struct MenuBarView: View {
     }
 }
 
+struct CommandErrorBanner: View {
+    @Environment(DaemonStore.self) private var store
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+                .font(.caption)
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.primary)
+                .lineLimit(3)
+            Spacer(minLength: 4)
+            Button {
+                store.commandError = nil
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, Metrics.pad)
+        .padding(.vertical, 6)
+        .background(Color.red.opacity(0.08))
+    }
+}
+
 enum Metrics {
     static let popoverWidth: CGFloat = 360
     static let pad: CGFloat = 12
@@ -80,12 +114,10 @@ struct MenuBarHeader: View {
                     .fontWeight(.medium)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
+                subtitle
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
             Spacer(minLength: 0)
         }
@@ -112,17 +144,24 @@ struct MenuBarHeader: View {
         }
     }
 
-    private var subtitle: String? {
+    /// Ages tick — a frozen "up 3h" reads as live data and lies.
+    @ViewBuilder
+    private var subtitle: some View {
         switch store.connection {
         case .connected:
-            guard let started = store.daemonStarted else { return nil }
-            return "up \(SlotPresentation.duration(Date().timeIntervalSince(started)))"
+            if let started = store.daemonStarted {
+                TickingText { now in
+                    "up \(SlotPresentation.duration(now.timeIntervalSince(started)))"
+                }
+            }
         case let .stale(since):
-            return "last update \(SlotPresentation.duration(Date().timeIntervalSince(since))) ago"
+            TickingText { now in
+                "last update \(SlotPresentation.duration(now.timeIntervalSince(since))) ago"
+            }
         case let .unreachable(reason):
-            return reason
+            Text(reason)
         case .connecting, .reconnecting:
-            return nil
+            EmptyView()
         }
     }
 }
@@ -139,7 +178,7 @@ struct MenuBarSlotRow: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 Circle()
-                    .fill(slot.wedged ? Color.red : slot.state.tint)
+                    .fill(slot.effectiveTint)
                     .frame(width: 6, height: 6)
                 Text(SlotPresentation.displayName(slot))
                     .font(.callout)
@@ -148,12 +187,11 @@ struct MenuBarSlotRow: View {
                     .truncationMode(.tail)
                 Spacer(minLength: 4)
                 // Only the elapsed digits tick, not the whole row.
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    Text("\(SlotPresentation.stateLabel(slot)) · \(SlotPresentation.duration(SlotPresentation.timeInState(slot, now: context.date)))")
-                        .font(.caption)
-                        .monospacedDigit()
-                        .foregroundStyle(slot.wedged ? .red : Metrics.secondaryText)
+                TickingText { now in
+                    "\(SlotPresentation.stateLabel(slot)) · \(SlotPresentation.duration(SlotPresentation.timeInState(slot, now: now)))"
                 }
+                .font(.caption)
+                .foregroundStyle(slot.wedged ? .red : Metrics.secondaryText)
             }
             secondLine
                 .padding(.leading, 12)
@@ -172,31 +210,29 @@ struct MenuBarSlotRow: View {
     private var secondLine: some View {
         if slot.state == .job, slot.hasJob {
             // The glance question while a job runs is "which job, how long".
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                Text("\(slot.job.name) · \(SlotPresentation.duration(context.date.timeIntervalSince(slot.job.started.dateValue)))")
-                    .font(.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(.blue)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+            TickingText { now in
+                "\(slot.job.name) · \(SlotPresentation.duration(now.timeIntervalSince(slot.job.started.dateValue)))"
             }
-        } else {
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                let note = noteText(now: context.date)
-                if !note.isEmpty {
-                    Text(note)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
+            .font(.caption)
+            .foregroundStyle(.blue)
+            .lineLimit(1)
+            .truncationMode(.tail)
+        } else if !noteText(now: Date()).isEmpty {
+            // Emptiness only changes with snapshots, so the gate doesn't
+            // need to tick; the countdown inside does.
+            TickingText { now in
+                noteText(now: now)
             }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.tail)
         }
     }
 
     private func noteText(now: Date) -> String {
         if let pending = store.pendingCommand(for: slot.slot) {
-            return "\(pending.kind.rawValue) requested…"
+            return pending.displayText
         }
         return SlotPresentation.note(slot, now: now)
     }
@@ -239,8 +275,11 @@ struct DoctorChip: View {
         Group {
             if let checks = store.doctorChecks, let ranAt = store.doctorRanAt {
                 let failed = checks.count(where: { !$0.ok })
-                Text(chipText(failed: failed, ranAt: ranAt))
-                    .foregroundStyle(failed == 0 ? Color.green : Color.red)
+                TickingText { now in
+                    let age = SlotPresentation.duration(now.timeIntervalSince(ranAt))
+                    return failed == 0 ? "✓ \(age) ago" : "\(failed) failed · \(age) ago"
+                }
+                .foregroundStyle(failed == 0 ? Color.green : Color.red)
             } else {
                 Text("doctor —")
                     .foregroundStyle(.secondary)
@@ -248,10 +287,5 @@ struct DoctorChip: View {
         }
         .font(.caption)
         .help("Last doctor run; re-run from the main window")
-    }
-
-    private func chipText(failed: Int, ranAt: Date) -> String {
-        let age = SlotPresentation.duration(Date().timeIntervalSince(ranAt))
-        return failed == 0 ? "✓ \(age) ago" : "\(failed) failed · \(age) ago"
     }
 }

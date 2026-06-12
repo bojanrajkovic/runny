@@ -34,7 +34,8 @@ final class CycleHistoryModel {
         loading = true
         loadError = nil
         inFlight = Task { @MainActor [weak self] in
-            defer { self?.loading = false }
+            // A cancelled predecessor must not clear the successor's spinner.
+            defer { if !Task.isCancelled { self?.loading = false } }
             do {
                 let records = try await client.why(slot: slotName, cycles: Self.depth)
                 guard !Task.isCancelled else { return }

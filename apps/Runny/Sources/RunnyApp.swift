@@ -110,16 +110,18 @@ struct SettingsView: View {
             Section {
                 TextField("Runny home", text: $homeOverride, prompt: Text("~/.runny"))
                     .help("Where runnyd keeps its socket. Matches the daemon's --home / RUNNY_HOME. Leave empty for ~/.runny.")
+                    // Restart on commit, not per keystroke — every restart
+                    // tears down and redials the whole client stack.
+                    .onSubmit { store.restart() }
                 LabeledContent("Socket", value: RunnyHome.displaySocketPath)
                 Button("Reconnect") { store.restart() }
             } footer: {
-                Text("A daemon started with a custom home is invisible to the app unless this matches — Finder-launched apps never see shell environment variables.")
+                Text("A daemon started with a custom home is invisible to the app unless this matches — Finder-launched apps never see shell environment variables. Press Return (or Reconnect) to apply.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
         .frame(width: 480)
-        .onChange(of: homeOverride) { store.restart() }
     }
 }

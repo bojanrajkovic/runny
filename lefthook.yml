@@ -8,7 +8,7 @@
 pre-commit:
   commands:
     format:
-      glob: "*.{go,bzl,bazel,swift}"
+      glob: "*.{go,bzl,bazel,swift},{BUILD,BUILD.bazel}"
       run: mise x -- bazel run //tools/format -- {staged_files}
       stage_fixed: true
     zizmor:

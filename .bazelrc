@@ -15,3 +15,18 @@ try-import %workspace%/user.bazelrc
 # Stamped builds (releases and branch artifacts): version from git via
 # tools/version.sh (ADR-0010).
 build:release --stamp --workspace_status_command=tools/workspace-status.sh
+# Signals release_build config_setting (strip debug symbols via gc_linkopts).
+build:release --define=release=1
+
+# Developer ID codesigning (opt-in; the cert must be in the active keychain).
+# Combine with --config=release for a release-grade signed binary:
+#   bazel build --config=release --config=developer-id //cmd/runnyd:runnyd_signed
+# The identity string is the CN of the Developer ID Application certificate;
+# verify with: security find-identity -v -p codesigning
+build:developer-id --action_env="CODESIGN_IDENTITY=Developer ID Application: Bojan Rajkovic (FP2BC7CW97)"
+
+# Notarization via App Store Connect API (combine with --config=developer-id).
+# In CI the job env sets NOTARY_KEY_B64/NOTARY_KEY_ID/NOTARY_ISSUER_ID from
+# secrets. For local notarization, export the variables first (see
+# tools/sign/sign.bzl docstring for the base64 one-liner).
+build:notarize --action_env=NOTARY_KEY_B64 --action_env=NOTARY_KEY_ID --action_env=NOTARY_ISSUER_ID

@@ -47,7 +47,7 @@ echo "Setting secrets on $REPO"
 # The releaser App's private key (release-please + tap push mint scoped
 # installation tokens from it).
 if [ -z "$releaser_key" ]; then
-	read -r -p "Path to releaser App private key .pem (empty to skip): " releaser_key
+	read -r -p "Path to releaser App private key .pem (empty to skip): " releaser_key || true
 fi
 if [ -n "$releaser_key" ]; then
 	set_secret "$APP_ENVIRONMENT" RELEASER_APP_PRIVATE_KEY "$(cat "$releaser_key")"

@@ -1,5 +1,6 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 load("//tools:stamp.bzl", "stamped_go_binary")
+load("//tools/sign:sign.bzl", "codesign_binary", "notarize_binary")
 
 # gazelle:map_kind go_binary stamped_go_binary //tools:stamp.bzl
 
@@ -21,6 +22,18 @@ go_library(
 stamped_go_binary(
     name = "runnyctl",
     embed = [":runnyctl_lib"],
+    visibility = ["//visibility:public"],
+)
+
+codesign_binary(
+    name = "runnyctl_signed",
+    binary = ":runnyctl",
+    visibility = ["//visibility:public"],
+)
+
+notarize_binary(
+    name = "runnyctl_notarized",
+    binary = ":runnyctl_signed",
     visibility = ["//visibility:public"],
 )
 

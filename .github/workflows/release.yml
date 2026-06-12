@@ -1,10 +1,19 @@
 # Release artifacts (ADR-0010): cold stamped Bazel build (no caches — see
-# CONTRIBUTING.md "CI security"), ad-hoc signed, checksummed, attested, and
-# attached to the release; then the Homebrew tap formula is updated when the
-# releaser App is configured. The formula's sha256 comes from the package
-# step's own checksum via job outputs — never from re-downloading the asset
-# (a CDN-propagation race, and it would attest whatever GitHub served
-# rather than what this run built).
+# CONTRIBUTING.md "CI security"), signed and notarized in-graph by the
+# runnyd_notarized target, checksummed, attested, and attached to the
+# release; then the Homebrew tap formula is updated when the releaser App
+# is configured. The formula's sha256 comes from the package step's own
+# checksum via job outputs — never from re-downloading the asset (a
+# CDN-propagation race, and it would attest whatever GitHub served rather
+# than what this run built).
+#
+# Signing and notarization are Bazel genrule targets (tools/sign/sign.bzl):
+#   codesign_binary  → //cmd/runnyd:runnyd_signed  (Developer ID + hardened runtime + timestamp)
+#   notarize_binary  → //cmd/runnyd:runnyd_notarized (notarytool submit --wait; output identical to input)
+#
+# When BUILD_CERTIFICATE_BASE64 is absent the build falls back to ad-hoc
+# signing and skips notarization — both graceful-skip paths live in the
+# Bazel targets, not in workflow conditionals.
 name: release
 
 on:
@@ -42,8 +51,65 @@ jobs:
       - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4
         with:
           cache: false
-      - name: build (cold, stamped)
-        run: mise x -- bazel build --config=ci --config=release //cmd/runnyd //cmd/runnyctl
+
+      # Import the Developer ID cert into a short-lived keychain. Skipped
+      # (and the keychain cleanup step no-ops) when the secret is absent.
+      # The identity string is extracted from the keychain after import so
+      # the workflow never hardcodes a specific cert CN.
+      - name: import signing certificate
+        id: import-cert
+        if: ${{ secrets.BUILD_CERTIFICATE_BASE64 != '' }}
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$RUNNER_TEMP/certificate.p12" \
+            -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          # Allow codesign to use the key without interactive prompts.
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | awk -F'"' '/Developer ID Application/{print $2; exit}')
+          echo "codesign_identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+
+      # Decode notary credentials into job env vars so --config=notarize can
+      # pick them up via --action_env (no value → inherit from environment).
+      # Skipped when the secret is absent; the notarize_binary genrule then
+      # sees an empty NOTARY_KEY_B64 and copies the binary unchanged.
+      - name: set notarization credentials
+        if: ${{ secrets.NOTARY_KEY_P8 != '' }}
+        run: |
+          echo "NOTARY_KEY_B64=$(printf '%s' "$NOTARY_KEY_P8" | base64 | tr -d '\n')" >> "$GITHUB_ENV"
+          echo "NOTARY_KEY_ID=$NOTARY_KEY_ID_VAL" >> "$GITHUB_ENV"
+          echo "NOTARY_ISSUER_ID=$NOTARY_ISSUER_ID_VAL" >> "$GITHUB_ENV"
+        env:
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID_VAL: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID_VAL: ${{ secrets.NOTARY_ISSUER_ID }}
+
+      - name: build (cold, stamped, signed, notarized)
+        env:
+          # Developer ID when the cert is present; '-' (ad-hoc) otherwise.
+          # The identity is read from the keychain after import — never hardcoded.
+          CODESIGN_IDENTITY: ${{ steps.import-cert.outputs.codesign_identity || '-' }}
+        run: |
+          mise x -- bazel build --config=ci --config=release \
+            --action_env="CODESIGN_IDENTITY=$CODESIGN_IDENTITY" \
+            --config=notarize \
+            //cmd/runnyd:runnyd_notarized //cmd/runnyctl:runnyctl_notarized
+
+      # Remove the temp keychain whether the build succeeded or failed.
+      - name: remove signing keychain
+        if: ${{ always() && steps.import-cert.outcome != 'skipped' }}
+        run: security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db"
+
       - name: package
         id: package
         env:
@@ -55,13 +121,8 @@ jobs:
           [ "v$VERSION" = "$TAG" ] || { echo "tag $TAG != stamped v$VERSION" >&2; exit 1; }
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           mkdir -p dist
-          cp bazel-bin/cmd/runnyd/runnyd_/runnyd dist/
-          cp bazel-bin/cmd/runnyctl/runnyctl_/runnyctl dist/
-          chmod +w dist/runnyd
-          codesign -s - --entitlements tools/sign/runnyd.entitlements --force dist/runnyd
-          # The sign step exits 0 even for a plist whose key is wrong;
-          # assert the entitlement actually embedded (CI security).
-          codesign -d --entitlements - dist/runnyd | grep -q com.apple.security.virtualization
+          cp bazel-bin/cmd/runnyd/runnyd_notarized.bin dist/runnyd
+          cp bazel-bin/cmd/runnyctl/runnyctl_notarized.bin dist/runnyctl
           tar -C dist -czf "runny_${VERSION}_darwin_arm64.tar.gz" runnyd runnyctl
           shasum -a 256 "runny_${VERSION}_darwin_arm64.tar.gz" > "runny_${VERSION}_darwin_arm64.tar.gz.sha256"
           echo "sha256=$(cut -d' ' -f1 < "runny_${VERSION}_darwin_arm64.tar.gz.sha256")" >> "$GITHUB_OUTPUT"

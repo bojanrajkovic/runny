@@ -96,16 +96,39 @@ their job).
 
 ## Daemon lifecycle
 
-1. **Load + validate**: config parse (strict), then the doctor suite (the
-   check inventory lives in `cmd/runnyd`'s `makeDoctor`; `runnyd -doctor`
-   prints it). Any failure refuses startup loudly.
-2. **Sweep** (cold start owns the world): delete `vms/*`, deregister offline
+1. **Load + sweep clones**: config parse (strict), the instance lock, then
+   delete `vms/*` — *before* validation, because teardown retains a wedged
+   guest's clone (ADR-0012) and its divergence must not fail `disk-headroom`
+   ahead of the sweep that would free it (ADR-0014). The sweep runs only on
+   the real-startup path under the lock; `-doctor` stays read-only.
+2. **Validate**: the doctor suite (the check inventory lives in
+   `cmd/runnyd`'s `makeDoctor`; `runnyd -doctor` prints it, and it includes
+   a `config-drift` check against the running config). Any failure refuses
+   startup loudly. The `runnyd starting` line logs the config file's
+   SHA-256, chaining the audit trail across reload restarts.
+3. **Sweep registrations** (cold start owns the world): deregister offline
    runners carrying our instance prefix.
-3. **Run**: one goroutine per slot + the socket server. SIGINT/SIGTERM cancels
+4. **Run**: one goroutine per slot + the socket server. SIGINT/SIGTERM cancels
    the root context; in-flight cycles fail into TEARDOWN (which detaches from
    the root context so cleanup always completes), then the daemon exits.
-   Runner tarballs are ensured inside each cycle's ENSURE_IMAGE — deliberately
-   not at startup, where an unbounded download once blocked the socket.
+   SIGHUP triggers a validated config reload instead of killing the process
+   (ADR-0014). Runner tarballs are ensured inside each cycle's ENSURE_IMAGE —
+   deliberately not at startup, where an unbounded download once blocked the
+   socket.
+
+## Draining: the two restart causes
+
+A wedged guest (ADR-0012) and a config reload (ADR-0014) share one drainer
+in `cmd/runnyd`: pause + recycle every slot — running jobs finish first —
+re-issued on every status change until each slot is stable (wedged, or
+paused in BACKOFF, which cannot start a job). At convergence a local exit
+gate re-parses the on-disk config: if it no longer parses the daemon
+*holds* (drained, still serving status with the hold annotation,
+revalidating every 30s) rather than handing launchd a file the respawn
+would refuse; otherwise it exits non-zero (`restarting after drain: …`)
+and launchd KeepAlive cold-starts it. The drain cause is visible as
+`GetStatusResponse.draining` (the `DRAINING` banner in runnyctl) and in
+each interrupted cycle's recycle reason.
 
 ## On-disk layout
 
@@ -156,7 +179,9 @@ App, real images), not just under test fakes:
   launchd cold start — process exit is the only thing that reclaims an
   in-process VM (ADR-0012).
 - Operator surface: recycle deregisters; pause holds; SIGTERM mid-cycle
-  leaves zero VMs, zero vm dirs, zero registrations.
+  leaves zero VMs, zero vm dirs, zero registrations; `runnyctl reload` (or
+  SIGHUP) validates the on-disk config and drains to a respawn, with the
+  drain cause in the status `draining` field.
 - SSH hardening (ADR-0013), both OSes: SECURE_SSH rotates in about a second
   per cycle; mid-cycle password SSH to a hardened guest is refused with the
   password method not even offered (`Permission denied (publickey)`); a pool

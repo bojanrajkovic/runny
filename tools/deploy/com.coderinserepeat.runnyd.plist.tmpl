@@ -19,11 +19,13 @@
   <key>RunAtLoad</key>
   <true/>
 
-  <!-- KeepAlive is load-bearing for the wedge restart (ADR-0012): when a
-       guest survives force-stop, runnyd exits non-zero expecting launchd to
-       cold-start it — process exit is the only thing that reclaims an
-       in-process VM. Stop the daemon with `launchctl bootout`, never by
-       killing it, to avoid an immediate respawn. -->
+  <!-- KeepAlive is load-bearing for the wedge restart (ADR-0012) AND for
+       config reload (ADR-0014): when a guest survives force-stop, or after
+       a `runnyctl reload` drains the fleet, runnyd exits non-zero expecting
+       launchd to cold-start it — process exit is the only thing that
+       reclaims an in-process VM, and the respawn is what applies a reloaded
+       config. Stop the daemon with `launchctl bootout`, never by killing
+       it, to avoid an immediate respawn. -->
   <key>KeepAlive</key>
   <true/>
   <key>ThrottleInterval</key>

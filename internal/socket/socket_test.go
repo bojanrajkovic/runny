@@ -2,6 +2,8 @@ package socket
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"log/slog"
@@ -10,13 +12,16 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/bojanrajkovic/runny/internal/cycle"
+	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/logring"
 	"github.com/bojanrajkovic/runny/internal/statemachine"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
@@ -77,6 +82,83 @@ func TestRecordToProtoCarriesImage(t *testing.T) {
 	}
 }
 
+func TestStatusToProtoCarriesDebugFields(t *testing.T) {
+	until := time.Date(2026, 6, 12, 16, 0, 0, 0, time.UTC)
+	armed := statusToProto(statemachine.Status{State: statemachine.StateJob, DebugHoldArmed: true})
+	if !armed.GetDebugHoldArmed() {
+		t.Error("DebugHoldArmed dropped")
+	}
+	if armed.GetDebugHoldExpires() != nil {
+		t.Error("DebugHoldExpires should be unset when zero")
+	}
+	held := statusToProto(statemachine.Status{State: statemachine.StateDebug, DebugHoldExpires: until})
+	if held.GetDebugHoldExpires() == nil || !held.GetDebugHoldExpires().AsTime().Equal(until) {
+		t.Errorf("DebugHoldExpires dropped: %v", held.GetDebugHoldExpires())
+	}
+}
+
+func TestRecordToProtoCarriesInjectedKeys(t *testing.T) {
+	r := &cycle.Record{
+		CycleID: "abcd1234", Slot: "mac-1",
+		Job: &cycle.JobInfo{Name: "build", OperatorKeys: []string{"SHA256:abc"}},
+		InjectedKeys: []cycle.InjectedKey{
+			{Fingerprint: "SHA256:abc", Outcome: "armed", State: "JOB", Reason: "wedged"},
+		},
+	}
+	pb := recordToProto(r)
+	if len(pb.GetInjectedKeys()) != 1 {
+		t.Fatalf("injected keys dropped: %+v", pb.GetInjectedKeys())
+	}
+	k := pb.GetInjectedKeys()[0]
+	if k.GetFingerprint() != "SHA256:abc" || k.GetOutcome() != "armed" || k.GetState() != "JOB" {
+		t.Errorf("injected key mangled: %+v", k)
+	}
+	if len(pb.GetJob().GetOperatorKeys()) != 1 || pb.GetJob().GetOperatorKeys()[0] != "SHA256:abc" {
+		t.Errorf("operator keys dropped: %+v", pb.GetJob().GetOperatorKeys())
+	}
+}
+
+func TestInjectDebugKeyValidation(t *testing.T) {
+	c := dial(t, newTestServer(testSlots("mac-1"), nil, nil, nil))
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	sshPub, _ := ssh.NewPublicKey(pub)
+	goodKey := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPub))) + " op@host"
+
+	// Bad key → InvalidArgument.
+	_, err := c.InjectDebugKey(t.Context(), &runnyv1.InjectDebugKeyRequest{Slot: "mac-1", PublicKey: "not a key"})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("bad key: code = %v, want InvalidArgument", status.Code(err))
+	}
+
+	// Negative hold → InvalidArgument.
+	_, err = c.InjectDebugKey(t.Context(), &runnyv1.InjectDebugKeyRequest{
+		Slot: "mac-1", PublicKey: goodKey, Hold: durationpb.New(-time.Hour),
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("negative hold: code = %v, want InvalidArgument", status.Code(err))
+	}
+
+	// Over-cap hold → InvalidArgument (cap is 2h in the test config).
+	_, err = c.InjectDebugKey(t.Context(), &runnyv1.InjectDebugKeyRequest{
+		Slot: "mac-1", PublicKey: goodKey, Hold: durationpb.New(3 * time.Hour),
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("over-cap hold: code = %v, want InvalidArgument", status.Code(err))
+	}
+
+	// Valid key but the slot is in BACKOFF (never started) → FailedPrecondition.
+	_, err = c.InjectDebugKey(t.Context(), &runnyv1.InjectDebugKeyRequest{Slot: "mac-1", PublicKey: goodKey})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Errorf("backoff precheck: code = %v, want FailedPrecondition", status.Code(err))
+	}
+
+	// Unknown slot → NotFound.
+	_, err = c.InjectDebugKey(t.Context(), &runnyv1.InjectDebugKeyRequest{Slot: "nope", PublicKey: goodKey})
+	if status.Code(err) != codes.NotFound {
+		t.Errorf("unknown slot: code = %v, want NotFound", status.Code(err))
+	}
+}
+
 func TestToLogLine(t *testing.T) {
 	e := logring.Entry{
 		Time:    time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC),
@@ -115,7 +197,11 @@ func newTestServer(slots []*statemachine.Slot, ring *logring.Ring, stores func(s
 	if doctor == nil {
 		doctor = func(context.Context) []DoctorCheck { return nil }
 	}
-	return NewServer(slots, ring, logring.NewRing(16), stores, doctor, "test")
+	cfg := &home.Config{}
+	cfg.Limits.MaxDebugHold = home.Duration(2 * time.Hour)
+	cfg.Limits.ReconcileInterval = home.Duration(60 * time.Second)
+	cfg.Deadlines.SecureSSH = home.Duration(15 * time.Second)
+	return NewServer(slots, ring, logring.NewRing(16), stores, doctor, "test", cfg)
 }
 
 // dial serves srv over an in-memory bufconn pipe and returns a connected

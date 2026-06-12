@@ -221,7 +221,7 @@ func run() error {
 
 	srv := socket.NewServer(slots, ring, runnerRing,
 		func(slot string) cycle.Store { return cycle.Store{SlotDir: dir.SlotCyclesDir(slot)} },
-		doctor, version)
+		doctor, version, cfg)
 
 	// Drain coordination: the wedge escalation (ADR-0012 — a guest that
 	// survives force-stop can only be reclaimed by process exit) and the

@@ -7,6 +7,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/cycle",
+        "//internal/home",
         "//internal/logring",
         "//internal/statemachine",
         "//proto/runny/v1:runny",
@@ -14,6 +15,7 @@ go_library(
         "@org_golang_google_grpc//codes",
         "@org_golang_google_grpc//status",
         "@org_golang_google_protobuf//types/known/timestamppb",
+        "@org_golang_x_crypto//ssh",
     ],
 )
 
@@ -23,6 +25,7 @@ go_test(
     embed = [":socket"],
     deps = [
         "//internal/cycle",
+        "//internal/home",
         "//internal/logring",
         "//internal/statemachine",
         "//proto/runny/v1:runny",
@@ -31,5 +34,7 @@ go_test(
         "@org_golang_google_grpc//credentials/insecure",
         "@org_golang_google_grpc//status",
         "@org_golang_google_grpc//test/bufconn",
+        "@org_golang_google_protobuf//types/known/durationpb",
+        "@org_golang_x_crypto//ssh",
     ],
 )

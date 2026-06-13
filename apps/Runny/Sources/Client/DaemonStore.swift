@@ -326,6 +326,15 @@ final class DaemonStore {
                 commandError = Self.describe(error, kind: kind, slot: slot.slot)
             }
         }
+        // Drive the confirmation timeout off a timer, not just snapshots: if
+        // WatchStatus drops or wedges after the command, confirmPending() would
+        // otherwise never run again and the 10s not-confirmed promise would
+        // fail silently exactly when supervision is unhealthy. The check is
+        // idempotent — a snapshot that already confirmed/expired it is a no-op.
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(Self.confirmationBound + 0.5))
+            confirmPending()
+        }
     }
 
     func pauseSlot(_ slot: Runny_V1_SlotStatus) {
@@ -352,13 +361,21 @@ final class DaemonStore {
         }
     }
 
-    /// The confirmed path: cancel the job only when the slot is STILL in JOB
-    /// (in DEBUG the recycle destroys the held guest regardless of the flag).
-    /// Re-read current state — the job may have ended between opening the
-    /// dialog and confirming, so the captured snapshot can be stale.
+    /// The confirmed path. Re-read current state, then guard the cycle: if it
+    /// advanced while the dialog was open (e.g. a DEBUG hold auto-released and
+    /// a new cycle reached JOB), the confirmation described a guest that's
+    /// gone — don't retarget this (possibly destructive) action onto an
+    /// unrelated new job. Make the operator re-issue against the live state.
+    /// When the cycle is unchanged, cancel the job only if it's STILL JOB (in
+    /// DEBUG the recycle destroys the held guest regardless of the flag).
     func confirmRecycle(_ slot: Runny_V1_SlotStatus) {
         recycleConfirm = nil
-        let current = slots.first(where: { $0.slot == slot.slot }) ?? slot
+        guard let current = slots.first(where: { $0.slot == slot.slot }) else { return }
+        guard current.cycleID == slot.cycleID else {
+            commandNote =
+                "\(slot.slot) moved to a new cycle while confirming — recycle not sent; re-issue if it's still needed"
+            return
+        }
         performRecycle(current, cancelRunningJob: current.state == .job)
     }
 

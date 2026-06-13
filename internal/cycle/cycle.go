@@ -60,6 +60,11 @@ type Record struct {
 	// InjectedKeys is the operator debug-key audit trail for this cycle: one
 	// entry per attempt (issue #39), including failed and refused ones.
 	InjectedKeys []InjectedKey `json:"injected_keys,omitempty"`
+	// CycleDir is the absolute path to this cycle's artifact directory. Not
+	// persisted to cycle.json (it is always derivable from the directory the
+	// file lives in); populated by Store.Recent() for in-memory use and wire
+	// serialization.
+	CycleDir string `json:"-"`
 }
 
 type StateRecord struct {
@@ -226,6 +231,7 @@ func (s Store) Recent(n int, liveCycleID string) ([]*Record, error) {
 		if err := json.Unmarshal(raw, &r); err != nil {
 			continue
 		}
+		r.CycleDir = dir
 		recs = append(recs, &r)
 	}
 	return recs, nil
@@ -260,6 +266,7 @@ func (s Store) synthesizeOrphan(dir string) *Record {
 		Failure:      &Failure{State: "?", Error: "daemon died with operator credential evidence on disk"},
 		InjectedKeys: keys,
 		Artifacts:    []string{OperatorAccessFile},
+		CycleDir:     dir,
 	}
 }
 

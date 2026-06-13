@@ -247,6 +247,13 @@ message CycleRecord {
   // tarball step was skipped or the cycle failed before ENSURE_IMAGE completed.
   // Empty in records written by older daemons.
   string runner_version = 15;
+  // Absolute path of this cycle's artifact directory on the daemon host —
+  // the directory that holds cycle.json and any retained post-mortem files.
+  // Set by daemons that support this field; older daemons leave it empty and
+  // clients must fall back to reconstructing the path from cycle metadata.
+  // Clients MUST NOT synthesize this from started+cycle_id: crash-orphan
+  // records have a Started that does not match the directory name.
+  string cycle_dir = 16;
 }
 
 message InjectedKey {

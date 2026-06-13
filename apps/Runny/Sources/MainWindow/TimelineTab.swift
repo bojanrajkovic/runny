@@ -456,7 +456,10 @@ struct ArtifactRow: View {
     }
 
     private var url: URL {
-        RunnyHome.artifactURL(cycle: cycle, filename: filename)
+        if !cycle.cycleDir.isEmpty {
+            return URL(fileURLWithPath: cycle.cycleDir).appendingPathComponent(filename)
+        }
+        return RunnyHome.artifactURL(cycle: cycle, filename: filename)
     }
 
     private func reveal() {

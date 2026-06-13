@@ -599,7 +599,11 @@ func (c *ctl) renderCycle(rec *runnyv1.CycleRecord) {
 		fmt.Fprintln(c.out, line)
 	}
 	for _, a := range rec.GetArtifacts() {
-		fmt.Fprintf(c.out, "  artifact: %s (in the cycle dir under ~/.runny/cycles)\n", a)
+		if dir := rec.GetCycleDir(); dir != "" {
+			fmt.Fprintf(c.out, "  artifact: %s/%s\n", dir, a)
+		} else {
+			fmt.Fprintf(c.out, "  artifact: %s (in the cycle dir under ~/.runny/cycles)\n", a)
+		}
 	}
 }
 

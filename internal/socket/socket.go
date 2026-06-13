@@ -603,6 +603,7 @@ func recordToProto(r *cycle.Record) *runnyv1.CycleRecord {
 		Result:        string(r.Result),
 		Vm:            &runnyv1.VMInfo{Mac: r.VM.MAC, Ip: r.VM.IP},
 		Artifacts:     r.Artifacts,
+		CycleDir:      r.CycleDir,
 	}
 	out.States = stateRecordsToProto(r.States)
 	if r.Job != nil {

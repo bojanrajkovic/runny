@@ -31,6 +31,10 @@ final class LogStreamModel {
     static let replayDepth: UInt32 = 200
 
     private var task: Task<Void, Never>?
+    /// The live StreamLogs call. Cancelling `task` stops *consuming*, but the
+    /// shared channel keeps the RPC (and its server ring subscription) open
+    /// until this call is explicitly cancelled.
+    private var call: GRPCAsyncServerStreamingCall<Runny_V1_StreamLogsRequest, Runny_V1_LogLine>?
     private var nextID = 0
     private var pendingBatch: [Line] = []
     private var flushScheduled = false
@@ -56,11 +60,12 @@ final class LogStreamModel {
                     continue
                 }
                 do {
-                    let stream = client.streamLogs(
+                    let call = client.streamLogs(
                         slot: slot, daemon: daemon, replay: Self.replayDepth
                     )
+                    self.call = call
                     var receiving = false
-                    for try await line in stream {
+                    for try await line in call.responseStream {
                         if !receiving {
                             receiving = true
                             delay = 2
@@ -94,6 +99,9 @@ final class LogStreamModel {
                         appendMarker("— log stream interrupted: \(reason); retrying —")
                     }
                 }
+                // This stream is done; the next iteration opens a fresh call.
+                call?.cancel()
+                call = nil
                 try? await Task.sleep(for: .seconds(delay))
                 delay = min(delay * 2, 30)
             }
@@ -102,6 +110,10 @@ final class LogStreamModel {
 
     func stop() {
         task?.cancel()
+        // Cancelling the Task only stops consuming; end the RPC explicitly so
+        // the server-side stream and ring subscription don't outlive the view.
+        call?.cancel()
+        call = nil
         task = nil
     }
 

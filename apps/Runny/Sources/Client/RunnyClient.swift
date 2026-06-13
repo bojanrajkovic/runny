@@ -47,15 +47,20 @@ final class RunnyClient: @unchecked Sendable {
         stub.watchStatus(.init())
     }
 
+    /// Returns the call, not just its `responseStream`: the channel is shared
+    /// across log views, so a consumer can't close it to stop the RPC —
+    /// cancelling the consuming Task doesn't reach the server. The caller must
+    /// `.cancel()` this call object to actually end the StreamLogs RPC and
+    /// release the server-side ring subscription.
     func streamLogs(slot: String?, daemon: Bool, replay: UInt32)
-        -> GRPCAsyncResponseStream<Runny_V1_LogLine>
+        -> GRPCAsyncServerStreamingCall<Runny_V1_StreamLogsRequest, Runny_V1_LogLine>
     {
         var request = Runny_V1_StreamLogsRequest()
         request.replay = replay
         request.follow = true
         request.daemon = daemon
         if let slot { request.slot = slot }
-        return stub.streamLogs(request)
+        return stub.makeStreamLogsCall(request)
     }
 
     /// `cancelRunningJob` is the wire form of the CLI's `-force`: in JOB it

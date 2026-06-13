@@ -24,6 +24,10 @@ struct RunnyApp: App {
                 }
         }
         .defaultSize(width: 920, height: 600)
+        // Drop the "Runny" titlebar text: above the big in-content runner name
+        // it reads as a stranded second title. The toolbar (traffic lights,
+        // sidebar toggle) stays; the content header is the sole title.
+        .windowStyle(.hiddenTitleBar)
 
         Settings {
             SettingsView()

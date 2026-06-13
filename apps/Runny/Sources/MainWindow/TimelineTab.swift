@@ -162,8 +162,12 @@ struct CurrentCycleView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                summary
-                Divider()
+                // No metadata header here: the detail header above and the Info
+                // tab already carry the image, digest, runner, vm, and live
+                // state. The current cycle's unique datum is where it is now —
+                // so this view is just the live pipeline. (Historical cycles
+                // keep their summary; for a finished cycle it's the only record
+                // of what ran.)
                 pipeline
                 Text("Per-state durations are recorded when the cycle finishes; it's selectable as a past cycle then.")
                     .font(.caption)
@@ -172,46 +176,6 @@ struct CurrentCycleView: View {
             .padding()
         }
         .textSelection(.enabled)
-    }
-
-    private var summary: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                StateBadge(slot: slot)
-                TickingText { now in
-                    "for \(SlotPresentation.duration(SlotPresentation.timeInState(slot, now: now)))"
-                }
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                Spacer()
-                Text(slot.cycleID)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-            if !SlotPresentation.note(slot, now: Date()).isEmpty {
-                TickingText { now in SlotPresentation.note(slot, now: now) }
-                    .font(.caption)
-                    .foregroundStyle(slot.lastFailure.isEmpty ? .secondary : Color.orange)
-                    .lineLimit(2)
-            }
-            HStack(spacing: 12) {
-                if !slot.image.isEmpty {
-                    Text(slot.image).lineLimit(1).truncationMode(.middle)
-                }
-                if !slot.imageDigest.isEmpty {
-                    Text(String(slot.imageDigest.prefix(19)) + "…")
-                }
-                if !slot.runnerVersion.isEmpty {
-                    Text(slot.runnerVersion).lineLimit(1).truncationMode(.middle)
-                }
-                if slot.hasVm, !slot.vm.ip.isEmpty {
-                    Text("vm \(slot.vm.ip)")
-                }
-            }
-            .font(.caption)
-            .monospacedDigit()
-            .foregroundStyle(.secondary)
-        }
     }
 
     private var pipeline: some View {
@@ -253,6 +217,7 @@ struct PipelineRow: View {
             Text(state.displayName)
                 .font(.callout)
                 .monospaced()
+                .fontWeight(position == .current ? .semibold : .regular)
                 .foregroundStyle(position == .pending ? .secondary : .primary)
                 .frame(width: 120, alignment: .leading)
             if position == .current {
@@ -265,7 +230,13 @@ struct PipelineRow: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 5)
+        .padding(.horizontal, 8)
+        .background {
+            if position == .current {
+                RoundedRectangle(cornerRadius: 6).fill(state.tint.opacity(0.12))
+            }
+        }
     }
 
     private var glyph: String {

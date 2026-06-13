@@ -231,6 +231,71 @@ func TestPruneAgesOrphanedSidecar(t *testing.T) {
 	}
 }
 
+func TestRecentSetsCycleDir(t *testing.T) {
+	s := Store{SlotDir: filepath.Join(t.TempDir(), "runner-1")}
+	base := time.Date(2026, 6, 9, 22, 0, 0, 0, time.UTC)
+	rec := record("runner-1", "dir00001", base, ResultSuccess)
+	if err := s.Write(rec); err != nil {
+		t.Fatal(err)
+	}
+	// Write() must set CycleDir as a side-effect so callers don't have to go
+	// through Recent() to get the path.
+	if rec.CycleDir == "" {
+		t.Error("Write did not set CycleDir on the record")
+	}
+	recs, err := s.Recent(1, "")
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("Recent: %v, %d", err, len(recs))
+	}
+	// CycleDir must be the absolute directory, not empty (clients use it to
+	// resolve artifact paths without reconstructing the dir name themselves).
+	if recs[0].CycleDir == "" {
+		t.Error("Recent did not set CycleDir on normal record")
+	}
+	if recs[0].CycleDir != rec.CycleDir {
+		t.Errorf("Recent CycleDir = %q, want %q (same as Write set)", recs[0].CycleDir, rec.CycleDir)
+	}
+	// CycleDir must not be persisted in cycle.json; json:"-" enforces this at
+	// compile time, so no runtime check is needed here.
+}
+
+func TestOrphanCycleDirIsRealDir(t *testing.T) {
+	// An orphan record has a Started = InjectedKey.Injected, not the real cycle
+	// start; Dir(r) would therefore reconstruct a different (wrong) directory.
+	// Recent() must populate CycleDir from the scanned dir, not from Dir(r).
+	s := Store{SlotDir: filepath.Join(t.TempDir(), "runner-1")}
+	cycleStart := time.Date(2026, 6, 9, 22, 0, 0, 0, time.UTC)
+	// The sidecar's injection time is later than the cycle start — this
+	// simulates the real mismatch between directory name and orphan.Started.
+	injected := cycleStart.Add(5 * time.Minute)
+	orphan := record("runner-1", "orph0001", cycleStart, ResultFailure)
+	keys := []InjectedKey{{Fingerprint: "SHA256:abc", Injected: injected, Outcome: "armed", State: "JOB"}}
+	data, _ := json.Marshal(keys)
+	if err := s.WriteArtifact(orphan, OperatorAccessFile, data); err != nil {
+		t.Fatal(err)
+	}
+	// No cycle.json — this is a crash orphan.
+	recs, err := s.Recent(0, "")
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("Recent: %v, %d", err, len(recs))
+	}
+	stub := recs[0]
+	if stub.CycleDir == "" {
+		t.Error("synthesized orphan has empty CycleDir")
+	}
+	// The real dir must exist; Dir(stub) would produce a different path because
+	// stub.Started = injected, not cycleStart.
+	if _, err := os.Stat(stub.CycleDir); err != nil {
+		t.Errorf("orphan CycleDir %q does not exist: %v", stub.CycleDir, err)
+	}
+	// Dir(stub) reconstructs from stub.Started = injected, not cycleStart, so
+	// it must produce a different path than the real scanned dir.
+	wrongDir, _ := s.Dir(stub)
+	if wrongDir == stub.CycleDir {
+		t.Errorf("Dir(stub) == stub.CycleDir (%q): orphan could self-reconstruct, undermining the whole fix", stub.CycleDir)
+	}
+}
+
 func TestNewIDShape(t *testing.T) {
 	id := NewID()
 	if len(id) != 8 {

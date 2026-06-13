@@ -60,6 +60,11 @@ type Record struct {
 	// InjectedKeys is the operator debug-key audit trail for this cycle: one
 	// entry per attempt (issue #39), including failed and refused ones.
 	InjectedKeys []InjectedKey `json:"injected_keys,omitempty"`
+	// CycleDir is the absolute path to this cycle's artifact directory. Not
+	// persisted to cycle.json (it is always derivable from the directory the
+	// file lives in); populated by Store.Recent() for in-memory use and wire
+	// serialization.
+	CycleDir string `json:"-"`
 }
 
 type StateRecord struct {
@@ -155,6 +160,10 @@ func (s Store) Write(r *Record) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("placing cycle.json: %w", err)
 	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	r.CycleDir = dir
 	return nil
 }
 
@@ -212,6 +221,9 @@ func (s Store) Recent(n int, liveCycleID string) ([]*Record, error) {
 	recs := make([]*Record, 0, len(names))
 	for _, name := range names {
 		dir := filepath.Join(s.SlotDir, name)
+		if abs, err := filepath.Abs(dir); err == nil {
+			dir = abs
+		}
 		raw, err := os.ReadFile(filepath.Join(dir, "cycle.json"))
 		if err != nil {
 			// A live cycle has no cycle.json yet (it lands at finishCycle) but
@@ -226,6 +238,7 @@ func (s Store) Recent(n int, liveCycleID string) ([]*Record, error) {
 		if err := json.Unmarshal(raw, &r); err != nil {
 			continue
 		}
+		r.CycleDir = dir
 		recs = append(recs, &r)
 	}
 	return recs, nil
@@ -260,6 +273,7 @@ func (s Store) synthesizeOrphan(dir string) *Record {
 		Failure:      &Failure{State: "?", Error: "daemon died with operator credential evidence on disk"},
 		InjectedKeys: keys,
 		Artifacts:    []string{OperatorAccessFile},
+		CycleDir:     dir,
 	}
 }
 

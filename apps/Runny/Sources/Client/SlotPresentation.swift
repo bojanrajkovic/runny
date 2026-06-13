@@ -14,18 +14,19 @@ extension Google_Protobuf_Timestamp {
 /// Mirrors runnyctl's status rendering semantics exactly (cmd/runnyctl);
 /// the two clients are siblings and should describe a slot the same way.
 enum SlotPresentation {
-    /// Duration formatting matching runnyctl's durString: seconds-rounded
-    /// under an hour, minutes-rounded at an hour and above, negatives clamp
-    /// to 0s.
+    /// Compact, locale-aware duration. Deliberately diverges from runnyctl's
+    /// hand-rolled durString in favour of the system formatter: it carries
+    /// rounding boundaries correctly (e.g. 3599.6s → "1h", never "60m") and
+    /// drops zero units, at most the two coarsest. Negatives clamp to "0s".
     static func duration(_ interval: TimeInterval) -> String {
         let clamped = max(interval, 0)
-        if clamped < 3600 {
-            let secs = Int(clamped.rounded())
-            if secs < 60 { return "\(secs)s" }
-            return "\(secs / 60)m\(secs % 60 == 0 ? "" : "\(secs % 60)s")"
-        }
-        let mins = Int((clamped / 60).rounded())
-        return "\(mins / 60)h\(mins % 60 == 0 ? "" : "\(mins % 60)m")"
+        return Duration.seconds(clamped).formatted(
+            .units(
+                allowed: [.hours, .minutes, .seconds],
+                width: .narrow,
+                maximumUnitCount: 2
+            )
+        )
     }
 
     /// The STATE label: name, with runnyctl's paused/wedged treatment —
@@ -109,6 +110,20 @@ enum SlotPresentation {
     /// Time spent in the current state, clamped at zero.
     static func timeInState(_ slot: Runny_V1_SlotStatus, now: Date) -> TimeInterval {
         max(now.timeIntervalSince(slot.stateEntered.dateValue), 0)
+    }
+
+    /// "job name · elapsed" for a slot running a job — the one wording the
+    /// detail header and the menu-bar row both render.
+    static func runningJob(_ slot: Runny_V1_SlotStatus, now: Date) -> String {
+        "\(slot.job.name) · \(duration(now.timeIntervalSince(slot.job.started.dateValue)))"
+    }
+
+    /// The live debug-hold release countdown ("releases in X"), or nil when
+    /// the slot isn't a DEBUG hold with a known expiry. Callers prefix it
+    /// (the chip uses it bare; the menu row says "debug hold — …").
+    static func debugRelease(_ slot: Runny_V1_SlotStatus, now: Date) -> String? {
+        guard slot.state == .debug, slot.hasDebugHoldExpires else { return nil }
+        return "releases in \(duration(slot.debugHoldExpires.dateValue.timeIntervalSince(now)))"
     }
 }
 

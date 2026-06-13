@@ -132,10 +132,17 @@ final class PresentationFormattingTests: XCTestCase {
     func testDurationClampsAndScales() {
         XCTAssertEqual(SlotPresentation.duration(-5), "0s")
         XCTAssertEqual(SlotPresentation.duration(42), "42s")
-        XCTAssertEqual(SlotPresentation.duration(90), "1m30s")
+        XCTAssertEqual(SlotPresentation.duration(90), "1m 30s")
         XCTAssertEqual(SlotPresentation.duration(120), "2m")
         XCTAssertEqual(SlotPresentation.duration(3600), "1h")
-        XCTAssertEqual(SlotPresentation.duration(3600 + 240), "1h4m")
+        XCTAssertEqual(SlotPresentation.duration(3600 + 240), "1h 4m")
+    }
+
+    func testDurationCarriesTheHourBoundary() {
+        // The old hand-rolled formatter rendered [3599.5, 3600) as "60m"; the
+        // system formatter carries the rounding correctly.
+        XCTAssertEqual(SlotPresentation.duration(3599.6), "1h")
+        XCTAssertEqual(SlotPresentation.duration(59.6), "1m")
     }
 
     func testStateLabelPausedAndWedged() {

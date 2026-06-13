@@ -11,21 +11,22 @@ struct LogsTab: View {
 
     @Environment(DaemonStore.self) private var store
     @State private var model: LogStreamModel?
+    /// False during the initial replay window so switching streams doesn't
+    /// flash "No logs" before the bounded replay has had a chance to arrive.
+    @State private var settled = false
 
     var body: some View {
         Group {
             if let model {
-                VStack(spacing: 0) {
+                if !model.lines.isEmpty {
                     LogTextView(lines: model.lines, daemonMode: daemon)
-                    Divider()
-                    HStack {
-                        Text("best-effort stream — the daemon's ring is bounded and slow consumers drop lines")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
+                } else if settled {
+                    ContentUnavailableView(
+                        "No logs", systemImage: "text.alignleft",
+                        description: Text("Lines appear here as the runner and daemon emit them.")
+                    )
+                } else {
+                    ProgressView()
                 }
             } else {
                 ProgressView()
@@ -35,6 +36,10 @@ struct LogsTab: View {
             let m = LogStreamModel(slot: slotName, daemon: daemon)
             m.start(store: store)
             model = m
+            Task {
+                try? await Task.sleep(for: .seconds(1.2))
+                settled = true
+            }
         }
         .onDisappear {
             // Streams die with their view; nothing follows invisibly.

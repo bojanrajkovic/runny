@@ -32,13 +32,19 @@ struct MenuBarView: View {
             if store.slots.isEmpty {
                 emptyState
             } else {
-                VStack(spacing: 2) {
-                    ForEach(store.slots, id: \.slot) { slot in
-                        MenuBarSlotRow(slot: slot)
+                ScrollView {
+                    VStack(spacing: 2) {
+                        ForEach(store.slots, id: \.slot) { slot in
+                            MenuBarSlotRow(slot: slot)
+                        }
                     }
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, Metrics.pad / 2)
                 }
-                .padding(.vertical, 6)
-                .padding(.horizontal, Metrics.pad / 2)
+                // Cap the runner list so a many-slot host can't grow the
+                // popover past the screen and push Quit / Open Runny off the
+                // bottom; beyond the cap it scrolls. Sized to content below it.
+                .frame(maxHeight: CGFloat(min(store.slots.count, 8)) * 46 + 12)
             }
             Divider()
             footer
@@ -287,6 +293,8 @@ struct SlotCommands: View {
                 activation.openMainWindow(openWindow)
             }
         }
+        // Recycle is a daemon no-op in BACKOFF (no guest to recycle).
+        .disabled(slot.state == .backoff)
         if openInApp {
             Divider()
             Button("Open in Runny") {

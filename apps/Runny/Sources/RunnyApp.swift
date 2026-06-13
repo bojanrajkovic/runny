@@ -75,12 +75,13 @@ final class ActivationCoordinator {
         closeObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: nil, queue: .main
         ) { notification in
-            guard let closing = notification.object as? NSWindow,
-                  closing.identifier?.rawValue == WindowID.main
-            else { return }
+            // Fire on ANY window close, not just the main window's: if
+            // Settings outlives the main window, gating on the main-window
+            // identifier ignored its close and left the app .regular with no
+            // windows. Revert whenever the last regular window goes (Settings
+            // counts — it's a regular, key-able, non-panel window).
+            guard let closing = notification.object as? NSWindow else { return }
             Task { @MainActor in
-                // After this window goes away, revert unless another
-                // regular window (Settings, a second main) is still up.
                 let remaining = NSApp.windows.contains { window in
                     window !== closing && window.isVisible
                         && window.canBecomeKey && !(window is NSPanel)

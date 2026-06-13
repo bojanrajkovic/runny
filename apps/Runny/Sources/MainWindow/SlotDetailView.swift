@@ -61,12 +61,15 @@ struct SlotDetailView: View {
                         .foregroundStyle(.orange)
                 }
                 // Pause now lives as a toggle on the Info card's Paused row;
-                // the header keeps the one non-toggle action.
+                // the header keeps the one non-toggle action. Recycle is a
+                // daemon no-op in BACKOFF (no guest to recycle), so disable it
+                // there rather than offer a button that does nothing.
                 Button("Recycle") {
                     store.requestRecycle(slot)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .disabled(slot.state == .backoff)
             }
             HStack(spacing: 8) {
                 StateBadge(slot: slot)
@@ -79,7 +82,11 @@ struct SlotDetailView: View {
                 }
                 .font(.callout)
                 .foregroundStyle(.secondary)
-                if slot.hasJob {
+                // Only while a job is actually running: a post-job DEBUG hold
+                // keeps Status.Job as history (hasJob stays true) even though
+                // the runner is killed and dead — so gate on the live state,
+                // not hasJob, to avoid ticking elapsed on a finished job.
+                if slot.state == .job, slot.hasJob {
                     HStack(spacing: 4) {
                         Image(systemName: "hammer")
                         TickingText { now in

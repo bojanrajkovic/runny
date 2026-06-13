@@ -24,9 +24,13 @@ struct TimelineTab: View {
     }
 
     /// The slot is actively running a cycle (not parked in BACKOFF between
-    /// attempts): only then is there a "current cycle" to show.
+    /// attempts, and not wedged): only then is there a "current cycle" to show.
+    /// A wedged slot keeps a non-empty cycleID and a TEARDOWN state after its
+    /// cycle record is already finished — showing it as a live cycle would tick
+    /// a forever-growing TEARDOWN that duplicates the completed failure record.
     private var hasCurrent: Bool {
-        !slot.cycleID.isEmpty && slot.state != .backoff && slot.state != .unspecified
+        !slot.cycleID.isEmpty && slot.state != .backoff
+            && slot.state != .unspecified && !slot.wedged
     }
 
     var body: some View {
@@ -43,6 +47,14 @@ struct TimelineTab: View {
         .onChange(of: slot.cycleID) {
             model.refreshIfNeeded(slot: slot, store: store)
             normalizeSelection()
+        }
+        // If the pane opened while the daemon was unreachable, the load failed
+        // and neither hook above fires on reconnect — retry once the client is
+        // back instead of stranding it on "daemon unreachable" until Reload.
+        .onChange(of: store.client == nil) {
+            if store.client != nil {
+                model.refreshIfNeeded(slot: slot, store: store)
+            }
         }
         // Cycles arrive asynchronously; pick a default once they land.
         .onChange(of: model.cycles.map(\.cycleID)) { normalizeSelection() }

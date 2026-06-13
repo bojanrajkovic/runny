@@ -386,12 +386,20 @@ func (s *Server) Pause(ctx context.Context, req *runnyv1.PauseRequest) (*runnyv1
 
 func (s *Server) Resume(ctx context.Context, req *runnyv1.ResumeRequest) (*runnyv1.ResumeResponse, error) {
 	// A resume mid-drain would silently fight the drainer (which re-issues
-	// pause until convergence); refuse with the cause instead.
+	// pause until convergence); refuse with the cause instead. The gate read
+	// and the command enqueue are not atomic: drainer.Start can set d.reason
+	// in between, so re-check after enqueuing and undo if a drain raced in.
 	if d := s.draining(); d != "" {
 		return nil, status.Errorf(codes.FailedPrecondition, "daemon is draining: %s; resume after the respawn", d)
 	}
 	if err := s.command(req.GetSlot(), statemachine.Command{Kind: statemachine.CmdResume}); err != nil {
 		return nil, err
+	}
+	if d := s.draining(); d != "" {
+		// A drain started between the gate read and the command enqueue.
+		// Undo the resume so the slot re-converges without a junk cycle.
+		_ = s.command(req.GetSlot(), statemachine.Command{Kind: statemachine.CmdPause})
+		return nil, status.Errorf(codes.FailedPrecondition, "daemon is draining: %s; resume after the respawn", d)
 	}
 	return &runnyv1.ResumeResponse{}, nil
 }

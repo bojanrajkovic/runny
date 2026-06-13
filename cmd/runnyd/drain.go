@@ -157,6 +157,12 @@ func (d *drainer) recheck() {
 
 // tryExit re-verifies convergence (monotone, so cheap and safe), runs the
 // exit gate, and either stops the daemon or holds with the gate's detail.
+// Two stability passes bracket the exit gate: the first avoids running
+// slow file I/O unnecessarily, the second guards against a Resume that
+// landed during the gate's I/O and un-stabled a slot (issue #53). Between
+// pass two and d.stop(), the window is a lock acquisition — not zero, but
+// brief enough that any junk cycle from that residual cannot start a job
+// before the daemon exits.
 func (d *drainer) tryExit() {
 	d.mu.Lock()
 	if d.exited || d.exitRunning {
@@ -185,6 +191,15 @@ func (d *drainer) tryExit() {
 			d.mu.Unlock()
 			d.log.Error("refusing to exit onto a config the respawn would refuse; fix the file (the drain stays converged; revalidates automatically)", "detail", detail)
 			d.startRetry()
+			return
+		}
+	}
+
+	// Second stability pass: a Resume landing during the exit gate's file
+	// I/O can un-stable a slot. Re-verify before committing the exit; the
+	// next status change re-evaluates via observe → recheck → tryExit.
+	for _, s := range d.slots {
+		if !stableStatus(s.Status()) {
 			return
 		}
 	}

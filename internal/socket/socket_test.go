@@ -638,3 +638,29 @@ func TestStreamLogsRejectsBadRequests(t *testing.T) {
 		t.Errorf("daemon+slot: code = %v, want InvalidArgument", status.Code(err))
 	}
 }
+
+// Resume's drain guard reads draining() before enqueuing CmdResume, and
+// re-reads after (issue #53). Simulate drainer.Start racing in between:
+// the first draining() call returns "", the second returns a reason. The
+// handler must return FailedPrecondition and not silently leave the slot
+// running against an active drain.
+func TestResumeDrainRaceIsRefused(t *testing.T) {
+	// Buffered channel of size 1: first draining() call fills it and returns
+	// "" (pre-enqueue check passes); subsequent calls hit default and return
+	// an active drain reason. Goroutine-safe without imports.
+	called := make(chan struct{}, 1)
+	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	srv.DrainingFn = func() string {
+		select {
+		case called <- struct{}{}:
+			return ""
+		default:
+			return "config reload (rpc): test"
+		}
+	}
+	c := dial(t, srv)
+	_, err := c.Resume(t.Context(), &runnyv1.ResumeRequest{Slot: "mac-1"})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Errorf("Resume mid-drain race: code = %v, want FailedPrecondition", status.Code(err))
+	}
+}

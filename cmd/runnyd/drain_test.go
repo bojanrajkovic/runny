@@ -290,3 +290,38 @@ func TestDrainerExitGateRetriesOnTicker(t *testing.T) {
 	gateOK.Store(true)
 	waitStopped(t, stopped)
 }
+
+// A Resume that races with the exit gate can un-stable a slot while the
+// gate's file I/O is in flight (issue #53). tryExit's second stability
+// pass must catch this and defer the exit until the slot re-converges.
+func TestTryExitSecondPassBlocksEarlyExit(t *testing.T) {
+	slot := &stubSlot{st: stableSt}
+	gateEntered := make(chan struct{})
+	gateCanExit := make(chan struct{})
+	d, stops, stopped := newTestDrainer(slot)
+	// Gate is called twice: once by the first tryExit (blocked until
+	// gateCanExit is closed), and once by the second tryExit after the slot
+	// re-converges (passes through immediately since gateCanExit is already
+	// closed — a closed channel select case always succeeds).
+	d.exitGate = func(string) (bool, string) {
+		select {
+		case <-gateCanExit:
+			return true, "" // second tryExit: gate already released
+		default:
+			close(gateEntered) // signal: first tryExit has entered the gate
+			<-gateCanExit
+			return true, ""
+		}
+	}
+	d.Start("config reload (rpc): test", "")
+	<-gateEntered
+	// Simulate Resume landing while the gate's I/O is in flight.
+	slot.setStatus(statemachine.Status{State: statemachine.StateBackoff}) // Paused: false
+	close(gateCanExit)
+	// Second stability pass must catch the unstable slot — daemon must not stop.
+	assertNotStopped(t, stops)
+	// Slot re-converges; the next observe drives tryExit to completion.
+	slot.setStatus(stableSt)
+	d.observe(stableSt)
+	waitStopped(t, stopped)
+}

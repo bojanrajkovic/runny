@@ -160,7 +160,7 @@ struct CurrentCycleView: View {
         var d: [Runny_V1_SlotState: TimeInterval] = [:]
         for record in slot.activeCycleStates {
             let elapsed = record.left.dateValue.timeIntervalSince(record.entered.dateValue)
-            if elapsed > 0 {
+            if elapsed >= 0 {
                 d[record.state] = elapsed
             }
         }

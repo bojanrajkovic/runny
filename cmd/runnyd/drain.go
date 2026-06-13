@@ -205,19 +205,16 @@ func (d *drainer) tryExit() {
 			d.startRetry()
 			return
 		}
-		// Gate accepted — clear any stale hold annotation and stop the retry
-		// ticker. The ticker exists solely to re-run the gate; with the gate
-		// accepted there is nothing for it to do. If the second stability pass
-		// backs out below, the needRecheck defer handles re-triggering; the
-		// ticker should not keep firing spurious gate invocations.
+		// Gate accepted — clear any stale hold annotation now. If the second
+		// stability pass backs out below, we must not leave a false "held"
+		// status visible while waiting for the slot to re-converge.
+		// The retry ticker stays alive until the exit is committed: if the
+		// second pass backs out and CmdPause sends drop (full buffer), the
+		// ticker keeps driving recheck() → tryExit() so the drain does not
+		// stall waiting for the BACKOFF timer to fire organically.
 		d.mu.Lock()
 		d.holdDetail = ""
-		stopRetry := d.retryStop
-		d.retryStop = nil
 		d.mu.Unlock()
-		if stopRetry != nil {
-			stopRetry()
-		}
 	}
 
 	// Second stability pass: a Resume landing during the exit gate's file

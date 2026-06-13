@@ -43,7 +43,9 @@ struct MenuBarView: View {
                 }
                 // Cap the runner list so a many-slot host can't grow the
                 // popover past the screen and push Quit / Open Runny off the
-                // bottom; beyond the cap it scrolls. Sized to content below it.
+                // bottom; beyond the cap it scrolls. basedOnSize keeps it from
+                // bouncing/scrolling at all when the rows already fit.
+                .scrollBounceBehavior(.basedOnSize)
                 .frame(maxHeight: CGFloat(min(store.slots.count, 8)) * 46 + 12)
             }
             Divider()
@@ -356,21 +358,17 @@ struct DoctorChip: View {
 
     var body: some View {
         // Cached last result + age only — Doctor re-runs full validation
-        // (GitHub API calls included); the main window owns re-runs.
-        Group {
-            if let checks = store.doctorChecks, let ranAt = store.doctorRanAt {
-                let failed = checks.count(where: { !$0.ok })
-                TickingText { now in
-                    let age = SlotPresentation.duration(now.timeIntervalSince(ranAt))
-                    return failed == 0 ? "✓ \(age) ago" : "\(failed) failed · \(age) ago"
-                }
-                .foregroundStyle(failed == 0 ? Color.green : Color.red)
-            } else {
-                Text("doctor —")
-                    .foregroundStyle(.secondary)
+        // (GitHub API calls included); the main window owns re-runs. Nothing
+        // shows until a run exists: a bare "doctor —" placeholder is noise.
+        if let checks = store.doctorChecks, let ranAt = store.doctorRanAt {
+            let failed = checks.count(where: { !$0.ok })
+            TickingText { now in
+                let age = SlotPresentation.duration(now.timeIntervalSince(ranAt))
+                return failed == 0 ? "✓ \(age) ago" : "\(failed) failed · \(age) ago"
             }
+            .font(.caption)
+            .foregroundStyle(failed == 0 ? Color.green : Color.red)
+            .help("Last doctor run; re-run from the main window")
         }
-        .font(.caption)
-        .help("Last doctor run; re-run from the main window")
     }
 }

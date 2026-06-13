@@ -1,28 +1,23 @@
 import SwiftUI
 
-/// Fleet-wide logs: all runners interleaved, or the daemon's own log.
-/// The two are distinct server streams and mutually exclusive by contract,
-/// so the picker swaps the whole view (and its stream) rather than filtering.
+/// The daemon's own log. Per-runner output lives on each runner's Logs tab,
+/// so there's no fleet "runner output" mode here — that was a duplicate of
+/// what the runner views already show.
 struct FleetLogsPane: View {
-    enum Mode: String, CaseIterable {
-        case runners = "Runner Output"
-        case daemon = "Daemon Log"
-    }
-
-    @State private var mode: Mode = .runners
-
     var body: some View {
         VStack(spacing: 0) {
-            Picker("", selection: $mode) {
-                ForEach(Mode.allCases, id: \.self) { Text($0.rawValue) }
+            HStack {
+                Text("Daemon log")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                Spacer()
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(10)
+            .padding(.horizontal)
+            .padding(.top, 14)
+            .padding(.bottom, 6)
             Divider()
-            // id(mode) tears down the old stream with its view.
-            LogsTab(slotName: nil, daemon: mode == .daemon)
-                .id(mode)
+            LogsTab(slotName: nil, daemon: true)
         }
+        .ignoresSafeArea(.container, edges: .top)
     }
 }

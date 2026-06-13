@@ -1,0 +1,3 @@
+# SwiftFormat (nicklockwood) config, applied by `bazel run //tools/format`.
+--swiftversion 6.0
+--indent 4

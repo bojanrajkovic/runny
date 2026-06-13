@@ -1,6 +1,7 @@
 load("@protobuf//bazel:proto_library.bzl", "proto_library")
 load("@rules_go//go:def.bzl", "go_library")
 load("@rules_go//proto:def.bzl", "go_proto_library")
+load("@rules_swift//proto:proto.bzl", "swift_proto_library")
 
 proto_library(
     name = "runnyv1_proto",
@@ -20,6 +21,21 @@ go_proto_library(
     ],
     importpath = "github.com/bojanrajkovic/runny/proto/runny/v1",
     proto = ":runnyv1_proto",
+    visibility = ["//visibility:public"],
+)
+
+# Swift client stubs for the Runny app (ADR-0006: generated in-graph, never
+# committed). Swift toolchains resolve only on macOS hosts.
+# keep
+swift_proto_library(
+    name = "runnyv1_swift_proto",
+    compilers = [
+        "@rules_swift//proto/compilers:swift_proto",
+        "@rules_swift//proto/compilers:swift_client_proto",
+    ],
+    module_name = "RunnyV1",
+    protos = [":runnyv1_proto"],
+    target_compatible_with = ["@platforms//os:macos"],
     visibility = ["//visibility:public"],
 )
 

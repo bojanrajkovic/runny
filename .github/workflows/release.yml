@@ -10,6 +10,8 @@
 # Signing and notarization are Bazel genrule targets (tools/sign/sign.bzl):
 #   codesign_binary  → //cmd/runnyd:runnyd_signed  (Developer ID + hardened runtime + timestamp)
 #   notarize_binary  → //cmd/runnyd:runnyd_notarized (notarytool submit --wait; output identical to input)
+#   codesign_app/notarize_app/app_dmg/notarize_dmg
+#                    → //apps/Runny:Runny_notarized_dmg (signed, notarized, stapled app in a stapled dmg)
 #
 # When BUILD_CERTIFICATE_BASE64 is absent the build falls back to ad-hoc
 # signing and skips notarization — both graceful-skip paths live in the
@@ -107,11 +109,16 @@ jobs:
           # Developer ID when the cert is present; '-' (ad-hoc) otherwise.
           # The identity is read from the keychain after import — never hardcoded.
           CODESIGN_IDENTITY: ${{ steps.import-cert.outputs.codesign_identity || '-' }}
+        # --embed_label feeds apple_bundle_version so the app's
+        # CFBundleShortVersionString/CFBundleVersion match the release tag.
         run: |
+          VERSION="$(mise x -- tools/version.sh)"
           mise x -- bazel build --config=ci --config=release \
             --action_env="CODESIGN_IDENTITY=$CODESIGN_IDENTITY" \
             --config=notarize \
-            //cmd/runnyd:runnyd_notarized //cmd/runnyctl:runnyctl_notarized
+            --embed_label="$VERSION" \
+            //cmd/runnyd:runnyd_notarized //cmd/runnyctl:runnyctl_notarized \
+            //apps/Runny:Runny_notarized_dmg
 
       # Remove the temp keychain whether the build succeeded or failed.
       - name: remove signing keychain
@@ -134,14 +141,18 @@ jobs:
           tar -C dist -czf "runny_${VERSION}_darwin_arm64.tar.gz" runnyd runnyctl
           shasum -a 256 "runny_${VERSION}_darwin_arm64.tar.gz" > "runny_${VERSION}_darwin_arm64.tar.gz.sha256"
           echo "sha256=$(cut -d' ' -f1 < "runny_${VERSION}_darwin_arm64.tar.gz.sha256")" >> "$GITHUB_OUTPUT"
+          cp bazel-bin/apps/Runny/Runny_notarized_dmg.dmg "Runny_${VERSION}.dmg"
+          shasum -a 256 "Runny_${VERSION}.dmg" > "Runny_${VERSION}.dmg.sha256"
       - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
         with:
-          subject-path: runny_*.tar.gz
+          subject-path: |
+            runny_*.tar.gz
+            Runny_*.dmg
       - name: attach to release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" runny_*.tar.gz runny_*.sha256
+        run: gh release upload "$TAG" runny_*.tar.gz runny_*.sha256 Runny_*.dmg Runny_*.dmg.sha256
 
   homebrew:
     name: update tap formula

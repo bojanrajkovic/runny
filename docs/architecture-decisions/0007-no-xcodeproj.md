@@ -2,6 +2,12 @@
 
 **Status:** Accepted (2026-06-09)
 
+**Amended:** 2026-06-12 — the app (now Runny, ADR-0016) gained a full main
+window alongside the menu bar, flipping activation policy dynamically while
+it is open, and `Info.plist` is a checked-in file at `apps/Runny/Info.plist`
+rather than generated from the BUILD file. The no-.xcodeproj core stands
+unchanged.
+
 ## Context
 
 The RunnyBar app needs to build into a signed `.app` bundle. The conventional

@@ -254,11 +254,36 @@ func TestCommandsResolveSlotByName(t *testing.T) {
 
 	// Unknown slot: findSlot's error path (this regressed once — findSlot
 	// matched the mutable Status().Slot, empty until a slot transitions).
-	if _, err := c.Recycle(t.Context(), &runnyv1.RecycleRequest{Slot: "nope"}); err == nil {
-		t.Error("Recycle of unknown slot should error")
+	if _, err := c.Recycle(t.Context(), &runnyv1.RecycleRequest{Slot: "nope"}); status.Code(err) != codes.NotFound {
+		t.Errorf("Recycle of unknown slot: code = %v, want NotFound", status.Code(err))
 	}
-	if _, err := c.Pause(t.Context(), &runnyv1.PauseRequest{Slot: "nope"}); err == nil {
-		t.Error("Pause of unknown slot should error")
+	if _, err := c.Pause(t.Context(), &runnyv1.PauseRequest{Slot: "nope"}); status.Code(err) != codes.NotFound {
+		t.Errorf("Pause of unknown slot: code = %v, want NotFound", status.Code(err))
+	}
+	if _, err := c.Resume(t.Context(), &runnyv1.ResumeRequest{Slot: "nope"}); status.Code(err) != codes.NotFound {
+		t.Errorf("Resume of unknown slot: code = %v, want NotFound", status.Code(err))
+	}
+}
+
+// A slot whose command buffer is full is not accepting commands; the RPCs
+// must say so (Unavailable — a transient, retryable condition, matching
+// InjectDebugKey) instead of succeeding while doing nothing — that silent
+// failure is exactly what this project exists to kill.
+func TestCommandsFailWhenSlotNotAccepting(t *testing.T) {
+	slots := testSlots("mac-1")
+	// No FSM goroutine drains test slots, so filling the buffer sticks.
+	for slots[0].Command(statemachine.Command{Kind: statemachine.CmdPause}) {
+	}
+	c := dial(t, newTestServer(slots, nil, nil, nil))
+
+	if _, err := c.Recycle(t.Context(), &runnyv1.RecycleRequest{Slot: "mac-1", Reason: "x"}); status.Code(err) != codes.Unavailable {
+		t.Errorf("Recycle on full buffer: code = %v, want Unavailable", status.Code(err))
+	}
+	if _, err := c.Pause(t.Context(), &runnyv1.PauseRequest{Slot: "mac-1"}); status.Code(err) != codes.Unavailable {
+		t.Errorf("Pause on full buffer: code = %v, want Unavailable", status.Code(err))
+	}
+	if _, err := c.Resume(t.Context(), &runnyv1.ResumeRequest{Slot: "mac-1"}); status.Code(err) != codes.Unavailable {
+		t.Errorf("Resume on full buffer: code = %v, want Unavailable", status.Code(err))
 	}
 }
 
@@ -270,14 +295,14 @@ func TestCommandsResolveRunnerName(t *testing.T) {
 		t.Errorf("Recycle by runner name: %v", err)
 	}
 	// A runner name whose embedded slot doesn't exist still errors.
-	if _, err := c.Recycle(t.Context(), &runnyv1.RecycleRequest{Slot: "host-a1b2c3d4-mac-9-e48657d0"}); err == nil {
-		t.Error("Recycle of runner name with unknown slot should error")
+	if _, err := c.Recycle(t.Context(), &runnyv1.RecycleRequest{Slot: "host-a1b2c3d4-mac-9-e48657d0"}); status.Code(err) != codes.NotFound {
+		t.Errorf("Recycle of runner name with unknown slot: code = %v, want NotFound", status.Code(err))
 	}
 	// Ambiguity (dashes make <prefix>-<slot> structurally uncertain) errors
 	// instead of guessing: "...-b-1-<cycle8>" suffix-matches both slots.
 	srv := newTestServer(testSlots("b-1", "a-b-1"), nil, nil, nil)
-	if _, err := srv.findSlot("host-a-b-1-e48657d0"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
-		t.Errorf("ambiguous runner name should error, got %v", err)
+	if _, err := srv.findSlot("host-a-b-1-e48657d0"); status.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "ambiguous") {
+		t.Errorf("ambiguous runner name should be InvalidArgument, got %v", err)
 	}
 }
 
@@ -301,8 +326,8 @@ func TestWhyReturnsRecentCycle(t *testing.T) {
 		t.Errorf("Why = %+v, want one cycle abcd1234", resp.GetCycles())
 	}
 
-	if _, err := c.Why(t.Context(), &runnyv1.WhyRequest{Slot: "nope"}); err == nil {
-		t.Error("Why of unknown slot should error")
+	if _, err := c.Why(t.Context(), &runnyv1.WhyRequest{Slot: "nope"}); status.Code(err) != codes.NotFound {
+		t.Errorf("Why of unknown slot: code = %v, want NotFound", status.Code(err))
 	}
 }
 

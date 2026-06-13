@@ -35,10 +35,14 @@ jobs:
           path: ~/.cache/bazel
           key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel', '.mise.toml') }}
           restore-keys: bazel-${{ runner.os }}-
+      # rules_apple resolves the Apple toolchain during analysis, which
+      # hard-fails on Linux before incompatible-target skipping can apply — so
+      # target_compatible_with can't prune the macOS app from a //... build
+      # here (bazel#12897). Exclude it explicitly; the macOS job builds it.
       - name: build
-        run: mise x -- bazel build --config=ci //...
+        run: mise x -- bazel build --config=ci -- //... -//apps/Runny/...
       - name: test
-        run: mise x -- bazel test --config=ci //...
+        run: mise x -- bazel test --config=ci -- //... -//apps/Runny/...
       - name: format
         run: |
           mise x -- bazel run --config=ci //tools/format
@@ -121,14 +125,23 @@ jobs:
       - name: build (cold, stamped, ad-hoc signed)
         # codesign_binary defaults to ad-hoc ('-') when CODESIGN_IDENTITY is
         # unset; Developer ID signing requires cert secrets on the release
-        # environment (see CONTRIBUTING.md "Codesigning tiers").
+        # environment (see CONTRIBUTING.md "Codesigning tiers"). The app dmg
+        # additionally needs --embed_label so apple_bundle_version stamps
+        # CFBundleShortVersionString/CFBundleVersion. Bundle version fields
+        # are numeric-only, so the bundle carries the bare x.y.z; the full
+        # pre-release label (x.y.z-beta.<sha>) rides the artifact filename
+        # and the Go binaries' stamps (ADR-0010 identifiability, within
+        # Apple's constraint).
         run: |
-          mise x -- bazel build --config=ci --config=release \
-            //cmd/runnyd:runnyd_signed //cmd/runnyctl:runnyctl_signed
           VERSION="$(mise x -- tools/version.sh)"
           echo "runny version: $VERSION"
+          mise x -- bazel build --config=ci --config=release \
+            --embed_label="$VERSION" \
+            //cmd/runnyd:runnyd_signed //cmd/runnyctl:runnyctl_signed \
+            //apps/Runny:Runny_dmg
           cp bazel-bin/cmd/runnyd/runnyd_signed.bin runnyd
           cp bazel-bin/cmd/runnyctl/runnyctl_signed.bin runnyctl
+          cp bazel-bin/apps/Runny/Runny_dmg.dmg Runny.dmg
           ./runnyctl version
       - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
         if: github.event_name == 'push'
@@ -136,9 +149,11 @@ jobs:
           subject-path: |
             runnyd
             runnyctl
+            Runny.dmg
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: runny-darwin-arm64
           path: |
             runnyd
             runnyctl
+            Runny.dmg

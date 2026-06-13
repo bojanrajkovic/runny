@@ -38,6 +38,31 @@ extension Runny_V1_SlotState {
         }
     }
 
+    /// Human-readable phrase for the app's prominent surfaces (badge,
+    /// sidebar): present-continuous for the transient provisioning states
+    /// ("Pulling image"), a noun for the stable ones ("Listening"). This is
+    /// the GUI voice; `displayName` stays the CLI-parity token (the Timeline,
+    /// an FSM audit, renders by `displayName`, never this).
+    var phrase: String {
+        switch self {
+        case .unspecified: "—"
+        case .backoff: "Backing off"
+        case .ensureImage: "Pulling image"
+        case .clone: "Cloning disk"
+        case .boot: "Booting"
+        case .awaitIp: "Waiting for IP"
+        case .awaitSsh: "Waiting for SSH"
+        case .secureSsh: "Securing SSH"
+        case .mintJit: "Registering runner"
+        case .provision: "Provisioning"
+        case .listening: "Listening"
+        case .job: "Running job"
+        case .debug: "Debug hold"
+        case .teardown: "Tearing down"
+        case let .UNRECOGNIZED(n): "State \(n)"
+        }
+    }
+
     var tint: Color {
         switch self {
         case .listening: .green

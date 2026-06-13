@@ -165,3 +165,70 @@ final class PresentationFormattingTests: XCTestCase {
         XCTAssertEqual(SlotPresentation.timeInState(status, now: Date()), 0)
     }
 }
+
+final class StatePhraseTests: XCTestCase {
+    func testTransientStatesReadAsHumanPhrases() {
+        XCTAssertEqual(Runny_V1_SlotState.ensureImage.phrase, "Pulling image")
+        XCTAssertEqual(Runny_V1_SlotState.boot.phrase, "Booting")
+        XCTAssertEqual(Runny_V1_SlotState.mintJit.phrase, "Registering runner")
+        XCTAssertEqual(Runny_V1_SlotState.listening.phrase, "Listening")
+    }
+
+    func testUnknownStatePhraseDoesNotCrash() {
+        XCTAssertEqual(Runny_V1_SlotState.UNRECOGNIZED(42).phrase, "State 42")
+    }
+
+    func testStatePhraseIsTheGuiVoiceWhileLabelStaysCliToken() {
+        var status = Runny_V1_SlotStatus()
+        status.state = .ensureImage
+        // The two surfaces diverge by design: phrase humanizes, label mirrors
+        // runnyctl's token verbatim.
+        XCTAssertEqual(SlotPresentation.statePhrase(status), "Pulling image")
+        XCTAssertEqual(SlotPresentation.stateLabel(status), "ENSURE_IMAGE")
+    }
+
+    func testWedgedOverridesPhraseEverywhere() {
+        var status = Runny_V1_SlotStatus()
+        status.state = .listening
+        status.wedged = true
+        XCTAssertEqual(SlotPresentation.statePhrase(status), "Wedged")
+    }
+
+    func testPausedIsNotFoldedIntoThePhrase() {
+        // Paused is surfaced separately (chip / Info toggle), so unlike
+        // stateLabel's "*" it must not leak into the phrase.
+        var status = Runny_V1_SlotStatus()
+        status.state = .listening
+        status.paused = true
+        XCTAssertEqual(SlotPresentation.statePhrase(status), "Listening")
+        XCTAssertEqual(SlotPresentation.stateLabel(status), "LISTENING*")
+    }
+}
+
+final class DoctorTitleTests: XCTestCase {
+    func testKnownSlugsGetFriendlyTitles() {
+        XCTAssertEqual(SlotPresentation.doctorTitle("config-drift").title, "Config drift")
+        XCTAssertEqual(SlotPresentation.doctorTitle("macos-guest-cap").title, "macOS guest cap")
+        XCTAssertEqual(SlotPresentation.doctorTitle("disk-headroom").title, "Disk headroom")
+    }
+
+    func testQualifiedNamesSplitTitleFromEntity() {
+        let perm = SlotPresentation.doctorTitle("runner-perm:bojanrajkovic/mcp-paprika")
+        XCTAssertEqual(perm.title, "Runner permission")
+        XCTAssertEqual(perm.qualifier, "bojanrajkovic/mcp-paprika")
+
+        let image = SlotPresentation.doctorTitle("image-resolve:linux")
+        XCTAssertEqual(image.title, "Image resolve")
+        XCTAssertEqual(image.qualifier, "linux")
+    }
+
+    func testUnknownSlugFallsBackToHumanizedHyphens() {
+        let parsed = SlotPresentation.doctorTitle("some-new-check")
+        XCTAssertEqual(parsed.title, "Some new check")
+        XCTAssertNil(parsed.qualifier)
+    }
+
+    func testNoQualifierWhenNoColon() {
+        XCTAssertNil(SlotPresentation.doctorTitle("platform").qualifier)
+    }
+}

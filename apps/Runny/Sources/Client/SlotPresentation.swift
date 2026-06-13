@@ -35,11 +35,46 @@ enum SlotPresentation {
         return slot.state.displayName + (slot.paused ? "*" : "")
     }
 
+    /// Human-readable state for the badge and sidebar — the GUI voice, not
+    /// the CLI token. Wedged still overrides everything ("Wedged"); paused is
+    /// surfaced separately (a chip / the Info toggle), not folded in here.
+    static func statePhrase(_ slot: Runny_V1_SlotStatus) -> String {
+        slot.wedged ? "Wedged" : slot.state.phrase
+    }
+
     /// Display name: the GitHub-visible runner name, falling back to the
     /// bare slot name when no runner exists (BACKOFF).
     static func displayName(_ slot: Runny_V1_SlotStatus) -> String {
         slot.runnerName.isEmpty ? slot.slot : slot.runnerName
     }
+
+    /// A doctor check's wire name split into a friendly title and its
+    /// optional qualifier — the daemon emits `runner-perm:<target>` and
+    /// `image-resolve:<pool>` with the entity after a colon, plain hyphenated
+    /// slugs otherwise. Title comes from a table (acronyms like macOS/SSH
+    /// don't survive naive capitalization); the qualifier renders as a mono
+    /// tag beside it.
+    static func doctorTitle(_ raw: String) -> (title: String, qualifier: String?) {
+        let parts = raw.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        let base = String(parts[0])
+        let qualifier = parts.count > 1 ? String(parts[1]) : nil
+        let title = doctorTitles[base] ?? base
+            .replacingOccurrences(of: "-", with: " ")
+            .capitalizedFirstWord
+        return (title, qualifier)
+    }
+
+    private static let doctorTitles: [String: String] = [
+        "platform": "Platform",
+        "config-drift": "Config drift",
+        "config-parse": "Config",
+        "runner-namespace": "Runner namespace",
+        "macos-guest-cap": "macOS guest cap",
+        "local-network": "Local network",
+        "runner-perm": "Runner permission",
+        "image-resolve": "Image resolve",
+        "disk-headroom": "Disk headroom",
+    ]
 
     /// Seconds until the next retry while in BACKOFF, nil otherwise or once
     /// elapsed. Computed client-side from the local clock, like runnyctl.
@@ -74,5 +109,14 @@ enum SlotPresentation {
     /// Time spent in the current state, clamped at zero.
     static func timeInState(_ slot: Runny_V1_SlotStatus, now: Date) -> TimeInterval {
         max(now.timeIntervalSince(slot.stateEntered.dateValue), 0)
+    }
+}
+
+extension String {
+    /// Uppercase the first character only, leaving the rest as-is — unlike
+    /// `capitalized`, which would also lowercase an embedded acronym.
+    var capitalizedFirstWord: String {
+        guard let first else { return self }
+        return first.uppercased() + dropFirst()
     }
 }

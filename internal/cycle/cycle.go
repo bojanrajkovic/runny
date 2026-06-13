@@ -160,6 +160,9 @@ func (s Store) Write(r *Record) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("placing cycle.json: %w", err)
 	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
 	r.CycleDir = dir
 	return nil
 }
@@ -218,6 +221,9 @@ func (s Store) Recent(n int, liveCycleID string) ([]*Record, error) {
 	recs := make([]*Record, 0, len(names))
 	for _, name := range names {
 		dir := filepath.Join(s.SlotDir, name)
+		if abs, err := filepath.Abs(dir); err == nil {
+			dir = abs
+		}
 		raw, err := os.ReadFile(filepath.Join(dir, "cycle.json"))
 		if err != nil {
 			// A live cycle has no cycle.json yet (it lands at finishCycle) but

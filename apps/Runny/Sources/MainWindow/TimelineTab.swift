@@ -1,3 +1,4 @@
+import AppKit
 import RunnyV1
 import SwiftUI
 
@@ -12,7 +13,21 @@ struct TimelineTab: View {
 
     let slot: Runny_V1_SlotStatus
     @State private var model = CycleHistoryModel()
-    @State private var selectedCycle: String?
+    @State private var selection: Selection?
+
+    /// Either the live, in-flight cycle or a completed one. The current cycle
+    /// has no cycle.json yet, so it can't be a `CycleRecord` — it's its own
+    /// case, rendered from the live snapshot.
+    enum Selection: Hashable {
+        case current
+        case cycle(String)
+    }
+
+    /// The slot is actively running a cycle (not parked in BACKOFF between
+    /// attempts): only then is there a "current cycle" to show.
+    private var hasCurrent: Bool {
+        !slot.cycleID.isEmpty && slot.state != .backoff && slot.state != .unspecified
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -21,20 +36,50 @@ struct TimelineTab: View {
             Divider()
             content
         }
-        .onAppear { model.refreshIfNeeded(slot: slot, store: store) }
+        .onAppear {
+            model.refreshIfNeeded(slot: slot, store: store)
+            normalizeSelection()
+        }
         .onChange(of: slot.cycleID) {
             model.refreshIfNeeded(slot: slot, store: store)
+            normalizeSelection()
+        }
+        // Cycles arrive asynchronously; pick a default once they land.
+        .onChange(of: model.cycles.map(\.cycleID)) { normalizeSelection() }
+    }
+
+    /// Default to the live cycle when one is running, else the most recent
+    /// completed cycle — never blank. Leaves a valid existing pick alone, so
+    /// a cycle advancing doesn't yank the user off a past cycle they opened.
+    private func normalizeSelection() {
+        if let selection, isValid(selection) { return }
+        if hasCurrent {
+            selection = .current
+        } else if let newest = model.cycles.first {
+            selection = .cycle(newest.cycleID)
+        } else {
+            selection = nil
+        }
+    }
+
+    private func isValid(_ selection: Selection) -> Bool {
+        switch selection {
+        case .current: hasCurrent
+        case let .cycle(id): model.cycles.contains { $0.cycleID == id }
         }
     }
 
     private var picker: some View {
         HStack {
-            Picker("Completed cycle", selection: $selectedCycle) {
+            Picker("Cycle", selection: $selection) {
+                if hasCurrent {
+                    Text("● Current cycle").tag(Optional(Selection.current))
+                }
                 ForEach(model.cycles, id: \.cycleID) { cycle in
-                    Text(pickerLabel(cycle)).tag(Optional(cycle.cycleID))
+                    Text(pickerLabel(cycle)).tag(Optional(Selection.cycle(cycle.cycleID)))
                 }
             }
-            .disabled(model.cycles.isEmpty)
+            .disabled(!hasCurrent && model.cycles.isEmpty)
             Spacer()
             if model.loading { ProgressView().controlSize(.small) }
             Button {
@@ -48,28 +93,33 @@ struct TimelineTab: View {
 
     @ViewBuilder
     private var content: some View {
+        switch selection {
+        case .current:
+            CurrentCycleView(slot: slot)
+        case let .cycle(id):
+            if let cycle = model.cycles.first(where: { $0.cycleID == id }) {
+                CycleView(cycle: cycle)
+            } else {
+                placeholder
+            }
+        case .none:
+            placeholder
+        }
+    }
+
+    @ViewBuilder
+    private var placeholder: some View {
         if let error = model.loadError {
             ContentUnavailableView(
                 "Couldn't load cycles", systemImage: "exclamationmark.triangle",
                 description: Text(error)
             )
-        } else if model.cycles.isEmpty {
+        } else if !model.loading {
             ContentUnavailableView(
                 "No completed cycles", systemImage: "clock.arrow.circlepath",
-                description: Text("The timeline shows finished cycles; the current cycle appears here once it completes.")
+                description: Text("Finished cycles show here; the current cycle is selectable above while it runs.")
             )
-        } else if let cycle = selectedOrNewest {
-            CycleView(cycle: cycle)
         }
-    }
-
-    private var selectedOrNewest: Runny_V1_CycleRecord? {
-        if let selectedCycle,
-           let match = model.cycles.first(where: { $0.cycleID == selectedCycle })
-        {
-            return match
-        }
-        return model.cycles.first // newest-first from the server
     }
 
     private func pickerLabel(_ cycle: Runny_V1_CycleRecord) -> String {
@@ -84,6 +134,163 @@ struct TimelineTab: View {
         formatter.timeStyle = .short
         return formatter
     }()
+}
+
+/// The in-flight cycle: a live position in the cycle pipeline, not a
+/// per-state timeline. cycle.json is written only at cycle end and live
+/// snapshots coalesce/skip states, so exact per-state durations can't be
+/// reconstructed mid-cycle — they fill in here once the cycle completes and
+/// becomes a selectable past cycle. What we *can* show honestly: which states
+/// are behind us, where we are now (with a live clock), and what's ahead.
+struct CurrentCycleView: View {
+    let slot: Runny_V1_SlotStatus
+
+    /// The forward path, BACKOFF excluded (it's the between-cycles park, not a
+    /// step). DEBUG only appears once it's armed or active — most cycles never
+    /// take it. Other optional states (e.g. SECURE_SSH when hardening is off)
+    /// simply show as not-yet-reached; the live clock is on the current state.
+    private var path: [Runny_V1_SlotState] {
+        Runny_V1_SlotState.cycleOrder.filter { state in
+            switch state {
+            case .backoff: false
+            case .debug: slot.debugHoldArmed || slot.state == .debug
+            default: true
+            }
+        }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                summary
+                Divider()
+                pipeline
+                Text("Per-state durations are recorded when the cycle finishes; it's selectable as a past cycle then.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding()
+        }
+        .textSelection(.enabled)
+    }
+
+    private var summary: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                StateBadge(slot: slot)
+                TickingText { now in
+                    "for \(SlotPresentation.duration(SlotPresentation.timeInState(slot, now: now)))"
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                Spacer()
+                Text(slot.cycleID)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+            if !SlotPresentation.note(slot, now: Date()).isEmpty {
+                TickingText { now in SlotPresentation.note(slot, now: now) }
+                    .font(.caption)
+                    .foregroundStyle(slot.lastFailure.isEmpty ? .secondary : Color.orange)
+                    .lineLimit(2)
+            }
+            HStack(spacing: 12) {
+                if !slot.image.isEmpty {
+                    Text(slot.image).lineLimit(1).truncationMode(.middle)
+                }
+                if !slot.imageDigest.isEmpty {
+                    Text(String(slot.imageDigest.prefix(19)) + "…")
+                }
+                if !slot.runnerVersion.isEmpty {
+                    Text(slot.runnerVersion).lineLimit(1).truncationMode(.middle)
+                }
+                if slot.hasVm, !slot.vm.ip.isEmpty {
+                    Text("vm \(slot.vm.ip)")
+                }
+            }
+            .font(.caption)
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private var pipeline: some View {
+        let currentIndex = slot.state.cycleIndex
+        return VStack(alignment: .leading, spacing: 0) {
+            ForEach(path, id: \.self) { state in
+                PipelineRow(
+                    state: state,
+                    position: position(of: state, currentIndex: currentIndex),
+                    slot: slot
+                )
+            }
+        }
+    }
+
+    private func position(of state: Runny_V1_SlotState, currentIndex: Int) -> PipelineRow.Position {
+        if state.cycleIndex < currentIndex { return .passed }
+        if state.cycleIndex == currentIndex { return .current }
+        return .pending
+    }
+}
+
+/// One pipeline step: a position glyph (passed / you-are-here / pending), the
+/// FSM token (matching the completed-cycle timeline's vocabulary), and a live
+/// clock on the current step only.
+struct PipelineRow: View {
+    enum Position { case passed, current, pending }
+
+    let state: Runny_V1_SlotState
+    let position: Position
+    let slot: Runny_V1_SlotStatus
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: glyph)
+                .font(.caption)
+                .foregroundStyle(glyphTint)
+                .accessibilityLabel(accessibilityLabel)
+            Text(state.displayName)
+                .font(.callout)
+                .monospaced()
+                .foregroundStyle(position == .pending ? .secondary : .primary)
+                .frame(width: 120, alignment: .leading)
+            if position == .current {
+                TickingText { now in
+                    "for \(SlotPresentation.duration(SlotPresentation.timeInState(slot, now: now)))"
+                }
+                .font(.callout)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 3)
+    }
+
+    private var glyph: String {
+        switch position {
+        case .passed: "circle.fill"
+        case .current: "largecircle.fill.circle"
+        case .pending: "circle"
+        }
+    }
+
+    private var glyphTint: Color {
+        switch position {
+        case .passed: .secondary
+        case .current: state.tint
+        case .pending: .secondary.opacity(0.45)
+        }
+    }
+
+    private var accessibilityLabel: String {
+        switch position {
+        case .passed: "passed"
+        case .current: "current"
+        case .pending: "pending"
+        }
+    }
 }
 
 struct CycleView: View {
@@ -186,10 +393,7 @@ struct CycleView: View {
                 .fontWeight(.semibold)
                 .foregroundStyle(.secondary)
             ForEach(cycle.artifacts, id: \.self) { artifact in
-                Label(artifact, systemImage: "doc.text")
-                    .font(.caption)
-                    .monospaced()
-                    .help("Retained in this cycle's directory under the runny home")
+                ArtifactRow(cycle: cycle, filename: artifact)
             }
         }
     }
@@ -221,6 +425,76 @@ struct CycleView: View {
             }
         }
     }
+}
+
+/// One retained artifact, made actionable. The app and daemon share a host
+/// (unix socket), so the file is local: click reveals it in Finder, the menu
+/// opens it or copies the path. The on-disk path is reconstructed from the
+/// cycle record (it carries only the filename), guarded by an existence check
+/// so a daemon layout drift surfaces an error instead of doing nothing.
+struct ArtifactRow: View {
+    @Environment(DaemonStore.self) private var store
+    let cycle: Runny_V1_CycleRecord
+    let filename: String
+
+    var body: some View {
+        Button(action: reveal) {
+            Label(filename, systemImage: "doc.text")
+                .font(.caption)
+                .monospaced()
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button("Reveal in Finder", action: reveal)
+            Button("Open", action: open)
+            Button("Copy Path") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(url.path, forType: .string)
+            }
+        }
+        .help("Reveal this cycle's artifact in Finder")
+    }
+
+    private var url: URL {
+        RunnyHome.directory
+            .appendingPathComponent("cycles")
+            .appendingPathComponent(cycle.slot)
+            .appendingPathComponent(Self.dirName(cycle))
+            .appendingPathComponent(filename)
+    }
+
+    private func reveal() {
+        guard ensurePresent() else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    private func open() {
+        guard ensurePresent() else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    private func ensurePresent() -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            store.commandError =
+                "couldn't find \(filename) on disk — looked in \(url.deletingLastPathComponent().path)"
+            return false
+        }
+        return true
+    }
+
+    /// Mirrors the daemon's cycle-dir name: `<RFC3339-started>-<cycleID>`,
+    /// UTC, colons rendered as dashes (internal/cycle Store.Dir).
+    static func dirName(_ cycle: Runny_V1_CycleRecord) -> String {
+        dirFormatter.string(from: cycle.started.dateValue) + "-" + cycle.cycleID
+    }
+
+    static let dirFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd'T'HH-mm-ss'Z'"
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter
+    }()
 }
 
 struct StateRow: View {

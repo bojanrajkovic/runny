@@ -46,7 +46,6 @@ struct MenuBarView: View {
         }
         .frame(width: Metrics.popoverWidth)
         .onAppear { store.start() }
-        .recycleConfirmation()
     }
 
     private var emptyState: some View {
@@ -233,7 +232,7 @@ struct MenuBarSlotRow: View {
         if slot.state == .job, slot.hasJob {
             // The glance question while a job runs is "which job, how long".
             TickingText { now in
-                "\(slot.job.name) · \(SlotPresentation.duration(now.timeIntervalSince(slot.job.started.dateValue)))"
+                SlotPresentation.runningJob(slot, now: now)
             }
             .font(.caption)
             .foregroundStyle(.blue)
@@ -256,8 +255,8 @@ struct MenuBarSlotRow: View {
         if let pending = store.pendingCommand(for: slot.slot) {
             return pending.displayText
         }
-        if slot.state == .debug, slot.hasDebugHoldExpires {
-            return "debug hold — releases in \(SlotPresentation.duration(slot.debugHoldExpires.dateValue.timeIntervalSince(now)))"
+        if let release = SlotPresentation.debugRelease(slot, now: now) {
+            return "debug hold — \(release)"
         }
         return SlotPresentation.note(slot, now: now)
     }
@@ -281,6 +280,12 @@ struct SlotCommands: View {
         }
         Button("Recycle") {
             store.requestRecycle(slot)
+            // The confirmation dialog lives only on the main window (one
+            // presenter), so a force-recycle from the popover needs the window
+            // up to confirm; a plain recycle runs without one.
+            if openInApp, store.recycleNeedsConsent(slot) {
+                activation.openMainWindow(openWindow)
+            }
         }
         if openInApp {
             Divider()

@@ -418,20 +418,13 @@ struct ArtifactRow: View {
         .contextMenu {
             Button("Reveal in Finder", action: reveal)
             Button("Open", action: open)
-            Button("Copy Path") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(url.path, forType: .string)
-            }
+            Button("Copy Path") { Pasteboard.copy(url.path) }
         }
         .help("Reveal this cycle's artifact in Finder")
     }
 
     private var url: URL {
-        RunnyHome.directory
-            .appendingPathComponent("cycles")
-            .appendingPathComponent(cycle.slot)
-            .appendingPathComponent(Self.dirName(cycle))
-            .appendingPathComponent(filename)
+        RunnyHome.artifactURL(cycle: cycle, filename: filename)
     }
 
     private func reveal() {
@@ -452,20 +445,6 @@ struct ArtifactRow: View {
         }
         return true
     }
-
-    /// Mirrors the daemon's cycle-dir name: `<RFC3339-started>-<cycleID>`,
-    /// UTC, colons rendered as dashes (internal/cycle Store.Dir).
-    static func dirName(_ cycle: Runny_V1_CycleRecord) -> String {
-        dirFormatter.string(from: cycle.started.dateValue) + "-" + cycle.cycleID
-    }
-
-    static let dirFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd'T'HH-mm-ss'Z'"
-        formatter.timeZone = TimeZone(identifier: "UTC")
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        return formatter
-    }()
 }
 
 struct StateRow: View {

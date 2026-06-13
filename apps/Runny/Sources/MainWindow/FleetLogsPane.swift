@@ -6,16 +6,7 @@ import SwiftUI
 struct FleetLogsPane: View {
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Daemon log")
-                    .font(.title2)
-                    .fontWeight(.semibold)
-                Spacer()
-            }
-            .padding(.horizontal)
-            .padding(.top, 14)
-            .padding(.bottom, 6)
-            Divider()
+            PaneHeader("Daemon log")
             LogsTab(slotName: nil, daemon: true)
         }
         .ignoresSafeArea(.container, edges: .top)

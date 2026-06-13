@@ -83,7 +83,7 @@ struct SlotDetailView: View {
                     HStack(spacing: 4) {
                         Image(systemName: "hammer")
                         TickingText { now in
-                            "\(slot.job.name) · \(SlotPresentation.duration(now.timeIntervalSince(slot.job.started.dateValue)))"
+                            SlotPresentation.runningJob(slot, now: now)
                         }
                     }
                     .font(.callout)
@@ -137,7 +137,7 @@ struct DebugHoldChip: View {
     var body: some View {
         if slot.state == .debug, slot.hasDebugHoldExpires {
             TickingText { now in
-                "releases in \(SlotPresentation.duration(slot.debugHoldExpires.dateValue.timeIntervalSince(now)))"
+                SlotPresentation.debugRelease(slot, now: now) ?? ""
             }
             .font(.callout)
             .foregroundStyle(.purple)
@@ -261,8 +261,7 @@ struct DetailRow: View {
             ZStack(alignment: .trailing) {
                 if copyable {
                     Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(value, forType: .string)
+                        Pasteboard.copy(value)
                     } label: {
                         Image(systemName: "doc.on.doc").imageScale(.small)
                     }

@@ -59,32 +59,41 @@ struct MainWindowView: View {
                 )
             }
         }
-        .alert(
-            "Command failed", isPresented: commandErrorBinding,
-            actions: { Button("OK") { store.commandError = nil } },
-            message: { Text(store.commandError ?? "") }
-        )
-        .alert(
-            "Heads up", isPresented: commandNoteBinding,
-            actions: { Button("OK") { store.commandNote = nil } },
-            message: { Text(store.commandNote ?? "") }
-        )
+        .commandAlerts()
         .recycleConfirmation()
     }
+}
 
-    private var commandErrorBinding: Binding<Bool> {
-        Binding(
-            get: { store.commandError != nil },
-            set: { if !$0 { store.commandError = nil } }
-        )
+/// The two transient command channels (failure alert, advisory note) for a
+/// scene root, with their nil→bool binding boilerplate in one place — the
+/// alert counterpart to the popover's StatusBanners.
+struct CommandAlerts: ViewModifier {
+    @Environment(DaemonStore.self) private var store
+
+    func body(content: Content) -> some View {
+        content
+            .alert(
+                "Command failed", isPresented: binding(\.commandError),
+                actions: { Button("OK") { store.commandError = nil } },
+                message: { Text(store.commandError ?? "") }
+            )
+            .alert(
+                "Heads up", isPresented: binding(\.commandNote),
+                actions: { Button("OK") { store.commandNote = nil } },
+                message: { Text(store.commandNote ?? "") }
+            )
     }
 
-    private var commandNoteBinding: Binding<Bool> {
+    private func binding(_ keyPath: ReferenceWritableKeyPath<DaemonStore, String?>) -> Binding<Bool> {
         Binding(
-            get: { store.commandNote != nil },
-            set: { if !$0 { store.commandNote = nil } }
+            get: { store[keyPath: keyPath] != nil },
+            set: { if !$0 { store[keyPath: keyPath] = nil } }
         )
     }
+}
+
+extension View {
+    func commandAlerts() -> some View { modifier(CommandAlerts()) }
 }
 
 /// Compact daemon status: connection, version, uptime, last update.
@@ -154,15 +163,48 @@ struct SidebarSlotRow: View {
     }
 }
 
+/// The shared detail-pane header band: a title with an optional inline
+/// subtitle and trailing accessory, the standard top-of-pane paddings, and the
+/// divider. One place owns the band so the panes can't drift.
+struct PaneHeader<Subtitle: View, Trailing: View>: View {
+    let title: String
+    @ViewBuilder var subtitle: () -> Subtitle
+    @ViewBuilder var trailing: () -> Trailing
+
+    init(
+        _ title: String,
+        @ViewBuilder subtitle: @escaping () -> Subtitle = { EmptyView() },
+        @ViewBuilder trailing: @escaping () -> Trailing = { EmptyView() }
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.trailing = trailing
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                subtitle()
+                Spacer()
+                trailing()
+            }
+            .padding(.horizontal)
+            .padding(.top, 14)
+            .padding(.bottom, 6)
+            Divider()
+        }
+    }
+}
+
 struct DoctorPane: View {
     @Environment(DaemonStore.self) private var store
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Doctor")
-                    .font(.title2)
-                    .fontWeight(.semibold)
+        VStack(spacing: 0) {
+            PaneHeader("Doctor") {
                 if let ranAt = store.doctorRanAt {
                     TickingText { now in
                         "last run \(SlotPresentation.duration(now.timeIntervalSince(ranAt))) ago"
@@ -170,14 +212,12 @@ struct DoctorPane: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 }
-                Spacer()
+            } trailing: {
                 Button(store.doctorRunning ? "Running…" : "Run Checks") {
                     store.runDoctor()
                 }
                 .disabled(store.doctorRunning || store.client == nil)
             }
-            .padding()
-            Divider()
             Group {
                 if let checks = store.doctorChecks {
                     List(checks, id: \.name) { check in

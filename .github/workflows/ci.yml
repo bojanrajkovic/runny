@@ -35,10 +35,14 @@ jobs:
           path: ~/.cache/bazel
           key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel', '.mise.toml') }}
           restore-keys: bazel-${{ runner.os }}-
+      # rules_apple resolves the Apple toolchain during analysis, which
+      # hard-fails on Linux before incompatible-target skipping can apply — so
+      # target_compatible_with can't prune the macOS app from a //... build
+      # here (bazel#12897). Exclude it explicitly; the macOS job builds it.
       - name: build
-        run: mise x -- bazel build --config=ci //...
+        run: mise x -- bazel build --config=ci -- //... -//apps/Runny/...
       - name: test
-        run: mise x -- bazel test --config=ci //...
+        run: mise x -- bazel test --config=ci -- //... -//apps/Runny/...
       - name: format
         run: |
           mise x -- bazel run --config=ci //tools/format

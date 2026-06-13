@@ -397,7 +397,9 @@ func (s *Server) Resume(ctx context.Context, req *runnyv1.ResumeRequest) (*runny
 	}
 	if d := s.draining(); d != "" {
 		// A drain started between the gate read and the command enqueue.
-		// Undo the resume so the slot re-converges without a junk cycle.
+		// Best-effort undo: if the buffer is full the drainer's re-issue loop
+		// (observe→recheck→CmdPause) covers the gap on the next FSM transition,
+		// so a dropped undo does not permanently stall the drain.
 		_ = s.command(req.GetSlot(), statemachine.Command{Kind: statemachine.CmdPause})
 		return nil, status.Errorf(codes.FailedPrecondition, "daemon is draining: %s; resume after the respawn", d)
 	}

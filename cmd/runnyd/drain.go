@@ -163,6 +163,14 @@ func (d *drainer) recheck() {
 // pass two and d.stop(), the window is a lock acquisition — not zero, but
 // brief enough that any junk cycle from that residual cannot start a job
 // before the daemon exits.
+//
+// needRecheck is set when the second stability pass forces a back-out. The
+// defer clears exitRunning and then calls d.recheck() so the drain does
+// not get stuck: if the slot stabilised between the return and the defer,
+// its observe fired a new tryExit that returned immediately (exitRunning
+// was still true); after the defer clears exitRunning the drain needs an
+// explicit recheck to restart tryExit, because no further status change
+// is guaranteed.
 func (d *drainer) tryExit() {
 	d.mu.Lock()
 	if d.exited || d.exitRunning {
@@ -172,10 +180,14 @@ func (d *drainer) tryExit() {
 	d.exitRunning = true
 	sha := d.acceptedSHA
 	d.mu.Unlock()
+	needRecheck := false
 	defer func() {
 		d.mu.Lock()
 		d.exitRunning = false
 		d.mu.Unlock()
+		if needRecheck {
+			d.recheck()
+		}
 	}()
 
 	for _, s := range d.slots {
@@ -193,6 +205,12 @@ func (d *drainer) tryExit() {
 			d.startRetry()
 			return
 		}
+		// Gate accepted — clear any stale hold annotation now. If the second
+		// stability pass backs out below, we must not leave a false "held"
+		// status visible while waiting for the slot to re-converge.
+		d.mu.Lock()
+		d.holdDetail = ""
+		d.mu.Unlock()
 	}
 
 	// Second stability pass: a Resume landing during the exit gate's file
@@ -200,6 +218,7 @@ func (d *drainer) tryExit() {
 	// next status change re-evaluates via observe → recheck → tryExit.
 	for _, s := range d.slots {
 		if !stableStatus(s.Status()) {
+			needRecheck = true
 			return
 		}
 	}

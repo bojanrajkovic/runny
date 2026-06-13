@@ -46,6 +46,7 @@ struct MenuBarView: View {
         }
         .frame(width: Metrics.popoverWidth)
         .onAppear { store.start() }
+        .recycleConfirmation()
     }
 
     private var emptyState: some View {
@@ -118,22 +119,29 @@ enum Metrics {
 
 struct MenuBarHeader: View {
     @Environment(DaemonStore.self) private var store
+    /// The sidebar card hides the uptime line (it lives in the card's tooltip
+    /// instead); the popover keeps it.
+    var showSubtitle = true
 
     var body: some View {
         HStack(spacing: 8) {
             Circle()
                 .fill(dotColor)
                 .frame(width: Metrics.statusDot, height: Metrics.statusDot)
+                .accessibilityLabel("Connection")
+                .accessibilityValue(title)
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
                     .font(.callout)
                     .fontWeight(.medium)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                subtitle
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                if showSubtitle {
+                    subtitle
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
             }
             Spacer(minLength: 0)
         }
@@ -193,18 +201,16 @@ struct MenuBarSlotRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                Circle()
-                    .fill(slot.effectiveTint)
-                    .frame(width: 6, height: 6)
+                StatusIndicator(slot: slot, size: 6)
                 Text(SlotPresentation.displayName(slot))
                     .font(.callout)
                     .fontWeight(.medium)
                     .lineLimit(1)
-                    .truncationMode(.tail)
+                    .truncationMode(.middle)
                 Spacer(minLength: 4)
                 // Only the elapsed digits tick, not the whole row.
                 TickingText { now in
-                    "\(SlotPresentation.stateLabel(slot)) · \(SlotPresentation.duration(SlotPresentation.timeInState(slot, now: now)))"
+                    "\(SlotPresentation.statePhrase(slot)) · \(SlotPresentation.duration(SlotPresentation.timeInState(slot, now: now)))"
                 }
                 .font(.caption)
                 .foregroundStyle(slot.wedged ? .red : Metrics.secondaryText)
@@ -274,7 +280,7 @@ struct SlotCommands: View {
             Button("Pause After This Cycle") { store.pauseSlot(slot) }
         }
         Button("Recycle") {
-            store.recycleSlot(slot, reason: "operator request (Runny)")
+            store.requestRecycle(slot)
         }
         if openInApp {
             Divider()
@@ -283,6 +289,53 @@ struct SlotCommands: View {
             }
         }
     }
+}
+
+/// Hosts the recycle confirmation for the `-force` cases (cancel a running
+/// job, destroy a debug hold). Applied at each scene root so whichever
+/// surface is frontmost presents it; everything else recycles one-click.
+struct RecycleConfirmation: ViewModifier {
+    @Environment(DaemonStore.self) private var store
+
+    func body(content: Content) -> some View {
+        content.confirmationDialog(
+            title, isPresented: isPresented, presenting: store.recycleConfirm
+        ) { slot in
+            Button(actionLabel(slot), role: .destructive) {
+                store.confirmRecycle(slot)
+            }
+        } message: { slot in
+            Text(message(slot))
+        }
+    }
+
+    private var isPresented: Binding<Bool> {
+        Binding(
+            get: { store.recycleConfirm != nil },
+            set: { if !$0 { store.recycleConfirm = nil } }
+        )
+    }
+
+    private var title: String {
+        guard let slot = store.recycleConfirm else { return "" }
+        return "Recycle \(SlotPresentation.displayName(slot))?"
+    }
+
+    private func actionLabel(_ slot: Runny_V1_SlotStatus) -> String {
+        slot.state == .job ? "Cancel Job & Recycle" : "Release Hold & Recycle"
+    }
+
+    private func message(_ slot: Runny_V1_SlotStatus) -> String {
+        if slot.state == .job {
+            let name = slot.job.name.isEmpty ? "the running job" : "job “\(slot.job.name)”"
+            return "Recycling cancels \(name) and tears the runner down."
+        }
+        return "This destroys the held debug guest and starts a fresh cycle."
+    }
+}
+
+extension View {
+    func recycleConfirmation() -> some View { modifier(RecycleConfirmation()) }
 }
 
 struct DoctorChip: View {

@@ -26,14 +26,16 @@ struct MainWindowView: View {
                     }
                     Section("Daemon") {
                         Label("Logs", systemImage: "text.alignleft")
+                            .imageScale(.small)
                             .tag(SidebarItem.logs)
                         Label("Doctor", systemImage: "stethoscope")
+                            .imageScale(.small)
                             .tag(SidebarItem.doctor)
                     }
                 }
                 .listStyle(.sidebar)
             }
-            .navigationSplitViewColumnWidth(min: 200, ideal: 230)
+            .navigationSplitViewColumnWidth(min: 180, ideal: 215)
         } detail: {
             switch selection {
             case .doctor:
@@ -67,6 +69,7 @@ struct MainWindowView: View {
             actions: { Button("OK") { store.commandNote = nil } },
             message: { Text(store.commandNote ?? "") }
         )
+        .recycleConfirmation()
     }
 
     private var commandErrorBinding: Binding<Bool> {
@@ -90,14 +93,9 @@ struct DaemonCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            MenuBarHeader()
-            if case .connected = store.connection, let last = store.lastUpdate {
-                TickingText { now in
-                    "updated \(SlotPresentation.duration(now.timeIntervalSince(last))) ago"
-                }
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-            }
+            // Dot + "runnyd <version>" only; uptime and last-contact are
+            // diagnostics, not glance data — they live in the tooltip.
+            MenuBarHeader(showSubtitle: false)
             if !store.draining.isEmpty {
                 Label("draining for restart: \(store.draining)", systemImage: "arrow.triangle.2.circlepath")
                     .font(.caption2)
@@ -108,7 +106,29 @@ struct DaemonCard: View {
         .padding(8)
         .background(
             RoundedRectangle(cornerRadius: 6).fill(Color.gray.opacity(0.08)))
+        // The padding/transparent areas aren't hit-testable for .help without
+        // an explicit shape — without this the tooltip only fires over glyphs.
+        .contentShape(Rectangle())
+        .help(tooltip)
     }
+
+    private var tooltip: String {
+        var parts: [String] = []
+        if let started = store.daemonStarted {
+            parts.append("Up since \(Self.clock.string(from: started))")
+        }
+        if let last = store.lastUpdate {
+            parts.append("last contact \(Self.clock.string(from: last))")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    static let clock: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .medium
+        return formatter
+    }()
 }
 
 struct SidebarSlotRow: View {
@@ -116,17 +136,18 @@ struct SidebarSlotRow: View {
     let slot: Runny_V1_SlotStatus
 
     var body: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(slot.effectiveTint)
-                .frame(width: 7, height: 7)
+        HStack(spacing: 7) {
+            StatusIndicator(slot: slot, size: 7)
             VStack(alignment: .leading, spacing: 1) {
-                Text(SlotPresentation.displayName(slot))
+                // The slot name, not the runner name: it's short and stable,
+                // so it never truncates in the sidebar. The full runner name
+                // (long, churns every cycle) lives in the detail header/Info.
+                Text(slot.slot)
                     .lineLimit(1)
-                    .truncationMode(.tail)
-                Text(SlotPresentation.stateLabel(slot))
+                Text(SlotPresentation.statePhrase(slot))
                     .font(.caption)
                     .foregroundStyle(slot.wedged ? .red : .secondary)
+                    .lineLimit(1)
             }
         }
         .contextMenu { SlotCommands(slot: slot) }
@@ -157,29 +178,61 @@ struct DoctorPane: View {
             }
             .padding()
             Divider()
-            if let checks = store.doctorChecks {
-                List(checks, id: \.name) { check in
-                    HStack(alignment: .firstTextBaseline) {
-                        Image(systemName: check.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
-                            .foregroundStyle(check.ok ? Color.green : Color.red)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(check.name)
-                            if !check.detail.isEmpty {
-                                Text(check.detail)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
+            Group {
+                if let checks = store.doctorChecks {
+                    List(checks, id: \.name) { check in
+                        DoctorRow(check: check)
+                            .listRowSeparator(.hidden)
                     }
-                    .listRowSeparator(.hidden)
+                    .listStyle(.inset)
+                    .scrollContentBackground(.hidden)
+                } else {
+                    ContentUnavailableView(
+                        "No results yet", systemImage: "stethoscope",
+                        description: Text("Run the daemon's validation checks — image cache, GitHub credentials, network.")
+                    )
                 }
-                .listStyle(.inset)
-                .scrollContentBackground(.hidden)
-            } else {
-                ContentUnavailableView(
-                    "No results yet", systemImage: "stethoscope",
-                    description: Text("Run the daemon's validation checks — image cache, GitHub credentials, network.")
-                )
+            }
+            // Fill below the header so the empty state centers h/v and the
+            // list fills — the header stays pinned at the top either way.
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .ignoresSafeArea(.container, edges: .top)
+    }
+}
+
+/// One doctor check: status glyph, a friendly title (the wire name's hyphen
+/// slug humanized), the qualifier — `runner-perm:<target>` /
+/// `image-resolve:<pool>` — as a mono tag, and the detail beneath.
+struct DoctorRow: View {
+    let check: Runny_V1_DoctorCheck
+
+    var body: some View {
+        let parsed = SlotPresentation.doctorTitle(check.name)
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: check.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
+                .foregroundStyle(check.ok ? Color.green : Color.red)
+                .accessibilityLabel(check.ok ? "passed" : "failed")
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Text(parsed.title)
+                    if let qualifier = parsed.qualifier {
+                        Text(qualifier)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(Color.secondary.opacity(0.12))
+                            )
+                    }
+                }
+                if !check.detail.isEmpty {
+                    Text(check.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }

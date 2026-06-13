@@ -64,6 +64,10 @@ final class DaemonStore {
     /// Advisory note from a command (e.g. pause during a drain is in-memory);
     /// not a failure — surfaced as info and cleared by the view.
     var commandNote: String?
+    /// A recycle awaiting operator consent (it would cancel a running job or
+    /// destroy a debug hold — the CLI's `-force` cases). The hosting view
+    /// presents a confirmation; nil otherwise.
+    var recycleConfirm: Runny_V1_SlotStatus?
 
     private(set) var pending: [String: PendingCommand] = [:]
 
@@ -316,9 +320,35 @@ final class DaemonStore {
         run(.resume, slot: slot) { try await $0.resume(slot: slot.slot); return nil }
     }
 
-    func recycleSlot(_ slot: Runny_V1_SlotStatus, reason: String) {
+    /// Recycling needs operator consent exactly when it would cancel a running
+    /// job or destroy a debug hold — the states the CLI guards with `-force`.
+    func recycleNeedsConsent(_ slot: Runny_V1_SlotStatus) -> Bool {
+        slot.state == .job || slot.state == .debug
+    }
+
+    /// Entry point for every Recycle control. Safe states recycle at once; the
+    /// `-force` cases stage a confirmation the hosting view presents.
+    func requestRecycle(_ slot: Runny_V1_SlotStatus) {
+        if recycleNeedsConsent(slot) {
+            recycleConfirm = slot
+        } else {
+            performRecycle(slot, cancelRunningJob: false)
+        }
+    }
+
+    /// The confirmed path: cancel the job only when the slot was in JOB (in
+    /// DEBUG the recycle destroys the held guest regardless of the flag).
+    func confirmRecycle(_ slot: Runny_V1_SlotStatus) {
+        recycleConfirm = nil
+        performRecycle(slot, cancelRunningJob: slot.state == .job)
+    }
+
+    private func performRecycle(_ slot: Runny_V1_SlotStatus, cancelRunningJob: Bool) {
         run(.recycle, slot: slot) {
-            try await $0.recycle(slot: slot.slot, reason: reason)
+            try await $0.recycle(
+                slot: slot.slot, reason: "operator request (Runny)",
+                cancelRunningJob: cancelRunningJob
+            )
             return nil
         }
     }

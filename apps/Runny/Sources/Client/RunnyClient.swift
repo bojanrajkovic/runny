@@ -58,10 +58,14 @@ final class RunnyClient: @unchecked Sendable {
         return stub.streamLogs(request)
     }
 
-    func recycle(slot: String, reason: String) async throws {
+    /// `cancelRunningJob` is the wire form of the CLI's `-force`: in JOB it
+    /// cancels the job into teardown; unset, a mid-job recycle lets the job
+    /// finish. Ignored outside JOB.
+    func recycle(slot: String, reason: String, cancelRunningJob: Bool) async throws {
         var request = Runny_V1_RecycleRequest()
         request.slot = slot
         request.reason = reason
+        request.cancelRunningJob = cancelRunningJob
         _ = try await stub.recycle(request, callOptions: Self.options(Self.commandTimeout))
     }
 

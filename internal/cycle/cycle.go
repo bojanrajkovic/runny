@@ -160,6 +160,7 @@ func (s Store) Write(r *Record) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("placing cycle.json: %w", err)
 	}
+	r.CycleDir = dir
 	return nil
 }
 

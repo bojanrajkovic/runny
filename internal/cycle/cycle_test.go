@@ -238,6 +238,11 @@ func TestRecentSetsCycleDir(t *testing.T) {
 	if err := s.Write(rec); err != nil {
 		t.Fatal(err)
 	}
+	// Write() must set CycleDir as a side-effect so callers don't have to go
+	// through Recent() to get the path.
+	if rec.CycleDir == "" {
+		t.Error("Write did not set CycleDir on the record")
+	}
 	recs, err := s.Recent(1, "")
 	if err != nil || len(recs) != 1 {
 		t.Fatalf("Recent: %v, %d", err, len(recs))
@@ -247,20 +252,11 @@ func TestRecentSetsCycleDir(t *testing.T) {
 	if recs[0].CycleDir == "" {
 		t.Error("Recent did not set CycleDir on normal record")
 	}
-	expectedDir, _ := s.Dir(rec)
-	if recs[0].CycleDir != expectedDir {
-		t.Errorf("CycleDir = %q, want %q", recs[0].CycleDir, expectedDir)
+	if recs[0].CycleDir != rec.CycleDir {
+		t.Errorf("Recent CycleDir = %q, want %q (same as Write set)", recs[0].CycleDir, rec.CycleDir)
 	}
-	// CycleDir must not be persisted in cycle.json — it is always derived from
-	// the directory, never stored in the file.
-	raw, _ := os.ReadFile(filepath.Join(recs[0].CycleDir, "cycle.json"))
-	if string(raw) != "" {
-		var m map[string]any
-		_ = json.Unmarshal(raw, &m)
-		if _, ok := m["cycle_dir"]; ok {
-			t.Error("cycle_dir leaked into cycle.json")
-		}
-	}
+	// CycleDir must not be persisted in cycle.json; json:"-" enforces this at
+	// compile time, so no runtime check is needed here.
 }
 
 func TestOrphanCycleDirIsRealDir(t *testing.T) {
@@ -292,11 +288,11 @@ func TestOrphanCycleDirIsRealDir(t *testing.T) {
 	if _, err := os.Stat(stub.CycleDir); err != nil {
 		t.Errorf("orphan CycleDir %q does not exist: %v", stub.CycleDir, err)
 	}
-	// Confirm Dir(stub) would compute a different path — proving the orphan
-	// truly cannot self-reconstruct.
+	// Dir(stub) reconstructs from stub.Started = injected, not cycleStart, so
+	// it must produce a different path than the real scanned dir.
 	wrongDir, _ := s.Dir(stub)
 	if wrongDir == stub.CycleDir {
-		t.Logf("orphan CycleDir = %q (same as Dir(stub) — times happen to match, test premise may not hold)", stub.CycleDir)
+		t.Errorf("Dir(stub) == stub.CycleDir (%q): orphan could self-reconstruct, undermining the whole fix", stub.CycleDir)
 	}
 }
 

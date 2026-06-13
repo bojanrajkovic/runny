@@ -74,7 +74,10 @@ final class LogStreamModel {
                     }
                     if Task.isCancelled { return }
                     // Clean EOF: the daemon closed the stream (shutdown or
-                    // wedge-restart). Routine — say so and retry.
+                    // wedge-restart). Routine — say so and retry. The stream
+                    // established (even if it carried no lines), so reset the
+                    // backoff; otherwise repeated empty streams back off to 30s.
+                    delay = 2
                     interrupted = true
                     appendMarker("— log stream closed by the daemon; retrying —")
                 } catch {

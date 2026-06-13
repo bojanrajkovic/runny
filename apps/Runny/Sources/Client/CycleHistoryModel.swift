@@ -21,7 +21,11 @@ final class CycleHistoryModel {
     private var inFlight: Task<Void, Never>?
 
     func refreshIfNeeded(slot: Runny_V1_SlotStatus, store: DaemonStore) {
-        guard fetchedForCycle != slot.cycleID || cycles.isEmpty else { return }
+        // Keyed on the cycle we last fetched for, NOT on emptiness: a slot with
+        // genuinely no completed cycles fetched-and-got-nothing, so re-fetching
+        // every cycle would just re-confirm empty (fetchedForCycle is only set
+        // on a successful fetch, so a load error still retries).
+        guard fetchedForCycle != slot.cycleID else { return }
         refresh(slotName: slot.slot, cycleID: slot.cycleID, store: store)
     }
 

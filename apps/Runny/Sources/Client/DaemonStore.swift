@@ -37,6 +37,11 @@ final class DaemonStore {
 
     struct PendingCommand: Equatable {
         enum Kind: String { case pause, resume, recycle }
+        /// Identity for this command. `pending` is keyed by slot (only the
+        /// latest in-flight command per slot is tracked), so a failing
+        /// command must clear its entry only when it's still the current one —
+        /// otherwise a fast second command on the same slot loses its tracking.
+        let id: Int
         let kind: Kind
         let requestedAt: Date
         /// Cycle at request time; a recycle is confirmed when it changes.
@@ -70,6 +75,7 @@ final class DaemonStore {
     var recycleConfirm: Runny_V1_SlotStatus?
 
     private(set) var pending: [String: PendingCommand] = [:]
+    private var nextCommandID = 0
 
     /// The client of the current healthy stream; log/timeline views borrow
     /// it. nil while unreachable — actions fail fast instead of hanging.
@@ -272,8 +278,12 @@ final class DaemonStore {
                 // Expiry happens here only — even for slots the daemon no
                 // longer reports — so the entry can't outlive its meaning.
                 pending.removeValue(forKey: slotName)
-                commandError =
-                    "\(command.kind.rawValue) of \(slotName) not confirmed after \(Int(Self.confirmationBound))s — the daemon accepted it but the slot hasn't reflected it"
+                // A slot that's simply gone from snapshots (config reload, drain)
+                // is a benign disappearance, not a command that failed.
+                if slot != nil {
+                    commandError =
+                        "\(command.kind.rawValue) of \(slotName) not confirmed after \(Int(Self.confirmationBound))s — the daemon accepted it but the slot hasn't reflected it"
+                }
             }
         }
     }
@@ -297,8 +307,10 @@ final class DaemonStore {
             commandError = "daemon unreachable — \(kind.rawValue) not sent"
             return
         }
+        nextCommandID += 1
+        let id = nextCommandID
         pending[slot.slot] = PendingCommand(
-            kind: kind, requestedAt: Date(), cycleID: slot.cycleID
+            id: id, kind: kind, requestedAt: Date(), cycleID: slot.cycleID
         )
         Task { @MainActor in
             do {
@@ -306,7 +318,11 @@ final class DaemonStore {
                     commandNote = note
                 }
             } catch {
-                pending.removeValue(forKey: slot.slot)
+                // Only retract our own entry — a faster second command on this
+                // slot may have replaced it, and must keep its tracking.
+                if pending[slot.slot]?.id == id {
+                    pending.removeValue(forKey: slot.slot)
+                }
                 commandError = Self.describe(error, kind: kind, slot: slot.slot)
             }
         }
@@ -336,11 +352,14 @@ final class DaemonStore {
         }
     }
 
-    /// The confirmed path: cancel the job only when the slot was in JOB (in
-    /// DEBUG the recycle destroys the held guest regardless of the flag).
+    /// The confirmed path: cancel the job only when the slot is STILL in JOB
+    /// (in DEBUG the recycle destroys the held guest regardless of the flag).
+    /// Re-read current state — the job may have ended between opening the
+    /// dialog and confirming, so the captured snapshot can be stale.
     func confirmRecycle(_ slot: Runny_V1_SlotStatus) {
         recycleConfirm = nil
-        performRecycle(slot, cancelRunningJob: slot.state == .job)
+        let current = slots.first(where: { $0.slot == slot.slot }) ?? slot
+        performRecycle(current, cancelRunningJob: current.state == .job)
     }
 
     private func performRecycle(_ slot: Runny_V1_SlotStatus, cancelRunningJob: Bool) {

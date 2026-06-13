@@ -14,6 +14,9 @@ struct LogsTab: View {
     /// False during the initial replay window so switching streams doesn't
     /// flash "No logs" before the bounded replay has had a chance to arrive.
     @State private var settled = false
+    /// Bumped each appearance so a grace Task left over from a prior stream
+    /// can't flip `settled` for the current one.
+    @State private var generation = 0
 
     var body: some View {
         Group {
@@ -33,12 +36,15 @@ struct LogsTab: View {
             }
         }
         .onAppear {
+            generation += 1
+            let gen = generation
+            settled = false
             let m = LogStreamModel(slot: slotName, daemon: daemon)
             m.start(store: store)
             model = m
             Task {
                 try? await Task.sleep(for: .seconds(1.2))
-                settled = true
+                if gen == generation { settled = true }
             }
         }
         .onDisappear {

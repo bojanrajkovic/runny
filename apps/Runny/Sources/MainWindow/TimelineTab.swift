@@ -148,14 +148,24 @@ struct TimelineTab: View {
     }()
 }
 
-/// The in-flight cycle: a live position in the cycle pipeline, not a
-/// per-state timeline. cycle.json is written only at cycle end and live
-/// snapshots coalesce/skip states, so exact per-state durations can't be
-/// reconstructed mid-cycle — they fill in here once the cycle completes and
-/// becomes a selectable past cycle. What we *can* show honestly: which states
-/// are behind us, where we are now (with a live clock), and what's ahead.
+/// The in-flight cycle: position in the pipeline with live per-state durations
+/// for completed states. Durations come from `slot.activeCycleStates`, populated
+/// by the daemon as each state finishes. Older daemons send an empty list;
+/// the view degrades gracefully (completed rows show no duration).
 struct CurrentCycleView: View {
     let slot: Runny_V1_SlotStatus
+
+    /// Completed-state durations keyed by SlotState for O(1) lookup per row.
+    private var completedDurations: [Runny_V1_SlotState: TimeInterval] {
+        var d: [Runny_V1_SlotState: TimeInterval] = [:]
+        for record in slot.activeCycleStates {
+            let elapsed = record.left.dateValue.timeIntervalSince(record.entered.dateValue)
+            if elapsed >= 0 {
+                d[record.state] = elapsed
+            }
+        }
+        return d
+    }
 
     /// The forward path, BACKOFF excluded (it's the between-cycles park, not a
     /// step). DEBUG only appears once it's armed or active — most cycles never
@@ -176,14 +186,8 @@ struct CurrentCycleView: View {
             VStack(alignment: .leading, spacing: 12) {
                 // No metadata header here: the detail header above and the Info
                 // tab already carry the image, digest, runner, vm, and live
-                // state. The current cycle's unique datum is where it is now —
-                // so this view is just the live pipeline. (Historical cycles
-                // keep their summary; for a finished cycle it's the only record
-                // of what ran.)
+                // state. The current cycle's unique datum is where it is now.
                 pipeline
-                Text("Per-state durations are recorded when the cycle finishes; it's selectable as a past cycle then.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
             .padding()
         }
@@ -192,12 +196,14 @@ struct CurrentCycleView: View {
 
     private var pipeline: some View {
         let currentIndex = slot.state.cycleIndex
+        let durations = completedDurations
         return VStack(alignment: .leading, spacing: 0) {
             ForEach(path, id: \.self) { state in
                 PipelineRow(
                     state: state,
                     position: position(of: state, currentIndex: currentIndex),
-                    slot: slot
+                    slot: slot,
+                    completedDuration: durations[state]
                 )
             }
         }
@@ -211,14 +217,18 @@ struct CurrentCycleView: View {
 }
 
 /// One pipeline step: a position glyph (passed / you-are-here / pending), the
-/// FSM token (matching the completed-cycle timeline's vocabulary), and a live
-/// clock on the current step only.
+/// FSM token (matching the completed-cycle timeline's vocabulary), and a
+/// duration: live clock on the current step, recorded duration on passed steps
+/// (nil when the daemon is older and doesn't stream active-cycle state history).
 struct PipelineRow: View {
     enum Position { case passed, current, pending }
 
     let state: Runny_V1_SlotState
     let position: Position
     let slot: Runny_V1_SlotStatus
+    /// Non-nil for passed states when the daemon is streaming active-cycle
+    /// history (`SlotStatus.active_cycle_states`). Nil on older daemons.
+    var completedDuration: TimeInterval?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -232,13 +242,23 @@ struct PipelineRow: View {
                 .fontWeight(position == .current ? .semibold : .regular)
                 .foregroundStyle(position == .pending ? .secondary : .primary)
                 .frame(width: 120, alignment: .leading)
-            if position == .current {
+            switch position {
+            case .current:
                 TickingText { now in
                     "for \(SlotPresentation.duration(SlotPresentation.timeInState(slot, now: now)))"
                 }
                 .font(.callout)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
+            case .passed:
+                if let d = completedDuration {
+                    Text(SlotPresentation.duration(d))
+                        .font(.callout)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+            case .pending:
+                EmptyView()
             }
             Spacer(minLength: 0)
         }

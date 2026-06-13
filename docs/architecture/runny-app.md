@@ -87,6 +87,27 @@ in subsequent `WatchStatus` snapshots; if confirmation doesn't arrive within
 10s, it says so. Errors switch on the gRPC status code, with the server's
 message text rendered verbatim as the fallback.
 
+## Timeline: current and completed cycles
+
+The Timeline tab shows the current in-flight cycle and completed past cycles
+from the `Why` RPC.
+
+**Current cycle** — the daemon streams per-state history as part of each
+`WatchStatus` snapshot via `SlotStatus.active_cycle_states`. Each entry is a
+`StateRecord` with `entered`, `left`, and `outcome`, appended at state
+transition: when state N starts, the snapshot includes all states 0..N-1 as
+completed records. The current state is `state` + `state_entered` — rendered
+with a live ticking clock. The app builds a `[SlotState → TimeInterval]`
+lookup from the completed records and passes each duration to the
+corresponding pipeline row.
+
+Older daemons that predate this field send `active_cycle_states` as empty;
+the app degrades gracefully (pipeline rows show position/glyph only, no
+durations for completed states).
+
+**Completed cycles** — fetched from `Why` on demand, rendered from the
+`cycle.json` artifact. This path is unchanged.
+
 ## Log streams are honestly lossy
 
 Each visible log view owns one `StreamLogs` (bounded replay, then follow),

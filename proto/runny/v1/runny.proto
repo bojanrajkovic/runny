@@ -130,6 +130,12 @@ message SlotStatus {
   // (e.g. "actions-runner-osx-arm64-2.320.0.tar.gz"); set when ENSURE_IMAGE
   // completes, empty before that and in BACKOFF. Empty from older daemons.
   string runner_version = 18;
+  // Completed states from the current in-flight cycle, in entry order.
+  // Populated when each state finishes; empty in BACKOFF and from older
+  // daemons. The current state is state+state_entered (not included here):
+  // clients render it as a live clock. Left is always set; outcome is "ok",
+  // "error", or "deadline".
+  repeated StateRecord active_cycle_states = 19;
 }
 
 message GetStatusRequest {}

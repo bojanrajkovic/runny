@@ -570,6 +570,24 @@ func statusToProto(st statemachine.Status) *runnyv1.SlotStatus {
 			OperatorKeys: st.Job.OperatorKeys,
 		}
 	}
+	out.ActiveCycleStates = stateRecordsToProto(st.ActiveCycleStates)
+	return out
+}
+
+func stateRecordsToProto(records []cycle.StateRecord) []*runnyv1.StateRecord {
+	if len(records) == 0 {
+		return nil
+	}
+	out := make([]*runnyv1.StateRecord, 0, len(records))
+	for _, sr := range records {
+		out = append(out, &runnyv1.StateRecord{
+			State:   stateToProto[statemachine.State(sr.State)],
+			Entered: timestamppb.New(sr.Entered),
+			Left:    timestamppb.New(sr.Left),
+			Outcome: string(sr.Outcome),
+			Error:   sr.Error,
+		})
+	}
 	return out
 }
 
@@ -586,15 +604,7 @@ func recordToProto(r *cycle.Record) *runnyv1.CycleRecord {
 		Vm:            &runnyv1.VMInfo{Mac: r.VM.MAC, Ip: r.VM.IP},
 		Artifacts:     r.Artifacts,
 	}
-	for _, sr := range r.States {
-		out.States = append(out.States, &runnyv1.StateRecord{
-			State:   stateToProto[statemachine.State(sr.State)],
-			Entered: timestamppb.New(sr.Entered),
-			Left:    timestamppb.New(sr.Left),
-			Outcome: string(sr.Outcome),
-			Error:   sr.Error,
-		})
-	}
+	out.States = stateRecordsToProto(r.States)
 	if r.Job != nil {
 		out.Job = &runnyv1.JobInfo{
 			Name: r.Job.Name, Started: timestamppb.New(r.Job.Started),

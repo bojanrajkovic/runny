@@ -1026,6 +1026,71 @@ func TestEnsureFailureExposesNoDigestButRecordsRef(t *testing.T) {
 	}
 }
 
+// ActiveCycleStates must accumulate completed states in the live snapshot and
+// clear when the slot enters BACKOFF between cycles.
+func TestActiveCycleStatesAccumulate(t *testing.T) {
+	h := newHarness(t, nil)
+	cancel := h.start(t)
+	_ = cancel
+
+	// ENSURE_IMAGE completes → CLONE enters; the snapshot at CLONE must carry
+	// ENSURE_IMAGE as a completed state.
+	cloneSt := h.waitState(t, StateClone)
+	if n := len(cloneSt.ActiveCycleStates); n != 1 {
+		t.Errorf("at CLONE: ActiveCycleStates has %d entries, want 1 (ENSURE_IMAGE)", n)
+	} else if cloneSt.ActiveCycleStates[0].State != string(StateEnsureImage) {
+		t.Errorf("at CLONE: ActiveCycleStates[0].State = %q, want ENSURE_IMAGE", cloneSt.ActiveCycleStates[0].State)
+	} else if cloneSt.ActiveCycleStates[0].Left.IsZero() {
+		t.Error("at CLONE: completed ENSURE_IMAGE record has zero Left timestamp")
+	}
+
+	// By LISTENING many states have completed; every completed state has
+	// non-zero Left (set when the state finished running).
+	h.proc.say(markerListening)
+	listSt := h.waitState(t, StateListening)
+	for _, sr := range listSt.ActiveCycleStates {
+		if sr.Left.IsZero() {
+			t.Errorf("ActiveCycleStates[%s].Left is zero — state was recorded incomplete", sr.State)
+		}
+	}
+	// All states up to (but not including) LISTENING must be present, exactly
+	// once each. Count is tied to the expected list so it doesn't need updating
+	// when a new state is added — only the membership slice below does.
+	wantBeforeListening := []State{StateEnsureImage, StateClone, StateBoot, StateAwaitIP, StateAwaitSSH, StateSecureSSH, StateMintJIT, StateProvision}
+	stateNames := make(map[string]bool, len(listSt.ActiveCycleStates))
+	for _, sr := range listSt.ActiveCycleStates {
+		stateNames[sr.State] = true
+	}
+	if n := len(listSt.ActiveCycleStates); n != len(wantBeforeListening) {
+		t.Errorf("at LISTENING: ActiveCycleStates has %d entries, want %d (one per pre-LISTENING state)", n, len(wantBeforeListening))
+	}
+	for _, want := range wantBeforeListening {
+		if !stateNames[string(want)] {
+			t.Errorf("ActiveCycleStates missing %s at LISTENING entry", want)
+		}
+	}
+
+	// TEARDOWN snapshot must carry all states completed before teardown
+	// (everything up through JOB). A regression in teardown's clone would
+	// silently drop entries.
+	h.proc.say("Running job: active-cycle-test")
+	h.waitState(t, StateJob)
+	h.proc.say("Job active-cycle-test completed with result: Succeeded")
+	h.proc.exit(0)
+	teardownSt := h.waitState(t, StateTeardown)
+	if n := len(teardownSt.ActiveCycleStates); n == 0 {
+		t.Error("TEARDOWN snapshot has empty ActiveCycleStates — completedBeforeTeardown was not set")
+	}
+
+	// BACKOFF must clear the slice entirely.
+	backoffSt := h.waitState(t, StateBackoff)
+	if len(backoffSt.ActiveCycleStates) != 0 {
+		t.Errorf("BACKOFF snapshot has %d ActiveCycleStates, want 0", len(backoffSt.ActiveCycleStates))
+	}
+	cancel()
+	<-h.runDone
+}
+
 func TestRunnerNameShape(t *testing.T) {
 	h := newHarness(t, nil)
 	cancel := h.start(t)

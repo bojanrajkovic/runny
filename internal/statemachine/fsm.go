@@ -267,6 +267,12 @@ type Status struct {
 	// armed: the slot will enter DEBUG (not teardown) at job end. Cleared the
 	// instant the hold is disarmed or DEBUG/TEARDOWN is entered (issue #39).
 	DebugHoldArmed bool
+	// ActiveCycleStates is the ordered list of states that have already
+	// completed in the current in-flight cycle. Populated on each state
+	// transition (the new-state snapshot carries all prior completed states);
+	// cleared when the slot enters BACKOFF. The current state is State +
+	// StateEntered — it is not included here.
+	ActiveCycleStates []cycle.StateRecord
 }
 
 // Slot drives one runner slot's lifecycle.
@@ -414,6 +420,7 @@ func (s *Slot) backoffWait(ctx context.Context) error {
 		st.RunnerVersion = ""
 		st.VM = cycle.VMInfo{}
 		st.Job = nil
+		st.ActiveCycleStates = nil
 	})
 	// Drain any command stranded by the previous cycle's TEARDOWN (the one
 	// consumer-less window) BEFORE arming the timer. A plain CmdRecycle left
@@ -596,9 +603,11 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	// runState records one state's execution; sctx is consulted only to
 	// classify deadline outcomes. false = cycle failed.
 	runState := func(state State, sctx context.Context, f func() error) bool {
+		completed := slices.Clone(rec.States)
 		s.setState(state, func(st *Status) {
 			st.CycleID = rec.CycleID
 			st.RunnerName = runnerName
+			st.ActiveCycleStates = completed
 		})
 		sr := cycle.StateRecord{State: string(state), Entered: time.Now()}
 		err := f()
@@ -827,7 +836,8 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 // (issue #39) is reported as a benign failure carrying StateDebug.
 func (s *Slot) listenAndRunJob(ctx context.Context, rec *cycle.Record, proc Proc, guest Guest, runnerName string) (bool, State, error) {
 	cfg := s.deps.Config
-	s.setState(StateListening, nil)
+	completed := slices.Clone(rec.States)
+	s.setState(StateListening, func(st *Status) { st.ActiveCycleStates = completed })
 	lrec := cycle.StateRecord{State: string(StateListening), Entered: time.Now()}
 
 	reconcile := time.NewTicker(cfg.Limits.ReconcileInterval.D())
@@ -928,7 +938,11 @@ func (s *Slot) runJob(ctx context.Context, rec *cycle.Record, proc Proc, guest G
 	jobName := strings.TrimSpace(markerLine[strings.Index(markerLine, markerJobStarted)+len(markerJobStarted):])
 	job := &cycle.JobInfo{Name: jobName, Started: time.Now()}
 	rec.Job = job
-	s.setState(StateJob, func(st *Status) { st.Job = job })
+	completedBeforeJob := slices.Clone(rec.States)
+	s.setState(StateJob, func(st *Status) {
+		st.Job = job
+		st.ActiveCycleStates = completedBeforeJob
+	})
 	jrec := cycle.StateRecord{State: string(StateJob), Entered: time.Now()}
 
 	arm := &debugArm{}
@@ -1391,9 +1405,11 @@ func (s *Slot) enterPostJobDebug(ctx context.Context, rec *cycle.Record, proc Pr
 // max-idle is gone by construction; release is destruction.
 func (s *Slot) holdForDebug(ctx context.Context, rec *cycle.Record, guest Guest, holdUntil time.Time) (State, error) {
 	secureSSH := s.deps.Config.Deadlines.SecureSSH.D()
+	completedBeforeDebug := slices.Clone(rec.States)
 	s.setState(StateDebug, func(st *Status) {
 		st.DebugHoldExpires = holdUntil
 		st.Detail = fmt.Sprintf("held for debug; release: runnyctl recycle %s", s.name)
+		st.ActiveCycleStates = completedBeforeDebug
 	})
 	dr := cycle.StateRecord{State: string(StateDebug), Entered: time.Now()}
 	finish := func(outcome cycle.Outcome, errStr string) {
@@ -1618,7 +1634,8 @@ type teardownInputs struct {
 // absorb, because releasing an in-process VM takes a process exit.
 func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInputs) bool {
 	cfg := s.deps.Config
-	s.setState(StateTeardown, nil)
+	completedBeforeTeardown := slices.Clone(rec.States)
+	s.setState(StateTeardown, func(st *Status) { st.ActiveCycleStates = completedBeforeTeardown })
 	tr := cycle.StateRecord{State: string(StateTeardown), Entered: time.Now()}
 	// Teardown must run even when ctx (daemon shutdown) is done: detach.
 	tctx, cancel := bounded.WithTimeout(context.WithoutCancel(ctx), cfg.Deadlines.Teardown.D())

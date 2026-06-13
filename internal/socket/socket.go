@@ -570,6 +570,16 @@ func statusToProto(st statemachine.Status) *runnyv1.SlotStatus {
 			OperatorKeys: st.Job.OperatorKeys,
 		}
 	}
+	for _, sr := range st.ActiveCycleStates {
+		psr := &runnyv1.StateRecord{
+			State:   stateToProto[statemachine.State(sr.State)],
+			Entered: timestamppb.New(sr.Entered),
+			Left:    timestamppb.New(sr.Left),
+			Outcome: string(sr.Outcome),
+			Error:   sr.Error,
+		}
+		out.ActiveCycleStates = append(out.ActiveCycleStates, psr)
+	}
 	return out
 }
 

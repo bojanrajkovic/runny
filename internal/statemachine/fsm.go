@@ -181,10 +181,10 @@ type Command struct {
 	Reason string
 	// ID is the client's opaque correlation id for CmdPause/CmdResume (a
 	// random UUID from PauseRequest/ResumeRequest.command_id). setPaused
-	// republishes it as Status.LastAppliedCommandID when the command applies,
-	// so the client can confirm THIS command. Empty for daemon-internal
-	// re-issues (the drainer) and older clients; an empty id never overwrites
-	// a published id (see setPaused).
+	// appends it to Status.RecentAppliedCommandIDs when the command applies,
+	// so the client can confirm THIS command by membership. Empty for
+	// daemon-internal re-issues (the drainer) and older clients; an empty id
+	// is never recorded (see setPaused).
 	ID string
 	// CancelJob applies to CmdRecycle only: consent to cancel a RUNNING job
 	// (decision 14). runnyctl sets it via its -force guard after observing
@@ -256,16 +256,18 @@ type Status struct {
 	// empty before ENSURE_IMAGE completes and in BACKOFF.
 	RunnerVersion string
 	Paused        bool
-	// LastAppliedCommandID is the Command.ID of the last IDENTIFIED pause/resume
-	// the FSM applied for this slot. The control surface confirms a pending
-	// pause/resume by exact match against it. An id-less internal re-issue does
-	// not change it, so a value persists across unrelated status snapshots.
-	LastAppliedCommandID string
-	ConsecutiveFailures  uint32
-	BackoffSeconds       int64
-	VM                   cycle.VMInfo
-	Job                  *cycle.JobInfo
-	LastFailure          string
+	// RecentAppliedCommandIDs is a bounded, oldest-evicted history of the
+	// IDENTIFIED pause/resume Command.IDs the FSM has applied for this slot. The
+	// control surface confirms a pending pause/resume by membership, so
+	// concurrent clients don't clobber each other's acknowledgement the way a
+	// single last-applied scalar would. An id-less internal re-issue appends
+	// nothing, so a client's id persists across unrelated status snapshots.
+	RecentAppliedCommandIDs []string
+	ConsecutiveFailures     uint32
+	BackoffSeconds          int64
+	VM                      cycle.VMInfo
+	Job                     *cycle.JobInfo
+	LastFailure             string
 	// Detail is the current state's live annotation (pull progress etc).
 	Detail string
 	// Wedged: the guest survived force-stop and still occupies a
@@ -507,23 +509,46 @@ func (s *Slot) isPaused() bool {
 	return s.paused
 }
 
+// recentCommandIDCap bounds the per-slot applied-command history. Generous
+// relative to the client's confirm→catch window: an id only needs to survive
+// from the snapshot that carries it until the client polls, so a handful is
+// plenty, and the cap exists only to keep an always-paused slot's history from
+// growing without bound.
+const recentCommandIDCap = 16
+
 // setPaused applies a pause/resume and republishes the slot status. cmdID is
 // the applying command's correlation id (empty for daemon-internal re-issues);
-// it is echoed as Status.LastAppliedCommandID so the control surface can
-// confirm that specific command. Non-clobber: an empty cmdID must not wipe a
-// previously published id, or a coalesced status stream could drop the
-// identified snapshot and the client would never see its acknowledgement.
+// a non-empty id is appended to Status.RecentAppliedCommandIDs so the control
+// surface can confirm that specific command by membership. An empty cmdID
+// appends nothing, so a coalesced status stream never drops a client's
+// acknowledgement out of the history.
 func (s *Slot) setPaused(p bool, cmdID string) {
 	s.mu.Lock()
 	s.paused = p
 	s.status.Paused = p
 	if cmdID != "" {
-		s.status.LastAppliedCommandID = cmdID
+		s.status.RecentAppliedCommandIDs = appendBounded(
+			s.status.RecentAppliedCommandIDs, cmdID, recentCommandIDCap,
+		)
 	}
 	snap := s.status
 	fns := slices.Clone(s.onChange)
 	s.mu.Unlock()
 	s.notify(fns, snap)
+}
+
+// appendBounded returns ids with id appended, retaining at most max entries
+// (oldest evicted). It always allocates a fresh backing array so a status value
+// already snapshotted under the lock keeps its own stable slice — a later
+// append must not mutate an array a prior snapshot still references.
+func appendBounded(ids []string, id string, max int) []string {
+	next := make([]string, 0, max)
+	if len(ids) >= max {
+		next = append(next, ids[len(ids)-max+1:]...)
+	} else {
+		next = append(next, ids...)
+	}
+	return append(next, id)
 }
 
 func (s *Slot) currentBackoff() time.Duration {

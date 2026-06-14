@@ -4,19 +4,19 @@ import XCTest
 
 import RunnyV1
 
-/// The pause/resume confirmation contract: a command confirms only on an exact
-/// match of the daemon's echoed `lastAppliedCommandID`, never on a
+/// The pause/resume confirmation contract: a command confirms only when its id
+/// is present in the daemon's `recentAppliedCommandIds` history, never on a
 /// coincidentally-matching paused state. These exercise `DaemonStore.isConfirmed`
 /// — the pure decision the live stream feeds.
 final class CommandConfirmationTests: XCTestCase {
     private func slot(
         _ name: String = "runner-1", paused: Bool = false,
-        lastApplied: String = "", cycleID: String = "cycle-a"
+        recentApplied: [String] = [], cycleID: String = "cycle-a"
     ) -> Runny_V1_SlotStatus {
         var s = Runny_V1_SlotStatus()
         s.slot = name
         s.paused = paused
-        s.lastAppliedCommandID = lastApplied
+        s.recentAppliedCommandIds = recentApplied
         s.cycleID = cycleID
         return s
     }
@@ -30,59 +30,71 @@ final class CommandConfirmationTests: XCTestCase {
         )
     }
 
-    func testPauseConfirmsOnExactIDMatchAndPausedDirection() {
+    func testPauseConfirmsOnIDMembershipAndPausedDirection() {
         let cmd = pending(.pause, id: "abc")
         XCTAssertTrue(
-            DaemonStore.isConfirmed(cmd, by: slot(paused: true, lastApplied: "abc"))
+            DaemonStore.isConfirmed(cmd, by: slot(paused: true, recentApplied: ["abc"]))
         )
     }
 
-    func testResumeConfirmsOnExactIDMatchAndResumedDirection() {
+    func testResumeConfirmsOnIDMembershipAndResumedDirection() {
         let cmd = pending(.resume, id: "abc")
         XCTAssertTrue(
-            DaemonStore.isConfirmed(cmd, by: slot(paused: false, lastApplied: "abc"))
+            DaemonStore.isConfirmed(cmd, by: slot(paused: false, recentApplied: ["abc"]))
         )
     }
 
-    func testPauseDoesNotConfirmOnMatchingStateButDifferentID() {
+    func testConfirmsWhenIDIsOneOfSeveralAppliedCommands() {
+        // The membership point: concurrent clients (or a fast second command)
+        // leave several ids in the history; ours need only be present, not last.
+        // A scalar last-applied would have lost our id behind "theirs".
+        let cmd = pending(.pause, id: "mine")
+        XCTAssertTrue(
+            DaemonStore.isConfirmed(
+                cmd, by: slot(paused: true, recentApplied: ["theirs", "mine", "later"])
+            )
+        )
+    }
+
+    func testPauseDoesNotConfirmOnMatchingStateButAbsentID() {
         // The original bug: a paused slot must NOT confirm a pause whose id the
-        // daemon never echoed (e.g. a periodic tick carrying paused=true).
+        // daemon never recorded (e.g. a periodic tick carrying paused=true).
         let cmd = pending(.pause, id: "mine")
         XCTAssertFalse(
-            DaemonStore.isConfirmed(cmd, by: slot(paused: true, lastApplied: "someone-elses"))
+            DaemonStore.isConfirmed(cmd, by: slot(paused: true, recentApplied: ["someone-elses"]))
         )
     }
 
-    func testPauseDoesNotConfirmOnMatchingIDButWrongDirection() {
-        // The direction belt: a stale snapshot echoing our id but still showing
+    func testPauseDoesNotConfirmOnPresentIDButWrongDirection() {
+        // The direction belt: a stale snapshot carrying our id but still showing
         // resumed must not confirm a pause.
         let cmd = pending(.pause, id: "abc")
         XCTAssertFalse(
-            DaemonStore.isConfirmed(cmd, by: slot(paused: false, lastApplied: "abc"))
+            DaemonStore.isConfirmed(cmd, by: slot(paused: false, recentApplied: ["abc"]))
         )
     }
 
-    func testResumeDoesNotConfirmOnMatchingIDButWrongDirection() {
+    func testResumeDoesNotConfirmOnPresentIDButWrongDirection() {
         let cmd = pending(.resume, id: "abc")
         XCTAssertFalse(
-            DaemonStore.isConfirmed(cmd, by: slot(paused: true, lastApplied: "abc"))
+            DaemonStore.isConfirmed(cmd, by: slot(paused: true, recentApplied: ["abc"]))
         )
     }
 
-    func testPreRequestSnapshotWithEmptyRegisterDoesNotConfirm() {
+    func testPreRequestSnapshotWithEmptyHistoryDoesNotConfirm() {
         // The snapshot in flight when the command was issued carries no id yet.
         let cmd = pending(.pause, id: "abc")
         XCTAssertFalse(
-            DaemonStore.isConfirmed(cmd, by: slot(paused: true, lastApplied: ""))
+            DaemonStore.isConfirmed(cmd, by: slot(paused: true, recentApplied: []))
         )
     }
 
-    func testDaemonRestartClearsRegisterSoCommandDoesNotConfirm() {
-        // A restarted daemon comes up with an empty register; the random id
+    func testDaemonRestartClearsHistorySoCommandDoesNotConfirm() {
+        // A restarted daemon comes up with an empty history; the random id
         // can't collide, so the command stays pending until it times out.
         let cmd = pending(.pause, id: "abc")
         XCTAssertFalse(
-            DaemonStore.isConfirmed(cmd, by: slot(paused: true, lastApplied: ""))
+            DaemonStore.isConfirmed(cmd, by: slot(paused: true, recentApplied: []))
         )
     }
 

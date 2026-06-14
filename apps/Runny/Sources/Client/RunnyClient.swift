@@ -76,8 +76,8 @@ final class RunnyClient: @unchecked Sendable {
 
     /// Returns the daemon's note (non-empty only while draining: pause is
     /// in-memory and won't survive the imminent respawn). `commandID` is the
-    /// caller's random per-command identity: the daemon echoes it back on the
-    /// slot's `lastAppliedCommandID` when the pause actually applies, so the
+    /// caller's random per-command identity: the daemon records it in the
+    /// slot's `recentAppliedCommandIds` when the pause actually applies, so the
     /// app confirms the specific command rather than a matching state.
     func pause(slot: String, commandID: String) async throws -> String {
         var request = Runny_V1_PauseRequest()

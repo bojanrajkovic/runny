@@ -38,7 +38,7 @@ final class DaemonStore {
     struct PendingCommand: Equatable {
         enum Kind: String { case pause, resume, recycle }
         /// Random per-command identity (a UUID string). For pause/resume the
-        /// daemon echoes this back on the slot's `lastAppliedCommandID` when
+        /// daemon records this in the slot's `recentAppliedCommandIds` when
         /// the command actually applies, so confirmation matches the specific
         /// command rather than a coincidentally-matching paused state. `pending`
         /// is keyed by slot, so a failing command clears its entry only when
@@ -309,19 +309,20 @@ final class DaemonStore {
     /// Is `command` confirmed by `slot`'s current snapshot? Pure and static so
     /// the confirmation contract is unit-testable without a live stream.
     ///
-    /// Pause/resume confirm on an exact command-id match against the daemon's
-    /// echoed `lastAppliedCommandID`, with the paused-direction as a sanity
-    /// belt: a random id can't collide across a daemon restart, and the
-    /// direction check rejects a stale snapshot that happens to carry a prior
-    /// command's id. Recycle has no echoed id — the daemon doesn't carry one on
-    /// the undo/internal re-issue path — so it confirms on a cycle change, the
-    /// same observable it always used.
+    /// Pause/resume confirm on the command's id being present in the daemon's
+    /// `recentAppliedCommandIds` history, with the paused-direction as a sanity
+    /// belt: a random id can't collide across a daemon restart, membership
+    /// survives concurrent clients clobbering each other (a scalar wouldn't),
+    /// and the direction check rejects a stale snapshot that still carries a
+    /// prior command's id. Recycle has no echoed id — the daemon doesn't carry
+    /// one on the undo/internal re-issue path — so it confirms on a cycle
+    /// change, the same observable it always used.
     nonisolated static func isConfirmed(_ command: PendingCommand, by slot: Runny_V1_SlotStatus?) -> Bool {
         switch command.kind {
         case .pause:
-            slot?.lastAppliedCommandID == command.id && (slot?.paused ?? false)
+            (slot?.recentAppliedCommandIds.contains(command.id) ?? false) && (slot?.paused ?? false)
         case .resume:
-            slot?.lastAppliedCommandID == command.id && !(slot?.paused ?? true)
+            (slot?.recentAppliedCommandIds.contains(command.id) ?? false) && !(slot?.paused ?? true)
         case .recycle:
             slot.map { $0.cycleID != command.cycleID } ?? false
         }
@@ -378,11 +379,11 @@ final class DaemonStore {
             commandError = "daemon unreachable — \(kind.rawValue) not sent"
             return
         }
-        // The daemon publishes one `lastAppliedCommandID` per slot, so a second
-        // identified pause/resume issued while one is still pending could clobber
-        // the first's ack and lose its confirmation. Reject it; the operator
-        // retries once the in-flight command resolves. Recycle confirms on a
-        // cycle change, not the id register, so it isn't subject to this.
+        // One identified pause/resume in flight per slot at a time: a second
+        // would install a fresh pending under the same slot key and lose the
+        // first's tracking. Reject it; the operator retries once the in-flight
+        // command resolves. Recycle confirms on a cycle change, not the id
+        // history, so it isn't subject to this.
         if kind == .pause || kind == .resume, pendingCommand(for: slot.slot) != nil {
             commandError =
                 "\(kind.rawValue) of \(slot.slot) ignored — a command is already pending for it"

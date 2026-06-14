@@ -50,7 +50,7 @@ type ReloadResult struct {
 // WireProtocolVersion is the daemon's wire-contract version, published in
 // GetStatusResponse.protocol_version. Bump it when the daemon gains a feature a
 // client must detect before relying on it. Version 1 introduced pause/resume
-// command acknowledgement (SlotStatus.last_applied_command_id): a client
+// command acknowledgement (SlotStatus.recent_applied_command_ids): a client
 // confirms a pause/resume from the command id only against a daemon advertising
 // >= 1.
 const WireProtocolVersion uint32 = 1
@@ -561,22 +561,22 @@ var stateToProto = map[statemachine.State]runnyv1.SlotState{
 
 func statusToProto(st statemachine.Status) *runnyv1.SlotStatus {
 	out := &runnyv1.SlotStatus{
-		Slot:                 st.Slot,
-		State:                stateToProto[st.State],
-		StateEntered:         timestamppb.New(st.StateEntered),
-		CycleId:              st.CycleID,
-		RunnerName:           st.RunnerName,
-		Image:                st.Image,
-		ImageDigest:          st.ImageDigest,
-		RunnerVersion:        st.RunnerVersion,
-		Paused:               st.Paused,
-		ConsecutiveFailures:  st.ConsecutiveFailures,
-		BackoffSeconds:       st.BackoffSeconds,
-		LastFailure:          st.LastFailure,
-		Detail:               st.Detail,
-		Wedged:               st.Wedged,
-		DebugHoldArmed:       st.DebugHoldArmed,
-		LastAppliedCommandId: st.LastAppliedCommandID,
+		Slot:                    st.Slot,
+		State:                   stateToProto[st.State],
+		StateEntered:            timestamppb.New(st.StateEntered),
+		CycleId:                 st.CycleID,
+		RunnerName:              st.RunnerName,
+		Image:                   st.Image,
+		ImageDigest:             st.ImageDigest,
+		RunnerVersion:           st.RunnerVersion,
+		Paused:                  st.Paused,
+		ConsecutiveFailures:     st.ConsecutiveFailures,
+		BackoffSeconds:          st.BackoffSeconds,
+		LastFailure:             st.LastFailure,
+		Detail:                  st.Detail,
+		Wedged:                  st.Wedged,
+		DebugHoldArmed:          st.DebugHoldArmed,
+		RecentAppliedCommandIds: st.RecentAppliedCommandIDs,
 	}
 	if !st.DebugHoldExpires.IsZero() {
 		out.DebugHoldExpires = timestamppb.New(st.DebugHoldExpires)

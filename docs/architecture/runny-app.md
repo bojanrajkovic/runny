@@ -88,24 +88,35 @@ so. Errors switch on the gRPC status code, with the server's message text
 rendered verbatim as the fallback.
 
 Confirmation keys on the **specific command**, not a matching state. A pause
-or resume carries a random command id on the request; the daemon echoes it on
-the slot's `last_applied_command_id` when the command actually applies, and
-the app confirms only on an exact id match (with the slot's paused direction
-as a sanity belt). This is what stops a periodic snapshot that merely carries
-`paused=true` from confirming — and so disarming the watchdog for — a pause
-the daemon hasn't run yet. Recycle has no echoed id and confirms on a cycle
-change, the observable it has always used.
+or resume carries a random command id on the request; the daemon records it in
+the slot's `recent_applied_command_ids` when the command actually applies, and
+the app confirms when its id is **present in that history** (with the slot's
+paused direction as a sanity belt). This is what stops a periodic snapshot that
+merely carries `paused=true` from confirming — and so disarming the watchdog
+for — a pause the daemon hasn't run yet. A history rather than a single
+last-applied id so concurrent clients (the app plus a `runnyctl` invocation, or
+a fast second command) don't clobber each other's acknowledgement: each finds
+its own id regardless of the others. Recycle has no recorded id and confirms on
+a cycle change, the observable it has always used.
+
+The history is bounded and best-effort, not a durable per-client receipt: an id
+need only survive from the snapshot that carries it until the app's next poll,
+so the cap is generous but finite, and a daemon restart drops it entirely (the
+random id can't collide, so the command just waits out its 10s watchdog). The
+app keys confirmation off the live `WatchStatus` stream, never off a stored
+receipt, so this honesty hole is closed by construction — a missed ack always
+fails safe toward the watchdog, never toward a false confirm.
 
 Pause/resume confirmation is gated on the daemon's `protocol_version`. A
-daemon that predates the ack contract advertises 0 and never echoes an id, so
+daemon that predates the ack contract advertises 0 and never records an id, so
 the app reports the command **sent but unconfirmable** (with an upgrade hint)
 rather than risk a false confirm or a guaranteed false timeout. While a
-pause/resume is pending for a slot, a second one is rejected — one echoed id
-per slot, so a second in-flight command would clobber the first's
-confirmation. A pending is held through most RPC errors (the ack may still
-arrive — e.g. a deadline that fired after the daemon applied the command);
-only a pre-enqueue `Unavailable` (a full command buffer, nothing ran) clears
-it at once.
+pause/resume is pending for a slot, a second one is rejected — one in-flight
+identified command per slot, so a second would install a fresh pending under
+the same slot key and lose the first's tracking. A pending is held through most
+RPC errors (the ack may still arrive — e.g. a deadline that fired after the
+daemon applied the command); only a pre-enqueue `Unavailable` (a full command
+buffer, nothing ran) clears it at once.
 
 ## Timeline: current and completed cycles
 

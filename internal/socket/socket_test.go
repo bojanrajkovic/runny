@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -64,11 +65,14 @@ func TestStatusToProtoCarriesWedgedAndDetail(t *testing.T) {
 	}
 }
 
-// The pause/resume command acknowledgement (issue #66) must reach the wire.
-func TestStatusToProtoCarriesLastAppliedCommandID(t *testing.T) {
-	pb := statusToProto(statemachine.Status{Slot: "mac-1", LastAppliedCommandID: "cmd-abc"})
-	if pb.GetLastAppliedCommandId() != "cmd-abc" {
-		t.Errorf("last_applied_command_id dropped: %q", pb.GetLastAppliedCommandId())
+// The pause/resume command acknowledgement (issue #66) must reach the wire,
+// preserving order and multiplicity so the client's membership check holds.
+func TestStatusToProtoCarriesRecentAppliedCommandIDs(t *testing.T) {
+	pb := statusToProto(statemachine.Status{
+		Slot: "mac-1", RecentAppliedCommandIDs: []string{"cmd-abc", "cmd-def"},
+	})
+	if got := pb.GetRecentAppliedCommandIds(); !slices.Equal(got, []string{"cmd-abc", "cmd-def"}) {
+		t.Errorf("recent_applied_command_ids dropped: %q", got)
 	}
 }
 

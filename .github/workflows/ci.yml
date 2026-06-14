@@ -70,6 +70,31 @@ jobs:
       - name: test
         run: mise x -- bazel test --config=ci //...
 
+  # The race detector, on its own job because the instrumented rebuild runs
+  # ~2-10x slower than the default test path (.bazelrc test:race). macOS so
+  # the cgo/vz packages are race-tested too, not just pure-Go — the FSM's
+  # goroutine-per-slot design and the oci errgroup are exactly the
+  # unsynchronized-shared-state surface this catches (it would have caught the
+  # OperatorKeys race before review). The Swift app is excluded: the race flag
+  # is Go-only (--@rules_go//go/config:race), so building it here is wasted
+  # work the macos job already does. A distinct cache key keeps the
+  # race-instrumented objects from thrashing the non-race macOS cache.
+  race:
+    name: build + test (race)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ~/Library/Caches/bazel
+          key: bazel-${{ runner.os }}-race-${{ hashFiles('MODULE.bazel', '.mise.toml') }}
+          restore-keys: bazel-${{ runner.os }}-race-
+      - name: test (race)
+        run: mise x -- bazel test --config=ci --config=race -- //... -//apps/Runny/...
+
   # The workflows themselves are attack surface (template injection,
   # unpinned actions, excessive permissions, leaked App tokens): zizmor
   # audits them. The pre-commit hook runs the same audit --offline via the

@@ -108,7 +108,11 @@ type Client struct {
 	hc *http.Client
 	// Progress, when set, receives byte deltas as layer data arrives — the
 	// feed for ENSURE_IMAGE's stall detector (a slow pull is fine, a silent
-	// one is not).
+	// one is not). It may be invoked CONCURRENTLY from multiple goroutines:
+	// pull fans the disk layers across an errgroup (up to 4 at once), each
+	// writing through progressWriter. The callback must be goroutine-safe —
+	// the production consumer in internal/images feeds a mutex-guarded
+	// progress aggregator and a bounded.Stall, both safe under concurrency.
 	Progress func(bytes int64)
 	// Waiting, when set, is called by PullTo when another pull into the same
 	// destination holds the lock: the wait is progress (the winner is moving
@@ -589,6 +593,10 @@ func HumanBytes(n int64) string {
 	}
 }
 
+// progressWriter forwards write lengths to a progress callback. It holds no
+// shared state of its own, but pull runs several of these concurrently (one per
+// errgroup layer), so fn is called from multiple goroutines — see Client.Progress
+// for the goroutine-safety contract callers must honor.
 type progressWriter struct{ fn func(int64) }
 
 func (p progressWriter) Write(b []byte) (int, error) {

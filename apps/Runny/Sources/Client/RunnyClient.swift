@@ -131,16 +131,23 @@ extension Error {
     }
 
     /// True when the gRPC code proves the command did NOT apply, so the caller
-    /// must clear any pending and surface the error rather than wait out the
-    /// confirmation watchdog: Unavailable (full command buffer, nothing
-    /// enqueued), NotFound (no such slot), FailedPrecondition (e.g. resume
-    /// during a drain), InvalidArgument. Ambiguous codes — deadlineExceeded, a
-    /// transport drop — are deliberately excluded: the daemon may still have
-    /// applied the command after the deadline fired, so the pending stands and
-    /// the watchdog adjudicates.
+    /// must clear any pending and surface the error at once rather than wait out
+    /// the confirmation watchdog: NotFound (no such slot), FailedPrecondition
+    /// (e.g. resume during a drain), InvalidArgument (a malformed request the
+    /// daemon refused before acting). These are server-originated rejections the
+    /// daemon could only have produced by *not* applying the command.
+    ///
+    /// `Unavailable` is deliberately NOT here: grpc-swift overloads it for both
+    /// the daemon's full-command-buffer rejection (which did not apply) AND a
+    /// dead/dropped transport (which may have applied before the connection
+    /// died). Indistinguishable at this layer, so it's treated as ambiguous —
+    /// the pending stands and the 10s watchdog adjudicates. That fails safe: the
+    /// worst case is a full-buffer rejection waiting out the watchdog instead of
+    /// surfacing instantly, never a false "failed" over a command that ran.
+    /// `deadlineExceeded` and transport drops are ambiguous for the same reason.
     var isDefinitiveRejection: Bool {
         switch grpcCode {
-        case .unavailable, .notFound, .failedPrecondition, .invalidArgument:
+        case .notFound, .failedPrecondition, .invalidArgument:
             true
         default:
             false

@@ -85,13 +85,24 @@ An RPC success for Pause/Resume/Recycle means **requested**, not done. The
 app shows a pending indicator and confirms the command from subsequent
 `WatchStatus` snapshots; if confirmation doesn't arrive within 10s, it says
 so. Errors switch on the gRPC status code, with the server's message text
-rendered verbatim as the fallback. A definitive rejection — `Unavailable`,
-`NotFound`, `FailedPrecondition` (e.g. a resume refused because the daemon is
-draining, whose message is shown verbatim), or `InvalidArgument` — proves the
-command never applied, so it clears the pending and surfaces the error at once.
-Ambiguous errors (a deadline, a transport drop) keep the pending: the daemon
-may have applied the command after the deadline fired, so the 10s watchdog is
-the honest adjudicator rather than a premature failure banner.
+rendered verbatim as the fallback. A definitive rejection — `NotFound`,
+`FailedPrecondition` (e.g. a resume refused because the daemon is draining,
+whose message is shown verbatim), or `InvalidArgument` — proves the command
+never applied, so it clears the pending and surfaces the error at once.
+Ambiguous errors keep the pending: the daemon may have applied the command
+after the error, so the 10s watchdog is the honest adjudicator rather than a
+premature failure banner. `Unavailable` is treated as ambiguous, not
+definitive: grpc-swift uses it for both the daemon's full-command-buffer
+rejection (which did not apply) and a dead transport (which may have applied
+before the connection died), indistinguishable at the client, so it fails safe
+toward the watchdog. A deadline or transport drop is ambiguous for the same
+reason.
+
+The error banner is a single scalar shared across slots, so it carries the id
+of the command that raised it. An ambiguous error sets the banner while keeping
+the pending; if a later snapshot then confirms that exact command, the
+confirmation retracts its own banner — matched by id, so it never wipes a
+genuine failure banner belonging to a different slot's command.
 
 Confirmation keys on the **specific command**, not a matching state. A pause
 or resume carries a random command id on the request; the daemon records it in

@@ -110,6 +110,22 @@ final class CommandConfirmationTests: XCTestCase {
         XCTAssertFalse(DaemonStore.isConfirmed(pending(.recycle, id: "abc"), by: nil))
     }
 
+    func testBannerRetractedOnlyForItsOwnCommand() {
+        // The error banner is a single scalar shared across slots. A confirmation
+        // retracts it only when the banner's provenance matches the confirming
+        // command — never a different command's failure, and never a banner with
+        // no owning command (unreachable, file-not-found: provenance nil).
+        XCTAssertTrue(DaemonStore.bannerBelongs(to: "abc", confirmedID: "abc"))
+        XCTAssertFalse(
+            DaemonStore.bannerBelongs(to: "abc", confirmedID: "xyz"),
+            "a different command's confirmation must not retract this banner"
+        )
+        XCTAssertFalse(
+            DaemonStore.bannerBelongs(to: nil, confirmedID: "abc"),
+            "an ownerless banner is never retracted by a command confirmation"
+        )
+    }
+
     func testRecycleConfirmsOnCycleChangeIgnoringID() {
         // Recycle has no echoed id — the daemon carries none on RecycleRequest —
         // so it confirms purely on the cycle advancing.
@@ -172,7 +188,7 @@ final class RecentlyConfirmedTests: XCTestCase {
 /// either swallows a real failure or fakes a timeout over a live command.
 final class ErrorClassificationTests: XCTestCase {
     func testDefinitiveRejectionCodes() {
-        for code in [GRPCStatus.Code.unavailable, .notFound, .failedPrecondition, .invalidArgument] {
+        for code in [GRPCStatus.Code.notFound, .failedPrecondition, .invalidArgument] {
             XCTAssertTrue(
                 GRPCStatus(code: code, message: nil).isDefinitiveRejection,
                 "\(code) proves the command did not apply"
@@ -183,7 +199,10 @@ final class ErrorClassificationTests: XCTestCase {
     func testAmbiguousCodesAreNotDefinitive() {
         // A deadline or transport drop may have raced an applied command — the
         // pending must stand for the watchdog, never cleared as a proven failure.
-        for code in [GRPCStatus.Code.deadlineExceeded, .cancelled, .unknown, .internalError] {
+        // Unavailable is included: grpc-swift uses it for both a full command
+        // buffer (did not apply) and a dead transport (may have applied), so it's
+        // ambiguous at this layer and must fail safe toward the watchdog.
+        for code in [GRPCStatus.Code.unavailable, .deadlineExceeded, .cancelled, .unknown, .internalError] {
             XCTAssertFalse(
                 GRPCStatus(code: code, message: nil).isDefinitiveRejection,
                 "\(code) is ambiguous — the command may still have applied"

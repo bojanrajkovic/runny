@@ -100,7 +100,30 @@ final class DaemonStore {
     private(set) var doctorRunning = false
 
     /// Set when a command fails or goes unconfirmed; views alert and clear.
-    var commandError: String?
+    /// `didSet` nils the provenance on every write, so a view clearing the
+    /// banner (`= nil`) or a non-command assignment (e.g. a file-not-found
+    /// message) correctly leaves no stale id behind; `setCommandError` re-sets
+    /// the id immediately after for command-path banners. The provenance lets
+    /// `confirmPending` retract *this* command's banner when a later snapshot
+    /// confirms it, without wiping a different slot's banner (the scalar is
+    /// shared across slots).
+    var commandError: String? {
+        didSet { commandErrorID = nil }
+    }
+
+    /// The id of the command whose error `commandError` currently reflects, or
+    /// nil for a banner with no owning command. Read only by `confirmPending`.
+    private var commandErrorID: String?
+
+    /// Set the command banner and record which command it belongs to. The
+    /// assignment fires `commandError`'s didSet (clearing the id), then we set
+    /// the real provenance — so the final state is `(text, id)` regardless of
+    /// what the id was before.
+    private func setCommandError(_ text: String, id: String?) {
+        commandError = text
+        commandErrorID = id
+    }
+
     /// Advisory note from a command (e.g. pause during a drain is in-memory);
     /// not a failure — surfaced as info and cleared by the view.
     var commandNote: String?
@@ -330,6 +353,17 @@ final class DaemonStore {
         }
     }
 
+    /// Should confirming `confirmedID` retract the current command banner, whose
+    /// provenance is `errorID`? Only when the banner belongs to that exact
+    /// command. The banner is a single scalar shared across slots, so a
+    /// confirmation must never clear a *different* command's failure banner — a
+    /// `nil` provenance (a banner with no owning command, e.g. unreachable or a
+    /// file-not-found) never matches. Pure and static so the invariant is
+    /// testable in isolation, like `isConfirmed`.
+    nonisolated static func bannerBelongs(to errorID: String?, confirmedID: String) -> Bool {
+        errorID == confirmedID
+    }
+
     private func confirmPending() {
         let now = Date()
         for (slotName, command) in pending {
@@ -340,13 +374,18 @@ final class DaemonStore {
                 // swallowed by run()'s catch rather than raising a banner that
                 // contradicts the confirmation the operator can already see.
                 recentlyConfirmed.note(command.id)
-                // Drop the pending. Deliberately DON'T clear commandError here —
-                // it's a single shared scalar, and a background snapshot
-                // confirming one slot's command must never wipe a genuine
-                // not-confirmed/failure banner belonging to a different slot's
-                // command (that would be a silent failure, the one thing this
-                // surface exists to prevent).
                 pending.removeValue(forKey: slotName)
+                // Retract this command's own error banner if it has one: an
+                // ambiguous error (a transport drop, a deadline) may have set a
+                // banner while keeping the pending, and the command then
+                // confirmed. Clear it only when the banner belongs to THIS
+                // command — the scalar is shared across slots, so without the
+                // provenance check a confirmation here could wipe a genuine
+                // failure banner for a different slot (a silent failure, the one
+                // thing this surface exists to prevent).
+                if Self.bannerBelongs(to: commandErrorID, confirmedID: command.id) {
+                    commandError = nil
+                }
             } else if now.timeIntervalSince(command.requestedAt) > Self.confirmationBound {
                 // Expiry happens here only — even for slots the daemon no
                 // longer reports — so the entry can't outlive its meaning.
@@ -354,8 +393,10 @@ final class DaemonStore {
                 // A slot that's simply gone from snapshots (config reload, drain)
                 // is a benign disappearance, not a command that failed.
                 if slot != nil {
-                    commandError =
-                        "\(command.kind.rawValue) of \(slotName) not confirmed after \(Int(Self.confirmationBound))s — the daemon accepted it but the slot hasn't reflected it"
+                    setCommandError(
+                        "\(command.kind.rawValue) of \(slotName) not confirmed after \(Int(Self.confirmationBound))s — the daemon accepted it but the slot hasn't reflected it",
+                        id: command.id
+                    )
                 }
             }
         }
@@ -446,8 +487,9 @@ final class DaemonStore {
                 }
                 // Otherwise an ambiguous error keeps the pending: the ack may
                 // still arrive, and the 10s confirmation watchdog is the honest
-                // backstop. Surface the error either way.
-                commandError = Self.describe(error, kind: kind, slot: slot.slot)
+                // backstop. Surface the error either way, tagged with this
+                // command's id so a later confirmation can retract it.
+                setCommandError(Self.describe(error, kind: kind, slot: slot.slot), id: id)
             }
         }
         // Drive the confirmation timeout off a timer, not just snapshots: if

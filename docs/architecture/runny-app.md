@@ -133,12 +133,13 @@ Pause/resume confirmation is gated on the daemon's `protocol_version`. A
 daemon that predates the ack contract advertises 0 and never records an id, so
 the app reports the command **sent but unconfirmable** (with an upgrade hint)
 rather than risk a false confirm or a guaranteed false timeout. While a
-pause/resume is pending for a slot, a second one is rejected — one in-flight
-identified command per slot, so a second would install a fresh pending under
-the same slot key and lose the first's tracking. The guard sweeps confirmed and
-expired pendings to ground truth before reading them, so a retry in the brief
-window after a command's 10s bound elapses but before its entry is reaped can't
-overwrite a still-live pending and lose its watchdog.
+command is pending for a slot, a second one — of any kind, including a recycle
+over a pending pause/resume or vice versa — is rejected: pending is keyed by
+slot, so a second would install a fresh entry under the same key and lose the
+first's watchdog. The guard sweeps confirmed and expired pendings to ground
+truth before reading them, so a retry in the brief window after a command's 10s
+bound elapses but before its entry is reaped can't overwrite a still-live
+pending and lose its watchdog.
 
 ## Timeline: current and completed cycles
 

@@ -430,12 +430,12 @@ final class DaemonStore {
         // the original's not-confirmed watchdog. Sweeping first closes the gap,
         // then the guard reads the raw map rather than the time-windowed view.
         confirmPending()
-        // One identified pause/resume in flight per slot at a time: a second
-        // would install a fresh pending under the same slot key and lose the
-        // first's tracking. Reject it; the operator retries once the in-flight
-        // command resolves. Recycle confirms on a cycle change, not the id
-        // history, so it isn't subject to this.
-        if kind == .pause || kind == .resume, pending[slot.slot] != nil {
+        // One command in flight per slot at a time, regardless of kind. pending
+        // is keyed by slot, so a second command — including a recycle over a
+        // pending pause/resume, or vice versa — would install a fresh entry
+        // under the same key and lose the first's not-confirmed watchdog. Reject
+        // it; the operator retries once the in-flight command resolves (≤10s).
+        if pending[slot.slot] != nil {
             commandError =
                 "\(kind.rawValue) of \(slot.slot) ignored — a command is already pending for it"
             return

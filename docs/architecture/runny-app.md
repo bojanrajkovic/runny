@@ -82,10 +82,30 @@ No step of supervision is unbounded:
 ## Command confirmation
 
 An RPC success for Pause/Resume/Recycle means **requested**, not done. The
-app shows a pending indicator and confirms the command from the state change
-in subsequent `WatchStatus` snapshots; if confirmation doesn't arrive within
-10s, it says so. Errors switch on the gRPC status code, with the server's
-message text rendered verbatim as the fallback.
+app shows a pending indicator and confirms the command from subsequent
+`WatchStatus` snapshots; if confirmation doesn't arrive within 10s, it says
+so. Errors switch on the gRPC status code, with the server's message text
+rendered verbatim as the fallback.
+
+Confirmation keys on the **specific command**, not a matching state. A pause
+or resume carries a random command id on the request; the daemon echoes it on
+the slot's `last_applied_command_id` when the command actually applies, and
+the app confirms only on an exact id match (with the slot's paused direction
+as a sanity belt). This is what stops a periodic snapshot that merely carries
+`paused=true` from confirming — and so disarming the watchdog for — a pause
+the daemon hasn't run yet. Recycle has no echoed id and confirms on a cycle
+change, the observable it has always used.
+
+Pause/resume confirmation is gated on the daemon's `protocol_version`. A
+daemon that predates the ack contract advertises 0 and never echoes an id, so
+the app reports the command **sent but unconfirmable** (with an upgrade hint)
+rather than risk a false confirm or a guaranteed false timeout. While a
+pause/resume is pending for a slot, a second one is rejected — one echoed id
+per slot, so a second in-flight command would clobber the first's
+confirmation. A pending is held through most RPC errors (the ack may still
+arrive — e.g. a deadline that fired after the daemon applied the command);
+only a pre-enqueue `Unavailable` (a full command buffer, nothing ran) clears
+it at once.
 
 ## Timeline: current and completed cycles
 

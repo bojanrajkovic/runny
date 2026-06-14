@@ -47,6 +47,34 @@ type ReloadResult struct {
 	ConfigSHA256        string
 }
 
+// WireProtocolVersion is the daemon's wire-contract version, published in
+// GetStatusResponse.protocol_version. Bump it when the daemon gains a feature a
+// client must detect before relying on it. Version 1 introduced pause/resume
+// command acknowledgement (SlotStatus.recent_applied_command_ids): a client
+// confirms a pause/resume from the command id only against a daemon advertising
+// >= 1.
+const WireProtocolVersion uint32 = 1
+
+// maxCommandIDLen bounds the optional pause/resume command id the client echoes
+// back for acknowledgement. The app sends a UUID (36 chars); the cap is generous
+// but finite because the daemon appends every applied id to the slot's
+// recent_applied_command_ids history — an unbounded id from a malformed or
+// hostile client (the socket is a trust boundary: ADR-0006 makes every client
+// equal and unprivileged) would amplify into unbounded per-slot memory. Empty is
+// allowed and means "don't track this command".
+const maxCommandIDLen = 128
+
+// validateCommandID rejects an oversized echoed command id before it can reach a
+// slot's history. It is an argument check, so it runs ahead of any state gate
+// (e.g. the drain gate): a malformed request is InvalidArgument regardless of
+// daemon state.
+func validateCommandID(id string) error {
+	if len(id) > maxCommandIDLen {
+		return status.Errorf(codes.InvalidArgument, "command_id is %d bytes; the limit is %d", len(id), maxCommandIDLen)
+	}
+	return nil
+}
+
 // Server implements runny.v1.RunnyService.
 type Server struct {
 	runnyv1.UnimplementedRunnyServiceServer
@@ -158,9 +186,10 @@ func (s *Server) draining() string {
 
 func (s *Server) snapshot() *runnyv1.GetStatusResponse {
 	resp := &runnyv1.GetStatusResponse{
-		DaemonStarted: timestamppb.New(s.Started),
-		Version:       s.Version,
-		Draining:      s.draining(),
+		DaemonStarted:   timestamppb.New(s.Started),
+		Version:         s.Version,
+		Draining:        s.draining(),
+		ProtocolVersion: WireProtocolVersion,
 	}
 	// The config-derived InjectDebugKey wait, so `runnyctl debug` can size its
 	// client deadline to outlast the daemon (else a timeout lies — see #0).
@@ -367,10 +396,13 @@ func (s *Server) Recycle(ctx context.Context, req *runnyv1.RecycleRequest) (*run
 }
 
 func (s *Server) Pause(ctx context.Context, req *runnyv1.PauseRequest) (*runnyv1.PauseResponse, error) {
+	if err := validateCommandID(req.GetCommandId()); err != nil {
+		return nil, err
+	}
 	// A full command buffer (the drainer saturates non-converged slots with
 	// re-issued pause+recycle pairs) must surface as an error, never a silent
 	// drop reported as success — the silent-failure-proofness invariant.
-	if err := s.command(req.GetSlot(), statemachine.Command{Kind: statemachine.CmdPause}); err != nil {
+	if err := s.command(req.GetSlot(), statemachine.Command{Kind: statemachine.CmdPause, ID: req.GetCommandId()}); err != nil {
 		return nil, err
 	}
 	resp := &runnyv1.PauseResponse{}
@@ -385,6 +417,9 @@ func (s *Server) Pause(ctx context.Context, req *runnyv1.PauseRequest) (*runnyv1
 }
 
 func (s *Server) Resume(ctx context.Context, req *runnyv1.ResumeRequest) (*runnyv1.ResumeResponse, error) {
+	if err := validateCommandID(req.GetCommandId()); err != nil {
+		return nil, err
+	}
 	// A resume mid-drain would silently fight the drainer (which re-issues
 	// pause until convergence); refuse with the cause instead. The gate read
 	// and the command enqueue are not atomic: drainer.Start can set d.reason
@@ -392,7 +427,7 @@ func (s *Server) Resume(ctx context.Context, req *runnyv1.ResumeRequest) (*runny
 	if d := s.draining(); d != "" {
 		return nil, status.Errorf(codes.FailedPrecondition, "daemon is draining: %s; resume after the respawn", d)
 	}
-	if err := s.command(req.GetSlot(), statemachine.Command{Kind: statemachine.CmdResume}); err != nil {
+	if err := s.command(req.GetSlot(), statemachine.Command{Kind: statemachine.CmdResume, ID: req.GetCommandId()}); err != nil {
 		return nil, err
 	}
 	if d := s.draining(); d != "" {
@@ -552,21 +587,22 @@ var stateToProto = map[statemachine.State]runnyv1.SlotState{
 
 func statusToProto(st statemachine.Status) *runnyv1.SlotStatus {
 	out := &runnyv1.SlotStatus{
-		Slot:                st.Slot,
-		State:               stateToProto[st.State],
-		StateEntered:        timestamppb.New(st.StateEntered),
-		CycleId:             st.CycleID,
-		RunnerName:          st.RunnerName,
-		Image:               st.Image,
-		ImageDigest:         st.ImageDigest,
-		RunnerVersion:       st.RunnerVersion,
-		Paused:              st.Paused,
-		ConsecutiveFailures: st.ConsecutiveFailures,
-		BackoffSeconds:      st.BackoffSeconds,
-		LastFailure:         st.LastFailure,
-		Detail:              st.Detail,
-		Wedged:              st.Wedged,
-		DebugHoldArmed:      st.DebugHoldArmed,
+		Slot:                    st.Slot,
+		State:                   stateToProto[st.State],
+		StateEntered:            timestamppb.New(st.StateEntered),
+		CycleId:                 st.CycleID,
+		RunnerName:              st.RunnerName,
+		Image:                   st.Image,
+		ImageDigest:             st.ImageDigest,
+		RunnerVersion:           st.RunnerVersion,
+		Paused:                  st.Paused,
+		ConsecutiveFailures:     st.ConsecutiveFailures,
+		BackoffSeconds:          st.BackoffSeconds,
+		LastFailure:             st.LastFailure,
+		Detail:                  st.Detail,
+		Wedged:                  st.Wedged,
+		DebugHoldArmed:          st.DebugHoldArmed,
+		RecentAppliedCommandIds: st.RecentAppliedCommandIDs,
 	}
 	if !st.DebugHoldExpires.IsZero() {
 		out.DebugHoldExpires = timestamppb.New(st.DebugHoldExpires)

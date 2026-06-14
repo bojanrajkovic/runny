@@ -75,17 +75,22 @@ final class RunnyClient: @unchecked Sendable {
     }
 
     /// Returns the daemon's note (non-empty only while draining: pause is
-    /// in-memory and won't survive the imminent respawn).
-    func pause(slot: String) async throws -> String {
+    /// in-memory and won't survive the imminent respawn). `commandID` is the
+    /// caller's random per-command identity: the daemon records it in the
+    /// slot's `recentAppliedCommandIds` when the pause actually applies, so the
+    /// app confirms the specific command rather than a matching state.
+    func pause(slot: String, commandID: String) async throws -> String {
         var request = Runny_V1_PauseRequest()
         request.slot = slot
+        request.commandID = commandID
         let response = try await stub.pause(request, callOptions: Self.options(Self.commandTimeout))
         return response.note
     }
 
-    func resume(slot: String) async throws {
+    func resume(slot: String, commandID: String) async throws {
         var request = Runny_V1_ResumeRequest()
         request.slot = slot
+        request.commandID = commandID
         _ = try await stub.resume(request, callOptions: Self.options(Self.commandTimeout))
     }
 
@@ -116,5 +121,36 @@ extension Error {
     /// The gRPC status code, when this error carries one.
     var grpcCode: GRPCStatus.Code? {
         (self as? GRPCStatus)?.code ?? (self as? GRPCStatusTransformable)?.makeGRPCStatus().code
+    }
+
+    /// The gRPC status message, when this error carries one. The daemon puts
+    /// operator-actionable detail here (e.g. why a resume was refused), so it's
+    /// worth surfacing verbatim rather than a generic fallback.
+    var grpcMessage: String? {
+        (self as? GRPCStatus)?.message ?? (self as? GRPCStatusTransformable)?.makeGRPCStatus().message
+    }
+
+    /// True when the gRPC code proves the command did NOT apply, so the caller
+    /// must clear any pending and surface the error at once rather than wait out
+    /// the confirmation watchdog: NotFound (no such slot), FailedPrecondition
+    /// (e.g. resume during a drain), InvalidArgument (a malformed request the
+    /// daemon refused before acting). These are server-originated rejections the
+    /// daemon could only have produced by *not* applying the command.
+    ///
+    /// `Unavailable` is deliberately NOT here: grpc-swift overloads it for both
+    /// the daemon's full-command-buffer rejection (which did not apply) AND a
+    /// dead/dropped transport (which may have applied before the connection
+    /// died). Indistinguishable at this layer, so it's treated as ambiguous —
+    /// the pending stands and the 10s watchdog adjudicates. That fails safe: the
+    /// worst case is a full-buffer rejection waiting out the watchdog instead of
+    /// surfacing instantly, never a false "failed" over a command that ran.
+    /// `deadlineExceeded` and transport drops are ambiguous for the same reason.
+    var isDefinitiveRejection: Bool {
+        switch grpcCode {
+        case .notFound, .failedPrecondition, .invalidArgument:
+            true
+        default:
+            false
+        }
     }
 }

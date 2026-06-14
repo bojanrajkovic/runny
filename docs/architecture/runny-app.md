@@ -82,10 +82,64 @@ No step of supervision is unbounded:
 ## Command confirmation
 
 An RPC success for Pause/Resume/Recycle means **requested**, not done. The
-app shows a pending indicator and confirms the command from the state change
-in subsequent `WatchStatus` snapshots; if confirmation doesn't arrive within
-10s, it says so. Errors switch on the gRPC status code, with the server's
-message text rendered verbatim as the fallback.
+app shows a pending indicator and confirms the command from subsequent
+`WatchStatus` snapshots; if confirmation doesn't arrive within 10s, it says
+so. Errors switch on the gRPC status code, with the server's message text
+rendered verbatim as the fallback. A definitive rejection — `NotFound`,
+`FailedPrecondition` (e.g. a resume refused because the daemon is draining,
+whose message is shown verbatim), or `InvalidArgument` — proves the command
+never applied, so it clears the pending and surfaces the error at once.
+Ambiguous errors keep the pending: the daemon may have applied the command
+after the error, so the 10s watchdog is the honest adjudicator rather than a
+premature failure banner. `Unavailable` is treated as ambiguous, not
+definitive: grpc-swift uses it for both the daemon's full-command-buffer
+rejection (which did not apply) and a dead transport (which may have applied
+before the connection died), indistinguishable at the client, so it fails safe
+toward the watchdog. A deadline or transport drop is ambiguous for the same
+reason.
+
+The error banner is a single scalar shared across slots, so it carries the id
+of the command that raised it. An ambiguous error sets the banner while keeping
+the pending; if a later snapshot then confirms that exact command, the
+confirmation retracts its own banner — matched by id, so it never wipes a
+genuine failure banner belonging to a different slot's command.
+
+Confirmation keys on the **specific command**, not a matching state. A pause
+or resume carries a random command id on the request; the daemon records it in
+the slot's `recent_applied_command_ids` **only when the command actually
+applies**, and the app confirms on its id being **present in that history** —
+membership alone, with no paused-direction check. Because the id is recorded
+only on apply, membership already proves the command ran; a direction belt would
+be worse than redundant, since a fast superseding command (a resume right after
+our pause applied) flips `paused` before the next snapshot and would make a
+`&& paused` test reject a pause that did run — timing it out into a false
+not-confirmed banner. Membership also stops a periodic snapshot that merely
+carries `paused=true` from confirming — and so disarming the watchdog for — a
+pause the daemon hasn't run yet. A history rather than a single last-applied id
+so concurrent clients (the app plus a `runnyctl` invocation, or a fast second
+command) don't clobber each other's acknowledgement: each finds its own id
+regardless of the others. Recycle has no recorded id and confirms on a cycle
+change, the observable it has always used.
+
+The history is bounded and best-effort, not a durable per-client receipt: an id
+need only survive from the snapshot that carries it until the app's next poll,
+so the cap is generous but finite, and a daemon restart drops it entirely (the
+random id can't collide, so the command just waits out its 10s watchdog). The
+app keys confirmation off the live `WatchStatus` stream, never off a stored
+receipt, so this honesty hole is closed by construction — a missed ack always
+fails safe toward the watchdog, never toward a false confirm.
+
+Pause/resume confirmation is gated on the daemon's `protocol_version`. A
+daemon that predates the ack contract advertises 0 and never records an id, so
+the app reports the command **sent but unconfirmable** (with an upgrade hint)
+rather than risk a false confirm or a guaranteed false timeout. While a
+command is pending for a slot, a second one — of any kind, including a recycle
+over a pending pause/resume or vice versa — is rejected: pending is keyed by
+slot, so a second would install a fresh entry under the same key and lose the
+first's watchdog. The guard sweeps confirmed and expired pendings to ground
+truth before reading them, so a retry in the brief window after a command's 10s
+bound elapses but before its entry is reaped can't overwrite a still-live
+pending and lose its watchdog.
 
 ## Timeline: current and completed cycles
 

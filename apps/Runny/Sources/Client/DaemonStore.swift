@@ -37,11 +37,14 @@ final class DaemonStore {
 
     struct PendingCommand: Equatable {
         enum Kind: String { case pause, resume, recycle }
-        /// Identity for this command. `pending` is keyed by slot (only the
-        /// latest in-flight command per slot is tracked), so a failing
-        /// command must clear its entry only when it's still the current one —
-        /// otherwise a fast second command on the same slot loses its tracking.
-        let id: Int
+        /// Random per-command identity (a UUID string). For pause/resume the
+        /// daemon records this in the slot's `recentAppliedCommandIds` when
+        /// the command actually applies, so confirmation matches the specific
+        /// command rather than a coincidentally-matching paused state. `pending`
+        /// is keyed by slot, so a failing command clears its entry only when
+        /// it's still the current one — otherwise a fast second command on the
+        /// same slot loses its tracking.
+        let id: String
         let kind: Kind
         let requestedAt: Date
         /// Cycle at request time; a recycle is confirmed when it changes.
@@ -49,6 +52,32 @@ final class DaemonStore {
 
         /// One wording for every surface that renders an in-flight command.
         var displayText: String { "\(kind.rawValue) requested…" }
+    }
+
+    /// A small bounded FIFO of command ids a snapshot has just confirmed. The
+    /// RPC Task's `catch` consults it so a late transport error — a deadline
+    /// that fired *after* the daemon already applied the command and a snapshot
+    /// already confirmed it — doesn't raise a contradictory "timed out" banner
+    /// on a command the slot visibly reflects. Bounded because only a brief
+    /// confirm→catch handoff is ever needed (any such error arrives within the
+    /// command's RPC deadline); a value type so it's unit-testable in isolation.
+    struct RecentlyConfirmed: Equatable {
+        private var ids: [String] = []
+        let cap: Int
+        init(cap: Int = 16) { self.cap = cap }
+
+        mutating func note(_ id: String) {
+            ids.append(id)
+            if ids.count > cap { ids.removeFirst(ids.count - cap) }
+        }
+
+        /// True exactly once per noted id: a confirmation is consumed by the
+        /// single error that races it, never suppressing a later real failure.
+        mutating func consume(_ id: String) -> Bool {
+            guard let i = ids.firstIndex(of: id) else { return false }
+            ids.remove(at: i)
+            return true
+        }
     }
 
     private(set) var connection: ConnectionState = .connecting
@@ -59,13 +88,42 @@ final class DaemonStore {
     /// Non-empty while the daemon is draining toward a restart (wedge or
     /// config reload): the reason every slot is converging to paused/wedged.
     private(set) var draining = ""
+    /// The daemon's wire-protocol version (0 from a daemon that predates the
+    /// command-ack contract). Gates pause/resume confirmation: an old daemon
+    /// never echoes a command id, so the app can't distinguish applied from
+    /// stuck — it reports the command sent-but-unconfirmable rather than
+    /// risk a false confirm or a guaranteed false timeout.
+    private(set) var protocolVersion: UInt32 = 0
 
     private(set) var doctorChecks: [Runny_V1_DoctorCheck]?
     private(set) var doctorRanAt: Date?
     private(set) var doctorRunning = false
 
     /// Set when a command fails or goes unconfirmed; views alert and clear.
-    var commandError: String?
+    /// `didSet` nils the provenance on every write, so a view clearing the
+    /// banner (`= nil`) or a non-command assignment (e.g. a file-not-found
+    /// message) correctly leaves no stale id behind; `setCommandError` re-sets
+    /// the id immediately after for command-path banners. The provenance lets
+    /// `confirmPending` retract *this* command's banner when a later snapshot
+    /// confirms it, without wiping a different slot's banner (the scalar is
+    /// shared across slots).
+    var commandError: String? {
+        didSet { commandErrorID = nil }
+    }
+
+    /// The id of the command whose error `commandError` currently reflects, or
+    /// nil for a banner with no owning command. Read only by `confirmPending`.
+    private var commandErrorID: String?
+
+    /// Set the command banner and record which command it belongs to. The
+    /// assignment fires `commandError`'s didSet (clearing the id), then we set
+    /// the real provenance — so the final state is `(text, id)` regardless of
+    /// what the id was before.
+    private func setCommandError(_ text: String, id: String?) {
+        commandError = text
+        commandErrorID = id
+    }
+
     /// Advisory note from a command (e.g. pause during a drain is in-memory);
     /// not a failure — surfaced as info and cleared by the view.
     var commandNote: String?
@@ -75,7 +133,9 @@ final class DaemonStore {
     var recycleConfirm: Runny_V1_SlotStatus?
 
     private(set) var pending: [String: PendingCommand] = [:]
-    private var nextCommandID = 0
+    /// Ids a snapshot confirmed in the last confirm→catch window, so a late RPC
+    /// error doesn't contradict a confirmation the operator can already see.
+    private var recentlyConfirmed = RecentlyConfirmed()
 
     /// The client of the current healthy stream; log/timeline views borrow
     /// it. nil while unreachable — actions fail fast instead of hanging.
@@ -92,6 +152,10 @@ final class DaemonStore {
     static let establishmentBound: TimeInterval = 5
     static let stalenessBound: TimeInterval = 90
     static let confirmationBound: TimeInterval = 10
+    /// The lowest daemon protocol version that echoes command ids, and so the
+    /// floor at which pause/resume are confirmable. Kept in lockstep with the
+    /// daemon's `WireProtocolVersion`.
+    static let ackProtocolVersion: UInt32 = 1
 
     func start() {
         guard supervisor == nil else { return }
@@ -116,6 +180,7 @@ final class DaemonStore {
         socketWatch = nil
         connection = .connecting
         slots = []
+        protocolVersion = 0
         client = nil
         start()
     }
@@ -257,23 +322,70 @@ final class DaemonStore {
         daemonVersion = snapshot.version
         daemonStarted = snapshot.hasDaemonStarted ? snapshot.daemonStarted.dateValue : nil
         draining = snapshot.draining
+        protocolVersion = snapshot.protocolVersion
         lastUpdate = Date()
         confirmPending()
     }
 
     // MARK: - Commands (requested vs confirmed)
 
+    /// Is `command` confirmed by `slot`'s current snapshot? Pure and static so
+    /// the confirmation contract is unit-testable without a live stream.
+    ///
+    /// Pause/resume confirm on the command's id being present in the daemon's
+    /// `recentAppliedCommandIds` history — membership alone, no paused-direction
+    /// check. The daemon appends the id only when the command actually applies
+    /// (inside `setPaused`), so membership already proves application; the random
+    /// id can't collide across a daemon restart, and a history (not a scalar)
+    /// survives concurrent clients clobbering each other's ack. A direction belt
+    /// would be worse than redundant: a fast superseding command (a resume right
+    /// after our pause applied) flips `paused` before our next snapshot, so
+    /// `&& paused` would reject a pause that *did* run — and the pending would
+    /// then time out into a false not-confirmed banner. Recycle has no echoed id
+    /// — the daemon doesn't carry one on the undo/internal re-issue path — so it
+    /// confirms on a cycle change, the same observable it always used.
+    nonisolated static func isConfirmed(_ command: PendingCommand, by slot: Runny_V1_SlotStatus?) -> Bool {
+        switch command.kind {
+        case .pause, .resume:
+            slot?.recentAppliedCommandIds.contains(command.id) ?? false
+        case .recycle:
+            slot.map { $0.cycleID != command.cycleID } ?? false
+        }
+    }
+
+    /// Should confirming `confirmedID` retract the current command banner, whose
+    /// provenance is `errorID`? Only when the banner belongs to that exact
+    /// command. The banner is a single scalar shared across slots, so a
+    /// confirmation must never clear a *different* command's failure banner — a
+    /// `nil` provenance (a banner with no owning command, e.g. unreachable or a
+    /// file-not-found) never matches. Pure and static so the invariant is
+    /// testable in isolation, like `isConfirmed`.
+    nonisolated static func bannerBelongs(to errorID: String?, confirmedID: String) -> Bool {
+        errorID == confirmedID
+    }
+
     private func confirmPending() {
         let now = Date()
         for (slotName, command) in pending {
             let slot = slots.first(where: { $0.slot == slotName })
-            let confirmed: Bool = switch command.kind {
-            case .pause: slot?.paused ?? false
-            case .resume: !(slot?.paused ?? true)
-            case .recycle: slot.map { $0.cycleID != command.cycleID } ?? false
-            }
-            if confirmed {
+            if Self.isConfirmed(command, by: slot) {
+                // Record the id so a straggling RPC error for this exact command
+                // (a deadline that fired after the daemon applied it) is
+                // swallowed by run()'s catch rather than raising a banner that
+                // contradicts the confirmation the operator can already see.
+                recentlyConfirmed.note(command.id)
                 pending.removeValue(forKey: slotName)
+                // Retract this command's own error banner if it has one: an
+                // ambiguous error (a transport drop, a deadline) may have set a
+                // banner while keeping the pending, and the command then
+                // confirmed. Clear it only when the banner belongs to THIS
+                // command — the scalar is shared across slots, so without the
+                // provenance check a confirmation here could wipe a genuine
+                // failure banner for a different slot (a silent failure, the one
+                // thing this surface exists to prevent).
+                if Self.bannerBelongs(to: commandErrorID, confirmedID: command.id) {
+                    commandError = nil
+                }
             } else if now.timeIntervalSince(command.requestedAt) > Self.confirmationBound {
                 // Expiry happens here only — even for slots the daemon no
                 // longer reports — so the entry can't outlive its meaning.
@@ -281,8 +393,10 @@ final class DaemonStore {
                 // A slot that's simply gone from snapshots (config reload, drain)
                 // is a benign disappearance, not a command that failed.
                 if slot != nil {
-                    commandError =
-                        "\(command.kind.rawValue) of \(slotName) not confirmed after \(Int(Self.confirmationBound))s — the daemon accepted it but the slot hasn't reflected it"
+                    setCommandError(
+                        "\(command.kind.rawValue) of \(slotName) not confirmed after \(Int(Self.confirmationBound))s — the daemon accepted it but the slot hasn't reflected it",
+                        id: command.id
+                    )
                 }
             }
         }
@@ -298,32 +412,84 @@ final class DaemonStore {
         return command
     }
 
-    /// Operations return an optional advisory note (e.g. pause-during-drain);
-    /// non-empty surfaces as an info banner, distinct from a failure.
+    /// Operations receive the command's random id (to forward on the wire) and
+    /// return an optional advisory note (e.g. pause-during-drain); a non-empty
+    /// note surfaces as an info banner, distinct from a failure.
     private func run(_ kind: PendingCommand.Kind, slot: Runny_V1_SlotStatus,
-                     _ operation: @escaping (RunnyClient) async throws -> String?)
+                     _ operation: @escaping (RunnyClient, String) async throws -> String?)
     {
         guard let client else {
             commandError = "daemon unreachable — \(kind.rawValue) not sent"
             return
         }
-        nextCommandID += 1
-        let id = nextCommandID
-        pending[slot.slot] = PendingCommand(
-            id: id, kind: kind, requestedAt: Date(), cycleID: slot.cycleID
-        )
+        // Sweep confirmed/expired pendings to ground truth before the guard
+        // reads them. pendingCommand(for:) treats an entry as absent the instant
+        // it passes the 10s bound, but confirmPending only *removes* it half a
+        // second later (or on the next snapshot); a retry in that window would
+        // see "no pending", install a fresh entry over the stale one, and lose
+        // the original's not-confirmed watchdog. Sweeping first closes the gap,
+        // then the guard reads the raw map rather than the time-windowed view.
+        confirmPending()
+        // One command in flight per slot at a time, regardless of kind. pending
+        // is keyed by slot, so a second command — including a recycle over a
+        // pending pause/resume, or vice versa — would install a fresh entry
+        // under the same key and lose the first's not-confirmed watchdog. Reject
+        // it; the operator retries once the in-flight command resolves (≤10s).
+        if pending[slot.slot] != nil {
+            commandError =
+                "\(kind.rawValue) of \(slot.slot) ignored — a command is already pending for it"
+            return
+        }
+        let id = UUID().uuidString
+        // Pause/resume are confirmable only against a daemon that advertises the
+        // ack protocol; an older daemon never echoes the id, so installing a
+        // pending would guarantee a false 10s not-confirmed timeout. Recycle is
+        // confirmed by cycle change and needs no protocol support.
+        let confirmable = kind == .recycle || protocolVersion >= Self.ackProtocolVersion
+        if confirmable {
+            pending[slot.slot] = PendingCommand(
+                id: id, kind: kind, requestedAt: Date(), cycleID: slot.cycleID
+            )
+        }
         Task { @MainActor in
             do {
-                if let note = try await operation(client), !note.isEmpty {
-                    commandNote = note
+                let note = try await operation(client, id)
+                // A drain warning and the unconfirmable-daemon hint can both
+                // apply at once (an old daemon that is also draining): combine
+                // them so the upgrade hint isn't hidden behind the drain note.
+                var parts: [String] = []
+                if let note, !note.isEmpty { parts.append(note) }
+                if !confirmable {
+                    // Sent, but this daemon can't echo the id — be honest that
+                    // the app can't verify it took effect rather than imply it did.
+                    parts.append(
+                        "\(kind.rawValue) of \(slot.slot) sent — this runnyd predates command confirmation; upgrade runnyd to verify it took effect"
+                    )
                 }
+                if !parts.isEmpty { commandNote = parts.joined(separator: " — ") }
             } catch {
-                // Only retract our own entry — a faster second command on this
-                // slot may have replaced it, and must keep its tracking.
-                if pending[slot.slot]?.id == id {
-                    pending.removeValue(forKey: slot.slot)
+                if error.isDefinitiveRejection {
+                    // The daemon proved the command did not apply (full buffer,
+                    // no such slot, refused mid-drain). Clear our pending — only
+                    // if it's still ours — and surface the error. Never let a
+                    // racing confirmation swallow this: a rejected command was
+                    // never confirmed, and hiding it would be the silent failure
+                    // this surface exists to prevent.
+                    if pending[slot.slot]?.id == id { pending.removeValue(forKey: slot.slot) }
+                } else if recentlyConfirmed.consume(id) {
+                    // Ambiguous error, but a snapshot already confirmed this exact
+                    // command — its deadline fired after the daemon applied it and
+                    // a snapshot reflected it. Swallow the straggler; surfacing a
+                    // failure over a confirmation the operator can see is a lie in
+                    // the other direction. Consume-once, so a later real failure on
+                    // a different command still surfaces.
+                    return
                 }
-                commandError = Self.describe(error, kind: kind, slot: slot.slot)
+                // Otherwise an ambiguous error keeps the pending: the ack may
+                // still arrive, and the 10s confirmation watchdog is the honest
+                // backstop. Surface the error either way, tagged with this
+                // command's id so a later confirmation can retract it.
+                setCommandError(Self.describe(error, kind: kind, slot: slot.slot), id: id)
             }
         }
         // Drive the confirmation timeout off a timer, not just snapshots: if
@@ -331,18 +497,20 @@ final class DaemonStore {
         // otherwise never run again and the 10s not-confirmed promise would
         // fail silently exactly when supervision is unhealthy. The check is
         // idempotent — a snapshot that already confirmed/expired it is a no-op.
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(Self.confirmationBound + 0.5))
-            confirmPending()
+        if confirmable {
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(Self.confirmationBound + 0.5))
+                confirmPending()
+            }
         }
     }
 
     func pauseSlot(_ slot: Runny_V1_SlotStatus) {
-        run(.pause, slot: slot) { try await $0.pause(slot: slot.slot) }
+        run(.pause, slot: slot) { try await $0.pause(slot: slot.slot, commandID: $1) }
     }
 
     func resumeSlot(_ slot: Runny_V1_SlotStatus) {
-        run(.resume, slot: slot) { try await $0.resume(slot: slot.slot); return nil }
+        run(.resume, slot: slot) { try await $0.resume(slot: slot.slot, commandID: $1); return nil }
     }
 
     /// Recycling needs operator consent exactly when it would cancel a running
@@ -380,8 +548,10 @@ final class DaemonStore {
     }
 
     private func performRecycle(_ slot: Runny_V1_SlotStatus, cancelRunningJob: Bool) {
-        run(.recycle, slot: slot) {
-            try await $0.recycle(
+        // Recycle confirms on a cycle change, not an echoed id, so the id arg is
+        // unused here — the daemon's RecycleRequest carries no command id.
+        run(.recycle, slot: slot) { client, _ in
+            try await client.recycle(
                 slot: slot.slot, reason: "operator request (Runny)",
                 cancelRunningJob: cancelRunningJob
             )
@@ -399,6 +569,12 @@ final class DaemonStore {
             "\(slot) is not accepting commands right now — try again shortly"
         case .notFound:
             "no slot named \(slot)"
+        case .failedPrecondition:
+            // A deliberate refusal with an operator-actionable reason (e.g. a
+            // resume while the daemon is draining). Surface the server's message
+            // verbatim rather than a generic failure string.
+            error.grpcMessage.map { "\(kind.rawValue) of \(slot) rejected — \($0)" }
+                ?? "\(kind.rawValue) of \(slot) rejected by the daemon"
         case .deadlineExceeded:
             "\(kind.rawValue) of \(slot) timed out — daemon busy or hung"
         default:

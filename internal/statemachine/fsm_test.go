@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -844,6 +845,104 @@ func TestPauseHoldsInBackoff(t *testing.T) {
 		t.Error("still paused after resume")
 	}
 	cancel()
+}
+
+// A pause/resume carrying a command id publishes it as the acknowledgement
+// (issue #66), and an id-less daemon-internal re-issue must not clobber it.
+func TestPauseResumeAcknowledgeCommandID(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 0 // unlimited cycles; we drive it to paused BACKOFF
+	h.images.err = errors.New("keep failing so we cycle fast")
+	cancel := h.start(t)
+	defer cancel()
+
+	h.waitState(t, StateBackoff)
+
+	waitAck := func(want func(Status) bool, desc string) {
+		t.Helper()
+		deadline := time.After(3 * time.Second)
+		for {
+			if want(h.slot.Status()) {
+				return
+			}
+			select {
+			case <-deadline:
+				st := h.slot.Status()
+				t.Fatalf("never %s (paused=%v recent_applied=%q)", desc, st.Paused, st.RecentAppliedCommandIDs)
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+	}
+
+	// Pause with an id records it.
+	h.slot.Command(Command{Kind: CmdPause, ID: "pause-1"})
+	waitAck(func(s Status) bool { return s.Paused && slices.Contains(s.RecentAppliedCommandIDs, "pause-1") },
+		"acknowledged pause id pause-1")
+
+	// An id-less re-issue (the drainer saturates paused slots with re-pauses)
+	// must NOT append — an empty id is never recorded, and a coalesced status
+	// stream must keep carrying the identified id so the client still confirms.
+	h.slot.Command(Command{Kind: CmdPause})
+	time.Sleep(200 * time.Millisecond)
+	if ids := h.slot.Status().RecentAppliedCommandIDs; !slices.Equal(ids, []string{"pause-1"}) {
+		t.Fatalf("id-less re-issue altered acknowledgement history: got %q, want [pause-1]", ids)
+	}
+
+	// Resume with a fresh id appends it; the prior pause id stays in history.
+	h.slot.Command(Command{Kind: CmdResume, ID: "resume-1"})
+	waitAck(func(s Status) bool { return !s.Paused && slices.Contains(s.RecentAppliedCommandIDs, "resume-1") },
+		"acknowledged resume id resume-1")
+	if ids := h.slot.Status().RecentAppliedCommandIDs; !slices.Equal(ids, []string{"pause-1", "resume-1"}) {
+		t.Fatalf("history lost an id: got %q, want [pause-1 resume-1]", ids)
+	}
+}
+
+// appendBounded keeps at most cap entries, evicting oldest-first, and never
+// mutates a slice a prior snapshot already holds.
+func TestAppendBoundedEvictsOldest(t *testing.T) {
+	var ids []string
+	for i := range 20 {
+		ids = appendBounded(ids, fmt.Sprintf("id-%d", i), recentCommandIDCap)
+	}
+	if len(ids) != recentCommandIDCap {
+		t.Fatalf("len = %d, want %d", len(ids), recentCommandIDCap)
+	}
+	if ids[0] != "id-4" || ids[recentCommandIDCap-1] != "id-19" {
+		t.Fatalf("window = %q, want [id-4 .. id-19]", ids)
+	}
+
+	// A snapshot taken before a further append must keep its own backing array.
+	snap := appendBounded([]string{"a", "b"}, "c", recentCommandIDCap)
+	_ = appendBounded(snap, "d", recentCommandIDCap)
+	if !slices.Equal(snap, []string{"a", "b", "c"}) {
+		t.Fatalf("a later append mutated a prior snapshot: %q", snap)
+	}
+}
+
+// A pause issued in a running state (the inline switch path, not the BACKOFF
+// idle handler) publishes its command id immediately, even though the pause
+// itself only takes hold at the next BACKOFF.
+func TestPauseInListeningAcknowledgesCommandID(t *testing.T) {
+	h := newHarness(t, nil)
+	cancel := h.start(t)
+	defer cancel()
+
+	h.waitState(t, StateProvision)
+	h.proc.say(markerListening)
+	h.waitState(t, StateListening)
+
+	h.slot.Command(Command{Kind: CmdPause, ID: "listen-pause"})
+	deadline := time.After(2 * time.Second)
+	for {
+		if slices.Contains(h.slot.Status().RecentAppliedCommandIDs, "listen-pause") {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("LISTENING pause never acknowledged id: got %q", h.slot.Status().RecentAppliedCommandIDs)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
 }
 
 func TestRunnerExitWhileListeningFails(t *testing.T) {

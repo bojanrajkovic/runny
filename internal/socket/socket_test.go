@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -61,6 +62,17 @@ func TestStatusToProtoCarriesWedgedAndDetail(t *testing.T) {
 	}
 	if pb.GetImage() != st.Image || pb.GetImageDigest() != st.ImageDigest {
 		t.Errorf("image fields dropped: image=%q digest=%q", pb.GetImage(), pb.GetImageDigest())
+	}
+}
+
+// The pause/resume command acknowledgement (issue #66) must reach the wire,
+// preserving order and multiplicity so the client's membership check holds.
+func TestStatusToProtoCarriesRecentAppliedCommandIDs(t *testing.T) {
+	pb := statusToProto(statemachine.Status{
+		Slot: "mac-1", RecentAppliedCommandIDs: []string{"cmd-abc", "cmd-def"},
+	})
+	if got := pb.GetRecentAppliedCommandIds(); !slices.Equal(got, []string{"cmd-abc", "cmd-def"}) {
+		t.Errorf("recent_applied_command_ids dropped: %q", got)
 	}
 }
 
@@ -287,6 +299,31 @@ func TestCommandsFailWhenSlotNotAccepting(t *testing.T) {
 	}
 }
 
+// The echoed command id is bounded: the daemon appends every applied id to a
+// slot's history, so an oversized id is rejected (InvalidArgument) before it can
+// reach the slot — a malformed or hostile client must not amplify into unbounded
+// per-slot memory. A UUID-sized id, and the empty "don't track" id, both pass.
+func TestCommandIDLengthIsBounded(t *testing.T) {
+	c := dial(t, newTestServer(testSlots("mac-1"), nil, nil, nil))
+
+	oversized := strings.Repeat("x", maxCommandIDLen+1)
+	if _, err := c.Pause(t.Context(), &runnyv1.PauseRequest{Slot: "mac-1", CommandId: oversized}); status.Code(err) != codes.InvalidArgument {
+		t.Errorf("Pause with oversized command_id: code = %v, want InvalidArgument", status.Code(err))
+	}
+	if _, err := c.Resume(t.Context(), &runnyv1.ResumeRequest{Slot: "mac-1", CommandId: oversized}); status.Code(err) != codes.InvalidArgument {
+		t.Errorf("Resume with oversized command_id: code = %v, want InvalidArgument", status.Code(err))
+	}
+
+	// A UUID-sized id (the real client's payload) and the empty id are accepted.
+	uuid := "550e8400-e29b-41d4-a716-446655440000"
+	if _, err := c.Pause(t.Context(), &runnyv1.PauseRequest{Slot: "mac-1", CommandId: uuid}); err != nil {
+		t.Errorf("Pause with UUID command_id: %v", err)
+	}
+	if _, err := c.Resume(t.Context(), &runnyv1.ResumeRequest{Slot: "mac-1", CommandId: ""}); err != nil {
+		t.Errorf("Resume with empty command_id: %v", err)
+	}
+}
+
 // Commands accept what status displays: a full runner name resolves to its
 // embedded slot, current cycle or stale.
 func TestCommandsResolveRunnerName(t *testing.T) {
@@ -499,6 +536,15 @@ func TestSnapshotCarriesDraining(t *testing.T) {
 	srv.DrainingFn = func() string { return "config reload (SIGHUP)" }
 	if got := srv.snapshot().GetDraining(); got != "config reload (SIGHUP)" {
 		t.Errorf("draining = %q", got)
+	}
+}
+
+// The daemon must advertise the wire protocol version so a client can decide
+// whether to rely on pause/resume command acknowledgement (issue #66).
+func TestSnapshotCarriesProtocolVersion(t *testing.T) {
+	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	if got := srv.snapshot().GetProtocolVersion(); got != WireProtocolVersion {
+		t.Errorf("protocol_version = %d, want %d", got, WireProtocolVersion)
 	}
 }
 

@@ -379,12 +379,20 @@ final class DaemonStore {
             commandError = "daemon unreachable — \(kind.rawValue) not sent"
             return
         }
+        // Sweep confirmed/expired pendings to ground truth before the guard
+        // reads them. pendingCommand(for:) treats an entry as absent the instant
+        // it passes the 10s bound, but confirmPending only *removes* it half a
+        // second later (or on the next snapshot); a retry in that window would
+        // see "no pending", install a fresh entry over the stale one, and lose
+        // the original's not-confirmed watchdog. Sweeping first closes the gap,
+        // then the guard reads the raw map rather than the time-windowed view.
+        confirmPending()
         // One identified pause/resume in flight per slot at a time: a second
         // would install a fresh pending under the same slot key and lose the
         // first's tracking. Reject it; the operator retries once the in-flight
         // command resolves. Recycle confirms on a cycle change, not the id
         // history, so it isn't subject to this.
-        if kind == .pause || kind == .resume, pendingCommand(for: slot.slot) != nil {
+        if kind == .pause || kind == .resume, pending[slot.slot] != nil {
             commandError =
                 "\(kind.rawValue) of \(slot.slot) ignored — a command is already pending for it"
             return
@@ -403,31 +411,40 @@ final class DaemonStore {
         Task { @MainActor in
             do {
                 let note = try await operation(client, id)
-                if let note, !note.isEmpty {
-                    commandNote = note
-                } else if !confirmable {
+                // A drain warning and the unconfirmable-daemon hint can both
+                // apply at once (an old daemon that is also draining): combine
+                // them so the upgrade hint isn't hidden behind the drain note.
+                var parts: [String] = []
+                if let note, !note.isEmpty { parts.append(note) }
+                if !confirmable {
                     // Sent, but this daemon can't echo the id — be honest that
                     // the app can't verify it took effect rather than imply it did.
-                    commandNote =
+                    parts.append(
                         "\(kind.rawValue) of \(slot.slot) sent — this runnyd predates command confirmation; upgrade runnyd to verify it took effect"
+                    )
                 }
+                if !parts.isEmpty { commandNote = parts.joined(separator: " — ") }
             } catch {
-                // If a snapshot already confirmed this exact command, the error
-                // is a straggler (its deadline fired after the daemon applied the
-                // command and a snapshot reflected it). Swallow it — surfacing a
-                // failure over a confirmation the operator can see is a lie in
-                // the other direction. Consume-once, so a later real failure on a
-                // different command still surfaces.
-                if recentlyConfirmed.consume(id) { return }
-                // Keep the pending on most errors: the ack may still arrive (a
-                // deadline that fired after the daemon already applied the
-                // command), and the confirmation timeout is the honest backstop.
-                // Only `.unavailable` is a proven pre-enqueue rejection (the
-                // slot's command buffer was full, so nothing ran) — clear it now,
-                // and only if it's still our own entry.
-                if error.grpcCode == .unavailable, pending[slot.slot]?.id == id {
-                    pending.removeValue(forKey: slot.slot)
+                if error.isDefinitiveRejection {
+                    // The daemon proved the command did not apply (full buffer,
+                    // no such slot, refused mid-drain). Clear our pending — only
+                    // if it's still ours — and surface the error. Never let a
+                    // racing confirmation swallow this: a rejected command was
+                    // never confirmed, and hiding it would be the silent failure
+                    // this surface exists to prevent.
+                    if pending[slot.slot]?.id == id { pending.removeValue(forKey: slot.slot) }
+                } else if recentlyConfirmed.consume(id) {
+                    // Ambiguous error, but a snapshot already confirmed this exact
+                    // command — its deadline fired after the daemon applied it and
+                    // a snapshot reflected it. Swallow the straggler; surfacing a
+                    // failure over a confirmation the operator can see is a lie in
+                    // the other direction. Consume-once, so a later real failure on
+                    // a different command still surfaces.
+                    return
                 }
+                // Otherwise an ambiguous error keeps the pending: the ack may
+                // still arrive, and the 10s confirmation watchdog is the honest
+                // backstop. Surface the error either way.
                 commandError = Self.describe(error, kind: kind, slot: slot.slot)
             }
         }
@@ -508,6 +525,12 @@ final class DaemonStore {
             "\(slot) is not accepting commands right now — try again shortly"
         case .notFound:
             "no slot named \(slot)"
+        case .failedPrecondition:
+            // A deliberate refusal with an operator-actionable reason (e.g. a
+            // resume while the daemon is draining). Surface the server's message
+            // verbatim rather than a generic failure string.
+            error.grpcMessage.map { "\(kind.rawValue) of \(slot) rejected — \($0)" }
+                ?? "\(kind.rawValue) of \(slot) rejected by the daemon"
         case .deadlineExceeded:
             "\(kind.rawValue) of \(slot) timed out — daemon busy or hung"
         default:

@@ -85,7 +85,13 @@ An RPC success for Pause/Resume/Recycle means **requested**, not done. The
 app shows a pending indicator and confirms the command from subsequent
 `WatchStatus` snapshots; if confirmation doesn't arrive within 10s, it says
 so. Errors switch on the gRPC status code, with the server's message text
-rendered verbatim as the fallback.
+rendered verbatim as the fallback. A definitive rejection — `Unavailable`,
+`NotFound`, `FailedPrecondition` (e.g. a resume refused because the daemon is
+draining, whose message is shown verbatim), or `InvalidArgument` — proves the
+command never applied, so it clears the pending and surfaces the error at once.
+Ambiguous errors (a deadline, a transport drop) keep the pending: the daemon
+may have applied the command after the deadline fired, so the 10s watchdog is
+the honest adjudicator rather than a premature failure banner.
 
 Confirmation keys on the **specific command**, not a matching state. A pause
 or resume carries a random command id on the request; the daemon records it in
@@ -113,10 +119,10 @@ the app reports the command **sent but unconfirmable** (with an upgrade hint)
 rather than risk a false confirm or a guaranteed false timeout. While a
 pause/resume is pending for a slot, a second one is rejected — one in-flight
 identified command per slot, so a second would install a fresh pending under
-the same slot key and lose the first's tracking. A pending is held through most
-RPC errors (the ack may still arrive — e.g. a deadline that fired after the
-daemon applied the command); only a pre-enqueue `Unavailable` (a full command
-buffer, nothing ran) clears it at once.
+the same slot key and lose the first's tracking. The guard sweeps confirmed and
+expired pendings to ground truth before reading them, so a retry in the brief
+window after a command's 10s bound elapses but before its entry is reaped can't
+overwrite a still-live pending and lose its watchdog.
 
 ## Timeline: current and completed cycles
 

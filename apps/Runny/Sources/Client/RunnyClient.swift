@@ -122,4 +122,28 @@ extension Error {
     var grpcCode: GRPCStatus.Code? {
         (self as? GRPCStatus)?.code ?? (self as? GRPCStatusTransformable)?.makeGRPCStatus().code
     }
+
+    /// The gRPC status message, when this error carries one. The daemon puts
+    /// operator-actionable detail here (e.g. why a resume was refused), so it's
+    /// worth surfacing verbatim rather than a generic fallback.
+    var grpcMessage: String? {
+        (self as? GRPCStatus)?.message ?? (self as? GRPCStatusTransformable)?.makeGRPCStatus().message
+    }
+
+    /// True when the gRPC code proves the command did NOT apply, so the caller
+    /// must clear any pending and surface the error rather than wait out the
+    /// confirmation watchdog: Unavailable (full command buffer, nothing
+    /// enqueued), NotFound (no such slot), FailedPrecondition (e.g. resume
+    /// during a drain), InvalidArgument. Ambiguous codes — deadlineExceeded, a
+    /// transport drop — are deliberately excluded: the daemon may still have
+    /// applied the command after the deadline fired, so the pending stands and
+    /// the watchdog adjudicates.
+    var isDefinitiveRejection: Bool {
+        switch grpcCode {
+        case .unavailable, .notFound, .failedPrecondition, .invalidArgument:
+            true
+        default:
+            false
+        }
+    }
 }

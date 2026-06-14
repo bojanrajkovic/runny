@@ -1,3 +1,4 @@
+import GRPC
 import XCTest
 
 @testable import Runny
@@ -157,5 +158,36 @@ final class RecentlyConfirmedTests: XCTestCase {
         XCTAssertFalse(register.consume("1"), "the oldest id past the cap is dropped")
         XCTAssertTrue(register.consume("2"))
         XCTAssertTrue(register.consume("3"))
+    }
+}
+
+/// The error classification that decides whether a failed command clears its
+/// pending and surfaces at once (a definitive rejection) or holds the pending
+/// for the confirmation watchdog (an ambiguous error). Getting this split wrong
+/// either swallows a real failure or fakes a timeout over a live command.
+final class ErrorClassificationTests: XCTestCase {
+    func testDefinitiveRejectionCodes() {
+        for code in [GRPCStatus.Code.unavailable, .notFound, .failedPrecondition, .invalidArgument] {
+            XCTAssertTrue(
+                GRPCStatus(code: code, message: nil).isDefinitiveRejection,
+                "\(code) proves the command did not apply"
+            )
+        }
+    }
+
+    func testAmbiguousCodesAreNotDefinitive() {
+        // A deadline or transport drop may have raced an applied command — the
+        // pending must stand for the watchdog, never cleared as a proven failure.
+        for code in [GRPCStatus.Code.deadlineExceeded, .cancelled, .unknown, .internalError] {
+            XCTAssertFalse(
+                GRPCStatus(code: code, message: nil).isDefinitiveRejection,
+                "\(code) is ambiguous — the command may still have applied"
+            )
+        }
+    }
+
+    func testGRPCMessageIsExtracted() {
+        let err = GRPCStatus(code: .failedPrecondition, message: "daemon is draining: wedge")
+        XCTAssertEqual(err.grpcMessage, "daemon is draining: wedge")
     }
 }

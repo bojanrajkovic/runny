@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -209,9 +210,12 @@ func TestPullToAssemblesBundle(t *testing.T) {
 	f := newFakeRegistry(t, config, nvram, disk)
 	_, ref := f.start()
 
-	var progressed int64
+	// progressWriter fans across pull's errgroup, so this callback runs from
+	// several goroutines at once (the contract on Client.Progress) — count
+	// atomically, or -race flags the bare += as a data race.
+	var progressed atomic.Int64
 	c := NewClient()
-	c.Progress = func(n int64) { progressed += n }
+	c.Progress = func(n int64) { progressed.Add(n) }
 
 	dest := filepath.Join(t.TempDir(), "bundle")
 	digest, err := c.PullTo(testCtx(t), ref, dest)
@@ -221,7 +225,7 @@ func TestPullToAssemblesBundle(t *testing.T) {
 	if digest != f.digest {
 		t.Errorf("digest = %s, want %s", digest, f.digest)
 	}
-	if progressed == 0 {
+	if progressed.Load() == 0 {
 		t.Error("progress callback never fired")
 	}
 

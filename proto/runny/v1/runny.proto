@@ -136,6 +136,14 @@ message SlotStatus {
   // clients render it as a live clock. Left is always set; outcome is "ok",
   // "error", or "deadline".
   repeated StateRecord active_cycle_states = 19;
+  // command_id of the last pause/resume the daemon actually APPLIED for this
+  // slot (PauseRequest.command_id / ResumeRequest.command_id). The client
+  // confirms a pending pause/resume by exact match against this. "Last
+  // applied IDENTIFIED command": a daemon-internal re-issue (empty id) does
+  // not overwrite it, so a value persists across unrelated status snapshots.
+  // Empty from a daemon that has applied no identified command yet, and from
+  // daemons predating protocol_version >= 1.
+  string last_applied_command_id = 20;
 }
 
 message GetStatusRequest {}
@@ -159,6 +167,13 @@ message GetStatusResponse {
   // told "nothing was injected" while the key is actually installed. Zero from
   // a daemon that predates this field; clients fall back to a built-in default.
   google.protobuf.Duration inject_handler_wait = 5;
+  // Monotonic wire-contract version, bumped when the daemon gains a feature a
+  // client must detect before relying on it. 0 from any daemon predating this
+  // field. Pause/resume command acknowledgement (last_applied_command_id)
+  // requires >= 1: a client confirms pause/resume from the command id only
+  // when the daemon advertises >= 1, and otherwise treats the command as
+  // applied-but-unconfirmable rather than confirming from slot state.
+  uint32 protocol_version = 6;
 }
 
 message WatchStatusRequest {}
@@ -197,6 +212,13 @@ message RecycleResponse {}
 
 message PauseRequest {
   string slot = 1;
+  // Opaque, client-generated correlation id (a random UUID). The daemon
+  // echoes it in SlotStatus.last_applied_command_id once this command is
+  // applied, letting the client confirm THIS pause rather than inferring
+  // confirmation from the slot happening to be paused. Empty from older
+  // clients and from daemon-internal re-issues; the daemon never matches on
+  // empty.
+  string command_id = 2;
 }
 
 message PauseResponse {
@@ -208,6 +230,9 @@ message PauseResponse {
 
 message ResumeRequest {
   string slot = 1;
+  // See PauseRequest.command_id: opaque client-generated correlation id,
+  // echoed in SlotStatus.last_applied_command_id when this resume applies.
+  string command_id = 2;
 }
 
 message ResumeResponse {}

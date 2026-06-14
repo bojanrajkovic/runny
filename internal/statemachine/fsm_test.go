@@ -846,6 +846,79 @@ func TestPauseHoldsInBackoff(t *testing.T) {
 	cancel()
 }
 
+// A pause/resume carrying a command id publishes it as the acknowledgement
+// (issue #66), and an id-less daemon-internal re-issue must not clobber it.
+func TestPauseResumeAcknowledgeCommandID(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 0 // unlimited cycles; we drive it to paused BACKOFF
+	h.images.err = errors.New("keep failing so we cycle fast")
+	cancel := h.start(t)
+	defer cancel()
+
+	h.waitState(t, StateBackoff)
+
+	waitAck := func(want func(Status) bool, desc string) {
+		t.Helper()
+		deadline := time.After(3 * time.Second)
+		for {
+			if want(h.slot.Status()) {
+				return
+			}
+			select {
+			case <-deadline:
+				st := h.slot.Status()
+				t.Fatalf("never %s (paused=%v last_applied=%q)", desc, st.Paused, st.LastAppliedCommandID)
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+	}
+
+	// Pause with an id publishes it.
+	h.slot.Command(Command{Kind: CmdPause, ID: "pause-1"})
+	waitAck(func(s Status) bool { return s.Paused && s.LastAppliedCommandID == "pause-1" },
+		"acknowledged pause id pause-1")
+
+	// An id-less re-issue (the drainer saturates paused slots with re-pauses)
+	// must NOT wipe the published id — a coalesced status stream could
+	// otherwise drop the identified snapshot and the client never confirms.
+	h.slot.Command(Command{Kind: CmdPause})
+	time.Sleep(200 * time.Millisecond)
+	if got := h.slot.Status().LastAppliedCommandID; got != "pause-1" {
+		t.Fatalf("id-less re-issue clobbered acknowledgement: got %q, want pause-1", got)
+	}
+
+	// Resume with a fresh id publishes the new id.
+	h.slot.Command(Command{Kind: CmdResume, ID: "resume-1"})
+	waitAck(func(s Status) bool { return !s.Paused && s.LastAppliedCommandID == "resume-1" },
+		"acknowledged resume id resume-1")
+}
+
+// A pause issued in a running state (the inline switch path, not the BACKOFF
+// idle handler) publishes its command id immediately, even though the pause
+// itself only takes hold at the next BACKOFF.
+func TestPauseInListeningAcknowledgesCommandID(t *testing.T) {
+	h := newHarness(t, nil)
+	cancel := h.start(t)
+	defer cancel()
+
+	h.waitState(t, StateProvision)
+	h.proc.say(markerListening)
+	h.waitState(t, StateListening)
+
+	h.slot.Command(Command{Kind: CmdPause, ID: "listen-pause"})
+	deadline := time.After(2 * time.Second)
+	for {
+		if h.slot.Status().LastAppliedCommandID == "listen-pause" {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("LISTENING pause never acknowledged id: got %q", h.slot.Status().LastAppliedCommandID)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
 func TestRunnerExitWhileListeningFails(t *testing.T) {
 	h := newHarness(t, nil)
 	cancel := h.start(t)

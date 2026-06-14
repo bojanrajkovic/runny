@@ -64,6 +64,14 @@ func TestStatusToProtoCarriesWedgedAndDetail(t *testing.T) {
 	}
 }
 
+// The pause/resume command acknowledgement (issue #66) must reach the wire.
+func TestStatusToProtoCarriesLastAppliedCommandID(t *testing.T) {
+	pb := statusToProto(statemachine.Status{Slot: "mac-1", LastAppliedCommandID: "cmd-abc"})
+	if pb.GetLastAppliedCommandId() != "cmd-abc" {
+		t.Errorf("last_applied_command_id dropped: %q", pb.GetLastAppliedCommandId())
+	}
+}
+
 // recordToProto must carry the configured ref (intent) alongside the
 // resolved digest (truth) — the post-mortem pair `runnyctl why` renders.
 func TestRecordToProtoCarriesImage(t *testing.T) {
@@ -499,6 +507,15 @@ func TestSnapshotCarriesDraining(t *testing.T) {
 	srv.DrainingFn = func() string { return "config reload (SIGHUP)" }
 	if got := srv.snapshot().GetDraining(); got != "config reload (SIGHUP)" {
 		t.Errorf("draining = %q", got)
+	}
+}
+
+// The daemon must advertise the wire protocol version so a client can decide
+// whether to rely on pause/resume command acknowledgement (issue #66).
+func TestSnapshotCarriesProtocolVersion(t *testing.T) {
+	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	if got := srv.snapshot().GetProtocolVersion(); got != WireProtocolVersion {
+		t.Errorf("protocol_version = %d, want %d", got, WireProtocolVersion)
 	}
 }
 

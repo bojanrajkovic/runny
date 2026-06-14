@@ -179,6 +179,13 @@ type Deps struct {
 type Command struct {
 	Kind   CommandKind
 	Reason string
+	// ID is the client's opaque correlation id for CmdPause/CmdResume (a
+	// random UUID from PauseRequest/ResumeRequest.command_id). setPaused
+	// republishes it as Status.LastAppliedCommandID when the command applies,
+	// so the client can confirm THIS command. Empty for daemon-internal
+	// re-issues (the drainer) and older clients; an empty id never overwrites
+	// a published id (see setPaused).
+	ID string
 	// CancelJob applies to CmdRecycle only: consent to cancel a RUNNING job
 	// (decision 14). runnyctl sets it via its -force guard after observing
 	// JOB. Without it, a mid-job recycle disarms any debug hold and the job
@@ -247,13 +254,18 @@ type Status struct {
 	// RunnerVersion is the asset filename of the actions-runner tarball
 	// ensured this cycle (e.g. "actions-runner-osx-arm64-2.320.0.tar.gz");
 	// empty before ENSURE_IMAGE completes and in BACKOFF.
-	RunnerVersion       string
-	Paused              bool
-	ConsecutiveFailures uint32
-	BackoffSeconds      int64
-	VM                  cycle.VMInfo
-	Job                 *cycle.JobInfo
-	LastFailure         string
+	RunnerVersion string
+	Paused        bool
+	// LastAppliedCommandID is the Command.ID of the last IDENTIFIED pause/resume
+	// the FSM applied for this slot. The control surface confirms a pending
+	// pause/resume by exact match against it. An id-less internal re-issue does
+	// not change it, so a value persists across unrelated status snapshots.
+	LastAppliedCommandID string
+	ConsecutiveFailures  uint32
+	BackoffSeconds       int64
+	VM                   cycle.VMInfo
+	Job                  *cycle.JobInfo
+	LastFailure          string
 	// Detail is the current state's live annotation (pull progress etc).
 	Detail string
 	// Wedged: the guest survived force-stop and still occupies a
@@ -459,9 +471,9 @@ drain:
 func (s *Slot) handleIdleCommand(cmd Command) {
 	switch cmd.Kind {
 	case CmdPause:
-		s.setPaused(true)
+		s.setPaused(true, cmd.ID)
 	case CmdResume:
-		s.setPaused(false)
+		s.setPaused(false, cmd.ID)
 	case CmdRecycle:
 		// Nothing to recycle while idle.
 	case CmdDebugKey:
@@ -495,10 +507,19 @@ func (s *Slot) isPaused() bool {
 	return s.paused
 }
 
-func (s *Slot) setPaused(p bool) {
+// setPaused applies a pause/resume and republishes the slot status. cmdID is
+// the applying command's correlation id (empty for daemon-internal re-issues);
+// it is echoed as Status.LastAppliedCommandID so the control surface can
+// confirm that specific command. Non-clobber: an empty cmdID must not wipe a
+// previously published id, or a coalesced status stream could drop the
+// identified snapshot and the client would never see its acknowledgement.
+func (s *Slot) setPaused(p bool, cmdID string) {
 	s.mu.Lock()
 	s.paused = p
 	s.status.Paused = p
+	if cmdID != "" {
+		s.status.LastAppliedCommandID = cmdID
+	}
 	snap := s.status
 	fns := slices.Clone(s.onChange)
 	s.mu.Unlock()
@@ -566,9 +587,9 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 				case CmdRecycle:
 					ccancel(fmt.Errorf("%w: %s", errOperatorRecycle, cmd.Reason))
 				case CmdPause:
-					s.setPaused(true)
+					s.setPaused(true, cmd.ID)
 				case CmdResume:
-					s.setPaused(false)
+					s.setPaused(false, cmd.ID)
 				case CmdDebugKey:
 					// Boot-path states have no usable hardened guest yet
 					// (issue #39): reply and do nothing.
@@ -862,9 +883,9 @@ func (s *Slot) listenAndRunJob(ctx context.Context, rec *cycle.Record, proc Proc
 				finishListening(cycle.OutcomeOK, "")
 				return false, StateListening, fmt.Errorf("%w: %s", errOperatorRecycle, cmd.Reason)
 			case CmdPause:
-				s.setPaused(true) // takes effect at next BACKOFF
+				s.setPaused(true, cmd.ID) // takes effect at next BACKOFF
 			case CmdResume:
-				s.setPaused(false)
+				s.setPaused(false, cmd.ID)
 			case CmdDebugKey:
 				// The LISTENING freeze (§5.1).
 				done, racedLine, hstate, herr := s.freezeForDebug(ctx, rec, proc, guest, cmd, finishListening)
@@ -1024,13 +1045,13 @@ func (s *Slot) watchJob(jctx, cctx context.Context, rec *cycle.Record, proc Proc
 		case cmd := <-s.cmds:
 			switch cmd.Kind {
 			case CmdPause:
-				s.setPaused(true)
+				s.setPaused(true, cmd.ID)
 				if arm.armed { // disarm NOW + audit + clear status (decision 19)
 					s.auditDisarm(rec, "slot paused", slog.LevelError)
 					s.clearArmedStatus(arm, jobDetail(rec))
 				}
 			case CmdResume:
-				s.setPaused(false)
+				s.setPaused(false, cmd.ID)
 			case CmdRecycle:
 				if cmd.CancelJob {
 					if arm.armed { // cancel consent destroys the job AND the armed hold
@@ -1433,9 +1454,9 @@ func (s *Slot) holdForDebug(ctx context.Context, rec *cycle.Record, guest Guest,
 				finish(cycle.OutcomeOK, "")
 				return StateDebug, fmt.Errorf("%w: %s", errOperatorRecycle, cmd.Reason)
 			case CmdPause:
-				s.setPaused(true) // holds in the NEXT BACKOFF; the hold itself untouched
+				s.setPaused(true, cmd.ID) // holds in the NEXT BACKOFF; the hold itself untouched
 			case CmdResume:
-				s.setPaused(false)
+				s.setPaused(false, cmd.ID)
 			case CmdDebugKey:
 				s.debugReArm(ctx, rec, guest, cmd, hold, secureSSH, finish)
 				if dr.Left.IsZero() {

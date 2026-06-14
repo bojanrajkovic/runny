@@ -310,19 +310,21 @@ final class DaemonStore {
     /// the confirmation contract is unit-testable without a live stream.
     ///
     /// Pause/resume confirm on the command's id being present in the daemon's
-    /// `recentAppliedCommandIds` history, with the paused-direction as a sanity
-    /// belt: a random id can't collide across a daemon restart, membership
-    /// survives concurrent clients clobbering each other (a scalar wouldn't),
-    /// and the direction check rejects a stale snapshot that still carries a
-    /// prior command's id. Recycle has no echoed id — the daemon doesn't carry
-    /// one on the undo/internal re-issue path — so it confirms on a cycle
-    /// change, the same observable it always used.
+    /// `recentAppliedCommandIds` history — membership alone, no paused-direction
+    /// check. The daemon appends the id only when the command actually applies
+    /// (inside `setPaused`), so membership already proves application; the random
+    /// id can't collide across a daemon restart, and a history (not a scalar)
+    /// survives concurrent clients clobbering each other's ack. A direction belt
+    /// would be worse than redundant: a fast superseding command (a resume right
+    /// after our pause applied) flips `paused` before our next snapshot, so
+    /// `&& paused` would reject a pause that *did* run — and the pending would
+    /// then time out into a false not-confirmed banner. Recycle has no echoed id
+    /// — the daemon doesn't carry one on the undo/internal re-issue path — so it
+    /// confirms on a cycle change, the same observable it always used.
     nonisolated static func isConfirmed(_ command: PendingCommand, by slot: Runny_V1_SlotStatus?) -> Bool {
         switch command.kind {
-        case .pause:
-            (slot?.recentAppliedCommandIds.contains(command.id) ?? false) && (slot?.paused ?? false)
-        case .resume:
-            (slot?.recentAppliedCommandIds.contains(command.id) ?? false) && !(slot?.paused ?? true)
+        case .pause, .resume:
+            slot?.recentAppliedCommandIds.contains(command.id) ?? false
         case .recycle:
             slot.map { $0.cycleID != command.cycleID } ?? false
         }

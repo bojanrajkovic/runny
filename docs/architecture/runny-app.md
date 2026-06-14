@@ -95,15 +95,20 @@ the honest adjudicator rather than a premature failure banner.
 
 Confirmation keys on the **specific command**, not a matching state. A pause
 or resume carries a random command id on the request; the daemon records it in
-the slot's `recent_applied_command_ids` when the command actually applies, and
-the app confirms when its id is **present in that history** (with the slot's
-paused direction as a sanity belt). This is what stops a periodic snapshot that
-merely carries `paused=true` from confirming — and so disarming the watchdog
-for — a pause the daemon hasn't run yet. A history rather than a single
-last-applied id so concurrent clients (the app plus a `runnyctl` invocation, or
-a fast second command) don't clobber each other's acknowledgement: each finds
-its own id regardless of the others. Recycle has no recorded id and confirms on
-a cycle change, the observable it has always used.
+the slot's `recent_applied_command_ids` **only when the command actually
+applies**, and the app confirms on its id being **present in that history** —
+membership alone, with no paused-direction check. Because the id is recorded
+only on apply, membership already proves the command ran; a direction belt would
+be worse than redundant, since a fast superseding command (a resume right after
+our pause applied) flips `paused` before the next snapshot and would make a
+`&& paused` test reject a pause that did run — timing it out into a false
+not-confirmed banner. Membership also stops a periodic snapshot that merely
+carries `paused=true` from confirming — and so disarming the watchdog for — a
+pause the daemon hasn't run yet. A history rather than a single last-applied id
+so concurrent clients (the app plus a `runnyctl` invocation, or a fast second
+command) don't clobber each other's acknowledgement: each finds its own id
+regardless of the others. Recycle has no recorded id and confirms on a cycle
+change, the observable it has always used.
 
 The history is bounded and best-effort, not a durable per-client receipt: an id
 need only survive from the snapshot that carries it until the app's next poll,

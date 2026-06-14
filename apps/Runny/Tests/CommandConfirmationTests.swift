@@ -31,14 +31,14 @@ final class CommandConfirmationTests: XCTestCase {
         )
     }
 
-    func testPauseConfirmsOnIDMembershipAndPausedDirection() {
+    func testPauseConfirmsOnIDMembership() {
         let cmd = pending(.pause, id: "abc")
         XCTAssertTrue(
             DaemonStore.isConfirmed(cmd, by: slot(paused: true, recentApplied: ["abc"]))
         )
     }
 
-    func testResumeConfirmsOnIDMembershipAndResumedDirection() {
+    func testResumeConfirmsOnIDMembership() {
         let cmd = pending(.resume, id: "abc")
         XCTAssertTrue(
             DaemonStore.isConfirmed(cmd, by: slot(paused: false, recentApplied: ["abc"]))
@@ -66,18 +66,23 @@ final class CommandConfirmationTests: XCTestCase {
         )
     }
 
-    func testPauseDoesNotConfirmOnPresentIDButWrongDirection() {
-        // The direction belt: a stale snapshot carrying our id but still showing
-        // resumed must not confirm a pause.
+    func testPauseConfirmsOnAppliedIDEvenWhenSuperseded() {
+        // The daemon records our id only when the pause actually applies. If a
+        // resume immediately supersedes it — flipping paused back to false before
+        // our next snapshot — the pause still ran, so its id in the history must
+        // confirm it. A paused-direction belt here would reject a command that
+        // applied and time it out into a false not-confirmed banner.
         let cmd = pending(.pause, id: "abc")
-        XCTAssertFalse(
+        XCTAssertTrue(
             DaemonStore.isConfirmed(cmd, by: slot(paused: false, recentApplied: ["abc"]))
         )
     }
 
-    func testResumeDoesNotConfirmOnPresentIDButWrongDirection() {
+    func testResumeConfirmsOnAppliedIDEvenWhenSuperseded() {
+        // Symmetric: a resume that applied (id recorded) then was superseded by a
+        // pause still confirms on membership.
         let cmd = pending(.resume, id: "abc")
-        XCTAssertFalse(
+        XCTAssertTrue(
             DaemonStore.isConfirmed(cmd, by: slot(paused: true, recentApplied: ["abc"]))
         )
     }

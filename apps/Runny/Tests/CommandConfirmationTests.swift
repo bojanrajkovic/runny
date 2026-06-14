@@ -104,3 +104,46 @@ final class CommandConfirmationTests: XCTestCase {
         )
     }
 }
+
+/// `RecentlyConfirmed` is the bounded register that lets a snapshot's
+/// confirmation swallow a single straggling RPC error for the same command —
+/// without ever suppressing a later, genuine failure on a different one.
+final class RecentlyConfirmedTests: XCTestCase {
+    func testConsumeReturnsTrueExactlyOncePerNotedID() {
+        var register = DaemonStore.RecentlyConfirmed()
+        register.note("abc")
+        XCTAssertTrue(register.consume("abc"), "the noted command's straggling error is swallowed")
+        XCTAssertFalse(
+            register.consume("abc"),
+            "consume is once-only — a second error for the same id must still surface"
+        )
+    }
+
+    func testConsumeOfUnnotedIDReturnsFalse() {
+        var register = DaemonStore.RecentlyConfirmed()
+        XCTAssertFalse(register.consume("never-noted"))
+        register.note("abc")
+        XCTAssertFalse(
+            register.consume("xyz"),
+            "an unrelated confirmation must not suppress a different command's error"
+        )
+    }
+
+    func testConsumeIsPerIDNotGlobal() {
+        var register = DaemonStore.RecentlyConfirmed()
+        register.note("a")
+        register.note("b")
+        XCTAssertTrue(register.consume("b"))
+        XCTAssertTrue(register.consume("a"), "consuming one id leaves the others intact")
+    }
+
+    func testOldestIDsEvictedPastCap() {
+        var register = DaemonStore.RecentlyConfirmed(cap: 2)
+        register.note("1")
+        register.note("2")
+        register.note("3") // pushes the window past the cap, evicting "1"
+        XCTAssertFalse(register.consume("1"), "the oldest id past the cap is dropped")
+        XCTAssertTrue(register.consume("2"))
+        XCTAssertTrue(register.consume("3"))
+    }
+}

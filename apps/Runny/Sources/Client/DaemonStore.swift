@@ -54,6 +54,32 @@ final class DaemonStore {
         var displayText: String { "\(kind.rawValue) requested…" }
     }
 
+    /// A small bounded FIFO of command ids a snapshot has just confirmed. The
+    /// RPC Task's `catch` consults it so a late transport error — a deadline
+    /// that fired *after* the daemon already applied the command and a snapshot
+    /// already confirmed it — doesn't raise a contradictory "timed out" banner
+    /// on a command the slot visibly reflects. Bounded because only a brief
+    /// confirm→catch handoff is ever needed (any such error arrives within the
+    /// command's RPC deadline); a value type so it's unit-testable in isolation.
+    struct RecentlyConfirmed: Equatable {
+        private var ids: [String] = []
+        let cap: Int
+        init(cap: Int = 16) { self.cap = cap }
+
+        mutating func note(_ id: String) {
+            ids.append(id)
+            if ids.count > cap { ids.removeFirst(ids.count - cap) }
+        }
+
+        /// True exactly once per noted id: a confirmation is consumed by the
+        /// single error that races it, never suppressing a later real failure.
+        mutating func consume(_ id: String) -> Bool {
+            guard let i = ids.firstIndex(of: id) else { return false }
+            ids.remove(at: i)
+            return true
+        }
+    }
+
     private(set) var connection: ConnectionState = .connecting
     private(set) var slots: [Runny_V1_SlotStatus] = []
     private(set) var daemonVersion = ""
@@ -84,6 +110,9 @@ final class DaemonStore {
     var recycleConfirm: Runny_V1_SlotStatus?
 
     private(set) var pending: [String: PendingCommand] = [:]
+    /// Ids a snapshot confirmed in the last confirm→catch window, so a late RPC
+    /// error doesn't contradict a confirmation the operator can already see.
+    private var recentlyConfirmed = RecentlyConfirmed()
 
     /// The client of the current healthy stream; log/timeline views borrow
     /// it. nil while unreachable — actions fail fast instead of hanging.
@@ -303,14 +332,18 @@ final class DaemonStore {
         for (slotName, command) in pending {
             let slot = slots.first(where: { $0.slot == slotName })
             if Self.isConfirmed(command, by: slot) {
+                // Record the id so a straggling RPC error for this exact command
+                // (a deadline that fired after the daemon applied it) is
+                // swallowed by run()'s catch rather than raising a banner that
+                // contradicts the confirmation the operator can already see.
+                recentlyConfirmed.note(command.id)
+                // Drop the pending. Deliberately DON'T clear commandError here —
+                // it's a single shared scalar, and a background snapshot
+                // confirming one slot's command must never wipe a genuine
+                // not-confirmed/failure banner belonging to a different slot's
+                // command (that would be a silent failure, the one thing this
+                // surface exists to prevent).
                 pending.removeValue(forKey: slotName)
-                // The ack supersedes any transport error recorded before it
-                // arrived: a deadline that fired after the daemon had already
-                // applied the command must not leave a red banner on a command
-                // the daemon demonstrably executed.
-                if command.kind == .pause || command.kind == .resume {
-                    commandError = nil
-                }
             } else if now.timeIntervalSince(command.requestedAt) > Self.confirmationBound {
                 // Expiry happens here only — even for slots the daemon no
                 // longer reports — so the entry can't outlive its meaning.
@@ -378,6 +411,13 @@ final class DaemonStore {
                         "\(kind.rawValue) of \(slot.slot) sent — this runnyd predates command confirmation; upgrade runnyd to verify it took effect"
                 }
             } catch {
+                // If a snapshot already confirmed this exact command, the error
+                // is a straggler (its deadline fired after the daemon applied the
+                // command and a snapshot reflected it). Swallow it — surfacing a
+                // failure over a confirmation the operator can see is a lie in
+                // the other direction. Consume-once, so a later real failure on a
+                // different command still surfaces.
+                if recentlyConfirmed.consume(id) { return }
                 // Keep the pending on most errors: the ack may still arrive (a
                 // deadline that fired after the daemon already applied the
                 // command), and the confirmation timeout is the honest backstop.

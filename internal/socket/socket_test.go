@@ -451,11 +451,64 @@ func TestReloadAcceptedCarriesVerdictFields(t *testing.T) {
 	}
 }
 
+// The respawn-convergence fingerprint must reach a client over the wire: a
+// non-empty per-process boot_id, the loaded config hash, the drain progress
+// counter and held flag, and protocol_version >= 2 to gate them.
+func TestStatusCarriesConvergenceFingerprint(t *testing.T) {
+	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	srv.ConfigSHA256 = "deadbeef"
+	srv.DrainFn = func() DrainState {
+		return DrainState{Reason: "config reload (rpc): x", ExitHeld: true, Seq: 7}
+	}
+	resp, err := dial(t, srv).GetStatus(t.Context(), &runnyv1.GetStatusRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetBootId() == "" || resp.GetBootId() != srv.BootID {
+		t.Errorf("boot_id = %q, want the server's %q", resp.GetBootId(), srv.BootID)
+	}
+	if resp.GetConfigSha256() != "deadbeef" {
+		t.Errorf("config_sha256 = %q", resp.GetConfigSha256())
+	}
+	if resp.GetDrainSeq() != 7 || !resp.GetExitHeld() {
+		t.Errorf("drain_seq/exit_held dropped: seq=%d held=%v", resp.GetDrainSeq(), resp.GetExitHeld())
+	}
+	if WireProtocolVersion < 2 || resp.GetProtocolVersion() != WireProtocolVersion {
+		t.Errorf("protocol_version = %d, want %d (>= 2)", resp.GetProtocolVersion(), WireProtocolVersion)
+	}
+}
+
+// Reload echoes the accepting process's own boot_id, so a follower can baseline
+// against it with no pre-RPC status read (closing the sub-RPC identity race).
+func TestReloadEchoesAcceptingBootID(t *testing.T) {
+	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	srv.ReloadFn = func(context.Context, string) ReloadResult {
+		return ReloadResult{Accepted: true, ConfigSHA256: "abc"}
+	}
+	resp, err := dial(t, srv).Reload(t.Context(), &runnyv1.ReloadRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetAcceptingBootId() == "" || resp.GetAcceptingBootId() != srv.BootID {
+		t.Errorf("accepting_boot_id = %q, want the server's %q", resp.GetAcceptingBootId(), srv.BootID)
+	}
+}
+
+// Two cold starts must mint distinct boot_ids, or a follower could mistake the
+// respawn for the old process after a tight crash-loop.
+func TestBootIDIsPerProcessUnique(t *testing.T) {
+	a := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	b := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	if a.BootID == "" || a.BootID == b.BootID {
+		t.Errorf("boot_ids not unique: %q vs %q", a.BootID, b.BootID)
+	}
+}
+
 // Reload must never gate on an active drain: the respawn loads the on-disk
 // file regardless, so the verdict matters most then (design decision 8).
 func TestReloadWhileDrainingStillCallsReloadFn(t *testing.T) {
 	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
-	srv.DrainingFn = func() string { return "wedged guest: a VM survived force-stop" }
+	srv.DrainFn = func() DrainState { return DrainState{Reason: "wedged guest: a VM survived force-stop"} }
 	called := false
 	srv.ReloadFn = func(ctx context.Context, reason string) ReloadResult {
 		called = true
@@ -480,7 +533,7 @@ func TestReloadWhileDrainingStillCallsReloadFn(t *testing.T) {
 
 func TestResumeRefusedWhileDraining(t *testing.T) {
 	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
-	srv.DrainingFn = func() string { return "config reload (rpc): x" }
+	srv.DrainFn = func() DrainState { return DrainState{Reason: "config reload (rpc): x"} }
 	c := dial(t, srv)
 	_, err := c.Resume(t.Context(), &runnyv1.ResumeRequest{Slot: "mac-1"})
 	if status.Code(err) != codes.FailedPrecondition {
@@ -518,7 +571,7 @@ func TestPauseNoteOnlyWhileDraining(t *testing.T) {
 	if resp.GetNote() != "" {
 		t.Errorf("pause note while not draining: %q", resp.GetNote())
 	}
-	srv.DrainingFn = func() string { return "config reload (rpc): x" }
+	srv.DrainFn = func() DrainState { return DrainState{Reason: "config reload (rpc): x"} }
 	resp, err = c.Pause(t.Context(), &runnyv1.PauseRequest{Slot: "mac-1"})
 	if err != nil {
 		t.Fatal(err)
@@ -531,9 +584,9 @@ func TestPauseNoteOnlyWhileDraining(t *testing.T) {
 func TestSnapshotCarriesDraining(t *testing.T) {
 	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
 	if got := srv.snapshot().GetDraining(); got != "" {
-		t.Errorf("draining = %q with no DrainingFn", got)
+		t.Errorf("draining = %q with no DrainFn", got)
 	}
-	srv.DrainingFn = func() string { return "config reload (SIGHUP)" }
+	srv.DrainFn = func() DrainState { return DrainState{Reason: "config reload (SIGHUP)"} }
 	if got := srv.snapshot().GetDraining(); got != "config reload (SIGHUP)" {
 		t.Errorf("draining = %q", got)
 	}
@@ -696,12 +749,12 @@ func TestResumeDrainRaceIsRefused(t *testing.T) {
 	// an active drain reason. Goroutine-safe without imports.
 	called := make(chan struct{}, 1)
 	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
-	srv.DrainingFn = func() string {
+	srv.DrainFn = func() DrainState {
 		select {
 		case called <- struct{}{}:
-			return ""
+			return DrainState{}
 		default:
-			return "config reload (rpc): test"
+			return DrainState{Reason: "config reload (rpc): test"}
 		}
 	}
 	c := dial(t, srv)

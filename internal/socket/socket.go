@@ -4,6 +4,7 @@ package socket
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"net"
 	"os"
@@ -47,13 +48,32 @@ type ReloadResult struct {
 	ConfigSHA256        string
 }
 
+// DrainState is the structured drain status the server publishes on
+// GetStatus, read from the drainer as a unit so the reason, the held flag, and
+// the progress counter never disagree across separate calls.
+type DrainState struct {
+	// Reason is the human-readable drain reason, with the exit-gate hold
+	// annotation appended when held; "" = not draining.
+	Reason string
+	// ExitHeld is true while the exit gate is refusing to exit onto a config
+	// that no longer parses. Authoritative — clients gate on it, never re-parse
+	// Reason.
+	ExitHeld bool
+	// Seq is a monotone drain-progress counter; a following client resets its
+	// stall timer when it changes.
+	Seq uint64
+}
+
 // WireProtocolVersion is the daemon's wire-contract version, published in
 // GetStatusResponse.protocol_version. Bump it when the daemon gains a feature a
 // client must detect before relying on it. Version 1 introduced pause/resume
 // command acknowledgement (SlotStatus.recent_applied_command_ids): a client
 // confirms a pause/resume from the command id only against a daemon advertising
-// >= 1.
-const WireProtocolVersion uint32 = 1
+// >= 1. Version 2 introduced reload-convergence confirmation (boot_id,
+// config_sha256, drain_seq, exit_held): a reload-following client confirms the
+// respawn by boot_id flip + config hash only against a daemon advertising >= 2,
+// and otherwise falls back to daemon_started and warns it cannot verify.
+const WireProtocolVersion uint32 = 2
 
 // maxCommandIDLen bounds the optional pause/resume command id the client echoes
 // back for acknowledgement. The app sends a UUID (36 chars); the cap is generous
@@ -88,15 +108,22 @@ type Server struct {
 	DoctorFn   func(ctx context.Context) []DoctorCheck
 	Started    time.Time
 	Version    string
+	// BootID is this process's random per-cold-start identity (the respawn
+	// discriminator), published as GetStatusResponse.boot_id and echoed into
+	// ReloadResponse.accepting_boot_id. Minted in NewServer.
+	BootID string
+	// ConfigSHA256 is the hex SHA-256 of the config bytes this process loaded
+	// at cold start, published as GetStatusResponse.config_sha256 so a reload
+	// follower can prove the respawn came up on the vetted file. Set by main.
+	ConfigSHA256 string
 	// ReloadFn validates the on-disk config and (on acceptance) starts the
 	// drain toward a respawn. It is called unconditionally — even while a
 	// drain is already active, the verdict matters because the respawn loads
 	// the on-disk file regardless. Nil = Unimplemented (handler unwired).
 	ReloadFn func(ctx context.Context, reason string) ReloadResult
-	// DrainingFn reports the active drain reason ("" = not draining),
-	// including the exit-gate hold annotation when held. Nil = never
-	// draining.
-	DrainingFn func() string
+	// DrainFn reports the structured drain state (reason, held flag, progress
+	// counter) as a unit. Nil = never draining.
+	DrainFn func() DrainState
 	// Config carries the limits InjectDebugKey validates against (hold cap,
 	// the queue/service bounds for the synchronous wait).
 	Config *home.Config
@@ -120,8 +147,13 @@ func NewServer(slots []*statemachine.Slot, ring, runnerRing *logring.Ring,
 		DoctorFn:   doctor,
 		Started:    time.Now(),
 		Version:    version,
-		Config:     cfg,
-		watches:    map[int]chan struct{}{},
+		// A fresh random identity per cold start. crypto/rand.Text never fails
+		// and yields 128+ bits of entropy — enough that two cold starts in a
+		// tight crash-loop cannot collide and fool a follower into seeing the
+		// old process. Distinct from the persisted, respawn-stable instance-id.
+		BootID:  rand.Text(),
+		Config:  cfg,
+		watches: map[int]chan struct{}{},
 	}
 	for _, slot := range slots {
 		slot.OnChange(func(statemachine.Status) { s.notify() })
@@ -139,6 +171,11 @@ func (s *Server) notify() {
 	}
 	s.mu.Unlock()
 }
+
+// NotifyProgress is the exported seam the drainer wires as its progress hook: a
+// drain_seq bump pushes a snapshot to watchers at once rather than waiting out
+// the heartbeat. Same non-blocking fan-out as notify(), safe from an FSM goroutine.
+func (s *Server) NotifyProgress() { s.notify() }
 
 // Serve listens on the unix socket (owner-only) until ctx ends.
 func (s *Server) Serve(ctx context.Context, socketPath string) error {
@@ -176,20 +213,25 @@ func (s *Server) Serve(ctx context.Context, socketPath string) error {
 	return nil
 }
 
-// draining is the nil-tolerant read of DrainingFn.
-func (s *Server) draining() string {
-	if s.DrainingFn == nil {
-		return ""
+// drainState is the nil-tolerant read of DrainFn.
+func (s *Server) drainState() DrainState {
+	if s.DrainFn == nil {
+		return DrainState{}
 	}
-	return s.DrainingFn()
+	return s.DrainFn()
 }
 
 func (s *Server) snapshot() *runnyv1.GetStatusResponse {
+	ds := s.drainState()
 	resp := &runnyv1.GetStatusResponse{
 		DaemonStarted:   timestamppb.New(s.Started),
 		Version:         s.Version,
-		Draining:        s.draining(),
+		Draining:        ds.Reason,
 		ProtocolVersion: WireProtocolVersion,
+		BootId:          s.BootID,
+		ConfigSha256:    s.ConfigSHA256,
+		DrainSeq:        ds.Seq,
+		ExitHeld:        ds.ExitHeld,
 	}
 	// The config-derived InjectDebugKey wait, so `runnyctl debug` can size its
 	// client deadline to outlast the daemon (else a timeout lies — see #0).
@@ -410,7 +452,7 @@ func (s *Server) Pause(ctx context.Context, req *runnyv1.PauseRequest) (*runnyv1
 	// paused anyway) but the operator must learn it is in-memory: the
 	// respawn at the drain's end silently clears it, a window that can last
 	// hours (a running job finishes first).
-	if d := s.draining(); d != "" {
+	if d := s.drainState().Reason; d != "" {
 		resp.Note = fmt.Sprintf("daemon is draining for restart (%s); pause is in-memory and will not survive the respawn", d)
 	}
 	return resp, nil
@@ -424,13 +466,13 @@ func (s *Server) Resume(ctx context.Context, req *runnyv1.ResumeRequest) (*runny
 	// pause until convergence); refuse with the cause instead. The gate read
 	// and the command enqueue are not atomic: drainer.Start can set d.reason
 	// in between, so re-check after enqueuing and undo if a drain raced in.
-	if d := s.draining(); d != "" {
+	if d := s.drainState().Reason; d != "" {
 		return nil, status.Errorf(codes.FailedPrecondition, "daemon is draining: %s; resume after the respawn", d)
 	}
 	if err := s.command(req.GetSlot(), statemachine.Command{Kind: statemachine.CmdResume, ID: req.GetCommandId()}); err != nil {
 		return nil, err
 	}
-	if d := s.draining(); d != "" {
+	if d := s.drainState().Reason; d != "" {
 		// A drain started between the gate read and the command enqueue.
 		// Best-effort undo: if the buffer is full the drainer's re-issue loop
 		// (observe→recheck→CmdPause) covers the gap on the next FSM transition,
@@ -458,6 +500,10 @@ func (s *Server) Reload(ctx context.Context, req *runnyv1.ReloadRequest) (*runny
 		SlotCount:           int32(r.SlotCount),
 		OperatorPausedSlots: r.OperatorPausedSlots,
 		ConfigSha256:        r.ConfigSHA256,
+		// The accepting process's own identity, captured in this round-trip so
+		// a follower needs no pre-RPC status read to baseline against — the
+		// respawn is then identified by a boot_id that differs from this one.
+		AcceptingBootId: s.BootID,
 	}
 	for _, c := range r.FailedChecks {
 		resp.FailedChecks = append(resp.FailedChecks, &runnyv1.DoctorCheck{Name: c.Name, Ok: c.OK, Detail: c.Detail})

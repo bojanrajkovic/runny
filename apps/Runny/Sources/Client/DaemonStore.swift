@@ -742,7 +742,10 @@ final class DaemonStore {
                     wantSHA: resp.configSha256,
                     acceptedAt: Date()
                 )
-                reloadJobInFlight = false
+                // Seed from the slots visible at acceptance, so a daemon that
+                // dies before its next snapshot still carries a job-in-flight
+                // warning into the verdict; later old-process snapshots refine it.
+                reloadJobInFlight = Self.anyJobRunning(slots)
                 reloadStallSeq = drainSeq
                 reloadStallSince = Date()
                 var notes = resp.warnings.filter { !$0.ok }.map { "\($0.name): \($0.detail)" }
@@ -784,7 +787,7 @@ final class DaemonStore {
     /// because the heartbeat keeps it fresh.
     private func trackReloadDrain() {
         guard let reload = pendingReload, !isReloadSuccessor(reload) else { return }
-        reloadJobInFlight = slots.contains { $0.state == .job }
+        reloadJobInFlight = Self.anyJobRunning(slots)
         if drainSeq != reloadStallSeq {
             reloadStallSeq = drainSeq
             reloadStallSince = Date()
@@ -820,6 +823,14 @@ final class DaemonStore {
     ) -> Bool {
         guard protocolVersion >= 2 else { return false }
         return !longRunning && !exitHeld && stalledFor > bound
+    }
+
+    /// Whether any slot is running a job. The reload's job-in-flight seed (at
+    /// acceptance) and its per-snapshot refinement share this, so a job present
+    /// when the daemon goes down is caught even if no further snapshot arrives.
+    /// Only a running JOB counts — a pull or a debug hold is not an interrupted job.
+    nonisolated static func anyJobRunning(_ slots: [Runny_V1_SlotStatus]) -> Bool {
+        slots.contains { $0.state == .job }
     }
 
     /// Once a genuinely new daemon answers while a reload is pending, render the

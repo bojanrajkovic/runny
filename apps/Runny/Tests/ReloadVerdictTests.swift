@@ -162,3 +162,29 @@ final class RespawnSilenceTests: XCTestCase {
         ))
     }
 }
+
+/// The reload's job-in-flight seed: only a running JOB colors the verdict (a job
+/// may have been interrupted), so the predicate that seeds the flag at acceptance
+/// and refines it per snapshot must catch a JOB slot and ignore a pull or a debug
+/// hold. Pinning it guards the contract that lets a daemon dying mid-drain still
+/// warn correctly.
+final class JobInFlightSeedTests: XCTestCase {
+    private func slot(_ state: Runny_V1_SlotState) -> Runny_V1_SlotStatus {
+        var s = Runny_V1_SlotStatus()
+        s.state = state
+        return s
+    }
+
+    func testDetectsRunningJob() {
+        XCTAssertTrue(DaemonStore.anyJobRunning([slot(.debug), slot(.job)]))
+    }
+
+    func testIgnoresNonJobStates() {
+        // A pull (ENSURE_IMAGE) or a debug hold is not an interrupted job.
+        XCTAssertFalse(DaemonStore.anyJobRunning([slot(.ensureImage), slot(.debug)]))
+    }
+
+    func testEmptyIsNoJob() {
+        XCTAssertFalse(DaemonStore.anyJobRunning([]))
+    }
+}

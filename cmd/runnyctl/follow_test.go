@@ -217,7 +217,7 @@ func TestStreamDrainStallFiresWhenIdle(t *testing.T) {
 	reader := startReader(ctx, hangingStream(t, recvResult{resp: idleSnap(1)}).Recv)
 	c := &ctl{client: &fakeFollowClient{}, out: &bytes.Buffer{}}
 	opts := testFollowOpts()
-	_, err := c.streamDrain(ctx, reader, baseline{bootID: "A"}, opts, newFollowState(opts))
+	err := c.streamDrain(ctx, reader, baseline{bootID: "A"}, opts, newFollowState(opts))
 	if err != errStalled {
 		t.Fatalf("err = %v, want errStalled", err)
 	}
@@ -237,7 +237,7 @@ func TestStreamDrainStallDisabledForPreV2(t *testing.T) {
 	opts := testFollowOpts()
 	done := make(chan error, 1)
 	go func() {
-		_, err := c.streamDrain(ctx, reader, baseline{bootID: "A"}, opts, newFollowState(opts))
+		err := c.streamDrain(ctx, reader, baseline{bootID: "A"}, opts, newFollowState(opts))
 		done <- err
 	}()
 	// Several stall windows must pass without errStalled.
@@ -272,7 +272,7 @@ func TestStreamDrainStallSuppressed(t *testing.T) {
 			opts := testFollowOpts()
 			done := make(chan error, 1)
 			go func() {
-				_, err := c.streamDrain(ctx, reader, baseline{bootID: "A"}, opts, newFollowState(opts))
+				err := c.streamDrain(ctx, reader, baseline{bootID: "A"}, opts, newFollowState(opts))
 				done <- err
 			}()
 			// Several stall windows must pass without errStalled while suppressed.
@@ -289,30 +289,33 @@ func TestStreamDrainStallSuppressed(t *testing.T) {
 	}
 }
 
-// A boot_id flip seen directly on the stream is the respawn — report it without
-// waiting for the stream to end.
-func TestStreamDrainSuccessorOnStream(t *testing.T) {
+// A foreign boot_id arriving mid-stream is NOT a successor: a stream is pinned to
+// one process, so this is a predecessor the reader prefetched before acceptance
+// (the launchd-restart race), not the respawn. streamDrain must discard it — not
+// fold it, not report it — and let the stream end carry the wait to the probe.
+func TestStreamDrainDiscardsForeignMidStreamSnapshot(t *testing.T) {
 	ctx := t.Context()
-	successor := &runnyv1.GetStatusResponse{BootId: "B", ProtocolVersion: 2, ConfigSha256: wantSHA}
-	stream := hangingStream(
-		t,
-		recvResult{resp: idleSnap(1)},
-		recvResult{resp: successor},
-	)
+	// baseline is the accepting process B; this A on a different config would, if
+	// mistaken for the respawn, report a false drift.
+	predecessor := &runnyv1.GetStatusResponse{BootId: "A", ProtocolVersion: 2, ConfigSha256: otherSHA}
+	stream := &scriptedStream{results: []recvResult{
+		{resp: predecessor},
+		{err: io.EOF},
+	}}
 	reader := startReader(ctx, stream.Recv)
 	c := &ctl{client: &fakeFollowClient{}, out: &bytes.Buffer{}}
 	opts := testFollowOpts()
-	st, err := c.streamDrain(ctx, reader, baseline{bootID: "A"}, opts, newFollowState(opts))
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
+	fs := newFollowState(opts)
+	if err := c.streamDrain(ctx, reader, baseline{bootID: "B"}, opts, fs); err != nil {
+		t.Fatalf("err = %v, want nil (the predecessor is discarded, then the stream ends)", err)
 	}
-	if st.GetBootId() != "B" {
-		t.Fatalf("want the successor (boot_id B), got %+v", st)
+	if fs.last != nil {
+		t.Errorf("predecessor folded into follow state (fs.last=%+v); it must be discarded", fs.last)
 	}
 }
 
 // A clean stream end means "the daemon exited for the respawn": streamDrain
-// returns (nil, nil) so the caller advances to the probe/respawn phase.
+// returns nil so the caller advances to the probe/respawn phase.
 func TestStreamDrainEndReturnsNil(t *testing.T) {
 	ctx := t.Context()
 	stream := &scriptedStream{results: []recvResult{
@@ -322,9 +325,8 @@ func TestStreamDrainEndReturnsNil(t *testing.T) {
 	reader := startReader(ctx, stream.Recv)
 	c := &ctl{client: &fakeFollowClient{}, out: &bytes.Buffer{}}
 	opts := testFollowOpts()
-	st, err := c.streamDrain(ctx, reader, baseline{bootID: "A"}, opts, newFollowState(opts))
-	if err != nil || st != nil {
-		t.Fatalf("stream end: got st=%+v err=%v, want nil/nil", st, err)
+	if err := c.streamDrain(ctx, reader, baseline{bootID: "A"}, opts, newFollowState(opts)); err != nil {
+		t.Fatalf("stream end: got err=%v, want nil", err)
 	}
 }
 
@@ -340,7 +342,7 @@ func TestStreamDrainReportsJobInFlight(t *testing.T) {
 	c := &ctl{client: &fakeFollowClient{}, out: &bytes.Buffer{}}
 	opts := testFollowOpts()
 	fs := newFollowState(opts)
-	_, err := c.streamDrain(ctx, reader, baseline{bootID: "A"}, opts, fs)
+	err := c.streamDrain(ctx, reader, baseline{bootID: "A"}, opts, fs)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -412,6 +414,35 @@ func TestFollowDiscardsPreAcceptPredecessor(t *testing.T) {
 	st, msg, err := c.follow(ctx, reader, func() {}, first, baseline{bootID: "B"}, wantSHA, testFollowOpts())
 	if err != nil {
 		t.Fatalf("verdict error — the pre-accept predecessor was mistaken for the respawn: %v", err)
+	}
+	if st.GetBootId() != "C" {
+		t.Fatalf("verdict resolved against boot_id %q, want the real respawn C", st.GetBootId())
+	}
+	if !strings.Contains(msg, "respawned on config") {
+		t.Errorf("msg = %q, want a clean respawn verdict", msg)
+	}
+}
+
+// Beyond the establish snapshot: after discarding `first` as a predecessor, a
+// SECOND predecessor snapshot the reader prefetched from the same pre-accept
+// stream (a heartbeat/transition queued while the Reload RPC ran) must also be
+// discarded, not mistaken for the respawn. The genuine successor C is found only
+// after that stream ends and a probe reaches the real process.
+func TestFollowDiscardsPrefetchedPredecessor(t *testing.T) {
+	ctx := t.Context()
+	first := &runnyv1.GetStatusResponse{BootId: "A", ProtocolVersion: 2, ConfigSha256: otherSHA}
+	prefetched := &runnyv1.GetStatusResponse{BootId: "A", ProtocolVersion: 2, ConfigSha256: otherSHA}
+	// The pre-accept stream (opened against A) delivers the prefetched predecessor
+	// snapshot, then ends; the probe then finds the genuine respawn C.
+	reader := startReader(ctx, (&scriptedStream{results: []recvResult{
+		{resp: prefetched}, {err: io.EOF},
+	}}).Recv)
+	respawn := &runnyv1.GetStatusResponse{BootId: "C", ProtocolVersion: 2, ConfigSha256: wantSHA}
+	fc := &fakeFollowClient{statusFn: func() (*runnyv1.GetStatusResponse, error) { return respawn, nil }}
+	c := &ctl{client: fc, out: &bytes.Buffer{}}
+	st, msg, err := c.follow(ctx, reader, func() {}, first, baseline{bootID: "B"}, wantSHA, testFollowOpts())
+	if err != nil {
+		t.Fatalf("verdict error — a prefetched predecessor was mistaken for the respawn: %v", err)
 	}
 	if st.GetBootId() != "C" {
 		t.Fatalf("verdict resolved against boot_id %q, want the real respawn C", st.GetBootId())

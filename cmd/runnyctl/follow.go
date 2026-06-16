@@ -241,18 +241,16 @@ func (c *ctl) follow(ctx context.Context, reader *snapshotReader, closeStream fu
 		c.fold(first, fs, opts)
 	}
 	for {
-		st, err := c.streamDrain(ctx, reader, base, opts, fs)
+		err := c.streamDrain(ctx, reader, base, opts, fs)
 		if ctx.Err() != nil {
 			return nil, "", c.cancelled(ctx)
 		}
 		if errors.Is(err, errStalled) {
 			return nil, "", err
 		}
-		if st != nil {
-			return verdict(st) // successor seen directly on the stream
-		}
-		// Stream ended without a successor on it. Probe to tell a transient drop
-		// (old daemon still draining) from the daemon actually exiting.
+		// The stream ended; streamDrain never reports a successor (one cannot
+		// appear on an established stream). Probe to tell a transient drop (old
+		// daemon still draining) from the daemon actually exiting.
 		switch p := c.probeDaemon(ctx, base, opts); p.kind {
 		case probeNewProcess:
 			return verdict(p.st)
@@ -354,22 +352,29 @@ func (c *ctl) openStream(ctx context.Context, within time.Duration) (*snapshotRe
 
 // streamDrain follows one stream's live drain against the shared follow state.
 // It returns:
-//   - (successor, nil): a snapshot reported a new process;
-//   - (nil, nil): the stream ended (the caller probes before the respawn cap);
-//   - (nil, errStalled): no drain progress past the stall window with nothing
+//   - nil: the stream ended (the caller probes before the respawn cap);
+//   - errStalled: no drain progress past the stall window with nothing
 //     long-running or held to explain it;
-//   - (nil, ctx err): cancelled.
+//   - ctx err: cancelled.
+//
+// It NEVER reports a successor. A snapshot arriving on an established stream is
+// always from the single process that stream is pinned to — never the respawn,
+// which can surface only as a freshly-opened stream's first snapshot (the reopen
+// path) or a probe/respawn poll. So a non-matching snapshot here is a predecessor
+// — e.g. one the reader prefetched from the old process before the reload was
+// accepted, in the launchd-restart race — and is discarded, never mistaken for
+// the respawn.
 //
 // The stall timer lives in fs and is NOT re-armed on entry — it carries across
 // reopens, so a flapping stream cannot reset the progress bound. A ctx
 // cancellation is caught by the caller's own ctx.Err() check.
-func (c *ctl) streamDrain(ctx context.Context, reader *snapshotReader, base baseline, opts followOpts, fs *followState) (*runnyv1.GetStatusResponse, error) {
+func (c *ctl) streamDrain(ctx context.Context, reader *snapshotReader, base baseline, opts followOpts, fs *followState) error {
 	redraw := time.NewTicker(opts.redrawInterval)
 	defer redraw.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return ctx.Err()
 		case <-fs.stall.C:
 			// The stall means "hung" only when nothing legitimately indefinite
 			// explains the silence: a slot in JOB or ENSURE_IMAGE is bounded
@@ -386,17 +391,25 @@ func (c *ctl) streamDrain(ctx context.Context, reader *snapshotReader, base base
 				fs.stall.Reset(opts.stallWindow)
 				continue
 			}
-			return nil, errStalled
+			return errStalled
 		case <-redraw.C:
 			if fs.last != nil {
 				c.renderFollow(fs.last, fs.start)
 			}
 		case m := <-reader.msgs:
 			if m.err != nil {
-				return nil, nil // stream ended; the caller probes
+				return nil // stream ended; the caller probes
 			}
-			if st := c.absorb(m.resp, base, fs, opts); st != nil {
-				return st, nil
+			// Fold this snapshot only when it is the process the reload baselined.
+			// A non-match is a predecessor the reader prefetched before acceptance
+			// (the launchd-restart race); discard it rather than absorb it as the
+			// respawn — the genuine successor arrives via a reopen or a probe.
+			// Fold this snapshot only when it is the process the reload baselined.
+			// A non-match is a predecessor the reader prefetched before acceptance
+			// (the launchd-restart race); discard it rather than absorb it as the
+			// respawn — the genuine successor arrives via a reopen or a probe.
+			if !base.isSuccessor(m.resp) {
+				c.fold(m.resp, fs, opts)
 			}
 		}
 	}

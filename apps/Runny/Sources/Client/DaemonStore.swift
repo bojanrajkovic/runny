@@ -94,6 +94,24 @@ final class DaemonStore {
     /// stuck — it reports the command sent-but-unconfirmable rather than
     /// risk a false confirm or a guaranteed false timeout.
     private(set) var protocolVersion: UInt32 = 0
+    /// SHA-256 (hex) of the config the running daemon loaded at cold start
+    /// (empty from a daemon predating the field). The reload verdict compares it
+    /// against the hash the reload validated to prove the respawn came up on the
+    /// right file.
+    private(set) var configSHA256 = ""
+    /// The running daemon's random per-process boot id (empty below protocol 2).
+    /// It is the respawn discriminator: a reload's verdict fires when this flips
+    /// to a value other than the one the accepting process echoed — the
+    /// persisted instance id can't discriminate, only a per-process id can.
+    private(set) var bootID = ""
+    /// The daemon-authoritative drain-progress counter. A reload follower resets
+    /// its mid-drain stall timer only when this CHANGES, so a wedged daemon's
+    /// 30s heartbeats (frozen drain_seq) can't mask a stalled drain.
+    private(set) var drainSeq: UInt64 = 0
+    /// True while the exit gate is held (the on-disk config no longer parses).
+    /// Authoritative — the stall is suppressed on it rather than parsing
+    /// `draining`.
+    private(set) var exitHeld = false
 
     private(set) var doctorChecks: [Runny_V1_DoctorCheck]?
     private(set) var doctorRanAt: Date?
@@ -131,11 +149,62 @@ final class DaemonStore {
     /// destroy a debug hold — the CLI's `-force` cases). The hosting view
     /// presents a confirmation; nil otherwise.
     var recycleConfirm: Runny_V1_SlotStatus?
+    /// True while the operator's reload confirmation dialog is up.
+    var reloadConfirm = false
+    /// True from the moment a reload RPC is sent until the daemon answers
+    /// accepted/refused — disables the Reload control and shows "Validating…".
+    /// The preflight is synchronous and can take most of a minute.
+    private(set) var reloadInFlight = false
 
     private(set) var pending: [String: PendingCommand] = [:]
     /// Ids a snapshot confirmed in the last confirm→catch window, so a late RPC
     /// error doesn't contradict a confirmation the operator can already see.
     private var recentlyConfirmed = RecentlyConfirmed()
+
+    /// A reload accepted and awaiting its respawn: the accepting process's boot
+    /// id (so a genuinely new process is recognizable — instance id persists
+    /// across a respawn, boot id does not), the config hash the reload validated
+    /// (so the respawn can be confirmed to have loaded that file), and the
+    /// pre-reload start time as the protocol-1 fallback discriminator. nil when
+    /// no reload is in flight.
+    private var pendingReload: PendingReload?
+    /// Whether a slot was running a job in the last old-process snapshot before
+    /// the respawn — colors the success verdict (a job may have been
+    /// interrupted). Tracked across the drain, read when the respawn resolves.
+    private var reloadJobInFlight = false
+    /// drain_seq the mid-drain stall is anchored on, and when it last changed.
+    /// A frozen drain_seq past `reloadStallBound` (with nothing long-running or
+    /// held) is the wedged-but-serving daemon the silence deadline can't catch.
+    private var reloadStallSeq: UInt64 = 0
+    private var reloadStallSince: Date?
+    /// The in-flight reload RPC's task, held so `restart()` (a runny-home change)
+    /// can cancel it — otherwise a late "accepted" answered against the old home
+    /// would arm a pending reload against the new home's supervisor and produce a
+    /// false verdict for a daemon the app is no longer watching.
+    private var reloadTask: Task<Void, Never>?
+    /// Monotonic reload identity. Cancellation is cooperative: a cancelled reload
+    /// task's `defer { reloadInFlight = false }` still runs as it unwinds, which
+    /// would clear the flag for a reload started after restart() bumped this. The
+    /// defer compares its captured generation against the live one and no-ops when
+    /// it is stale, so only the current reload can clear its own flag.
+    private var reloadGeneration = 0
+
+    struct PendingReload: Equatable {
+        let acceptingBootID: String
+        let priorStart: Date?
+        let wantSHA: String
+    }
+
+    /// The fingerprint of a respawn against the config a reload validated. A
+    /// `.failure` is config drift — the respawn loaded a different file, the one
+    /// outcome the operator must act on; `.warning` is degraded-but-ok (config
+    /// unverifiable, or a job may have been interrupted); `.success` is a
+    /// confirmed clean reload.
+    struct ReloadOutcome: Equatable {
+        enum Severity { case success, warning, failure }
+        let text: String
+        let severity: Severity
+    }
 
     /// The client of the current healthy stream; log/timeline views borrow
     /// it. nil while unreachable — actions fail fast instead of hanging.
@@ -152,6 +221,19 @@ final class DaemonStore {
     static let establishmentBound: TimeInterval = 5
     static let stalenessBound: TimeInterval = 90
     static let confirmationBound: TimeInterval = 10
+    /// After a reload drains the fleet, how long the app tolerates SILENCE — no
+    /// fresh snapshot — before declaring the respawn failed. Anchored on the
+    /// last snapshot (`lastUpdate`), not the reload time: a long healthy drain
+    /// keeps serving status every ≤30s, so silence only accrues once the daemon
+    /// actually stops reporting (died and hasn't returned). Same budget as
+    /// runnyctl's respawn cap.
+    static let respawnBound: TimeInterval = 90
+    /// How long a reload's drain may make NO progress (a frozen drain_seq) while
+    /// the daemon still answers, before it's called wedged. Distinct from
+    /// `respawnBound` (silence): this catches the daemon that heartbeats but
+    /// stops draining. Generous, since legitimate drain transitions can be
+    /// spaced; suppressed while a slot is in JOB/ENSURE_IMAGE or the gate is held.
+    static let reloadStallBound: TimeInterval = 90
     /// The lowest daemon protocol version that echoes command ids, and so the
     /// floor at which pause/resume are confirmable. Kept in lockstep with the
     /// daemon's `WireProtocolVersion`.
@@ -181,6 +263,17 @@ final class DaemonStore {
         connection = .connecting
         slots = []
         protocolVersion = 0
+        configSHA256 = ""
+        bootID = ""
+        drainSeq = 0
+        exitHeld = false
+        pendingReload = nil
+        reloadJobInFlight = false
+        reloadStallSince = nil
+        reloadTask?.cancel()
+        reloadTask = nil
+        reloadGeneration += 1
+        reloadInFlight = false
         client = nil
         start()
     }
@@ -245,6 +338,9 @@ final class DaemonStore {
                     connection = .unreachable(reason: Self.diagnose())
                 }
             }
+            // The connection state just changed; if a reload is waiting on a
+            // respawn whose daemon went silent, this is where we give up on it.
+            checkReloadRespawnDeadline()
             await sleepInterruptibly(backoff * Double.random(in: 0.8 ... 1.2))
             if retryNow {
                 retryNow = false
@@ -323,8 +419,14 @@ final class DaemonStore {
         daemonStarted = snapshot.hasDaemonStarted ? snapshot.daemonStarted.dateValue : nil
         draining = snapshot.draining
         protocolVersion = snapshot.protocolVersion
+        configSHA256 = snapshot.configSha256
+        bootID = snapshot.bootID
+        drainSeq = snapshot.drainSeq
+        exitHeld = snapshot.exitHeld
         lastUpdate = Date()
         confirmPending()
+        trackReloadDrain()
+        noteRespawnIfReady()
     }
 
     // MARK: - Commands (requested vs confirmed)
@@ -594,5 +696,208 @@ final class DaemonStore {
                 commandError = "doctor failed: \(error.localizedDescription)"
             }
         }
+    }
+
+    // MARK: - Reload (validate → drain → confirm the respawn)
+
+    /// Stage the reload confirmation dialog. Reload restarts the whole daemon
+    /// and drains every slot (jobs finish first), so it's gated behind explicit
+    /// consent like the `-force` recycle cases.
+    func requestReload() { reloadConfirm = true }
+
+    /// The confirmed path: send the reload. Acceptance arms a pendingReload that
+    /// `noteRespawnIfReady` resolves into a verdict once a new daemon (a changed
+    /// boot id) answers; refusal surfaces the failed checks at once and leaves
+    /// the daemon running.
+    func performReload() {
+        reloadConfirm = false
+        guard let client else {
+            commandError = "daemon unreachable — reload not sent"
+            return
+        }
+        guard !reloadInFlight else { return }
+        reloadInFlight = true
+        // The protocol-1 fallback discriminator. The real discriminator is the
+        // accepting process's boot id, carried in the response, so there is no
+        // pre-RPC read whose process could differ from the one that accepts.
+        let priorStart = daemonStarted
+        let gen = reloadGeneration
+        reloadTask = Task { @MainActor in
+            defer { if gen == reloadGeneration { reloadInFlight = false } }
+            do {
+                let resp = try await client.reload(reason: "operator request (Runny)")
+                guard !Task.isCancelled else { return }
+                guard resp.accepted else {
+                    pendingReload = nil
+                    commandError = Self.describeRefusal(resp)
+                    return
+                }
+                pendingReload = PendingReload(
+                    acceptingBootID: resp.acceptingBootID,
+                    priorStart: priorStart,
+                    wantSHA: resp.configSha256
+                )
+                reloadJobInFlight = false
+                reloadStallSeq = drainSeq
+                reloadStallSince = Date()
+                var notes = resp.warnings.filter { !$0.ok }.map { "\($0.name): \($0.detail)" }
+                if resp.acceptingBootID.isEmpty {
+                    notes.append("this daemon predates boot-id reporting — confirming the respawn by start time only")
+                }
+                if !notes.isEmpty {
+                    commandNote = "reload accepted — " + notes.joined(separator: "; ")
+                }
+                // The drain itself shows through the live WatchStatus stream; the
+                // respawn is resolved by noteRespawnIfReady on a later snapshot.
+            } catch {
+                if Task.isCancelled { return }
+                pendingReload = nil
+                commandError = "reload failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Is `st`'s identity a genuinely new process versus the reload we baselined?
+    /// Prefer boot id (positive, closes the sub-RPC race) when both sides speak
+    /// it; otherwise fall back to a changed start time — covering both a pre-2
+    /// daemon we baselined and a respawn that downgraded to a pre-2 binary
+    /// mid-reload (which echoes no boot id, so a boot-id-only check would pin the
+    /// pending reload forever with no verdict).
+    private func isReloadSuccessor(_ reload: PendingReload) -> Bool {
+        if !reload.acceptingBootID.isEmpty, !bootID.isEmpty {
+            return bootID != reload.acceptingBootID
+        }
+        guard let prior = reload.priorStart, let started = daemonStarted else { return false }
+        return started != prior
+    }
+
+    /// On each old-process snapshot during a pending reload's drain: remember
+    /// whether a job is in flight (colors the verdict) and bound the drain by
+    /// PROGRESS. A frozen drain_seq past `reloadStallBound`, with nothing
+    /// long-running (JOB/ENSURE_IMAGE are daemon-bounded) or held to explain it,
+    /// is a wedged-but-serving daemon — the case `lastUpdate` silence can't catch
+    /// because the heartbeat keeps it fresh.
+    private func trackReloadDrain() {
+        guard let reload = pendingReload, !isReloadSuccessor(reload) else { return }
+        reloadJobInFlight = slots.contains { $0.state == .job }
+        if drainSeq != reloadStallSeq {
+            reloadStallSeq = drainSeq
+            reloadStallSince = Date()
+            return
+        }
+        guard let since = reloadStallSince else {
+            reloadStallSince = Date()
+            return
+        }
+        let longRunning = slots.contains { $0.state == .job || $0.state == .ensureImage }
+        if !longRunning, !exitHeld, Date().timeIntervalSince(since) > Self.reloadStallBound {
+            commandError = "reload isn't converging — the daemon stopped making drain "
+                + "progress and may be hung; check `runnyctl status`"
+            pendingReload = nil
+            reloadStallSince = nil
+        }
+    }
+
+    /// Once a genuinely new daemon answers while a reload is pending, render the
+    /// verdict and retire the pending. Until then a no-op — the old process
+    /// answering during the drain resolves nothing.
+    private func noteRespawnIfReady() {
+        guard let reload = pendingReload, isReloadSuccessor(reload) else { return }
+        let outcome = Self.respawnVerdict(
+            protocolVersion: protocolVersion,
+            gotSHA: configSHA256,
+            wantSHA: reload.wantSHA,
+            jobInFlight: reloadJobInFlight,
+            reDraining: draining
+        )
+        pendingReload = nil
+        reloadStallSince = nil
+        switch outcome.severity {
+        case .failure:
+            commandError = outcome.text
+        case .success, .warning:
+            commandNote = outcome.text
+        }
+    }
+
+    /// Bounds the respawn wait from the silence side: if a reload is pending and
+    /// no snapshot has arrived for `respawnBound`, the daemon died and never came
+    /// back — say so and retire the pending so a much-later unrelated restart
+    /// can't surface a stale "reloaded" verdict. The wedged-but-heartbeating case
+    /// is `trackReloadDrain`'s job (this anchor stays fresh under a heartbeat).
+    private func checkReloadRespawnDeadline() {
+        guard pendingReload != nil else { return }
+        guard let last = lastUpdate,
+              Date().timeIntervalSince(last) > Self.respawnBound
+        else { return }
+        if case .unreachable = connection {
+            commandError = "reload drained the fleet, but the daemon hasn't "
+                + "come back — \(Self.diagnose())"
+        } else {
+            commandError = "reload isn't converging — the daemon stopped "
+                + "reporting while draining and may be hung; check `runnyctl status`"
+        }
+        pendingReload = nil
+        reloadStallSince = nil
+    }
+
+    /// Pure: turns a refused ReloadResponse into the operator-facing banner —
+    /// the failed checks, plus the loud warning when a drain is already running
+    /// and WILL load the invalid file. Static so it's unit-testable.
+    nonisolated static func describeRefusal(_ resp: Runny_V1_ReloadResponse) -> String {
+        var lines = [
+            "reload refused — the new config failed validation; the running daemon is unchanged",
+        ]
+        for check in resp.failedChecks where !check.ok {
+            lines.append("• \(check.name): \(check.detail)")
+        }
+        if !resp.draining.isEmpty {
+            lines.append(
+                "WARNING: the daemon is already draining (\(resp.draining)) and the "
+                    + "respawn WILL load this invalid config — fix it before the drain converges"
+            )
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Pure: the whole respawn taxonomy against the validated config, mirroring
+    /// runnyctl's `respawnVerdict`. Static so every branch is unit-testable. A
+    /// `.failure` is config drift (the operator must act); the job-in-flight case
+    /// is a `.warning` (the config IS live, but a job may have been interrupted).
+    nonisolated static func respawnVerdict(
+        protocolVersion: UInt32, gotSHA: String, wantSHA: String,
+        jobInFlight: Bool, reDraining: String
+    ) -> ReloadOutcome {
+        let want = shortSHA(wantSHA)
+        let note = reDraining.isEmpty
+            ? "" : " (the new daemon is already draining again: \(reDraining))"
+        if protocolVersion < 2 || gotSHA.isEmpty {
+            return ReloadOutcome(
+                text: "daemon respawned, but it doesn't report its running config hash — "
+                    + "can't verify it came up on \(want); upgrade runnyd to confirm\(note)",
+                severity: .warning
+            )
+        }
+        if gotSHA != wantSHA {
+            return ReloadOutcome(
+                text: "daemon respawned on config \(shortSHA(gotSHA)), NOT the config you "
+                    + "reloaded (\(want)) — the on-disk file changed during the drain",
+                severity: .failure
+            )
+        }
+        if jobInFlight {
+            return ReloadOutcome(
+                text: "daemon respawned on config \(want), but the previous daemon went down "
+                    + "with a job still running — it may have been interrupted\(note)",
+                severity: .warning
+            )
+        }
+        return ReloadOutcome(
+            text: "reloaded: respawned on config \(want)\(note)", severity: .success
+        )
+    }
+
+    nonisolated static func shortSHA(_ s: String) -> String {
+        s.count > 12 ? String(s.prefix(12)) : s
     }
 }

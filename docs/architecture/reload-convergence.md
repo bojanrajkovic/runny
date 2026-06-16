@@ -81,7 +81,11 @@ In FOLLOW the stall catches a daemon that stopped making drain progress —
 that keeps bumping it. The stall is **carried across stream reopens** (a flapping
 stream cannot reset it forever) and **suppressed** while a slot is legitimately
 long-running (a running job, a progress-bounded pull) or the exit gate is held —
-those are bounded daemon-side or operator-actionable, not hangs. Anchoring the
+those are bounded daemon-side or operator-actionable, not hangs. It is **disabled
+outright against a pre-2 daemon**, which publishes no `drain_seq`: with no
+progress signal the bound could only degrade into a wall-clock cap on the drain
+(the cap this design refuses), so a pre-2 drain falls back to stream-liveness and
+the respawn cap, and the accept-time warning says so. Anchoring the
 respawn cap on the daemon's *disappearance*, confirmed by a probe rather than a
 single dropped stream, is what lets a long healthy drain precede a short bounded
 respawn wait without the two interfering. Ctrl-C stops following without

@@ -159,9 +159,15 @@ func run() error {
 	case "reload":
 		fs := flag.NewFlagSet("reload", flag.ExitOnError)
 		reason := fs.String("reason", "", "reason recorded in the daemon log and cycle records")
+		wait := fs.Bool("wait", false, "follow the drain and confirm the respawn came up on this config")
+		respawnTimeout := fs.Duration("respawn-timeout", 90*time.Second, "max wait for the respawn after the daemon exits")
+		timeout := fs.Duration("timeout", 0, "optional hard cap on the entire wait (0 = none)")
 		_ = fs.Parse(rest)
 		if fs.NArg() != 0 {
 			return fmt.Errorf("reload takes no positional arguments")
+		}
+		if *wait {
+			return c.reloadWait(ctx, *reason, defaultFollowOpts(*respawnTimeout, *timeout))
 		}
 		return c.reload(ctx, *reason)
 	case "why":

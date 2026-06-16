@@ -6,7 +6,10 @@ load("//tools/sign:sign.bzl", "codesign_binary", "notarize_binary")
 
 go_library(
     name = "runnyctl_lib",
-    srcs = ["main.go"],
+    srcs = [
+        "follow.go",
+        "main.go",
+    ],
     importpath = "github.com/bojanrajkovic/runny/cmd/runnyctl",
     visibility = ["//visibility:private"],
     deps = [
@@ -34,7 +37,10 @@ notarize_binary(
 
 go_test(
     name = "runnyctl_test",
-    srcs = ["main_test.go"],
+    srcs = [
+        "follow_test.go",
+        "main_test.go",
+    ],
     embed = [":runnyctl_lib"],
     deps = [
         "//proto/runny/v1:runny",

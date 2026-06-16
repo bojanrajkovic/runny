@@ -293,6 +293,9 @@ func TestStreamDrainStallSuppressed(t *testing.T) {
 		{"provisioning (180s daemon deadline)", slotSnap(1, runnyv1.SlotState_SLOT_STATE_PROVISION)},
 		{"booting", slotSnap(1, runnyv1.SlotState_SLOT_STATE_BOOT)},
 		{"awaiting ssh", slotSnap(1, runnyv1.SlotState_SLOT_STATE_AWAIT_SSH)},
+		// slotSnap leaves the slot UNPAUSED: a BACKOFF slot still backing off (up
+		// to the backoff cap) is not yet converged — only PAUSED BACKOFF is.
+		{"unpaused backoff (still backing off)", slotSnap(1, runnyv1.SlotState_SLOT_STATE_BACKOFF)},
 		{"held exit gate", func() *runnyv1.GetStatusResponse { s := idleSnap(1); s.ExitHeld = true; return s }()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

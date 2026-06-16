@@ -128,25 +128,35 @@ final class DrainStallTests: XCTestCase {
     }
 }
 
-/// Slot activity drives the stall carve-out: any non-BACKOFF state is a slot
-/// still working a daemon-bounded step, so the stall is suppressed for it; only a
-/// fully quiescent fleet (all BACKOFF) can be called hung. Mirrors runnyctl's
-/// `anySlotActive`.
+/// Slot activity drives the stall carve-out — it mirrors the daemon's stable
+/// predicate (Wedged || (Paused && BACKOFF)): a slot is quiescent only when wedged
+/// or PAUSED in BACKOFF, so a cycle state OR an unpaused BACKOFF (still backing
+/// off) is active and suppresses the stall. Only a fully converged fleet can be
+/// called hung. Mirrors runnyctl's `anySlotActive`.
 final class SlotActivityTests: XCTestCase {
-    private func slot(_ state: Runny_V1_SlotState) -> Runny_V1_SlotStatus {
+    private func slot(_ state: Runny_V1_SlotState, paused: Bool = false) -> Runny_V1_SlotStatus {
         var s = Runny_V1_SlotStatus()
         s.state = state
+        s.paused = paused
         return s
     }
 
     func testProvisioningIsActive() {
         // A slot mid-PROVISION (180s daemon deadline) must read as active so the
         // 90s stall is suppressed rather than calling a healthy drain hung.
-        XCTAssertTrue(DaemonStore.anySlotActive([slot(.backoff), slot(.provision)]))
+        XCTAssertTrue(DaemonStore.anySlotActive([slot(.backoff, paused: true), slot(.provision)]))
     }
 
-    func testAllBackoffIsQuiescent() {
-        XCTAssertFalse(DaemonStore.anySlotActive([slot(.backoff), slot(.backoff)]))
+    func testPausedBackoffIsQuiescent() {
+        XCTAssertFalse(
+            DaemonStore.anySlotActive([slot(.backoff, paused: true), slot(.backoff, paused: true)])
+        )
+    }
+
+    func testUnpausedBackoffIsActive() {
+        // Still backing off (up to the cap), not yet converged — the daemon's
+        // stableStatus requires Paused && BACKOFF, so an unpaused BACKOFF is active.
+        XCTAssertTrue(DaemonStore.anySlotActive([slot(.backoff, paused: false)]))
     }
 
     func testWedgedSlotIsQuiescent() {
@@ -155,7 +165,7 @@ final class SlotActivityTests: XCTestCase {
         // converged-but-not-exiting fleet would suppress the stall forever.
         var wedged = slot(.teardown)
         wedged.wedged = true
-        XCTAssertFalse(DaemonStore.anySlotActive([slot(.backoff), wedged]))
+        XCTAssertFalse(DaemonStore.anySlotActive([slot(.backoff, paused: true), wedged]))
     }
 
     func testEmptyIsQuiescent() {

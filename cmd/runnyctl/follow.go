@@ -546,29 +546,27 @@ func anySlotInState(resp *runnyv1.GetStatusResponse, states ...runnyv1.SlotState
 	return false
 }
 
-// anySlotActive reports whether any slot is still working through its cycle — any
-// state other than BACKOFF, the paused/backing-off state a drain converges to.
-// Every active state is bounded daemon-side, by its own per-state deadline (CLONE,
-// BOOT, AWAIT_*, MINT_JIT, PROVISION, TEARDOWN, SECURE_SSH), by a duration budget
-// (a long JOB), or by a progress watcher (an ENSURE_IMAGE pull), so a frozen
-// drain_seq while a slot is active is that bound's business to enforce — not a
-// hang for the client stall to call. The stall is left to fire only once the
-// fleet is quiescent (all slots in BACKOFF) yet still not exiting.
-//
-// A WEDGED slot is excepted: it is a converged drain state (the daemon counts it
-// as stable — it cannot start a job) even though it still reports its underlying
-// state (e.g. TEARDOWN). Treating it as active would suppress the stall forever
-// on a fleet that converged but never exits — exactly the hang the stall catches.
+// anySlotActive reports whether any slot is still working toward convergence. It
+// mirrors the daemon's own stable predicate (stableStatus = Wedged || (Paused &&
+// BACKOFF)): a slot is quiescent only when wedged or PAUSED in BACKOFF. So a slot
+// working a cycle state (JOB, ENSURE_IMAGE, PROVISION, …) OR sitting UNPAUSED in
+// BACKOFF — still backing off, up to the backoff cap, before the drainer's pause
+// lands — counts as active. Each active case is bounded daemon-side (a per-state
+// deadline, a duration budget, a pull watcher, or the backoff cap), so a frozen
+// drain_seq while a slot is active is that bound's business, not a hang for the
+// client stall to call. The stall is left to fire only once every slot is
+// quiescent (the daemon's own converged state) yet the daemon still hasn't exited.
 func anySlotActive(resp *runnyv1.GetStatusResponse) bool {
 	for _, s := range resp.GetSlots() {
-		if s.GetWedged() {
-			continue
-		}
-		switch s.GetState() {
-		case runnyv1.SlotState_SLOT_STATE_UNSPECIFIED, runnyv1.SlotState_SLOT_STATE_BACKOFF:
-			// not active
+		switch {
+		case s.GetWedged():
+			// converged: a wedged slot cannot start a job
+		case s.GetState() == runnyv1.SlotState_SLOT_STATE_BACKOFF && s.GetPaused():
+			// converged: paused in BACKOFF (the daemon's stable state)
+		case s.GetState() == runnyv1.SlotState_SLOT_STATE_UNSPECIFIED:
+			// no state reported
 		default:
-			return true
+			return true // active, incl. an UNPAUSED BACKOFF still backing off
 		}
 	}
 	return false

@@ -89,3 +89,40 @@ final class ReloadRefusalTests: XCTestCase {
         XCTAssertTrue(text.contains("respawn WILL load this invalid config"))
     }
 }
+
+/// The mid-drain stall gate: only a protocol-2 daemon publishes `drain_seq`, the
+/// progress signal the stall rests on. A pre-2 daemon (no signal) must never be
+/// declared wedged; a v2 daemon is wedged only when frozen past the bound with
+/// nothing long-running or the exit gate held. Mirrors runnyctl's `streamDrain`
+/// carve-out. Pure, so every branch is pinned without a live daemon.
+final class DrainStallTests: XCTestCase {
+    func testPreV2NeverStalls() {
+        // Frozen far past the bound, but there is no drain_seq to measure against.
+        XCTAssertFalse(DaemonStore.drainStalled(
+            protocolVersion: 1, stalledFor: 1000, bound: 90, longRunning: false, exitHeld: false
+        ))
+    }
+
+    func testV2StallsWhenFrozenPastBound() {
+        XCTAssertTrue(DaemonStore.drainStalled(
+            protocolVersion: 2, stalledFor: 91, bound: 90, longRunning: false, exitHeld: false
+        ))
+    }
+
+    func testV2SuppressedWhileLongRunningOrHeld() {
+        // A running job / image pull is daemon-bounded and a held exit gate is
+        // operator-actionable — not hangs, so no stall even far past the bound.
+        XCTAssertFalse(DaemonStore.drainStalled(
+            protocolVersion: 2, stalledFor: 1000, bound: 90, longRunning: true, exitHeld: false
+        ))
+        XCTAssertFalse(DaemonStore.drainStalled(
+            protocolVersion: 2, stalledFor: 1000, bound: 90, longRunning: false, exitHeld: true
+        ))
+    }
+
+    func testV2WithinBoundIsNotYetStalled() {
+        XCTAssertFalse(DaemonStore.drainStalled(
+            protocolVersion: 2, stalledFor: 30, bound: 90, longRunning: false, exitHeld: false
+        ))
+    }
+}

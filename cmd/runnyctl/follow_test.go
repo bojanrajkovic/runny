@@ -180,9 +180,10 @@ func hangingStream(t *testing.T, results ...recvResult) *scriptedStream {
 
 func idleSnap(seq uint64) *runnyv1.GetStatusResponse {
 	return &runnyv1.GetStatusResponse{
-		BootId:   "A",
-		DrainSeq: seq,
-		Draining: "config reload (rpc)",
+		BootId:          "A",
+		ProtocolVersion: 2, // drain_seq is a protocol-2 signal; the stall is too
+		DrainSeq:        seq,
+		Draining:        "config reload (rpc)",
 		Slots: []*runnyv1.SlotStatus{
 			{Slot: "mac-1", State: runnyv1.SlotState_SLOT_STATE_BACKOFF, Paused: true},
 		},
@@ -219,6 +220,35 @@ func TestStreamDrainStallFiresWhenIdle(t *testing.T) {
 	_, err := c.streamDrain(ctx, reader, baseline{bootID: "A"}, opts, newFollowState(opts))
 	if err != errStalled {
 		t.Fatalf("err = %v, want errStalled", err)
+	}
+}
+
+// A pre-2 daemon pins drain_seq at 0 — it has no progress signal — so the stall
+// must NOT fire against it, or it degrades into a wall-clock cap on a drain that
+// can validly run as long as any bounded state allows. streamDrain must keep
+// following until cancel.
+func TestStreamDrainStallDisabledForPreV2(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	snap := idleSnap(1)
+	snap.ProtocolVersion = 1 // supports Reload, predates the drain_seq signal
+	reader := startReader(ctx, hangingStream(t, recvResult{resp: snap}).Recv)
+	c := &ctl{client: &fakeFollowClient{}, out: &bytes.Buffer{}}
+	opts := testFollowOpts()
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.streamDrain(ctx, reader, baseline{bootID: "A"}, opts, newFollowState(opts))
+		done <- err
+	}()
+	// Several stall windows must pass without errStalled.
+	select {
+	case err := <-done:
+		t.Fatalf("streamDrain returned %v; a pre-2 daemon has no progress signal and must not trip the stall", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	cancel()
+	if err := <-done; err != context.Canceled {
+		t.Fatalf("after cancel err = %v, want context.Canceled", err)
 	}
 }
 

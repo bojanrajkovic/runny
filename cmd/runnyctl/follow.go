@@ -145,7 +145,7 @@ func (c *ctl) reloadWait(ctx context.Context, reason string, opts followOpts) er
 	base.bootID = resp.GetAcceptingBootId()
 	wantSHA := resp.GetConfigSha256()
 	if base.bootID == "" && !c.json {
-		fmt.Fprintln(os.Stderr, "warning: this daemon predates boot-id reporting (protocol < 2); confirming the respawn by start time only — a respawn racing this reload cannot be told apart")
+		fmt.Fprintln(os.Stderr, "warning: this daemon predates boot-id reporting (protocol < 2); confirming the respawn by start time only — a respawn racing this reload can't be told apart, and a stalled drain can't be detected (no drain-progress signal before protocol 2)")
 	}
 
 	st, msg, verr := c.follow(ctx, reader, closeStream, first, base, wantSHA, opts)
@@ -373,11 +373,16 @@ func (c *ctl) streamDrain(ctx context.Context, reader *snapshotReader, base base
 		case <-fs.stall.C:
 			// The stall means "hung" only when nothing legitimately indefinite
 			// explains the silence: a slot in JOB or ENSURE_IMAGE is bounded
-			// daemon-side (max_job_duration / the pull stall watcher), and a held
-			// exit gate is operator-actionable. Suppress and re-arm in those cases.
-			// (The timer fired and the select drained fs.stall.C, so a bare Reset
-			// is safe here.)
-			if fs.last != nil && (anySlotInState(fs.last, runnyv1.SlotState_SLOT_STATE_JOB, runnyv1.SlotState_SLOT_STATE_ENSURE_IMAGE) || fs.last.GetExitHeld()) {
+			// daemon-side (max_job_duration / the pull stall watcher), a held exit
+			// gate is operator-actionable, and a pre-2 daemon has no drain_seq at
+			// all — it pins the counter at 0, so the stall would degrade into a
+			// wall-clock cap on a drain that can validly run as long as any bounded
+			// state allows (the cap this design refuses). Suppress and re-arm in
+			// those cases. (The timer fired and the select drained fs.stall.C, so a
+			// bare Reset is safe here.)
+			if fs.last != nil && (fs.last.GetProtocolVersion() < 2 ||
+				anySlotInState(fs.last, runnyv1.SlotState_SLOT_STATE_JOB, runnyv1.SlotState_SLOT_STATE_ENSURE_IMAGE) ||
+				fs.last.GetExitHeld()) {
 				fs.stall.Reset(opts.stallWindow)
 				continue
 			}

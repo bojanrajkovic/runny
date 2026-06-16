@@ -742,7 +742,7 @@ final class DaemonStore {
                 reloadStallSince = Date()
                 var notes = resp.warnings.filter { !$0.ok }.map { "\($0.name): \($0.detail)" }
                 if resp.acceptingBootID.isEmpty {
-                    notes.append("this daemon predates boot-id reporting — confirming the respawn by start time only")
+                    notes.append("this daemon predates boot-id reporting — confirming the respawn by start time only; a stalled drain can't be detected either (no drain-progress signal before protocol 2)")
                 }
                 if !notes.isEmpty {
                     commandNote = "reload accepted — " + notes.joined(separator: "; ")
@@ -790,12 +790,31 @@ final class DaemonStore {
             return
         }
         let longRunning = slots.contains { $0.state == .job || $0.state == .ensureImage }
-        if !longRunning, !exitHeld, Date().timeIntervalSince(since) > Self.reloadStallBound {
+        if Self.drainStalled(
+            protocolVersion: protocolVersion, stalledFor: Date().timeIntervalSince(since),
+            bound: Self.reloadStallBound, longRunning: longRunning, exitHeld: exitHeld
+        ) {
             commandError = "reload isn't converging — the daemon stopped making drain "
                 + "progress and may be hung; check `runnyctl status`"
             pendingReload = nil
             reloadStallSince = nil
         }
+    }
+
+    /// Pure: should a mid-drain reload be declared wedged? Only protocol >= 2
+    /// publishes `drain_seq`, the progress signal the stall rests on; a pre-2
+    /// daemon pins it at 0, so its drain can't be progress-bounded and must not
+    /// trip the stall — which would degrade into a wall-clock cap on a drain that
+    /// can validly run as long as any bounded state allows. Also suppressed while a
+    /// slot is legitimately long-running (JOB/ENSURE_IMAGE) or the exit gate is
+    /// held. Static so the gate is unit-testable without a live daemon; mirrors
+    /// runnyctl's stall carve-out in `streamDrain`.
+    nonisolated static func drainStalled(
+        protocolVersion: UInt32, stalledFor: TimeInterval, bound: TimeInterval,
+        longRunning: Bool, exitHeld: Bool
+    ) -> Bool {
+        guard protocolVersion >= 2 else { return false }
+        return !longRunning && !exitHeld && stalledFor > bound
     }
 
     /// Once a genuinely new daemon answers while a reload is pending, render the

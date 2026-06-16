@@ -92,38 +92,65 @@ final class ReloadRefusalTests: XCTestCase {
 
 /// The mid-drain stall gate: only a protocol-2 daemon publishes `drain_seq`, the
 /// progress signal the stall rests on. A pre-2 daemon (no signal) must never be
-/// declared wedged; a v2 daemon is wedged only when frozen past the bound with
-/// nothing long-running or the exit gate held. Mirrors runnyctl's `streamDrain`
+/// declared wedged; a v2 daemon is wedged only when frozen past the bound with no
+/// slot active and the exit gate not held. Mirrors runnyctl's `streamDrain`
 /// carve-out. Pure, so every branch is pinned without a live daemon.
 final class DrainStallTests: XCTestCase {
     func testPreV2NeverStalls() {
         // Frozen far past the bound, but there is no drain_seq to measure against.
         XCTAssertFalse(DaemonStore.drainStalled(
-            protocolVersion: 1, stalledFor: 1000, bound: 90, longRunning: false, exitHeld: false
+            protocolVersion: 1, stalledFor: 1000, bound: 90, anySlotActive: false, exitHeld: false
         ))
     }
 
-    func testV2StallsWhenFrozenPastBound() {
+    func testV2StallsWhenFrozenPastBoundAndQuiescent() {
         XCTAssertTrue(DaemonStore.drainStalled(
-            protocolVersion: 2, stalledFor: 91, bound: 90, longRunning: false, exitHeld: false
+            protocolVersion: 2, stalledFor: 91, bound: 90, anySlotActive: false, exitHeld: false
         ))
     }
 
-    func testV2SuppressedWhileLongRunningOrHeld() {
-        // A running job / image pull is daemon-bounded and a held exit gate is
-        // operator-actionable — not hangs, so no stall even far past the bound.
+    func testV2SuppressedWhileActiveOrHeld() {
+        // A slot still working an active state is bounded daemon-side by its own
+        // per-state deadline and a held exit gate is operator-actionable — not
+        // hangs, so no stall even far past the bound.
         XCTAssertFalse(DaemonStore.drainStalled(
-            protocolVersion: 2, stalledFor: 1000, bound: 90, longRunning: true, exitHeld: false
+            protocolVersion: 2, stalledFor: 1000, bound: 90, anySlotActive: true, exitHeld: false
         ))
         XCTAssertFalse(DaemonStore.drainStalled(
-            protocolVersion: 2, stalledFor: 1000, bound: 90, longRunning: false, exitHeld: true
+            protocolVersion: 2, stalledFor: 1000, bound: 90, anySlotActive: false, exitHeld: true
         ))
     }
 
     func testV2WithinBoundIsNotYetStalled() {
         XCTAssertFalse(DaemonStore.drainStalled(
-            protocolVersion: 2, stalledFor: 30, bound: 90, longRunning: false, exitHeld: false
+            protocolVersion: 2, stalledFor: 30, bound: 90, anySlotActive: false, exitHeld: false
         ))
+    }
+}
+
+/// Slot activity drives the stall carve-out: any non-BACKOFF state is a slot
+/// still working a daemon-bounded step, so the stall is suppressed for it; only a
+/// fully quiescent fleet (all BACKOFF) can be called hung. Mirrors runnyctl's
+/// `anySlotActive`.
+final class SlotActivityTests: XCTestCase {
+    private func slot(_ state: Runny_V1_SlotState) -> Runny_V1_SlotStatus {
+        var s = Runny_V1_SlotStatus()
+        s.state = state
+        return s
+    }
+
+    func testProvisioningIsActive() {
+        // A slot mid-PROVISION (180s daemon deadline) must read as active so the
+        // 90s stall is suppressed rather than calling a healthy drain hung.
+        XCTAssertTrue(DaemonStore.anySlotActive([slot(.backoff), slot(.provision)]))
+    }
+
+    func testAllBackoffIsQuiescent() {
+        XCTAssertFalse(DaemonStore.anySlotActive([slot(.backoff), slot(.backoff)]))
+    }
+
+    func testEmptyIsQuiescent() {
+        XCTAssertFalse(DaemonStore.anySlotActive([]))
     }
 }
 

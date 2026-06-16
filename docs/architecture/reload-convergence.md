@@ -79,9 +79,13 @@ sequenceDiagram
 In FOLLOW the stall catches a daemon that stopped making drain progress —
 `drain_seq` frozen across heartbeats — distinct from a slow-but-healthy drain
 that keeps bumping it. The stall is **carried across stream reopens** (a flapping
-stream cannot reset it forever) and **suppressed** while a slot is legitimately
-long-running (a running job, a progress-bounded pull) or the exit gate is held —
-those are bounded daemon-side or operator-actionable, not hangs. It is **disabled
+stream cannot reset it forever) and **suppressed while any slot is still working
+an active state** — every cycle state is bounded daemon-side by its own per-state
+deadline (PROVISION alone is 180s, twice the window), a duration budget (a job),
+or a pull watcher — or while the exit gate is held; those are bounded daemon-side
+or operator-actionable, not hangs, so the stall is left to fire only once the
+fleet is quiescent (all slots paused in BACKOFF) yet still not exiting. It is
+**disabled
 outright against a pre-2 daemon**, which publishes no `drain_seq`: with no
 progress signal the bound could only degrade into a wall-clock cap on the drain
 (the cap this design refuses), so a pre-2 drain falls back to stream-liveness and

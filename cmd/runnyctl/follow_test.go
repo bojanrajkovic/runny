@@ -252,9 +252,11 @@ func TestStreamDrainStallDisabledForPreV2(t *testing.T) {
 	}
 }
 
-// The stall must be SUPPRESSED while a slot is legitimately long-running (JOB /
-// ENSURE_IMAGE) or the exit gate is held — those are bounded daemon-side or
-// operator-actionable, not hangs. streamDrain must keep following until cancel.
+// The stall must be SUPPRESSED while any slot is still working an active state —
+// every cycle state is bounded daemon-side by its own per-state deadline (e.g.
+// PROVISION at 180s, twice the stall window), a duration budget (JOB), or a pull
+// watcher (ENSURE_IMAGE) — or while the exit gate is held. None is a hang.
+// streamDrain must keep following until cancel.
 func TestStreamDrainStallSuppressed(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -262,6 +264,9 @@ func TestStreamDrainStallSuppressed(t *testing.T) {
 	}{
 		{"running job", slotSnap(1, runnyv1.SlotState_SLOT_STATE_JOB)},
 		{"image pull", slotSnap(1, runnyv1.SlotState_SLOT_STATE_ENSURE_IMAGE)},
+		{"provisioning (180s daemon deadline)", slotSnap(1, runnyv1.SlotState_SLOT_STATE_PROVISION)},
+		{"booting", slotSnap(1, runnyv1.SlotState_SLOT_STATE_BOOT)},
+		{"awaiting ssh", slotSnap(1, runnyv1.SlotState_SLOT_STATE_AWAIT_SSH)},
 		{"held exit gate", func() *runnyv1.GetStatusResponse { s := idleSnap(1); s.ExitHeld = true; return s }()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

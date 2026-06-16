@@ -816,10 +816,9 @@ final class DaemonStore {
             reloadStallSince = Date()
             return
         }
-        let longRunning = slots.contains { $0.state == .job || $0.state == .ensureImage }
         if Self.drainStalled(
             protocolVersion: protocolVersion, stalledFor: Date().timeIntervalSince(since),
-            bound: Self.reloadStallBound, longRunning: longRunning, exitHeld: exitHeld
+            bound: Self.reloadStallBound, anySlotActive: Self.anySlotActive(slots), exitHeld: exitHeld
         ) {
             commandError = "reload isn't converging — the daemon stopped making drain "
                 + "progress and may be hung; check `runnyctl status`"
@@ -832,16 +831,17 @@ final class DaemonStore {
     /// publishes `drain_seq`, the progress signal the stall rests on; a pre-2
     /// daemon pins it at 0, so its drain can't be progress-bounded and must not
     /// trip the stall — which would degrade into a wall-clock cap on a drain that
-    /// can validly run as long as any bounded state allows. Also suppressed while a
-    /// slot is legitimately long-running (JOB/ENSURE_IMAGE) or the exit gate is
-    /// held. Static so the gate is unit-testable without a live daemon; mirrors
-    /// runnyctl's stall carve-out in `streamDrain`.
+    /// can validly run as long as any bounded state allows. Also suppressed while
+    /// any slot is still working an active state (each is bounded daemon-side by
+    /// its own per-state deadline — PROVISION alone is 180s, twice the window) or
+    /// the exit gate is held. Static so the gate is unit-testable without a live
+    /// daemon; mirrors runnyctl's stall carve-out in `streamDrain`.
     nonisolated static func drainStalled(
         protocolVersion: UInt32, stalledFor: TimeInterval, bound: TimeInterval,
-        longRunning: Bool, exitHeld: Bool
+        anySlotActive: Bool, exitHeld: Bool
     ) -> Bool {
         guard protocolVersion >= 2 else { return false }
-        return !longRunning && !exitHeld && stalledFor > bound
+        return !anySlotActive && !exitHeld && stalledFor > bound
     }
 
     /// Whether any slot is running a job. The reload's job-in-flight seed (at
@@ -850,6 +850,15 @@ final class DaemonStore {
     /// Only a running JOB counts — a pull or a debug hold is not an interrupted job.
     nonisolated static func anyJobRunning(_ slots: [Runny_V1_SlotStatus]) -> Bool {
         slots.contains { $0.state == .job }
+    }
+
+    /// Whether any slot is still working through its cycle — any state other than
+    /// BACKOFF (the paused/backing-off state a drain converges to). Every active
+    /// state is bounded daemon-side by its own per-state deadline, so a frozen
+    /// drain_seq while a slot is active is that bound's business, not a hang.
+    /// Mirrors runnyctl's `anySlotActive`.
+    nonisolated static func anySlotActive(_ slots: [Runny_V1_SlotStatus]) -> Bool {
+        slots.contains { $0.state != .backoff && $0.state != .unspecified }
     }
 
     /// Once a genuinely new daemon answers while a reload is pending, render the

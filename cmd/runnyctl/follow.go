@@ -377,16 +377,18 @@ func (c *ctl) streamDrain(ctx context.Context, reader *snapshotReader, base base
 			return ctx.Err()
 		case <-fs.stall.C:
 			// The stall means "hung" only when nothing legitimately indefinite
-			// explains the silence: a slot in JOB or ENSURE_IMAGE is bounded
-			// daemon-side (max_job_duration / the pull stall watcher), a held exit
-			// gate is operator-actionable, and a pre-2 daemon has no drain_seq at
-			// all — it pins the counter at 0, so the stall would degrade into a
-			// wall-clock cap on a drain that can validly run as long as any bounded
-			// state allows (the cap this design refuses). Suppress and re-arm in
-			// those cases. (The timer fired and the select drained fs.stall.C, so a
-			// bare Reset is safe here.)
+			// explains the silence. Suppress and re-arm when: any slot is still
+			// working an active state (every cycle state carries its own per-state
+			// deadline — PROVISION alone is 180s, twice this window — so a frozen
+			// drain_seq while a slot works is that deadline's business to enforce,
+			// not a hang for the client to call); the exit gate is held
+			// (operator-actionable); or the daemon predates drain_seq (protocol < 2,
+			// no progress signal, so the stall would degrade into a wall-clock cap
+			// on a drain — the cap this design refuses). What's left is a quiescent
+			// fleet (all slots in BACKOFF) that still isn't exiting. (The timer
+			// fired and the select drained fs.stall.C, so a bare Reset is safe.)
 			if fs.last != nil && (fs.last.GetProtocolVersion() < 2 ||
-				anySlotInState(fs.last, runnyv1.SlotState_SLOT_STATE_JOB, runnyv1.SlotState_SLOT_STATE_ENSURE_IMAGE) ||
+				anySlotActive(fs.last) ||
 				fs.last.GetExitHeld()) {
 				fs.stall.Reset(opts.stallWindow)
 				continue
@@ -525,6 +527,26 @@ func anySlotInState(resp *runnyv1.GetStatusResponse, states ...runnyv1.SlotState
 			if s.GetState() == want {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// anySlotActive reports whether any slot is still working through its cycle — any
+// state other than BACKOFF, the paused/backing-off state a drain converges to.
+// Every active state is bounded daemon-side, by its own per-state deadline (CLONE,
+// BOOT, AWAIT_*, MINT_JIT, PROVISION, TEARDOWN, SECURE_SSH), by a duration budget
+// (a long JOB), or by a progress watcher (an ENSURE_IMAGE pull), so a frozen
+// drain_seq while a slot is active is that bound's business to enforce — not a
+// hang for the client stall to call. The stall is left to fire only once the
+// fleet is quiescent (all slots in BACKOFF) yet still not exiting.
+func anySlotActive(resp *runnyv1.GetStatusResponse) bool {
+	for _, s := range resp.GetSlots() {
+		switch s.GetState() {
+		case runnyv1.SlotState_SLOT_STATE_UNSPECIFIED, runnyv1.SlotState_SLOT_STATE_BACKOFF:
+			// not active
+		default:
+			return true
 		}
 	}
 	return false

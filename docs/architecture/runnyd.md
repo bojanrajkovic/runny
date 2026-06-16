@@ -133,6 +133,13 @@ and launchd KeepAlive cold-starts it. The drain cause is visible as
 `GetStatusResponse.draining` (the `DRAINING` banner in runnyctl) and in
 each interrupted cycle's recycle reason.
 
+The drainer also bumps a `drain_seq` counter on every real progress event (a
+slot transition, an exit-gate hold flip) and publishes it alongside the
+process's `boot_id` and loaded `config_sha256`. These are what let a client
+confirm the respawn that comes back is the one it asked for, and tell a
+slow-but-healthy drain apart from a hung one — the client-facing other half is
+[reload-convergence.md](reload-convergence.md).
+
 ## On-disk layout
 
 `internal/home` is the authority. Shape: `config.yaml`, `runnyd.sock` (0600),

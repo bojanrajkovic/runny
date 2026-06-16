@@ -61,6 +61,7 @@ struct MainWindowView: View {
         }
         .commandAlerts()
         .recycleConfirmation()
+        .reloadConfirmation()
     }
 }
 
@@ -111,6 +112,12 @@ struct DaemonCard: View {
                     .foregroundStyle(.orange)
                     .lineLimit(2)
             }
+            Button(store.reloadInFlight ? "Validating…" : "Reload Config…") {
+                store.requestReload()
+            }
+            .controlSize(.small)
+            .disabled(store.reloadInFlight || store.client == nil)
+            .padding(.top, 2)
         }
         .padding(8)
         .background(

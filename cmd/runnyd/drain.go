@@ -3,8 +3,10 @@ package main
 import (
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/bojanrajkovic/runny/internal/socket"
 	"github.com/bojanrajkovic/runny/internal/statemachine"
 )
 
@@ -41,6 +43,17 @@ type drainer struct {
 	exitGate func(acceptedSHA string) (ok bool, detail string)
 	// retryEvery overrides the held-exit-gate revalidation interval (tests).
 	retryEvery time.Duration
+	// onProgress is called on each drain-progress event (a slot transition
+	// while draining, or an exit-gate hold flip). Wired to the socket server's
+	// watch fan-out so a following client's stall timer resets on real
+	// progress without waiting out the 30s heartbeat. Nil = not wired (tests).
+	onProgress func()
+
+	// seq is the monotone drain-progress counter published as drain_seq. Bumped
+	// only on real progress (never the heartbeat), so a frozen seq across
+	// heartbeats is the signal of a stalled drain. Atomic: read off the RPC
+	// path, written from FSM goroutines.
+	seq atomic.Uint64
 
 	mu          sync.Mutex // control-plane frequency; a mutex beats CAS choreography
 	reason      string     // empty = not draining; feeds GetStatus `draining`
@@ -49,6 +62,31 @@ type drainer struct {
 	exited      bool
 	exitRunning bool   // one tryExit at a time
 	retryStop   func() // stops the exit-gate retry ticker
+}
+
+// progress records one drain-progress event: it bumps the published counter
+// and kicks the watch fan-out so followers see movement immediately. Safe from
+// an FSM goroutine — the increment is atomic and onProgress is a non-blocking
+// notify.
+func (d *drainer) progress() {
+	d.seq.Add(1)
+	if d.onProgress != nil {
+		d.onProgress()
+	}
+}
+
+// setHold updates the exit-gate hold detail and records drain progress when the
+// held state flips (empty<->non-empty). The flip is a real drain event that
+// does NOT run through a slot's OnChange, so bumping here is what makes a hold
+// set or release visible to followers before the next 30s heartbeat.
+func (d *drainer) setHold(detail string) {
+	d.mu.Lock()
+	flipped := (d.holdDetail == "") != (detail == "")
+	d.holdDetail = detail
+	d.mu.Unlock()
+	if flipped {
+		d.progress()
+	}
 }
 
 // stableStatus is the per-slot convergence predicate: the states that
@@ -87,11 +125,9 @@ func (d *drainer) UpdateAcceptedSHA(sha string) {
 	d.mu.Unlock()
 }
 
-// Reason reports the active drain reason ("" = not draining), with the
-// exit-gate hold annotation appended while the gate is refusing.
-func (d *drainer) Reason() string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+// reasonLocked builds the drain reason with the exit-gate hold annotation
+// appended while the gate is refusing. Caller holds d.mu.
+func (d *drainer) reasonLocked() string {
 	if d.reason == "" {
 		return ""
 	}
@@ -99,6 +135,26 @@ func (d *drainer) Reason() string {
 		return d.reason + " — exit held: " + d.holdDetail
 	}
 	return d.reason
+}
+
+// Reason reports the active drain reason ("" = not draining), with the
+// exit-gate hold annotation appended while the gate is refusing.
+func (d *drainer) Reason() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.reasonLocked()
+}
+
+// State is the structured drain status the socket server publishes: the reason
+// and held flag are read together under the lock so they never disagree; seq is
+// a monotone atomic read taken separately, which is fine — a follower watches
+// it for change, not an exact value. Wired as the server's DrainFn.
+func (d *drainer) State() socket.DrainState {
+	d.mu.Lock()
+	st := socket.DrainState{Reason: d.reasonLocked(), ExitHeld: d.holdDetail != ""}
+	d.mu.Unlock()
+	st.Seq = d.seq.Load()
+	return st
 }
 
 // Exited reports whether the drainer called stop() to hand off to launchd.
@@ -122,6 +178,9 @@ func (d *drainer) observe(st statemachine.Status) {
 	} else {
 		d.Start("wedged guest: a VM survived force-stop (see the slot's cycle record)", "")
 	}
+	// A slot transition observed during a drain is real forward progress;
+	// record it so a follower's stall timer resets (heartbeats alone do not).
+	d.progress()
 	d.recheck()
 }
 
@@ -198,9 +257,7 @@ func (d *drainer) tryExit() {
 
 	if d.exitGate != nil {
 		if ok, detail := d.exitGate(sha); !ok {
-			d.mu.Lock()
-			d.holdDetail = detail
-			d.mu.Unlock()
+			d.setHold(detail)
 			d.log.Error("refusing to exit onto a config the respawn would refuse; fix the file (the drain stays converged; revalidates automatically)", "detail", detail)
 			d.startRetry()
 			return
@@ -212,9 +269,7 @@ func (d *drainer) tryExit() {
 		// second pass backs out and CmdPause sends drop (full buffer), the
 		// ticker keeps driving recheck() → tryExit() so the drain does not
 		// stall waiting for the BACKOFF timer to fire organically.
-		d.mu.Lock()
-		d.holdDetail = ""
-		d.mu.Unlock()
+		d.setHold("")
 	}
 
 	// Second stability pass: a Resume landing during the exit gate's file

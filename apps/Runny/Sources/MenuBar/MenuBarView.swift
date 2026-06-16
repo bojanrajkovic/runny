@@ -70,10 +70,17 @@ struct MenuBarView: View {
     }
 
     private var footer: some View {
-        HStack {
+        HStack(spacing: 8) {
             Button("Open Runny") {
                 activation.openMainWindow(openWindow)
             }
+            // Reload's confirmation dialog lives on the main window (the popover
+            // panel has no reliable presenter), so route through the window.
+            Button(store.reloadInFlight ? "Validating…" : "Reload…") {
+                activation.openMainWindow(openWindow)
+                store.requestReload()
+            }
+            .disabled(store.reloadInFlight || store.client == nil)
             Spacer()
             DoctorChip()
             Spacer()
@@ -351,6 +358,32 @@ struct RecycleConfirmation: ViewModifier {
 
 extension View {
     func recycleConfirmation() -> some View { modifier(RecycleConfirmation()) }
+}
+
+/// Hosts the reload confirmation. Reload restarts the whole daemon and drains
+/// every slot, so — like the `-force` recycle cases — it asks first. Applied at
+/// the main-window root; the popover's Reload routes through the window to
+/// present it (the popover panel has no reliable dialog presenter).
+struct ReloadConfirmation: ViewModifier {
+    @Environment(DaemonStore.self) private var store
+
+    func body(content: Content) -> some View {
+        @Bindable var store = store
+        return content.confirmationDialog(
+            "Reload daemon config?", isPresented: $store.reloadConfirm
+        ) {
+            Button("Validate & Reload") { store.performReload() }
+        } message: {
+            Text(
+                "Validates the on-disk config, then drains the fleet (running jobs "
+                    + "finish first) and restarts runnyd on it. Operator pauses are cleared."
+            )
+        }
+    }
+}
+
+extension View {
+    func reloadConfirmation() -> some View { modifier(ReloadConfirmation()) }
 }
 
 struct DoctorChip: View {

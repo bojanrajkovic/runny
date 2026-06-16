@@ -13,9 +13,14 @@ final class RunnyClient: @unchecked Sendable {
     private let channel: ClientConnection
     let stub: Runny_V1_RunnyServiceAsyncClient
 
-    /// Deadline tiers: snappy for commands, roomier for disk-touching RPCs.
+    /// Deadline tiers: snappy for commands, roomier for disk-touching RPCs,
+    /// generous for reload (its preflight re-runs the full startup suite,
+    /// including GitHub API and network checks that can take most of a minute).
+    /// reloadTimeout is a backstop over a healthy-but-slow preflight, not the
+    /// sum of the daemon's per-check budgets.
     static let commandTimeout = TimeAmount.seconds(5)
     static let queryTimeout = TimeAmount.seconds(10)
+    static let reloadTimeout = TimeAmount.seconds(90)
 
     /// App-lifetime group: the supervisor creates a client per reconnect
     /// attempt, and a per-client group would spawn and tear down an OS
@@ -92,6 +97,17 @@ final class RunnyClient: @unchecked Sendable {
         request.slot = slot
         request.commandID = commandID
         _ = try await stub.resume(request, callOptions: Self.options(Self.commandTimeout))
+    }
+
+    /// Validate the on-disk config and, if it passes, drain the fleet toward a
+    /// respawn that loads it. Returns the full response so the caller can tell
+    /// accepted from refused, read the validated config hash and the accepting
+    /// process's boot id (to confirm the respawn later), and surface failed
+    /// checks / warnings.
+    func reload(reason: String) async throws -> Runny_V1_ReloadResponse {
+        var request = Runny_V1_ReloadRequest()
+        request.reason = reason
+        return try await stub.reload(request, callOptions: Self.options(Self.reloadTimeout))
     }
 
     func why(slot: String, cycles: UInt32) async throws -> [Runny_V1_CycleRecord] {

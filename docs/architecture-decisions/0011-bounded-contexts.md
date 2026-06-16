@@ -5,6 +5,12 @@
 **Amended:** 2026-06-11 — added the delegated-bound rule for waits on a
 peer's bounded operation (the concurrent-pull and tarball locks).
 
+**Amended:** 2026-06-15 — the rule for *sizing* the three bound kinds
+graduated into a standalone principle, `architecture/bounds.md`. This ADR owns
+the enforcement mechanism (the type); that doc owns how each bound's value is
+chosen (match the magnitude; a backstop is not a target; never sum upstream
+budgets).
+
 ## Context
 
 "No operation is ever unbounded" was a disciplinary invariant: every
@@ -81,6 +87,16 @@ not absent. Two conditions make the delegation honest rather than a loophole:
    that only counts the waiter's bytes, a healthy delegated wait is
    indistinguishable from a dead transfer; left unfed it reported STALLED and
    killed the context the waiter would need if the holder failed.
+
+### Sizing the bound
+
+The type forces a bound to exist and names its kind; it says nothing about the
+*value*. That rule — size to the operation's healthy magnitude with flat margin,
+treat the bound as a backstop rather than a target, and never derive a wait from
+a sum of upstream budgets — is the
+[bounds principle](../architecture/bounds.md). It applies to every constructor
+above and to the client-side waits (`runnyctl reload -wait`, the app) that are
+not themselves `bounded.Context` call sites.
 
 ## Rejected alternatives
 

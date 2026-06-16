@@ -176,7 +176,43 @@ message GetStatusResponse {
   // requires >= 1: a client confirms pause/resume from the command id only
   // when the daemon advertises >= 1, and otherwise treats the command as
   // applied-but-unconfirmable rather than confirming from slot state.
+  // Reload-convergence confirmation (boot_id, config_sha256, drain_seq,
+  // exit_held below) requires >= 2: against an older daemon a reload-following
+  // client falls back to daemon_started as the respawn discriminator and warns
+  // that it cannot positively confirm the config.
   uint32 protocol_version = 6;
+  // SHA-256 (hex) of the raw config bytes THIS running process loaded at its
+  // cold start. A reload-following client compares it against the hash the
+  // Reload RPC returned (ReloadResponse.config_sha256) to prove the respawn
+  // came up on the file the preflight vetted, not a stale or re-edited one.
+  // Empty from a daemon advertising protocol_version < 2.
+  string config_sha256 = 7;
+  // A random per-process identity minted fresh at every cold start (never
+  // persisted, never read from disk). It is the respawn discriminator: a
+  // client that captured a daemon's boot_id and later sees a DIFFERENT one
+  // knows a genuinely new process answered — launchd restarts on any exit, so
+  // reachability alone cannot prove a respawn. Distinct from the persisted
+  // instance-id, which names the host's runner family and is STABLE across
+  // respawns (it cannot discriminate). Empty from protocol_version < 2.
+  string boot_id = 8;
+  // A monotone counter the daemon bumps on each real drain-progress event (a
+  // slot transitioning while draining, or the exit-gate hold being set or
+  // cleared) — NOT on the periodic status heartbeat. A reload-following client
+  // resets its progress-stall timer only when this CHANGES, so a wedged daemon
+  // that still answers the 30s heartbeat (frozen drain_seq) no longer masks a
+  // stalled drain. 0 and constant from a non-draining or protocol_version < 2
+  // daemon. The client watches for change, not an absolute value, so a
+  // double-count or flap is harmless.
+  uint64 drain_seq = 9;
+  // True while the drain has converged but the exit gate is REFUSING to exit
+  // onto a config that no longer parses (the human-readable detail is appended
+  // to `draining`). The held state is operator-actionable and indefinite by
+  // design — fixing the file releases it — so a reload-following client must
+  // suppress its progress-stall while this is set rather than report a false
+  // "the daemon may be hung". An authoritative flag, not derivable from the
+  // `draining` string (clients must never re-parse the reason). False from
+  // protocol_version < 2.
+  bool exit_held = 10;
 }
 
 message WatchStatusRequest {}
@@ -362,6 +398,15 @@ message ReloadResponse {
   // (drainer.Start's return) — clients render it, never re-derive it by
   // string-matching the drain reason.
   bool started_drain = 8;
+  // The boot_id of the daemon process that ACCEPTED this reload, stamped by
+  // the same handler that returns config_sha256 — captured in this one
+  // round-trip with no prior status read. A reload-following client uses it as
+  // the baseline and waits for a status reporting a DIFFERENT boot_id; because
+  // it is the accepting process's own identity, there is no earlier read whose
+  // process could differ, so the respawn is identified positively with no
+  // window to misattribute. Empty from a daemon advertising
+  // protocol_version < 2 (the client then falls back to daemon_started).
+  string accepting_boot_id = 9;
 }
 
 message InjectDebugKeyRequest {

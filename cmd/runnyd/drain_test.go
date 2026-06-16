@@ -291,6 +291,64 @@ func TestDrainerExitGateRetriesOnTicker(t *testing.T) {
 	waitStopped(t, stopped)
 }
 
+// drain_seq advances on a slot transition during a drain (and notifies), and
+// State() reports the reason/held/seq as a unit. A frozen seq across the 30s
+// heartbeat is what lets a follower distinguish a wedge from a healthy drain.
+func TestDrainerProgressOnTransition(t *testing.T) {
+	var notifies atomic.Int32
+	d, _, _ := newTestDrainer(&stubSlot{st: jobSt})
+	d.onProgress = func() { notifies.Add(1) }
+	if got := d.State(); got.Seq != 0 || got.Reason != "" || got.ExitHeld {
+		t.Fatalf("fresh State() = %+v, want zero value", got)
+	}
+	d.Start("config reload (rpc): test", "sha")
+	before := d.State().Seq
+	d.observe(jobSt) // a transition while draining
+	after := d.State()
+	if after.Seq <= before {
+		t.Errorf("drain_seq did not advance on a transition: %d -> %d", before, after.Seq)
+	}
+	if notifies.Load() == 0 {
+		t.Error("onProgress not called on a drain transition")
+	}
+	if after.Reason == "" {
+		t.Error("State().Reason empty while draining")
+	}
+}
+
+// An exit-gate hold flips drain_seq on both set and release (the hold change
+// does not run through a slot's OnChange, so the drainer must bump it
+// directly), and State().ExitHeld tracks it authoritatively.
+func TestDrainerProgressAndStateOnHoldFlip(t *testing.T) {
+	var gateOK atomic.Bool
+	d, _, stopped := newTestDrainer(&stubSlot{st: stableSt})
+	d.exitGate = func(string) (bool, string) {
+		if gateOK.Load() {
+			return true, ""
+		}
+		return false, "config.yaml no longer parses"
+	}
+	d.Start("config reload (rpc): test", "sha")
+	waitFor(t, func() bool { return d.State().ExitHeld })
+	held := d.State()
+	if !held.ExitHeld {
+		t.Fatal("State().ExitHeld false after the gate refused")
+	}
+	if held.Seq == 0 {
+		t.Error("drain_seq did not advance on the hold being set")
+	}
+	gateOK.Store(true)
+	d.recheck()
+	waitStopped(t, stopped)
+	final := d.State()
+	if final.ExitHeld {
+		t.Error("State().ExitHeld still set after release")
+	}
+	if final.Seq <= held.Seq {
+		t.Errorf("drain_seq did not advance on hold release: %d -> %d", held.Seq, final.Seq)
+	}
+}
+
 // A Resume that races with the exit gate can un-stable a slot while the
 // gate's file I/O is in flight (issue #53). tryExit's second stability
 // pass must catch this and defer the exit until the slot re-converges.

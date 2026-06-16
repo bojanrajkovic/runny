@@ -222,6 +222,9 @@ func run() error {
 	srv := socket.NewServer(slots, ring, runnerRing,
 		func(slot string) cycle.Store { return cycle.Store{SlotDir: dir.SlotCyclesDir(slot)} },
 		doctor, version, cfg)
+	// Publish the hash of the file THIS process loaded, so a reload follower
+	// can prove the respawn came up on the config its preflight vetted.
+	srv.ConfigSHA256 = startupSHA
 
 	// Drain coordination: the wedge escalation (ADR-0012 — a guest that
 	// survives force-stop can only be reclaimed by process exit) and the
@@ -347,7 +350,11 @@ func run() error {
 	srv.ReloadFn = func(ctx context.Context, reason string) socket.ReloadResult {
 		return requestReload(ctx, "rpc", reason)
 	}
-	srv.DrainingFn = d.Reason
+	srv.DrainFn = d.State
+	// Deliver drain-progress bumps (slot transitions, exit-gate hold flips) to
+	// watchers immediately, so a follower's stall timer tracks real progress
+	// rather than the 30s heartbeat.
+	d.onProgress = srv.NotifyProgress
 
 	// SIGHUP maps to the same validated reload path; the channel was claimed
 	// before the startup gauntlet (above) so the default process-terminate

@@ -399,6 +399,22 @@ func (f *flappyClient) GetStatus(_ context.Context, _ *runnyv1.GetStatusRequest,
 	return f.snap, nil
 }
 
+// reopenFailClient models a daemon that is alive on the unary path (GetStatus
+// answers) but whose WatchStatus reopen keeps failing — a transient stream-open
+// error during a healthy drain.
+type reopenFailClient struct {
+	runnyv1.RunnyServiceClient
+	statusFn func() (*runnyv1.GetStatusResponse, error)
+}
+
+func (f *reopenFailClient) WatchStatus(_ context.Context, _ *runnyv1.WatchStatusRequest, _ ...grpc.CallOption) (runnyv1.RunnyService_WatchStatusClient, error) {
+	return nil, errors.New("transient stream-open failure")
+}
+
+func (f *reopenFailClient) GetStatus(_ context.Context, _ *runnyv1.GetStatusRequest, _ ...grpc.CallOption) (*runnyv1.GetStatusResponse, error) {
+	return f.statusFn()
+}
+
 // The headline silent-hang: a daemon that flaps its stream (one snapshot then
 // EOF, repeatedly) while drain_seq stays frozen must NOT reset the stall on each
 // reopen. follow must still declare errStalled rather than spin forever.
@@ -481,6 +497,37 @@ func TestFollowDiscardsPrefetchedPredecessor(t *testing.T) {
 	if !strings.Contains(msg, "respawned on config") {
 		t.Errorf("msg = %q, want a clean respawn verdict", msg)
 	}
+}
+
+// A transient stream-reopen failure while the daemon is still alive must NOT
+// start the respawn cap — doing so would time out against a daemon that never
+// exited and report a false "no respawn observed". follow must keep re-probing
+// the live daemon (here: forever, until cancelled) rather than enter the cap.
+func TestFollowReopenFailureDoesNotStartRespawnCap(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	// The live stream drops immediately; the daemon then stays old on every probe
+	// while WatchStatus (the reopen) keeps failing.
+	reader := startReader(ctx, (&scriptedStream{results: []recvResult{{err: io.EOF}}}).Recv)
+	fc := &reopenFailClient{statusFn: func() (*runnyv1.GetStatusResponse, error) {
+		return &runnyv1.GetStatusResponse{BootId: "A", ProtocolVersion: 2}, nil
+	}}
+	c := &ctl{client: fc, out: &bytes.Buffer{}}
+	opts := testFollowOpts()
+	opts.respawnTimeout = 30 * time.Millisecond // would fire fast if we wrongly entered the cap
+	errc := make(chan error, 1)
+	go func() {
+		_, _, err := c.follow(ctx, reader, func() {}, idleSnap(1), baseline{bootID: "A"}, wantSHA, opts)
+		errc <- err
+	}()
+	// Many respawn-cap windows must pass without follow returning a verdict/error.
+	select {
+	case err := <-errc:
+		t.Fatalf("follow returned %v; a reopen failure must re-probe the live daemon, not start the respawn cap", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	cancel()
+	<-errc // let the goroutine unwind
 }
 
 // A single failed GetStatus is NOT proof of exit; probeDaemon declares gone only

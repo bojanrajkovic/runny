@@ -250,29 +250,43 @@ func (c *ctl) follow(ctx context.Context, reader *snapshotReader, closeStream fu
 		}
 		// The stream ended; streamDrain never reports a successor (one cannot
 		// appear on an established stream). Probe to tell a transient drop (old
-		// daemon still draining) from the daemon actually exiting.
-		switch p := c.probeDaemon(ctx, base, opts); p.kind {
-		case probeNewProcess:
-			return verdict(p.st)
-		case probeStillOld:
-			// Transient drop: reopen the stream (Clock A bounds its first
-			// snapshot) and resume the still-healthy drain. The stall keeps
-			// accruing across this reopen — only a drain_seq change resets it.
-			nr, nclose, nfirst, err := c.openStream(ctx, opts.establishTimeout)
-			if err != nil {
-				if ctx.Err() != nil {
-					return nil, "", c.cancelled(ctx)
-				}
+		// daemon still draining) from the daemon actually exiting, reopening on a
+		// transient drop. A reopen FAILURE is NOT a disappearance — the probe just
+		// saw the old daemon alive — so re-probe rather than start the respawn cap
+		// against a daemon that never exited.
+		reopened := false
+		for !reopened {
+			switch p := c.probeDaemon(ctx, base, opts); p.kind {
+			case probeNewProcess:
+				return verdict(p.st)
+			case probeGone:
 				return c.respawnOrCancel(ctx, base, wantSHA, fs.jobInFlight, opts)
+			case probeStillOld:
+				// Transient drop: reopen the stream (Clock A bounds its first
+				// snapshot) and resume the still-healthy drain. The stall keeps
+				// accruing across this reopen — only a drain_seq change resets it.
+				nr, nclose, nfirst, err := c.openStream(ctx, opts.establishTimeout)
+				if err != nil {
+					if ctx.Err() != nil {
+						return nil, "", c.cancelled(ctx)
+					}
+					// Reopen failed, but the daemon was just seen alive. Wait out the
+					// poll interval and re-probe; only a probe that finds it GONE
+					// starts the respawn cap.
+					select {
+					case <-ctx.Done():
+						return nil, "", c.cancelled(ctx)
+					case <-time.After(opts.pollInterval):
+					}
+					continue
+				}
+				closeStream()
+				reader, closeStream = nr, nclose
+				if st := c.absorb(nfirst, base, fs, opts); st != nil {
+					return verdict(st)
+				}
+				reopened = true
 			}
-			closeStream()
-			reader, closeStream = nr, nclose
-			if st := c.absorb(nfirst, base, fs, opts); st != nil {
-				return verdict(st)
-			}
-			continue
-		case probeGone:
-			return c.respawnOrCancel(ctx, base, wantSHA, fs.jobInFlight, opts)
 		}
 	}
 }

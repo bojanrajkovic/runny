@@ -711,8 +711,9 @@ final class DaemonStore {
 
     /// The confirmed path: send the reload. Acceptance arms a pendingReload that
     /// `noteRespawnIfReady` resolves into a verdict once a new daemon (a changed
-    /// boot id) answers; refusal surfaces the failed checks at once and leaves
-    /// the daemon running.
+    /// boot id) answers; refusal surfaces the failed checks at once and leaves the
+    /// daemon running — and, when a prior reload is already accepted and draining,
+    /// leaves that one's pending tracking intact (only an accepted reload arms it).
     func performReload() {
         reloadConfirm = false
         guard let client else {
@@ -731,17 +732,23 @@ final class DaemonStore {
             do {
                 let resp = try await client.reload(reason: "operator request (Runny)")
                 guard !Task.isCancelled else { return }
+                // Only an accepted reload (re)arms the pending tracking. A refusal
+                // must NOT cancel an earlier accepted reload still draining toward
+                // its respawn — that one keeps its convergence verdict; the refusal
+                // only surfaces the failed checks.
+                pendingReload = Self.pendingAfterAttempt(
+                    existing: pendingReload,
+                    accepted: resp.accepted
+                        ? PendingReload(
+                            acceptingBootID: resp.acceptingBootID, priorStart: priorStart,
+                            wantSHA: resp.configSha256, acceptedAt: Date()
+                        )
+                        : nil
+                )
                 guard resp.accepted else {
-                    pendingReload = nil
                     commandError = Self.describeRefusal(resp)
                     return
                 }
-                pendingReload = PendingReload(
-                    acceptingBootID: resp.acceptingBootID,
-                    priorStart: priorStart,
-                    wantSHA: resp.configSha256,
-                    acceptedAt: Date()
-                )
                 // Seed from the slots visible at acceptance, so a daemon that
                 // dies before its next snapshot still carries a job-in-flight
                 // warning into the verdict; later old-process snapshots refine it.
@@ -759,10 +766,22 @@ final class DaemonStore {
                 // respawn is resolved by noteRespawnIfReady on a later snapshot.
             } catch {
                 if Task.isCancelled { return }
-                pendingReload = nil
+                // A transport failure likewise must not cancel an earlier accepted
+                // reload that is still converging toward its respawn.
                 commandError = "reload failed: \(error.localizedDescription)"
             }
         }
+    }
+
+    /// Pure: the pending reload after an attempt resolves. Only an accepted reload
+    /// changes it (the `accepted` value); a refusal or transport failure (nil)
+    /// returns the EXISTING pending untouched — an earlier accepted reload is still
+    /// draining toward its respawn and keeps its convergence verdict rather than
+    /// being cancelled by a later attempt. Static so the rule is unit-testable.
+    nonisolated static func pendingAfterAttempt(
+        existing: PendingReload?, accepted: PendingReload?
+    ) -> PendingReload? {
+        accepted ?? existing
     }
 
     /// Is `st`'s identity a genuinely new process versus the reload we baselined?

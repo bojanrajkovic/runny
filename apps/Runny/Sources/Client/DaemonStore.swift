@@ -855,10 +855,13 @@ final class DaemonStore {
     /// Whether any slot is still working through its cycle — any state other than
     /// BACKOFF (the paused/backing-off state a drain converges to). Every active
     /// state is bounded daemon-side by its own per-state deadline, so a frozen
-    /// drain_seq while a slot is active is that bound's business, not a hang.
-    /// Mirrors runnyctl's `anySlotActive`.
+    /// drain_seq while a slot is active is that bound's business, not a hang. A
+    /// WEDGED slot is excepted: it is a converged drain state (it can't start a
+    /// job) even though it still reports an underlying state like TEARDOWN, so
+    /// treating it as active would suppress the stall on a converged-but-not-
+    /// exiting fleet forever. Mirrors runnyctl's `anySlotActive`.
     nonisolated static func anySlotActive(_ slots: [Runny_V1_SlotStatus]) -> Bool {
-        slots.contains { $0.state != .backoff && $0.state != .unspecified }
+        slots.contains { !$0.wedged && $0.state != .backoff && $0.state != .unspecified }
     }
 
     /// Once a genuinely new daemon answers while a reload is pending, render the

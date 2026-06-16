@@ -223,6 +223,32 @@ func TestStreamDrainStallFiresWhenIdle(t *testing.T) {
 	}
 }
 
+// A WEDGED slot is a converged drain state even though it still reports an
+// underlying state like TEARDOWN; it must NOT suppress the stall, or a fleet that
+// converged (every slot wedged or paused) but never exits hangs the follow
+// forever — the very case the stall now exists to catch.
+func TestStreamDrainStallFiresOnWedgedSlot(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	snap := idleSnap(1)
+	snap.Slots[0].State = runnyv1.SlotState_SLOT_STATE_TEARDOWN
+	snap.Slots[0].Paused = false
+	snap.Slots[0].Wedged = true
+	reader := startReader(ctx, hangingStream(t, recvResult{resp: snap}).Recv)
+	c := &ctl{client: &fakeFollowClient{}, out: &bytes.Buffer{}}
+	opts := testFollowOpts()
+	done := make(chan error, 1)
+	go func() { done <- c.streamDrain(ctx, reader, baseline{bootID: "A"}, opts, newFollowState(opts)) }()
+	select {
+	case err := <-done:
+		if err != errStalled {
+			t.Fatalf("err = %v, want errStalled (a wedged slot is converged, not active)", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("streamDrain did not stall — the wedged slot was wrongly treated as active")
+	}
+}
+
 // A pre-2 daemon pins drain_seq at 0 — it has no progress signal — so the stall
 // must NOT fire against it, or it degrades into a wall-clock cap on a drain that
 // can validly run as long as any bounded state allows. streamDrain must keep

@@ -540,8 +540,16 @@ func anySlotInState(resp *runnyv1.GetStatusResponse, states ...runnyv1.SlotState
 // drain_seq while a slot is active is that bound's business to enforce — not a
 // hang for the client stall to call. The stall is left to fire only once the
 // fleet is quiescent (all slots in BACKOFF) yet still not exiting.
+//
+// A WEDGED slot is excepted: it is a converged drain state (the daemon counts it
+// as stable — it cannot start a job) even though it still reports its underlying
+// state (e.g. TEARDOWN). Treating it as active would suppress the stall forever
+// on a fleet that converged but never exits — exactly the hang the stall catches.
 func anySlotActive(resp *runnyv1.GetStatusResponse) bool {
 	for _, s := range resp.GetSlots() {
+		if s.GetWedged() {
+			continue
+		}
 		switch s.GetState() {
 		case runnyv1.SlotState_SLOT_STATE_UNSPECIFIED, runnyv1.SlotState_SLOT_STATE_BACKOFF:
 			// not active

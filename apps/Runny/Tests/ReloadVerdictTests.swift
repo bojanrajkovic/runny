@@ -149,6 +149,15 @@ final class SlotActivityTests: XCTestCase {
         XCTAssertFalse(DaemonStore.anySlotActive([slot(.backoff), slot(.backoff)]))
     }
 
+    func testWedgedSlotIsQuiescent() {
+        // A wedged slot is a converged drain state even though it still reports an
+        // underlying state like TEARDOWN — it must not read as active, or a
+        // converged-but-not-exiting fleet would suppress the stall forever.
+        var wedged = slot(.teardown)
+        wedged.wedged = true
+        XCTAssertFalse(DaemonStore.anySlotActive([slot(.backoff), wedged]))
+    }
+
     func testEmptyIsQuiescent() {
         XCTAssertFalse(DaemonStore.anySlotActive([]))
     }

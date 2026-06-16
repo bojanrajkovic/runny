@@ -363,6 +363,34 @@ func TestFollowFlappingStreamStillStalls(t *testing.T) {
 	}
 }
 
+// The establish snapshot is captured BEFORE the reload is accepted, so a boot_id
+// that differs from the accepting baseline is a PREDECESSOR — a launchd restart
+// that raced the reload (boot_id A on the wire, boot_id B accepting), never the
+// respawn. follow must discard it and keep waiting for the genuine successor,
+// not resolve a verdict against the predecessor's config (which here is a
+// different SHA, so a mistaken verdict would falsely read as config drift).
+func TestFollowDiscardsPreAcceptPredecessor(t *testing.T) {
+	ctx := t.Context()
+	// first: predecessor A, on a DIFFERENT config than the reload validated.
+	first := &runnyv1.GetStatusResponse{BootId: "A", ProtocolVersion: 2, ConfigSha256: otherSHA}
+	// The establish stream (opened against A) drops; the probe then finds the
+	// genuine respawn C, up on the validated config.
+	reader := startReader(ctx, (&scriptedStream{results: []recvResult{{err: io.EOF}}}).Recv)
+	respawn := &runnyv1.GetStatusResponse{BootId: "C", ProtocolVersion: 2, ConfigSha256: wantSHA}
+	fc := &fakeFollowClient{statusFn: func() (*runnyv1.GetStatusResponse, error) { return respawn, nil }}
+	c := &ctl{client: fc, out: &bytes.Buffer{}}
+	st, msg, err := c.follow(ctx, reader, func() {}, first, baseline{bootID: "B"}, wantSHA, testFollowOpts())
+	if err != nil {
+		t.Fatalf("verdict error — the pre-accept predecessor was mistaken for the respawn: %v", err)
+	}
+	if st.GetBootId() != "C" {
+		t.Fatalf("verdict resolved against boot_id %q, want the real respawn C", st.GetBootId())
+	}
+	if !strings.Contains(msg, "respawned on config") {
+		t.Errorf("msg = %q, want a clean respawn verdict", msg)
+	}
+}
+
 // A single failed GetStatus is NOT proof of exit; probeDaemon declares gone only
 // after the establish window of failures.
 func TestProbeDaemonGoneOnlyAfterWindow(t *testing.T) {

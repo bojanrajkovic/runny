@@ -182,15 +182,11 @@ type followState struct {
 	start       time.Time
 }
 
-// absorb processes one old-or-new snapshot. It returns the snapshot when it is
-// the successor; otherwise it folds it into the follow state (rendering, the
-// job-in-flight flag, and resetting the stall ONLY on a drain_seq change) and
-// returns nil. Shared by the establish snapshot, the live stream, and every
-// reopen so none is dropped unexamined.
-func (c *ctl) absorb(snap *runnyv1.GetStatusResponse, base baseline, fs *followState, opts followOpts) *runnyv1.GetStatusResponse {
-	if base.isSuccessor(snap) {
-		return snap
-	}
+// fold records one old-process snapshot into the follow state: it becomes the
+// carve-out/render snapshot, sets the job-in-flight flag, and resets the stall
+// ONLY on a drain_seq change (so a flapping stream that makes no progress cannot
+// keep re-arming the bound).
+func (c *ctl) fold(snap *runnyv1.GetStatusResponse, fs *followState, opts followOpts) {
 	fs.last = snap
 	fs.jobInFlight = anySlotInState(snap, runnyv1.SlotState_SLOT_STATE_JOB)
 	if seq := snap.GetDrainSeq(); !fs.haveSeq || seq != fs.lastSeq {
@@ -198,6 +194,19 @@ func (c *ctl) absorb(snap *runnyv1.GetStatusResponse, base baseline, fs *followS
 		resetTimer(fs.stall, opts.stallWindow)
 	}
 	c.renderFollow(snap, fs.start)
+}
+
+// absorb processes one snapshot from a live or reopened stream — both of which
+// run AFTER the reload was accepted, so either can be the moment the successor
+// first appears. It returns the snapshot when it is that successor; otherwise it
+// is old-process state, folded into the follow state, and nil is returned. The
+// pre-acceptance establish snapshot is deliberately NOT routed here — it can
+// never be the successor (see follow).
+func (c *ctl) absorb(snap *runnyv1.GetStatusResponse, base baseline, fs *followState, opts followOpts) *runnyv1.GetStatusResponse {
+	if base.isSuccessor(snap) {
+		return snap
+	}
+	c.fold(snap, fs, opts)
 	return nil
 }
 
@@ -219,10 +228,17 @@ func (c *ctl) follow(ctx context.Context, reader *snapshotReader, closeStream fu
 		msg, verr := respawnVerdict(st, wantSHA, fs.jobInFlight)
 		return st, msg, verr
 	}
-	// The establish snapshot can already be the successor (a fast drain that
-	// exited before we dialed); examine it rather than discarding it.
-	if st := c.absorb(first, base, fs, opts); st != nil {
-		return verdict(st)
+	// The establish snapshot was captured BEFORE the reload was accepted, so it
+	// can never be the respawn: the respawn does not exist until the accepting
+	// process drains and exits. Seed the follow state from it only when it is the
+	// accepting process itself; a DIFFERENT identity here is a predecessor
+	// surfaced by a launchd restart that raced the reload (boot_id A on the wire,
+	// boot_id B accepting). Routing it through absorb would mistake that
+	// predecessor for the respawn and report convergence or drift against the
+	// wrong process before the real drain even begins. The post-acceptance stream
+	// (and any reopen) carries the genuine successor.
+	if !base.isSuccessor(first) {
+		c.fold(first, fs, opts)
 	}
 	for {
 		st, err := c.streamDrain(ctx, reader, base, opts, fs)

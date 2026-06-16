@@ -250,3 +250,24 @@ final class PendingReloadLifecycleTests: XCTestCase {
         XCTAssertNil(DaemonStore.pendingAfterAttempt(existing: nil, accepted: nil))
     }
 }
+
+/// A reload that throws is ambiguous — a transport drop or deadline means the
+/// daemon may have accepted it and begun draining — so the banner must not assert
+/// a flat "reload failed". (A definitive gRPC rejection IS a real failure, but
+/// that path is the established isDefinitiveRejection one and needs the gRPC
+/// module to construct; the new behavior pinned here is the ambiguous case.)
+final class ReloadThrowBannerTests: XCTestCase {
+    private struct TransportDrop: Error {} // no gRPC code → ambiguous
+
+    func testAmbiguousThrowDoesNotClaimFailure() {
+        let banner = DaemonStore.reloadThrowBanner(TransportDrop())
+        XCTAssertTrue(
+            banner.contains("may have accepted it and started draining"),
+            "ambiguous throw must surface the unknown-outcome guidance, got: \(banner)"
+        )
+        XCTAssertFalse(
+            banner.contains("reload failed"),
+            "an ambiguous throw must not assert a failure that may not have happened"
+        )
+    }
+}

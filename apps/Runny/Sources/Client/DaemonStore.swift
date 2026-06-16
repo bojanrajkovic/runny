@@ -766,11 +766,34 @@ final class DaemonStore {
                 // respawn is resolved by noteRespawnIfReady on a later snapshot.
             } catch {
                 if Task.isCancelled { return }
-                // A transport failure likewise must not cancel an earlier accepted
-                // reload that is still converging toward its respawn.
-                commandError = "reload failed: \(error.localizedDescription)"
+                // A reload throw is a transport drop, a deadline, or a definitive
+                // refusal — never a validation refusal (those come back as
+                // accepted == false). A transport drop/deadline is AMBIGUOUS: the
+                // daemon may have accepted the reload and begun draining, so the
+                // banner must not assert a failure that may not have happened. (We
+                // don't arm a pending here: the validated config hash was lost with
+                // the response, and a blind pending would later surface a false
+                // "isn't converging" if the reload never actually took.) An earlier
+                // accepted reload's pending is untouched either way.
+                commandError = Self.reloadThrowBanner(error)
             }
         }
+    }
+
+    /// Pure: the operator banner for a reload that threw. A definitive rejection
+    /// (the daemon refused before acting) is a real failure, surfaced verbatim;
+    /// any other throw — a transport drop or a deadline — is AMBIGUOUS, since the
+    /// daemon may have accepted the reload and begun draining. The ambiguous banner
+    /// says the outcome is unknown and how to confirm it rather than claiming a
+    /// failure that may not have happened. Static so the wording is unit-testable;
+    /// reuses the same definitive-vs-ambiguous split the command path uses.
+    nonisolated static func reloadThrowBanner(_ error: Error) -> String {
+        if error.isDefinitiveRejection {
+            return "reload failed: " + (error.grpcMessage ?? error.localizedDescription)
+        }
+        return "the daemon didn't confirm the reload (" + error.localizedDescription
+            + "); it may have accepted it and started draining — check `runnyctl status`, "
+            + "then re-run reload if it didn't take"
     }
 
     /// Pure: the pending reload after an attempt resolves. Only an accepted reload

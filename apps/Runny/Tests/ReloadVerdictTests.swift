@@ -126,3 +126,39 @@ final class DrainStallTests: XCTestCase {
         ))
     }
 }
+
+/// The respawn-silence deadline anchors at the later of acceptance and the last
+/// snapshot — never at a snapshot that predates acceptance, so a stream already
+/// near-stale when Reload was clicked can't bank that quiet against the respawn
+/// wait. Pure, so pinned without a live stream.
+final class RespawnSilenceTests: XCTestCase {
+    func testPreAcceptanceSilenceIsNotBanked() {
+        // The stream had been quiet ~94s when the reload was accepted 5s ago. The
+        // bug measured from lastUpdate (~94s) and falsely expired; the anchor is
+        // acceptance (5s ago), so it must NOT be expired.
+        let now = Date()
+        XCTAssertFalse(DaemonStore.respawnSilenceExpired(
+            acceptedAt: now.addingTimeInterval(-5),
+            lastUpdate: now.addingTimeInterval(-94), now: now, bound: 90
+        ))
+    }
+
+    func testSilenceFromAcceptanceExpiresAfterBound() {
+        // Daemon accepted, then died and never sent another snapshot: silence
+        // accrues from acceptance and trips `bound` later.
+        let now = Date()
+        XCTAssertTrue(DaemonStore.respawnSilenceExpired(
+            acceptedAt: now.addingTimeInterval(-91), lastUpdate: nil, now: now, bound: 90
+        ))
+    }
+
+    func testPostAcceptanceSnapshotMovesAnchorForward() {
+        // A fresh snapshot after acceptance resets the clock: 10s of silence since
+        // it is well under bound, even though acceptance was long ago.
+        let now = Date()
+        XCTAssertFalse(DaemonStore.respawnSilenceExpired(
+            acceptedAt: now.addingTimeInterval(-300),
+            lastUpdate: now.addingTimeInterval(-10), now: now, bound: 90
+        ))
+    }
+}

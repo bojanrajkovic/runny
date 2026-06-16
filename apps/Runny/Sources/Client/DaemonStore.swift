@@ -193,6 +193,10 @@ final class DaemonStore {
         let acceptingBootID: String
         let priorStart: Date?
         let wantSHA: String
+        /// When the reload was accepted — the floor for the respawn-silence
+        /// deadline, so a stream already quiet when Reload was clicked cannot bank
+        /// that pre-acceptance silence against the respawn wait.
+        let acceptedAt: Date
     }
 
     /// The fingerprint of a respawn against the config a reload validated. A
@@ -735,7 +739,8 @@ final class DaemonStore {
                 pendingReload = PendingReload(
                     acceptingBootID: resp.acceptingBootID,
                     priorStart: priorStart,
-                    wantSHA: resp.configSha256
+                    wantSHA: resp.configSha256,
+                    acceptedAt: Date()
                 )
                 reloadJobInFlight = false
                 reloadStallSeq = drainSeq
@@ -845,10 +850,11 @@ final class DaemonStore {
     /// can't surface a stale "reloaded" verdict. The wedged-but-heartbeating case
     /// is `trackReloadDrain`'s job (this anchor stays fresh under a heartbeat).
     private func checkReloadRespawnDeadline() {
-        guard pendingReload != nil else { return }
-        guard let last = lastUpdate,
-              Date().timeIntervalSince(last) > Self.respawnBound
-        else { return }
+        guard let reload = pendingReload else { return }
+        guard Self.respawnSilenceExpired(
+            acceptedAt: reload.acceptedAt, lastUpdate: lastUpdate,
+            now: Date(), bound: Self.respawnBound
+        ) else { return }
         if case .unreachable = connection {
             commandError = "reload drained the fleet, but the daemon hasn't "
                 + "come back — \(Self.diagnose())"
@@ -858,6 +864,20 @@ final class DaemonStore {
         }
         pendingReload = nil
         reloadStallSince = nil
+    }
+
+    /// Pure: has the respawn-silence deadline passed? Silence is measured from the
+    /// later of acceptance and the last snapshot — never from a snapshot that
+    /// predates acceptance, so a stream already near-stale when the operator hit
+    /// Reload can't bank that pre-acceptance quiet against the respawn wait. A
+    /// post-acceptance snapshot (lastUpdate > acceptedAt) moves the anchor forward;
+    /// a daemon that dies at acceptance and never returns trips it `bound` after
+    /// acceptance. Static so it's unit-testable without a live stream.
+    nonisolated static func respawnSilenceExpired(
+        acceptedAt: Date, lastUpdate: Date?, now: Date, bound: TimeInterval
+    ) -> Bool {
+        let anchor = max(acceptedAt, lastUpdate ?? acceptedAt)
+        return now.timeIntervalSince(anchor) > bound
     }
 
     /// Pure: turns a refused ReloadResponse into the operator-facing banner —

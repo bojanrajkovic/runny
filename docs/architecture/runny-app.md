@@ -141,6 +141,24 @@ truth before reading them, so a retry in the brief window after a command's 10s
 bound elapses but before its entry is reaped can't overwrite a still-live
 pending and lose its watchdog.
 
+## Reload
+
+A Reload control in the popover footer and on the main-window daemon card
+validates the on-disk config and drains the fleet toward a respawn; because that
+restarts the whole daemon, it is gated behind a confirmation dialog (hosted on
+the main window — the popover panel has no reliable presenter, so the popover's
+button routes through the window). The drain itself shows through the existing
+live stream; the app adds only the **verdict**, baselined on the accepting
+process's `boot_id` from the reload response and resolved when a snapshot reports
+a different one. Two backstops cover the two failure shapes: a silence deadline
+for a daemon that died and never returned, and a `drain_seq` progress stall for
+one that still heartbeats but stopped draining — suppressed while a slot is
+legitimately long-running or the gate is held. A runny-home change cancels an
+in-flight reload so a late accept can't arm a verdict against a daemon the app no
+longer watches. The fingerprint, the bounding, and the verdict taxonomy are
+shared with `runnyctl` and documented once in
+[reload-convergence.md](reload-convergence.md).
+
 ## Timeline: current and completed cycles
 
 The Timeline tab shows the current in-flight cycle and completed past cycles

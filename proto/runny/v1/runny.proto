@@ -160,12 +160,14 @@ message GetStatusRequest {}
 // LIVE, never remembered: a cached "granted" would outlive a revoked grant — a
 // false negative that hides a real failure, which this project refuses.
 //
-// NOT gated on protocol_version. UNSPECIFIED is a reserved sentinel that already
-// means "this daemon does not publish the signal" (older than the field, or not
-// yet sampled), so a client detects availability from the value alone and needs
-// no version check. Do not "consistency-fix" this by bumping the protocol: the
-// boot_id/exit_held fields gated on >= 2 only because their zero values (""/false)
-// were ambiguous — a reserved enum zero is not.
+// NOT gated on protocol_version, and a bump is unnecessary: this field is present
+// from the FIRST release onward, so no deployed daemon can predate it. The
+// "same-core daemon at protocol N that lacks this field" upgrade window the
+// protocol axis guards therefore cannot arise for it — there is no prior release
+// to be behind. (A future field that real, shipped releases could straddle would
+// still bump; this one straddles nothing.) The UNSPECIFIED zero additionally
+// covers a non-darwin or not-yet-sampled daemon, distinct from the ambiguous
+// boot_id/exit_held zeros (""/false) that DID need the >= 2 gate.
 enum LocalNetworkGrant {
   // The daemon does not publish this signal (predates the field) or has not yet
   // sampled, and on non-darwin builds. Clients show no grant affordance and rely

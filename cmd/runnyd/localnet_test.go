@@ -67,6 +67,25 @@ func TestLocalNetworkGrantUnknownWithoutVmnet(t *testing.T) {
 	}
 }
 
+// The sampler must push a fresh snapshot to watchers whenever the grant CHANGES
+// (including the first sample), not wait out the 30s heartbeat — else the
+// proactive card lands up to ~45s late, undermining the before-first-dial warning.
+func TestLocalNetworkSamplerNotifiesOnlyOnChange(t *testing.T) {
+	var count int
+	s := &localNetworkSampler{onChange: func() { count++ }}
+	unknown := int32(runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNKNOWN)
+	denied := int32(runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_DENIED)
+	s.set(unknown) // UNSPECIFIED(0) -> UNKNOWN: change -> notify
+	s.set(unknown) // UNKNOWN -> UNKNOWN: no change -> no notify
+	s.set(denied)  // UNKNOWN -> DENIED: change -> notify
+	if count != 2 {
+		t.Errorf("onChange fired %d times, want 2 (only on change)", count)
+	}
+	if got := s.read(); got != runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_DENIED {
+		t.Errorf("read = %v after sets, want DENIED", got)
+	}
+}
+
 // A fresh sampler reads UNSPECIFIED (the int32 zero) until its first sample
 // lands, and read() round-trips whatever the sampler stored — so the status hot
 // path never blocks on the probe.

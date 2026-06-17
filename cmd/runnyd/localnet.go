@@ -114,6 +114,11 @@ const localNetworkSampleInterval = 15 * time.Second
 // keeping every status response non-blocking.
 type localNetworkSampler struct {
 	grant atomic.Int32 // a runnyv1.LocalNetworkGrant, int32 for atomic access
+	// onChange, if set, fires whenever a sample CHANGES the cached value (including
+	// the first sample off the zero value). Wired to the server's watch fan-out so
+	// a grant change reaches the app at once instead of waiting out the 30s
+	// heartbeat — the proactive card must land before the first guest dial fails.
+	onChange func()
 }
 
 // read returns the most recently sampled grant. UNSPECIFIED until the first
@@ -122,11 +127,20 @@ func (s *localNetworkSampler) read() runnyv1.LocalNetworkGrant {
 	return runnyv1.LocalNetworkGrant(s.grant.Load())
 }
 
+// set stores a sampled value and notifies watchers only when it actually changed,
+// so a steady grant doesn't spam the fan-out while a real transition reaches the
+// app promptly.
+func (s *localNetworkSampler) set(v int32) {
+	if s.grant.Swap(v) != v && s.onChange != nil {
+		s.onChange()
+	}
+}
+
 // run samples once immediately, then on every tick until ctx ends. Bounded by
 // design: each probe carries localNetworkGrant's 2s dial timeout, and the loop
 // stops with the daemon — no unbounded operation (ADR-0011).
 func (s *localNetworkSampler) run(ctx context.Context) {
-	sample := func() { s.grant.Store(int32(localNetworkGrant())) }
+	sample := func() { s.set(int32(localNetworkGrant())) }
 	sample()
 	t := time.NewTicker(localNetworkSampleInterval)
 	defer t.Stop()

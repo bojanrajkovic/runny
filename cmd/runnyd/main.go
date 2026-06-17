@@ -369,9 +369,11 @@ func run() error {
 	// and cached; darwin-only, since the grant and the vmnet subnet it gates are
 	// macOS concepts — the doctor's local-network check gates on GOOS the same way.
 	if runtime.GOOS == "darwin" {
-		sampler := &localNetworkSampler{}
-		go sampler.run(ctx)
+		// Wire the read Fn AND the change hook before starting the goroutine, so the
+		// first sample's notify pushes a snapshot that already reads the sampler.
+		sampler := &localNetworkSampler{onChange: srv.NotifyProgress}
 		srv.LocalNetworkGrantFn = sampler.read
+		go sampler.run(ctx)
 	}
 
 	// SIGHUP maps to the same validated reload path; the channel was claimed

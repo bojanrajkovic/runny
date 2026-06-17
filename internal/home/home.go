@@ -11,21 +11,26 @@ import (
 	"strings"
 )
 
-// Dir is the runny home root (default ~/.runny, overridable via --home or
-// RUNNY_HOME).
+// Dir is the runny home root: ~/.runny, derived from the run-user's $HOME.
+// There is no environment or flag override — the home is fixed so the app and
+// daemon can never disagree about where the socket and credentials live.
 type Dir string
 
-// Resolve picks the home root: explicit flag > RUNNY_HOME > ~/.runny.
-func Resolve(flag string) (Dir, error) {
-	switch {
-	case flag != "":
-		return Dir(flag), nil
-	case os.Getenv("RUNNY_HOME") != "":
-		return Dir(os.Getenv("RUNNY_HOME")), nil
-	}
+// Resolve returns the runny home, <run-user-home>/.runny, derived from $HOME.
+// It rejects an implausible $HOME — anything that isn't an absolute path below
+// root — rather than deriving a wrong home: launchd can hand an agent a
+// degenerate $HOME, and with no override left to correct a bad derivation, that
+// must fail loudly at startup rather than silently. The check is structural, not
+// a denylist of spellings: filepath.Join Cleans, so "/", "//", and "///" all
+// collapse to the same "/.runny", and a relative $HOME would yield a relative
+// home — IsAbs plus a non-root Clean rejects the whole class in one shape.
+func Resolve() (Dir, error) {
 	h, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolving home dir: %w", err)
+	}
+	if !filepath.IsAbs(h) || filepath.Clean(h) == "/" {
+		return "", fmt.Errorf("resolving home dir: implausible $HOME %q", h)
 	}
 	return Dir(filepath.Join(h, ".runny")), nil
 }

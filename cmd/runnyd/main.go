@@ -49,12 +49,11 @@ func main() {
 }
 
 func run() error {
-	homeFlag := flag.String("home", "", "runny home dir (default $RUNNY_HOME or ~/.runny)")
 	configFlag := flag.String("config", "", "config path (default <home>/config.yaml)")
 	checkOnly := flag.Bool("doctor", false, "run validation checks and exit")
 	flag.Parse()
 
-	dir, err := home.Resolve(*homeFlag)
+	dir, err := home.Resolve()
 	if err != nil {
 		return err
 	}

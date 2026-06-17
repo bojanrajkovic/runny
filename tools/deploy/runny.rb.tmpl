@@ -30,7 +30,6 @@ class Runny < Formula
     run [opt_bin/"runnyd"]
     keep_alive true
     run_type :immediate
-    environment_variables RUNNY_HOME: "#{Dir.home}/.runny"
     log_path "#{Dir.home}/.runny/logs/launchd.out.log"
     error_log_path "#{Dir.home}/.runny/logs/launchd.err.log"
   end

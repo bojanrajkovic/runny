@@ -8,7 +8,10 @@ set -euo pipefail
 
 LABEL="com.coderinserepeat.runnyd"
 RUNNYD="${RUNNYD:-$(command -v runnyd || true)}"
-RUNNY_HOME="${RUNNY_HOME:-$HOME/.runny}"
+# The home is fixed at ~/.runny, derived from the run-user's $HOME — the same
+# path the daemon computes. This is a local value feeding the plist token, not
+# an override hook; a RUNNY_HOME in the environment is not honored.
+RUNNY_HOME="$HOME/.runny"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TMPL="$HERE/com.coderinserepeat.runnyd.plist.tmpl"
 DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -28,7 +31,7 @@ launchctl enable "gui/$UID_NUM/$LABEL"
 echo "Installed $LABEL"
 echo "  plist:      $DEST"
 echo "  runnyd:     $RUNNYD"
-echo "  RUNNY_HOME: $RUNNY_HOME"
+echo "  home:       $RUNNY_HOME"
 echo
 echo "First install on this machine: accept the macOS \"Local Network\" prompt"
 echo "for runnyd when it appears. Then verify reachability with:"

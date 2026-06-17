@@ -3,19 +3,13 @@ import RunnyV1
 
 /// Resolves the runny home directory and socket path.
 ///
-/// runnyctl honors $RUNNY_HOME, but a Finder-launched app runs in the launchd
-/// user session and never sees shell exports — so the app's override lives in
-/// UserDefaults (Settings) instead. Default matches the daemon: ~/.runny.
+/// The home is fixed at ~/.runny, derived from the current user — matching the
+/// daemon's run-user derivation. There is no override (no environment variable,
+/// no Settings field), so a Finder-launched app and the daemon can never
+/// disagree about where the socket and credentials live.
 enum RunnyHome {
-    static let overrideDefaultsKey = "runnyHomeOverride"
-
     static var directory: URL {
-        if let override = UserDefaults.standard.string(forKey: overrideDefaultsKey),
-           !override.isEmpty
-        {
-            return URL(fileURLWithPath: (override as NSString).expandingTildeInPath)
-        }
-        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".runny")
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".runny")
     }
 
     static var socketPath: String {

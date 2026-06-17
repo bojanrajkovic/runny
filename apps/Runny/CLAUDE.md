@@ -14,11 +14,12 @@ bounds) and ADR-0016 (decisions). Sharp edges below.
 - **Window/activation mechanics are a pattern, not a one-liner.** Open the
   main window via `openWindow(id:)` only after
   `NSApp.setActivationPolicy(.regular)` plus a main-queue-hopped
-  `NSApp.activate(ignoringOtherApps:)`; revert to `.accessory` on
-  `NSWindow.willCloseNotification` filtered by window identifier, and only
-  when no other regular windows remain (Settings counts). Deviating gets a
-  window that opens behind everything, or an app that vanishes from the Dock
-  while Settings is still open.
+  `NSApp.activate(ignoringOtherApps:)`; observe `NSWindow.willCloseNotification`
+  and revert to `.accessory` only when no other regular, key-able, non-panel
+  window remains. The main window is currently the only such window, but keep
+  the check general — a second window that outlives the main one (e.g. a future
+  Settings scene) must not strand the app `.regular` with nothing visible, and
+  gating on the main-window identifier alone reintroduces that bug.
 - **`MenuBarExtra` `.window` style has no public programmatic dismissal.**
   Closing the popover (e.g. on "Open Runny") goes through a minimal AppKit
   shim that finds and closes the panel `NSWindow` — check whether the
@@ -62,3 +63,21 @@ bounds) and ADR-0016 (decisions). Sharp edges below.
   the connection-gated `visibleSkew` (the card) / `shownSkew` (the dismissible
   popover banner) — never `skew` directly, so a stale verdict can't outlive the
   live stream and lie about a daemon that may have recycled.
+- **The home is fixed at `~/.runny`, no override.** `RunnyHome.directory` is
+  unconditionally `homeDirectoryForCurrentUser/.runny` — there is no
+  UserDefaults override, no `RUNNY_HOME`, no Settings field. This is what kills
+  the app↔daemon split-brain (a Finder-launched app never sees shell exports,
+  so a mismatched override silently rendered a healthy daemon "unreachable").
+  The daemon derives the same path from its run-user's `$HOME`, so the two can't
+  disagree. `diagnose()`'s "different home?" hint stays — it's still useful for
+  the upgrade window where an *old* daemon was launched with `RUNNY_HOME`.
+- **The daemon-card Reconnect is disabled while `reloadPending`, never during
+  validation.** `reloadPending` is `pendingReload != nil` (the drain window with
+  a live convergence verdict to lose); the guard exists so a manual re-dial
+  can't tear down the stream and discard that verdict. It deliberately does *not*
+  cover the earlier RPC-in-flight window — that's already made safe by
+  `reloadTask` cancellation + the `reloadGeneration` bump, so don't broaden the
+  guard to `reloadInFlight`. The disabled-while-pending direction is the view's
+  `.disabled(store.reloadPending)` binding, verified in review (arming a real
+  `pendingReload` needs the live RPC flow — no pure seam, by design); the unit
+  test only pins that a fresh store leaves Reconnect enabled.

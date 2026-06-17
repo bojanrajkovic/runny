@@ -28,11 +28,6 @@ struct RunnyApp: App {
         // it reads as a stranded second title. The toolbar (traffic lights,
         // sidebar toggle) stays; the content header is the sole title.
         .windowStyle(.hiddenTitleBar)
-
-        Settings {
-            SettingsView()
-                .environment(store)
-        }
     }
 
     init() {
@@ -75,11 +70,12 @@ final class ActivationCoordinator {
         closeObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: nil, queue: .main
         ) { notification in
-            // Fire on ANY window close, not just the main window's: if
-            // Settings outlives the main window, gating on the main-window
-            // identifier ignored its close and left the app .regular with no
-            // windows. Revert whenever the last regular window goes (Settings
-            // counts — it's a regular, key-able, non-panel window).
+            // Fire on ANY window close, not just the main window's, and revert
+            // only when no other regular, key-able, non-panel window remains.
+            // The main window is currently the only such window, but the check
+            // stays general: a second window that outlives the main one (e.g. a
+            // future Settings scene) must not strand the app .regular with
+            // nothing visible.
             guard let closing = notification.object as? NSWindow else { return }
             Task { @MainActor in
                 let remaining = NSApp.windows.contains { window in
@@ -103,30 +99,5 @@ final class ActivationCoordinator {
         {
             window.close()
         }
-    }
-}
-
-struct SettingsView: View {
-    @Environment(DaemonStore.self) private var store
-    @AppStorage(RunnyHome.overrideDefaultsKey) private var homeOverride = ""
-
-    var body: some View {
-        Form {
-            Section {
-                TextField("Runny home", text: $homeOverride, prompt: Text("~/.runny"))
-                    .help("Where runnyd keeps its socket. Matches the daemon's --home / RUNNY_HOME. Leave empty for ~/.runny.")
-                    // Restart on commit, not per keystroke — every restart
-                    // tears down and redials the whole client stack.
-                    .onSubmit { store.restart() }
-                LabeledContent("Socket", value: RunnyHome.displaySocketPath)
-                Button("Reconnect") { store.restart() }
-            } footer: {
-                Text("A daemon started with a custom home is invisible to the app unless this matches — Finder-launched apps never see shell environment variables. Press Return (or Reconnect) to apply.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .formStyle(.grouped)
-        .frame(width: 480)
     }
 }

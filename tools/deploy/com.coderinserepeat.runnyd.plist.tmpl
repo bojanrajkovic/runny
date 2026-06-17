@@ -31,14 +31,10 @@
   <key>ThrottleInterval</key>
   <integer>10</integer>
 
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>RUNNY_HOME</key>
-    <string>@RUNNY_HOME@</string>
-  </dict>
-
   <!-- Pre-log crash output only; the daemon's own structured log rotates
-       under $RUNNY_HOME/logs/runnyd.log. -->
+       under ~/.runny/logs/runnyd.log. @RUNNY_HOME@ is substituted at install
+       time with the run-user's fixed ~/.runny — the same path the daemon
+       derives from $HOME (there is no environment override). -->
   <key>StandardOutPath</key>
   <string>@RUNNY_HOME@/logs/launchd.out.log</string>
   <key>StandardErrorPath</key>

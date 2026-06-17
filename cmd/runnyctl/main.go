@@ -29,7 +29,7 @@ var version = "dev"
 
 const usage = `runnyctl — control surface for runnyd
 
-usage: runnyctl [-home DIR] [-json] <command> [args]
+usage: runnyctl [-json] <command> [args]
 
 commands:
   version             print the client version
@@ -74,7 +74,6 @@ func main() {
 }
 
 func run() error {
-	homeFlag := flag.String("home", "", "runny home dir (default $RUNNY_HOME or ~/.runny)")
 	jsonOut := flag.Bool("json", false, "emit protojson instead of human rendering")
 	flag.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	flag.Parse()
@@ -84,7 +83,7 @@ func run() error {
 		return fmt.Errorf("a command is required")
 	}
 
-	dir, err := home.Resolve(*homeFlag)
+	dir, err := home.Resolve()
 	if err != nil {
 		return err
 	}

@@ -113,6 +113,25 @@ final class DaemonStore {
     /// `draining`.
     private(set) var exitHeld = false
 
+    /// The current version-skew verdict, recomputed from each snapshot, or nil
+    /// when the app and daemon match / the daemon's version isn't known yet / the
+    /// app is an unstamped dev build / the daemon is merely newer. Surfaces read
+    /// `shownSkew`, which gates this on a live connection and on dismissal — never
+    /// `skew` directly.
+    private(set) var skew: SkewVerdict?
+    /// The skew verdict the operator dismissed, if any. Keyed on the full
+    /// `Equatable` verdict (not the version string), so a worsening or
+    /// different-axis skew on the same version re-surfaces. Set by the dismiss
+    /// control.
+    var dismissedSkew: SkewVerdict?
+
+    /// The skew to actually render: `skew` gated on a live connection and on
+    /// dismissal. Both surfaces read this one property; neither re-implements
+    /// either gate, so neither can forget it.
+    var shownSkew: SkewVerdict? {
+        Self.shownSkew(skew: skew, connection: connection, dismissed: dismissedSkew)
+    }
+
     private(set) var doctorChecks: [Runny_V1_DoctorCheck]?
     private(set) var doctorRanAt: Date?
     private(set) var doctorRunning = false
@@ -263,6 +282,14 @@ final class DaemonStore {
     /// with the daemon's `WireProtocolVersion`: bump both together. This is not a
     /// backstop or a cap — the healthy-magnitude sizing rule does not apply.
     static let expectedProtocolVersion: UInt32 = 2
+    /// The app's own stamped version core — `CFBundleShortVersionString`, already
+    /// regex-stripped to `x.y.z` by the build (`apple_bundle_version`). A missing
+    /// or non-string read coalesces to the unstamped sentinel `"0.0.0"` — the same
+    /// quiet branch a dev build takes — so a wrong or missing key fails safe
+    /// (quiet), never loud-and-wrong. The one impure read in the skew path; the
+    /// verdict never touches the bundle (it takes this as a parameter).
+    static let appVersion: String =
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
 
     func start() {
         guard supervisor == nil else { return }
@@ -292,6 +319,10 @@ final class DaemonStore {
         bootID = ""
         drainSeq = 0
         exitHeld = false
+        // A home change may point at a different daemon entirely, so a stale skew
+        // — and any dismissal of it — must not carry across.
+        skew = nil
+        dismissedSkew = nil
         pendingReload = nil
         reloadJobInFlight = false
         reloadStallSince = nil
@@ -452,6 +483,12 @@ final class DaemonStore {
         confirmPending()
         trackReloadDrain()
         noteRespawnIfReady()
+        // Derived from this snapshot's version/protocol against the app's own
+        // stamped facts; recompute last so it reflects the values just applied.
+        skew = Self.skewVerdict(
+            appVersion: Self.appVersion, appExpectedProtocol: Self.expectedProtocolVersion,
+            daemonVersion: daemonVersion, daemonProtocol: protocolVersion
+        )
     }
 
     // MARK: - Commands (requested vs confirmed)

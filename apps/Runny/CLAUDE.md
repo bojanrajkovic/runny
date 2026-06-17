@@ -14,11 +14,12 @@ bounds) and ADR-0016 (decisions). Sharp edges below.
 - **Window/activation mechanics are a pattern, not a one-liner.** Open the
   main window via `openWindow(id:)` only after
   `NSApp.setActivationPolicy(.regular)` plus a main-queue-hopped
-  `NSApp.activate(ignoringOtherApps:)`; revert to `.accessory` on
-  `NSWindow.willCloseNotification` filtered by window identifier, and only
-  when no other regular windows remain (Settings counts). Deviating gets a
-  window that opens behind everything, or an app that vanishes from the Dock
-  while Settings is still open.
+  `NSApp.activate(ignoringOtherApps:)`; observe `NSWindow.willCloseNotification`
+  and revert to `.accessory` only when no other regular, key-able, non-panel
+  window remains. The main window is currently the only such window, but keep
+  the check general — a second window that outlives the main one (e.g. a future
+  Settings scene) must not strand the app `.regular` with nothing visible, and
+  gating on the main-window identifier alone reintroduces that bug.
 - **`MenuBarExtra` `.window` style has no public programmatic dismissal.**
   Closing the popover (e.g. on "Open Runny") goes through a minimal AppKit
   shim that finds and closes the panel `NSWindow` — check whether the

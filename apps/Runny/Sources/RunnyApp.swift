@@ -28,11 +28,6 @@ struct RunnyApp: App {
         // it reads as a stranded second title. The toolbar (traffic lights,
         // sidebar toggle) stays; the content header is the sole title.
         .windowStyle(.hiddenTitleBar)
-
-        Settings {
-            SettingsView()
-                .environment(store)
-        }
     }
 
     init() {
@@ -75,11 +70,12 @@ final class ActivationCoordinator {
         closeObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: nil, queue: .main
         ) { notification in
-            // Fire on ANY window close, not just the main window's: if
-            // Settings outlives the main window, gating on the main-window
-            // identifier ignored its close and left the app .regular with no
-            // windows. Revert whenever the last regular window goes (Settings
-            // counts — it's a regular, key-able, non-panel window).
+            // Fire on ANY window close, not just the main window's, and revert
+            // only when no other regular, key-able, non-panel window remains.
+            // The main window is currently the only such window, but the check
+            // stays general: a second window that outlives the main one (e.g. a
+            // future Settings scene) must not strand the app .regular with
+            // nothing visible.
             guard let closing = notification.object as? NSWindow else { return }
             Task { @MainActor in
                 let remaining = NSApp.windows.contains { window in
@@ -103,20 +99,5 @@ final class ActivationCoordinator {
         {
             window.close()
         }
-    }
-}
-
-struct SettingsView: View {
-    var body: some View {
-        Form {
-            Section {
-                // The home is fixed at ~/.runny with no override, so the socket
-                // path is read-only — shown for diagnostics only. The manual
-                // Reconnect affordance lives on the main-window daemon card.
-                LabeledContent("Socket", value: RunnyHome.displaySocketPath)
-            }
-        }
-        .formStyle(.grouped)
-        .frame(width: 480)
     }
 }

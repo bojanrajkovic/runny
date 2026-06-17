@@ -1,0 +1,395 @@
+import AppKit
+import Foundation
+import Observation
+
+/// The imperative shell over `CLIInstall`'s pure verdicts: it resolves the real
+/// filesystem state, applies the verdict (an unprivileged `createSymbolicLink`
+/// or one `with administrator privileges` shell line), confirms from disk, and
+/// drives the `@Observable` state every surface renders. The decision logic is
+/// all in `CLIInstall` and the pure mappers below; this file owns only the
+/// `FileManager`/`osascript` execution that can't run under test.
+@MainActor
+@Observable
+final class CLIInstallModel {
+    enum State: Equatable {
+        /// No link, or a stale link into another Runny.app the install would adopt.
+        case notInstalled
+        /// A privileged or unprivileged write is in flight; the UI shows a cancel.
+        case installing
+        case installed
+        /// Linked, but `/usr/local/bin` isn't on PATH — installed yet not reachable.
+        case installedButNotOnPath
+        /// A foreign file owns the path; never overwritten. Carries its owner.
+        case conflict(owner: String)
+        /// The app is translocated / at a transient path; refused (fail closed).
+        case translocated
+        case failed(String)
+        case cancelled
+    }
+
+    private(set) var state: State = .notInstalled
+
+    /// Monotonic op identity. A cancel bumps it; a late async result whose
+    /// captured generation is stale is ignored, so a cancelled op can never
+    /// overwrite the loud `.cancelled` state with a result the operator dismissed.
+    private var generation = 0
+    private var running: Process?
+
+    static let linkPath = "/usr/local/bin/runnyctl"
+    private static let binDir = "/usr/local/bin"
+
+    /// This bundle's nested runnyctl, canonicalized — the symlink target. nil for
+    /// an unbundled dev build (no `Contents/MacOS/runnyctl`), where install is
+    /// simply unavailable rather than wrong.
+    static var bundleCLIPath: String? {
+        let url = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/runnyctl")
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return url.resolvingSymlinksInPath().path
+    }
+
+    /// Recompute the resting state from disk — on appear, and after every op.
+    func refresh() {
+        guard let bundle = Self.bundleCLIPath else {
+            state = .failed("this build carries no bundled runnyctl")
+            return
+        }
+        switch Self.readExisting(Self.linkPath) {
+        case .absent:
+            state = .notInstalled
+        case .regularFile:
+            state = .conflict(owner: Self.linkPath)
+        case let .symlink(resolved):
+            if resolved == bundle {
+                state = Self.dirOnPath(Self.binDir) ? .installed : .installedButNotOnPath
+            } else if CLIInstall.isRunnyBundleCLI(resolved) {
+                state = .notInstalled // a moved/older Runny.app link; install re-points it
+            } else {
+                state = .conflict(owner: resolved)
+            }
+        }
+    }
+
+    func install() {
+        guard state != .installing else { return }
+        generation += 1
+        let gen = generation
+        Task { await runInstall(gen: gen) }
+    }
+
+    func uninstall() {
+        guard state != .installing else { return }
+        generation += 1
+        let gen = generation
+        Task { await runUninstall(gen: gen) }
+    }
+
+    /// Cancel an in-flight op: terminate the privileged process if one is up and
+    /// flip to the loud terminal `.cancelled` — never a silent spinner. The
+    /// generation bump makes any late osascript result a no-op.
+    func cancel() {
+        guard state == .installing else { return }
+        generation += 1
+        running?.terminate()
+        running = nil
+        state = .cancelled
+    }
+
+    // MARK: - Install / uninstall (imperative shell)
+
+    private func runInstall(gen: Int) async {
+        guard let bundle = Self.bundleCLIPath else {
+            apply(.failed("this build carries no bundled runnyctl"), gen: gen)
+            return
+        }
+        let verdict = CLIInstall.plan(
+            intent: .install,
+            bundleCLIPath: bundle,
+            existing: Self.readExisting(Self.linkPath),
+            dirWritable: Self.dirWritable(Self.binDir),
+            translocated: Self.isTranslocated(Bundle.main.bundleURL.path)
+        )
+        switch verdict {
+        case .refuseTranslocated:
+            apply(.translocated, gen: gen)
+        case .alreadyInstalled:
+            confirm(bundle: bundle, gen: gen)
+        case .refuseForeign:
+            apply(.conflict(owner: Self.resolvedLink(Self.linkPath) ?? Self.linkPath), gen: gen)
+        case .createUnprivileged:
+            apply(.installing, gen: gen)
+            let err = Self.createUnprivileged(linkPath: Self.linkPath, target: bundle)
+            if let err { apply(.failed(err), gen: gen) } else { confirm(bundle: bundle, gen: gen) }
+        case .escalate:
+            apply(.installing, gen: gen)
+            let outcome = await runPrivileged(target: bundle, gen: gen)
+            applyPrivileged(outcome, bundle: bundle, gen: gen)
+        case .removeOurs, .notInstalled:
+            // Not reachable for an install intent; refresh to the truth.
+            confirm(bundle: bundle, gen: gen)
+        }
+    }
+
+    private func runUninstall(gen: Int) async {
+        guard let bundle = Self.bundleCLIPath else {
+            apply(.failed("this build carries no bundled runnyctl"), gen: gen)
+            return
+        }
+        let verdict = CLIInstall.plan(
+            intent: .uninstall,
+            bundleCLIPath: bundle,
+            existing: Self.readExisting(Self.linkPath),
+            dirWritable: Self.dirWritable(Self.binDir),
+            translocated: false // removing a link is safe regardless of our bundle's path
+        )
+        switch verdict {
+        case .removeOurs:
+            if Self.dirWritable(Self.binDir) {
+                apply(.installing, gen: gen)
+                let err = Self.removeUnprivileged(Self.linkPath)
+                if let err { apply(.failed(err), gen: gen) } else { apply(.notInstalled, gen: gen) }
+            } else {
+                apply(.installing, gen: gen)
+                let outcome = await runPrivilegedRemove(gen: gen)
+                switch outcome {
+                case .ok: apply(.notInstalled, gen: gen)
+                case .cancelled: apply(.cancelled, gen: gen)
+                case .refusedForeign: apply(.conflict(owner: Self.resolvedLink(Self.linkPath) ?? Self.linkPath), gen: gen)
+                case let .failed(m): apply(.failed(m), gen: gen)
+                }
+            }
+        case .notInstalled:
+            apply(.notInstalled, gen: gen)
+        case .refuseForeign:
+            apply(.conflict(owner: Self.resolvedLink(Self.linkPath) ?? Self.linkPath), gen: gen)
+        case .alreadyInstalled, .createUnprivileged, .escalate, .refuseTranslocated:
+            confirm(bundle: bundle, gen: gen)
+        }
+    }
+
+    /// Read back the link and set the final state from the pure verify result —
+    /// the "requested ≠ done" invariant: the UI flips to installed only on what
+    /// disk actually shows, never on a privileged step's exit code.
+    private func confirm(bundle: String, gen: Int) {
+        let result = CLIInstall.verify(
+            bundleCLIPath: bundle,
+            resolvedLink: Self.resolvedLink(Self.linkPath),
+            onPath: Self.dirOnPath(Self.binDir)
+        )
+        apply(Self.stateForVerify(result), gen: gen)
+    }
+
+    private func applyPrivileged(_ outcome: PrivilegedOutcome, bundle: String, gen: Int) {
+        switch outcome {
+        case .ok: confirm(bundle: bundle, gen: gen)
+        case .cancelled: apply(.cancelled, gen: gen)
+        case .refusedForeign: apply(.conflict(owner: Self.resolvedLink(Self.linkPath) ?? Self.linkPath), gen: gen)
+        case let .failed(m): apply(.failed(m), gen: gen)
+        }
+    }
+
+    /// Set state only if this op is still current — a cancelled/superseded op's
+    /// late result is dropped.
+    private func apply(_ new: State, gen: Int) {
+        guard gen == generation else { return }
+        state = new
+    }
+
+    // MARK: - Privileged escalation (osascript, off the main actor)
+
+    private func runPrivileged(target: String, gen: Int) async -> PrivilegedOutcome {
+        await runOsascript(CLIInstallModel.installScript(target: target), gen: gen)
+    }
+
+    private func runPrivilegedRemove(gen: Int) async -> PrivilegedOutcome {
+        await runOsascript(CLIInstallModel.removeScript(), gen: gen)
+    }
+
+    /// Raise the admin prompt and wait. The app is `LSUIElement`/accessory, so an
+    /// auth prompt can present without focus — activate first (mirroring the
+    /// window dance), then revert. The process handle is held so `cancel()` can
+    /// terminate it; a system-dismissed prompt comes back as `.cancelled`.
+    private func runOsascript(_ script: String, gen: Int) async -> PrivilegedOutcome {
+        let priorPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        defer { NSApp.setActivationPolicy(priorPolicy) }
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", script]
+        let errPipe = Pipe()
+        proc.standardError = errPipe
+        proc.standardOutput = Pipe()
+        running = proc
+
+        let (status, stderr): (Int32, String) = await withCheckedContinuation { cont in
+            DispatchQueue.global().async {
+                do { try proc.run() } catch {
+                    cont.resume(returning: (-1, "could not launch osascript: \(error.localizedDescription)"))
+                    return
+                }
+                proc.waitUntilExit()
+                let data = errPipe.fileHandleForReading.readDataToEndOfFile()
+                cont.resume(returning: (proc.terminationStatus, String(data: data, encoding: .utf8) ?? ""))
+            }
+        }
+        if running === proc { running = nil }
+        // A cancel between launch and return already set .cancelled and bumped the
+        // generation; report cancelled regardless of how the terminated osascript exited.
+        if gen != generation { return .cancelled }
+        return Self.outcomeForOsascript(exitCode: status, stderr: stderr)
+    }
+}
+
+// MARK: - Pure mappers (nonisolated static, unit-tested)
+
+extension CLIInstallModel {
+    /// The result of the privileged step, recovered from osascript's exit and
+    /// stderr (osascript has no structured channel for `do shell script` failures).
+    enum PrivilegedOutcome: Equatable {
+        case ok
+        case refusedForeign
+        case cancelled
+        case failed(String)
+    }
+
+    nonisolated static func stateForVerify(_ r: CLIInstall.VerifyResult) -> State {
+        switch r {
+        case .installed: .installed
+        case .installedButNotOnPath: .installedButNotOnPath
+        case .mismatch: .failed("the link now points somewhere else — a concurrent change; try again")
+        case .missing: .failed("the install reported success but no link is there")
+        }
+    }
+
+    /// Map osascript's exit + stderr to an outcome. `do shell script` surfaces the
+    /// inner shell exit code in parentheses (our foreign guard exits 3), and a
+    /// user-dismissed auth prompt is AppleScript error -128.
+    nonisolated static func outcomeForOsascript(exitCode: Int32, stderr: String) -> PrivilegedOutcome {
+        if exitCode == 0 { return .ok }
+        if stderr.contains("-128") || stderr.localizedCaseInsensitiveContains("User canceled") {
+            return .cancelled
+        }
+        if stderr.contains("(3)") { return .refusedForeign }
+        return .failed(stderr.isEmpty ? "the privileged step failed (exit \(exitCode))" : stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// True when the bundle is translocated or at a transient path — a link into
+    /// it would dangle on next launch. The Security SPI that answers this
+    /// authoritatively isn't in the Swift import surface, so this matches the
+    /// App Translocation mount root, which Gatekeeper always uses (no false
+    /// negatives for the actual hazard) and fails closed for any /private/var
+    /// transient path.
+    nonisolated static func isTranslocated(_ bundlePath: String) -> Bool {
+        bundlePath.contains("/AppTranslocation/") || bundlePath.hasPrefix("/private/var/folders/")
+    }
+
+    /// The install one-liner: create `/usr/local/bin` if missing, then test-and-
+    /// create — the foreign guard re-runs at write time (closing the TOCTOU window
+    /// a `brew install` between plan and write would open) and `ln -sfn` re-points
+    /// only when the existing entry is itself a Runny.app link, never a foreign file.
+    nonisolated static func installScript(target: String) -> String {
+        let sh = "mkdir -p /usr/local/bin && "
+            + "if [ -e /usr/local/bin/runnyctl ]; then "
+            + "case \"$(readlink /usr/local/bin/runnyctl 2>/dev/null)\" in "
+            + "*/Runny.app/Contents/MacOS/runnyctl) : ;; "
+            + "*) exit 3 ;; esac; fi; "
+            + "ln -sfn \(shellSingleQuote(target)) /usr/local/bin/runnyctl"
+        return appleScript(doShell: sh)
+    }
+
+    /// The uninstall one-liner: remove the link only when it is a Runny.app link
+    /// (never a foreign file that drifted in), test-and-remove at write time.
+    nonisolated static func removeScript() -> String {
+        let sh = "if [ -L /usr/local/bin/runnyctl ]; then "
+            + "case \"$(readlink /usr/local/bin/runnyctl 2>/dev/null)\" in "
+            + "*/Runny.app/Contents/MacOS/runnyctl) rm -f /usr/local/bin/runnyctl ;; "
+            + "*) exit 3 ;; esac; "
+            + "elif [ -e /usr/local/bin/runnyctl ]; then exit 3; fi"
+        return appleScript(doShell: sh)
+    }
+
+    /// Wrap a shell command as `do shell script "…" with administrator privileges`,
+    /// escaping for the AppleScript string layer (backslash then double-quote).
+    nonisolated static func appleScript(doShell sh: String) -> String {
+        let escaped = sh
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "do shell script \"\(escaped)\" with administrator privileges"
+    }
+
+    /// Single-quote a path for `/bin/sh`, escaping embedded single quotes the
+    /// standard `'\''` way — so a path with spaces (or a quote) can't break out
+    /// of the privileged command.
+    nonisolated static func shellSingleQuote(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
+// MARK: - Filesystem shell (impure, nonisolated)
+
+extension CLIInstallModel {
+    /// The raw state of a path: absent, a symlink (with its fully resolved
+    /// target), or any other existing entry (a regular file → foreign).
+    nonisolated static func readExisting(_ path: String) -> CLIInstall.Existing {
+        let fm = FileManager.default
+        guard let attrs = try? fm.attributesOfItem(atPath: path),
+              let type = attrs[.type] as? FileAttributeType
+        else { return .absent }
+        if type == .typeSymbolicLink {
+            return .symlink(resolvesTo: resolvedLink(path) ?? path)
+        }
+        return .regularFile
+    }
+
+    /// The fully resolved target of the link at `path`, or nil if nothing is there.
+    nonisolated static func resolvedLink(_ path: String) -> String? {
+        let fm = FileManager.default
+        guard (try? fm.attributesOfItem(atPath: path)) != nil else { return nil }
+        return URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+    }
+
+    /// Can the link be created without admin? True when the dir exists and is
+    /// writable, or (the dir is absent) its parent is — covering the absent
+    /// `/usr/local/bin` whose `/usr/local` the user owns.
+    nonisolated static func dirWritable(_ dir: String) -> Bool {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: dir) { return fm.isWritableFile(atPath: dir) }
+        return fm.isWritableFile(atPath: (dir as NSString).deletingLastPathComponent)
+    }
+
+    /// Best-effort: is `dir` on the invoking environment's PATH? The app's PATH
+    /// may differ from an interactive shell's, so a false here is a hint, not a
+    /// certainty — surfaced as the distinct installedButNotOnPath state.
+    nonisolated static func dirOnPath(_ dir: String) -> Bool {
+        (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":").contains { $0 == Substring(dir) }
+    }
+
+    /// Create or re-point the link without escalation. Returns an error message
+    /// on failure, nil on success. Re-point removes our prior link first
+    /// (createSymbolicLink won't overwrite); the planner already proved it ours.
+    nonisolated static func createUnprivileged(linkPath: String, target: String) -> String? {
+        let fm = FileManager.default
+        do {
+            try? fm.createDirectory(atPath: (linkPath as NSString).deletingLastPathComponent,
+                                    withIntermediateDirectories: true)
+            if (try? fm.attributesOfItem(atPath: linkPath)) != nil {
+                try fm.removeItem(atPath: linkPath)
+            }
+            try fm.createSymbolicLink(atPath: linkPath, withDestinationPath: target)
+            return nil
+        } catch {
+            return "could not create the link: \(error.localizedDescription)"
+        }
+    }
+
+    nonisolated static func removeUnprivileged(_ linkPath: String) -> String? {
+        do {
+            try FileManager.default.removeItem(atPath: linkPath)
+            return nil
+        } catch {
+            return "could not remove the link: \(error.localizedDescription)"
+        }
+    }
+}

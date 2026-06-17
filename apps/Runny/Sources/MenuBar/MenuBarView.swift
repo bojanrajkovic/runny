@@ -6,6 +6,7 @@ struct MenuBarView: View {
     @Environment(DaemonStore.self) private var store
     @Environment(ActivationCoordinator.self) private var activation
     @Environment(CLIInstallModel.self) private var cli
+    @Environment(AgentController.self) private var agent
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -82,6 +83,10 @@ struct MenuBarView: View {
         .onAppear {
             store.start()
             cli.refresh()
+            // Refresh the agent's install state so the Start/Update affordances here
+            // (and in the main window) reflect an already-registered agent on launch,
+            // not the default .notInstalled until Settings is opened.
+            agent.refresh()
         }
     }
 

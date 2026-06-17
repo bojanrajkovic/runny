@@ -184,6 +184,20 @@ final class DaemonStore {
         Self.appNewerThanDaemon(appVersion: Self.appVersion, daemonVersion: daemonVersion)
     }
 
+    /// Same version core, daemon's protocol older than this app expects — the
+    /// protocol-only upgrade window.
+    var protocolBehind: Bool {
+        Self.protocolBehind(
+            appVersion: Self.appVersion, daemonVersion: daemonVersion,
+            daemonProtocol: protocolVersion, appExpectedProtocol: Self.expectedProtocolVersion
+        )
+    }
+
+    /// The app is ahead of the running daemon on either axis — a reload would
+    /// update it. The condition that gates the update affordance and clears the
+    /// attempt flag once an update takes.
+    var appAheadOfDaemon: Bool { appNewerThanDaemon || protocolBehind }
+
     /// Slots with a live in-process guest that uninstalling would abandon —
     /// matching the FSM's own consent rule (`.job` OR `.debug`): a DEBUG-held guest
     /// is a parked VM an operator deliberately kept alive, so booting out the daemon
@@ -202,6 +216,7 @@ final class DaemonStore {
         return Self.daemonUpdate(
             agentInstalled: agentInstalled,
             appNewer: appNewerThanDaemon,
+            protocolBehind: protocolBehind,
             daemonCore: Self.versionCore(daemonVersion) ?? daemonVersion,
             reloadPending: reloadPending,
             attempted: daemonUpdateAttempted
@@ -585,10 +600,10 @@ final class DaemonStore {
             appVersion: Self.appVersion, appExpectedProtocol: Self.expectedProtocolVersion,
             daemonVersion: daemonVersion, daemonProtocol: protocolVersion
         )
-        // Once the daemon is no longer older — the update took, or the daemon was
-        // never older — clear the attempt flag so a future skew shows "available",
-        // not a stale "didn't take".
-        if !appNewerThanDaemon { daemonUpdateAttempted = false }
+        // Once the app is no longer ahead on either axis — the update took, or it
+        // was never behind — clear the attempt flag so a future skew shows
+        // "available", not a stale "didn't take".
+        if !appAheadOfDaemon { daemonUpdateAttempted = false }
     }
 
     // MARK: - Commands (requested vs confirmed)
@@ -1279,18 +1294,41 @@ final class DaemonStore {
         return false
     }
 
+    /// Pure: same-core-older-protocol — the upgrade window the version compare
+    /// alone misses (e.g. a beta/rebuild whose stubs expect a newer protocol). A
+    /// reload moves launchd onto the bundled binary, so it IS update-eligible for
+    /// an app-installed agent. Mirrors `skewVerdict`'s protocol axis.
+    nonisolated static func protocolBehind(
+        appVersion: String, daemonVersion: String, daemonProtocol: UInt32, appExpectedProtocol: UInt32
+    ) -> Bool {
+        guard let app = versionCore(appVersion), app != unstampedVersion,
+              let daemon = versionCore(daemonVersion), app == daemon
+        else { return false }
+        return daemonProtocol < appExpectedProtocol
+    }
+
     /// Pure: the daemon-update surface. Offered ONLY for an app-installed agent the
-    /// app is newer than — a brew/manual daemon would drain its fleet for a respawn
-    /// of the same binary, so it never sees this. While the update reload drains,
-    /// `inProgress`; after it resolves still-older, `didNotTake` (named, loud).
+    /// app is ahead of on EITHER axis — a newer version core, or the same core with
+    /// an older protocol (a reload picks up the bundled binary either way). A
+    /// brew/manual daemon would drain its fleet for a respawn of the same binary, so
+    /// it never sees this. While the update reload drains, `inProgress`; after it
+    /// resolves still-behind, `didNotTake` (named, loud).
     nonisolated static func daemonUpdate(
-        agentInstalled: Bool, appNewer: Bool, daemonCore: String,
+        agentInstalled: Bool, appNewer: Bool, protocolBehind: Bool, daemonCore: String,
         reloadPending: Bool, attempted: Bool
     ) -> DaemonUpdate {
-        guard agentInstalled, appNewer else { return .none }
+        guard agentInstalled, appNewer || protocolBehind else { return .none }
         if reloadPending { return .inProgress }
         if attempted { return .didNotTake(daemonCore: daemonCore) }
         return .available
+    }
+
+    /// Pure: must the uninstall raise the abandon confirmation? Yes whenever a live
+    /// guest is present OR the live-guest state is UNKNOWN — a disconnected or
+    /// pre-first-snapshot store reports an empty list that means "no snapshot", not
+    /// "no guest", so an empty list is safe to skip only while connected.
+    nonisolated static func uninstallNeedsConfirmation(connected: Bool, liveGuestSlots: [String]) -> Bool {
+        !liveGuestSlots.isEmpty || !connected
     }
 
     /// Pure: the skew to actually render, applying the two visibility gates that

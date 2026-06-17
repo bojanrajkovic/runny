@@ -25,30 +25,71 @@ final class DaemonUpdateTests: XCTestCase {
 
     func testUpdateOfferedOnlyToAppInstalledNewerAgent() {
         XCTAssertEqual(
-            DaemonStore.daemonUpdate(agentInstalled: true, appNewer: true, daemonCore: "0.5.0", reloadPending: false, attempted: false),
+            DaemonStore.daemonUpdate(agentInstalled: true, appNewer: true, protocolBehind: false, daemonCore: "0.5.0", reloadPending: false, attempted: false),
             .available
         )
         // A brew/manual daemon (agent not app-installed) is never offered the
         // futile fleet-draining update — only the generic skew banner.
         XCTAssertEqual(
-            DaemonStore.daemonUpdate(agentInstalled: false, appNewer: true, daemonCore: "0.5.0", reloadPending: false, attempted: false),
+            DaemonStore.daemonUpdate(agentInstalled: false, appNewer: true, protocolBehind: false, daemonCore: "0.5.0", reloadPending: false, attempted: false),
             .none
         )
         XCTAssertEqual(
-            DaemonStore.daemonUpdate(agentInstalled: true, appNewer: false, daemonCore: "0.6.0", reloadPending: false, attempted: false),
+            DaemonStore.daemonUpdate(agentInstalled: true, appNewer: false, protocolBehind: false, daemonCore: "0.6.0", reloadPending: false, attempted: false),
             .none
         )
     }
 
+    func testProtocolBehindIsSameCoreOlderProtocolOnly() {
+        // Same core, daemon's protocol older than the app expects → the upgrade
+        // window the version compare alone misses.
+        XCTAssertTrue(DaemonStore.protocolBehind(
+            appVersion: "0.6.0", daemonVersion: "0.6.0", daemonProtocol: 1, appExpectedProtocol: 2
+        ))
+        // Same core, same protocol → not behind.
+        XCTAssertFalse(DaemonStore.protocolBehind(
+            appVersion: "0.6.0", daemonVersion: "0.6.0", daemonProtocol: 2, appExpectedProtocol: 2
+        ))
+        // Different core is the version-mismatch axis, not the protocol one.
+        XCTAssertFalse(DaemonStore.protocolBehind(
+            appVersion: "0.6.0", daemonVersion: "0.5.0", daemonProtocol: 1, appExpectedProtocol: 2
+        ))
+    }
+
+    func testUpdateOfferedForProtocolBehindWindow() {
+        // Same version core but an older protocol: a reload moves launchd onto the
+        // newer bundled binary, so an app-installed agent gets the update, not just
+        // the generic skew banner.
+        XCTAssertEqual(
+            DaemonStore.daemonUpdate(agentInstalled: true, appNewer: false, protocolBehind: true, daemonCore: "0.6.0", reloadPending: false, attempted: false),
+            .available
+        )
+        // Neither axis ahead → nothing to offer.
+        XCTAssertEqual(
+            DaemonStore.daemonUpdate(agentInstalled: true, appNewer: false, protocolBehind: false, daemonCore: "0.6.0", reloadPending: false, attempted: false),
+            .none
+        )
+    }
+
+    func testUninstallConfirmsWheneverLiveGuestStateIsUnknown() {
+        // Connected with no live guests → provably safe, uninstall without a prompt.
+        XCTAssertFalse(DaemonStore.uninstallNeedsConfirmation(connected: true, liveGuestSlots: []))
+        // Live guests → always confirm.
+        XCTAssertTrue(DaemonStore.uninstallNeedsConfirmation(connected: true, liveGuestSlots: ["mac-1"]))
+        // NOT connected: an empty list is "no snapshot", not "no guest" — confirm
+        // fail-safe so a disconnected uninstall can't silently abandon a job.
+        XCTAssertTrue(DaemonStore.uninstallNeedsConfirmation(connected: false, liveGuestSlots: []))
+    }
+
     func testUpdateInProgressThenDidNotTake() {
         XCTAssertEqual(
-            DaemonStore.daemonUpdate(agentInstalled: true, appNewer: true, daemonCore: "0.5.0", reloadPending: true, attempted: true),
+            DaemonStore.daemonUpdate(agentInstalled: true, appNewer: true, protocolBehind: false, daemonCore: "0.5.0", reloadPending: true, attempted: true),
             .inProgress
         )
         // Reload resolved (not pending) but still app-newer after an attempt → loud,
         // named "didn't take", never a silent re-arm or a generic reload note.
         XCTAssertEqual(
-            DaemonStore.daemonUpdate(agentInstalled: true, appNewer: true, daemonCore: "0.5.0", reloadPending: false, attempted: true),
+            DaemonStore.daemonUpdate(agentInstalled: true, appNewer: true, protocolBehind: false, daemonCore: "0.5.0", reloadPending: false, attempted: true),
             .didNotTake(daemonCore: "0.5.0")
         )
     }

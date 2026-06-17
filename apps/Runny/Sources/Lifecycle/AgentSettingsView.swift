@@ -57,9 +57,17 @@ struct AgentInstallRow: View {
             Button("Remove and Abandon", role: .destructive) { Task { await agent.uninstall() } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Removing the daemon stops it immediately, abandoning the work on "
-                + "\(abandonedSlotsText). A running job will not finish, and a "
-                + "debug-held guest is destroyed.")
+            if store.liveGuestSlots.isEmpty {
+                // Reached only when the live-guest state is UNKNOWN (the daemon isn't
+                // connected), so we can't prove nothing is running — warn fail-safe.
+                Text("Runny can't confirm whether a job is running because the daemon "
+                    + "isn't connected. Removing it now may abandon a running job or a "
+                    + "debug-held guest.")
+            } else {
+                Text("Removing the daemon stops it immediately, abandoning the work on "
+                    + "\(abandonedSlotsText). A running job will not finish, and a "
+                    + "debug-held guest is destroyed.")
+            }
         }
     }
 
@@ -75,10 +83,12 @@ struct AgentInstallRow: View {
             set: { wantOn in
                 if wantOn {
                     confirmingInstall = true
-                } else if store.liveGuestSlots.isEmpty {
-                    Task { await agent.uninstall() }
-                } else {
+                } else if DaemonStore.uninstallNeedsConfirmation(
+                    connected: store.connection == .connected, liveGuestSlots: store.liveGuestSlots
+                ) {
                     confirmingUninstall = true
+                } else {
+                    Task { await agent.uninstall() }
                 }
             }
         )

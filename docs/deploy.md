@@ -29,6 +29,15 @@ guests are unreachable, see "Troubleshooting: Local Network permission".
 - `~/.runny/config.yaml` with at least one pool, valid GitHub App credentials,
   and the runner-administration permission (`runnyd -doctor` asserts it).
 
+The runny home is fixed at `~/.runny`, derived from the run-user's `$HOME`.
+There is no `RUNNY_HOME` environment variable and no `--home` flag — the
+LaunchAgent, the brew service, and the daemon all derive the home the same way.
+An operator who previously set `RUNNY_HOME=/custom` must **relocate**
+`config.yaml` and the file referenced by `private_key_path` into `~/.runny`
+(there is no automatic migration); a stale `RUNNY_HOME` left in the environment
+is ignored, and a daemon that finds no `config.yaml` under `~/.runny` fails
+loudly at startup.
+
 ## Install (for testing, from this checkout)
 
 ```sh

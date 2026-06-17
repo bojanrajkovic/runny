@@ -198,9 +198,11 @@ process's `boot_id` from the reload response and resolved when a snapshot report
 a different one. Two backstops cover the two failure shapes: a silence deadline
 for a daemon that died and never returned, and a `drain_seq` progress stall for
 one that still heartbeats but stopped draining — suppressed while a slot is
-legitimately long-running or the gate is held. A runny-home change cancels an
-in-flight reload so a late accept can't arm a verdict against a daemon the app no
-longer watches. The fingerprint, the bounding, and the verdict taxonomy are
+legitimately long-running or the gate is held. A manual Reconnect cancels an
+in-flight reload RPC so a late accept can't arm a verdict against a supervisor
+the app has torn down; once a reload is *draining*, Reconnect is disabled
+outright, so it can't discard a verdict that's already live. The fingerprint,
+the bounding, and the verdict taxonomy are
 shared with `runnyctl` and documented once in
 [reload-convergence.md](reload-convergence.md).
 
@@ -236,12 +238,14 @@ a gapless tail would be a silent lie. No deduplication is attempted.
 
 ## Socket path resolution
 
-A UserDefaults override (set in Settings) wins; otherwise the socket lives
-under `~/.runny`. The daemon's `$RUNNY_HOME` convention does not apply:
-a Finder-launched app inherits launchd's environment, not the shell's, so an
-exported variable never reaches it. The app reads nothing else from the
-runny home — files under `~/.runny` belong to the daemon (ADR-0006
-symmetry: the app knows only the contract).
+The socket is always `~/.runny/runnyd.sock`, derived from the current user —
+the same fixed home the daemon derives from its run-user's `$HOME`. There is no
+override: no environment variable (a Finder-launched app inherits launchd's
+environment, not the shell's, so an exported variable would never reach it) and
+no Settings field. The app and daemon therefore can't disagree about where the
+socket lives. The app reads nothing else from the runny home — files under
+`~/.runny` belong to the daemon (ADR-0006 symmetry: the app knows only the
+contract).
 
 ## Build shape
 

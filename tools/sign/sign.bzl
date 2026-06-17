@@ -225,6 +225,14 @@ def codesign_app(name, app_zip, binaries = {}, entitlements = {}, entitlement_ke
     """
     srcs = [app_zip] + list(binaries.values()) + list(entitlements.values())
 
+    # A plist or required-key named for a binary not in `binaries` is a typo that
+    # would silently drop that binary's must-have assertion — fail loud at analysis.
+    # (Loop var must NOT be `name`: that would rebind the genrule's name parameter.)
+    for keyed in list(entitlements.keys()) + list(entitlement_keys.keys()):
+        if keyed not in binaries:
+            fail("codesign_app: entitlements/entitlement_keys names %r, which is not in binaries %s" %
+                 (keyed, sorted(binaries.keys())))
+
     # The sensitive keys across the bundle: each owning binary must carry its
     # own, and no other nested binary may. Deduped, order-stable.
     sensitive = []
@@ -255,13 +263,15 @@ def codesign_app(name, app_zip, binaries = {}, entitlements = {}, entitlement_ke
             verify_lines.append("codesign --verify --strict %s\n" % dest)
             own = entitlement_keys.get(bare)
             for key in sensitive:
+                # grep -qF -- : exact fixed string, so the dots in the key aren't
+                # regex wildcards and a key that is a prefix of another can't match.
                 if key == own:
                     assert_lines.append(
-                        'codesign -d --entitlements :- %s 2>/dev/null | grep -q %s || { echo "%s is missing required entitlement %s" >&2; exit 1; }\n' % (dest, key, bare, key),
+                        'codesign -d --entitlements :- %s 2>/dev/null | grep -qF -- %s || { echo "%s is missing required entitlement %s" >&2; exit 1; }\n' % (dest, key, bare, key),
                     )
                 else:
                     assert_lines.append(
-                        'if codesign -d --entitlements :- %s 2>/dev/null | grep -q %s; then echo "%s carries entitlement %s it must not" >&2; exit 1; fi\n' % (dest, key, bare, key),
+                        'if codesign -d --entitlements :- %s 2>/dev/null | grep -qF -- %s; then echo "%s carries entitlement %s it must not" >&2; exit 1; fi\n' % (dest, key, bare, key),
                     )
         nested = "".join(nested_lines)
         asserts = "".join(assert_lines)

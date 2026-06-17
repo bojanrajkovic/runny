@@ -131,3 +131,22 @@ installation token** (App JWT → installation token → JIT config), never a
 long-lived registration token
 ([ADR-0003](architecture-decisions/0003-jit-runner-config.md)). The JIT config
 is single-use.
+
+## The app's privileged surface
+
+The Runny app's only privileged action is vending the CLI — symlinking the
+bundled `runnyctl` to `/usr/local/bin/runnyctl`. It tries an unprivileged
+`createSymbolicLink` first and escalates only when `/usr/local/bin` is not
+user-writable, through **one** `with administrator privileges` shell line — no
+privileged helper, no `SMJobBless`, no System Extension
+([ADR-0018](architecture-decisions/0018-bundled-app-distribution.md) rejects a
+root helper for this surface). The escalated command is minimal and TOCTOU-safe:
+it re-checks the foreign guard at the moment of mutation (test-and-create, never
+`ln -f`), so a `brew install` landing between the unprivileged plan and the
+privileged write cannot be clobbered, and it re-points only a `Runny.app` symlink,
+never a foreign file. The target is shell-quoted through the AppleScript layer so
+a path with spaces or quotes cannot break out of the command, and the result is
+confirmed by reading the link back from disk, never trusted from the privileged
+step's exit code. The bundled binaries are signed inside-out — the daemon carries
+`com.apple.security.virtualization`, the CLI carries none, both asserted at build
+time, so the CLI can never inherit the VM grant.

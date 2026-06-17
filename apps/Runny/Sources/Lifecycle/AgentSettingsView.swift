@@ -101,7 +101,7 @@ struct AgentInstallRow: View {
 
     private var reconcileWarning: String? {
         switch agent.reconcileState {
-        case .ok: nil
+        case .notChecked, .ok: nil
         case let .foreign(path): "A runnyd agent is registered from an unexpected location (\(path)). "
             + "Reinstall from /Applications to repoint it."
         case .undetermined: "Couldn't determine the registered runnyd agent's location."

@@ -85,8 +85,10 @@ struct MenuBarView: View {
             cli.refresh()
             // Refresh the agent's install state so the Start/Update affordances here
             // (and in the main window) reflect an already-registered agent on launch,
-            // not the default .notInstalled until Settings is opened.
+            // not the default .notInstalled until Settings is opened. Reconcile too,
+            // so Update gates on a fresh canonical verdict rather than the default.
             agent.refresh()
+            Task { await agent.runReconcile() }
         }
     }
 

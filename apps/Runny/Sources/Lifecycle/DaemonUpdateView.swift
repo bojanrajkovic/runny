@@ -48,10 +48,11 @@ struct DaemonUpdateAffordance: View {
         store.requestDaemonUpdate()
     }
 
-    /// A reconcile that affirmatively found a foreign-path agent blocks the update
-    /// (a reload would respawn the foreign binary). `.ok`/`.undetermined` are
-    /// canonical-enough — reconcile may not have run on this surface yet.
+    /// Update requires AFFIRMATIVE canonical confirmation — `.ok`, not the
+    /// unchecked `.notChecked` default (nor `.foreign`/`.undetermined`). A reload
+    /// for a foreign or unverified agent could respawn the wrong BundleProgram, so
+    /// the surfaces run reconcile on appear and Update stays hidden until it lands.
     private var agentCanonical: Bool {
-        if case .foreign = agent.reconcileState { false } else { true }
+        agent.reconcileState == .ok
     }
 }

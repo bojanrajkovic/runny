@@ -27,6 +27,7 @@ struct RunnyApp: App {
                     store.start()
                     activation.windowAppeared()
                     agent.refresh()
+                    Task { await agent.runReconcile() }
                 }
         }
         .defaultSize(width: 920, height: 600)

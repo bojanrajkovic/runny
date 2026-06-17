@@ -154,6 +154,20 @@ final class AgentControllerTests: XCTestCase {
 
     // MARK: - Reconcile
 
+    func testReconcileDefaultsToNotCheckedNotCanonical() async {
+        // An unchecked agent must NOT read as canonical (the default can't be .ok,
+        // or Update would show for a foreign-but-unreconciled agent on the menu/main
+        // surfaces where reconcile hasn't run).
+        let c = AgentController(registrar: MockRegistrar())
+        XCTAssertEqual(c.reconcileState, .notChecked)
+        // A run produces a definitive verdict.
+        let mock = MockRegistrar()
+        mock.programResult = .program("/Applications/Runny.app/Contents/MacOS/runnyd")
+        let c2 = AgentController(registrar: mock)
+        await c2.runReconcile()
+        XCTAssertEqual(c2.reconcileState, .ok)
+    }
+
     func testReconcileComparesAgainstCanonicalNotRunningBundle() async {
         let mock = MockRegistrar()
         // A /Applications agent is good even when observed from a translocated launch.

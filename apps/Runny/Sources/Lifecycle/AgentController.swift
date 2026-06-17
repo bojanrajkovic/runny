@@ -63,6 +63,10 @@ enum AgentProgram: Equatable {
 /// good `/Applications` agent observed from a translocated `~/Downloads` launch is
 /// not stale.
 enum AgentReconcile: Equatable {
+    /// Reconcile has not run on this surface yet — explicitly NOT a canonical
+    /// confirmation, so the update affordance (which requires affirmative `.ok`)
+    /// stays hidden until a real verdict lands.
+    case notChecked
     /// Canonical, or no agent registered — nothing to surface.
     case ok
     /// A runnyd agent is registered from a non-canonical program path.
@@ -218,13 +222,21 @@ final class AgentController {
     }
 
     /// The last reconcile verdict — whether the registered agent points where it
-    /// should. Surface-only in P4 (repair is a follow-up).
-    private(set) var reconcileState: AgentReconcile = .ok
+    /// should. Defaults to `.notChecked` (not canonical), so a surface that gates on
+    /// `.ok` shows nothing until reconcile actually runs. Surface-only in P4 (repair
+    /// is a follow-up).
+    private(set) var reconcileState: AgentReconcile = .notChecked
+    private var reconcileInFlight = false
 
     /// Reconcile-on-launch: read the registered agent's program path and compare it
     /// to the canonical install location. Surfaces a foreign/stale-path agent, and
-    /// an introspection that times out as "couldn't determine" — never a spin.
+    /// an introspection that times out as "couldn't determine" — never a spin. The
+    /// in-flight guard keeps concurrent surface appears from stacking launchctl
+    /// subprocesses that race on the result.
     func runReconcile() async {
+        guard !reconcileInFlight else { return }
+        reconcileInFlight = true
+        defer { reconcileInFlight = false }
         reconcileState = await Self.reconcileVerdict(registrar.agentProgramPath())
     }
 

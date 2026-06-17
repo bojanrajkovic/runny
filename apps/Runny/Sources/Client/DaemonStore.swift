@@ -125,9 +125,19 @@ final class DaemonStore {
     /// control.
     var dismissedSkew: SkewVerdict?
 
-    /// The skew to actually render: `skew` gated on a live connection and on
-    /// dismissal. Both surfaces read this one property; neither re-implements
-    /// either gate, so neither can forget it.
+    /// The live skew — gated on a healthy connection only. The main-window card
+    /// reads this and renders it as an always-on status row, like the draining
+    /// line: the card is the authoritative status surface, so it keeps telling the
+    /// truth even after the popover's nag is dismissed. The connection gate lives
+    /// in the one `shownSkew` step both this and `shownSkew` call, so no view
+    /// re-implements it.
+    var visibleSkew: SkewVerdict? {
+        Self.shownSkew(skew: skew, connection: connection, dismissed: nil)
+    }
+
+    /// `visibleSkew` minus what the operator dismissed — the popover's dismissible
+    /// banner reads this, so a dismissal silences the glanceable nag while the card
+    /// keeps showing the standing condition.
     var shownSkew: SkewVerdict? {
         Self.shownSkew(skew: skew, connection: connection, dismissed: dismissedSkew)
     }

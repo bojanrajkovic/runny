@@ -146,11 +146,15 @@ final class CLIInstallModelTests: XCTestCase {
                       "a dangling Runny.app link must classify as Runny-owned, not foreign")
     }
 
-    func testRemoveScriptOnlyTouchesRunnyLinks() {
-        let s = CLIInstallModel.removeScript()
+    func testRemoveScriptOnlyTouchesThisBundle() {
+        let s = CLIInstallModel.removeScript(target: "/Applications/Runny.app/Contents/MacOS/runnyctl")
         XCTAssertTrue(s.contains("with administrator privileges"))
-        // Removes only a Runny.app symlink; a foreign file exits 3 (never rm'd).
-        XCTAssertTrue(s.contains("*/Runny.app/Contents/MacOS/runnyctl) rm -f"))
+        // Removes only a link pointing at THIS bundle (exact compare, not a Runny.app
+        // glob that would match another copy's link); anything else exits 3. (The
+        // `"$existing"` quotes are escaped by the AppleScript layer, so assert on the
+        // single-quoted target + rm, which pass through verbatim.)
+        XCTAssertTrue(s.contains("= '/Applications/Runny.app/Contents/MacOS/runnyctl' ]; then rm -f /usr/local/bin/runnyctl"))
         XCTAssertTrue(s.contains("exit 3"))
+        XCTAssertFalse(s.contains("*/Runny.app/Contents/MacOS/runnyctl)"), "must not use the loose Runny.app glob")
     }
 }

@@ -136,11 +136,11 @@ final class CLIInstallModel {
         case .refuseForeign:
             apply(.conflict(owner: Self.resolvedLink(Self.linkPath) ?? Self.linkPath), gen: gen)
         case .createUnprivileged:
-            apply(.installing, gen: gen)
+            guard gen == generation else { return } // cancelled before the write
             let err = Self.createUnprivileged(linkPath: Self.linkPath, target: bundle)
             if let err { apply(.failed(err), gen: gen) } else { confirm(bundle: bundle, gen: gen) }
         case .escalate:
-            apply(.installing, gen: gen)
+            guard gen == generation else { return }
             let outcome = await runPrivileged(target: bundle, gen: gen)
             applyPrivileged(outcome, bundle: bundle, gen: gen)
         case .removeOurs, .notInstalled:
@@ -163,11 +163,12 @@ final class CLIInstallModel {
         )
         switch verdict {
         case .removeOurs:
+            guard gen == generation else { return } // cancelled before the write
             if Self.dirWritable(Self.binDir) {
                 let err = Self.removeUnprivileged(Self.linkPath, bundleCLIPath: bundle)
                 if let err { apply(.failed(err), gen: gen) } else { confirmRemoved(gen: gen) }
             } else {
-                let outcome = await runPrivilegedRemove(gen: gen)
+                let outcome = await runPrivilegedRemove(target: bundle, gen: gen)
                 switch outcome {
                 case .ok: confirmRemoved(gen: gen)
                 case .cancelled: apply(.cancelled, gen: gen)
@@ -218,14 +219,14 @@ final class CLIInstallModel {
         await runOsascript(CLIInstallModel.installScript(target: target), gen: gen)
     }
 
-    private func runPrivilegedRemove(gen: Int) async -> PrivilegedOutcome {
-        await runOsascript(CLIInstallModel.removeScript(), gen: gen)
+    private func runPrivilegedRemove(target: String, gen: Int) async -> PrivilegedOutcome {
+        await runOsascript(CLIInstallModel.removeScript(target: target), gen: gen)
     }
 
-    /// Raise the admin prompt and wait. The app is `LSUIElement`/accessory, so an
-    /// auth prompt can present without focus — activate first (mirroring the
-    /// window dance), then revert. The process handle is held so `cancel()` can
-    /// terminate it; a system-dismissed prompt comes back as `.cancelled`.
+    /// Raise the admin prompt and wait. The app is `LSUIElement`/accessory, so the
+    /// prompt is brought forward by activating; the process handle is held so
+    /// `cancel()` can terminate it, and a system-dismissed prompt comes back as
+    /// `.cancelled`.
     private func runOsascript(_ script: String, gen: Int) async -> PrivilegedOutcome {
         // Bring the app forward so the system admin prompt has focus. Do NOT flip
         // and restore the activation policy here: the install surface is Settings
@@ -233,6 +234,9 @@ final class CLIInstallModel {
         // app .regular if its window closed during the prompt (the LSUIElement bug
         // ActivationCoordinator's remaining-window check exists to avoid).
         NSApp.activate(ignoringOtherApps: true)
+        // A Cancel that landed before we got here already bumped the generation —
+        // don't raise the prompt at all.
+        guard gen == generation else { return .cancelled }
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
@@ -240,14 +244,20 @@ final class CLIInstallModel {
         let errPipe = Pipe()
         proc.standardError = errPipe
         proc.standardOutput = Pipe()
+        // Publish `running` and launch synchronously ON the main actor: from here to
+        // proc.run() there is no suspension, so a Cancel can only land once the
+        // process is live (where running?.terminate() reaches it) — never on an
+        // unlaunched process that would then orphan a prompt after .cancelled.
         running = proc
-
+        do {
+            try proc.run()
+        } catch {
+            if running === proc { running = nil }
+            return .failed("could not launch osascript: \(error.localizedDescription)")
+        }
+        // Only the blocking wait goes to a background queue.
         let (status, stderr): (Int32, String) = await withCheckedContinuation { cont in
             DispatchQueue.global().async {
-                do { try proc.run() } catch {
-                    cont.resume(returning: (-1, "could not launch osascript: \(error.localizedDescription)"))
-                    return
-                }
                 proc.waitUntilExit()
                 let data = errPipe.fileHandleForReading.readDataToEndOfFile()
                 cont.resume(returning: (proc.terminationStatus, String(data: data, encoding: .utf8) ?? ""))
@@ -318,10 +328,11 @@ extension CLIInstallModel {
         bundlePath.contains("/AppTranslocation/") || bundlePath.hasPrefix("/private/var/folders/")
     }
 
-    /// The install one-liner: create `/usr/local/bin` if missing, then test-and-
-    /// create — the foreign guard re-runs at write time (closing the TOCTOU window
-    /// a `brew install` between plan and write would open) and `ln -sfn` re-points
-    /// only when the existing entry is itself a Runny.app link, never a foreign file.
+    /// The install one-liner: create `/usr/local/bin` if missing, remove only a
+    /// Runny.app link we own, refuse (exit 3) anything else still present, then
+    /// create with a non-forcing `ln -s`. The guard re-runs at write time (closing
+    /// the TOCTOU window a `brew install` between plan and write would open), and
+    /// the non-forcing create fails loud on a late race rather than clobbering.
     nonisolated static func installScript(target: String) -> String {
         let sh = "mkdir -p /usr/local/bin && "
             + "existing=\"$(readlink /usr/local/bin/runnyctl 2>/dev/null)\"; "
@@ -335,14 +346,14 @@ extension CLIInstallModel {
         return appleScript(doShell: sh)
     }
 
-    /// The uninstall one-liner: remove the link only when it is a Runny.app link
-    /// (never a foreign file that drifted in), test-and-remove at write time.
-    nonisolated static func removeScript() -> String {
-        let sh = "if [ -L /usr/local/bin/runnyctl ]; then "
-            + "case \"$(readlink /usr/local/bin/runnyctl 2>/dev/null)\" in "
-            + "*/Runny.app/Contents/MacOS/runnyctl) rm -f /usr/local/bin/runnyctl ;; "
-            + "*) exit 3 ;; esac; "
-            + "elif [ -e /usr/local/bin/runnyctl ]; then exit 3; fi"
+    /// The uninstall one-liner: remove the link only when it points at THIS bundle
+    /// (not merely some Runny.app — another copy's link is refused, matching
+    /// plan(.uninstall), which returns removeOurs only for this bundle); test-and-
+    /// remove at write time, refusing (exit 3) anything else still present.
+    nonisolated static func removeScript(target: String) -> String {
+        let sh = "existing=\"$(readlink /usr/local/bin/runnyctl 2>/dev/null)\"; "
+            + "if [ \"$existing\" = \(shellSingleQuote(target)) ]; then rm -f /usr/local/bin/runnyctl; "
+            + "elif [ -e /usr/local/bin/runnyctl ] || [ -L /usr/local/bin/runnyctl ]; then exit 3; fi"
         return appleScript(doShell: sh)
     }
 

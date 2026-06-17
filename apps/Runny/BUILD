@@ -7,6 +7,7 @@ target_compatible_with before toolchain resolution.
 
 load("@rules_apple//apple:macos.bzl", "macos_application", "macos_unit_test")
 load("@rules_apple//apple:versioning.bzl", "apple_bundle_version")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("@rules_swift//swift:swift.bzl", "swift_library")
 load("//tools/sign:sign.bzl", "app_dmg", "codesign_app", "notarize_app", "notarize_dmg")
 
@@ -78,10 +79,38 @@ macos_application(
 # ad-hoc signature → re-sign → notarize+staple the .app → dmg →
 # notarize+staple the dmg. Every notarize step is a pass-through copy at
 # the ad-hoc tier.
+# The .app carries the same runnyd + runnyctl the brew tarball ships, placed at
+# Contents/MacOS/{runnyd,runnyctl} under their bare names and signed inside-out
+# (the daemon keeps com.apple.security.virtualization; the CLI gets none, asserted
+# at build time). A launchd BundleProgram and the vended-CLI symlink both depend on
+# the exact bare names. The binaries are re-sealed here, so they are NOT byte-
+# identical to the tarball's _notarized copies (different CDHash) — same source,
+# separately sealed and notarized per container.
 codesign_app(
     name = "Runny_signed",
     app_zip = ":Runny",
+    binaries = {
+        "runnyd": "//cmd/runnyd:runnyd_signed",
+        "runnyctl": "//cmd/runnyctl:runnyctl_signed",
+    },
+    entitlement_keys = {"runnyd": "com.apple.security.virtualization"},
+    entitlements = {"runnyd": "//tools/sign:runnyd.entitlements"},
     visibility = ["//visibility:public"],
+)
+
+# Runs in `bazel test //...`, so the release inherits it: a packaging or signing
+# regression that drops a binary, strips the daemon's entitlement, over-grants the
+# CLI, or ships a non-executable Mach-O fails here, not on a user's machine.
+sh_test(
+    name = "bundle_contents_test",
+    size = "small",
+    srcs = ["bundle_contents_test.sh"],
+    args = ["$(rootpath :Runny_signed)"],
+    data = [":Runny_signed"],
+    # codesign --verify and exec'ing freshly signed binaries need securityd; the
+    # macOS test sandbox blocks it (same reason the signing genrules are tagged).
+    tags = ["no-sandbox"],
+    target_compatible_with = ["@platforms//os:macos"],
 )
 
 notarize_app(

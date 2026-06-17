@@ -16,10 +16,11 @@ bounds) and ADR-0016 (decisions). Sharp edges below.
   `NSApp.setActivationPolicy(.regular)` plus a main-queue-hopped
   `NSApp.activate(ignoringOtherApps:)`; observe `NSWindow.willCloseNotification`
   and revert to `.accessory` only when no other regular, key-able, non-panel
-  window remains. The main window is currently the only such window, but keep
-  the check general — a second window that outlives the main one (e.g. a future
-  Settings scene) must not strand the app `.regular` with nothing visible, and
-  gating on the main-window identifier alone reintroduces that bug.
+  window remains. The main window and the Settings scene **both** call
+  `ActivationCoordinator.windowAppeared()` (deliberately not named for either),
+  so whichever outlives the other keeps the app visible until both are gone —
+  gating the revert on the main-window identifier alone reintroduces the
+  strand-`.regular`-with-nothing-visible bug.
 - **`MenuBarExtra` `.window` style has no public programmatic dismissal.**
   Closing the popover (e.g. on "Open Runny") goes through a minimal AppKit
   shim that finds and closes the panel `NSWindow` — check whether the
@@ -81,3 +82,29 @@ bounds) and ADR-0016 (decisions). Sharp edges below.
   `.disabled(store.reloadPending)` binding, verified in review (arming a real
   `pendingReload` needs the live RPC flow — no pure seam, by design); the unit
   test only pins that a fresh store leaves Reconnect enabled.
+- **The bundle carries `runnyd`/`runnyctl`, signed inside-out by `codesign_app`
+  — never re-introduce an outer-only seal.** `codesign_app` places each binary at
+  `Contents/MacOS/<bare-name>`, signs it nested-first with its own entitlements
+  (the daemon gets `com.apple.security.virtualization`, the CLI gets none — both
+  asserted at build time, the CLI's absence too), then seals the bundle over them.
+  A single outer `codesign` of the `.app` does **not** cover nested Mach-Os, so an
+  outer-only seal ships an unsigned binary that fails Gatekeeper on a clean
+  machine. The verification `--deep` in the macro is a *different* operation from
+  the deprecated signing `--deep` the project avoids; don't "consistency-fix" them
+  together. `additional_contents` is deliberately **not** used for these — its
+  `else`-branch would land `runnyd_signed.bin` at the wrong filename and unsigned.
+- **CLI install: never clobber a foreign file, fail closed from a translocated
+  bundle.** The verdict/result cases live in
+  `Sources/Install/CLIInstallPlan.swift` (pure) — read them there, don't
+  re-enumerate. A regular file or a non-`Runny.app` symlink at
+  `/usr/local/bin/runnyctl` is foreign and is refused, never overwritten; a
+  translocated app (matched by the `…/AppTranslocation/…` path, since the Security
+  SPI isn't Swift-importable) is refused fail-closed. The privileged escalation is
+  one `with administrator privileges` line whose foreign guard re-runs at write
+  time (test-and-create, not `ln -f`); the path is shell-quoted through the
+  AppleScript layer; the app **activates before raising the prompt** (it's
+  `LSUIElement`/accessory, so a prompt can present without focus) and confirms the
+  result by reading the link back from disk, never from the exit code. The menu-bar
+  nudge shows only while the CLI is absent (the model's `.notInstalled`), so a dev
+  build that carries no bundled `runnyctl` — `refresh()` leaves it `.failed` —
+  never nags.

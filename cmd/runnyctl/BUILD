@@ -9,6 +9,7 @@ go_library(
     srcs = [
         "follow.go",
         "main.go",
+        "skew.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/cmd/runnyctl",
     visibility = ["//visibility:private"],
@@ -40,9 +41,11 @@ go_test(
     srcs = [
         "follow_test.go",
         "main_test.go",
+        "skew_test.go",
     ],
     embed = [":runnyctl_lib"],
     deps = [
+        "//internal/socket",
         "//proto/runny/v1:runny",
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_protobuf//types/known/timestamppb",

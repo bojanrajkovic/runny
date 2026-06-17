@@ -74,6 +74,22 @@ secrets exist. That App is deliberately *not* the runtime runner-registration
 App — release/CI and prod-host/runner-admin are separate blast radii.
 `tools/deploy/install.sh` remains the path for running a from-checkout build.
 
+## The Runny app and the command-line tool
+
+The `Runny.app` bundle carries signed copies of `runnyd` and `runnyctl`, and its
+Settings pane can vend the CLI: **Install command-line tool** symlinks the bundled
+`runnyctl` to `/usr/local/bin/runnyctl`, so the app and the CLI it installs are
+always the same build. It tries an unprivileged link first and raises a single
+admin prompt only when `/usr/local/bin` needs it; it refuses to overwrite a
+`brew`-managed `runnyctl` (naming the conflict) and refuses to run from a
+translocated app (move Runny to your Applications folder first). The same pane
+removes the link.
+
+The app does **not** yet install or manage the daemon — `runnyd` still runs under
+the Homebrew service or the manual LaunchAgent above. A bundled `runnyctl` placed
+on PATH can lag a `brew`-managed `runnyd`; when it does, `runnyctl` prints a
+one-line version-skew warning to stderr before its output (warn, never refuse).
+
 ## Applying config changes
 
 runnyd reads `~/.runny/config.yaml` once, at startup. To apply an edit

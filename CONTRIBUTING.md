@@ -73,6 +73,8 @@ The posture these workflows implement — SHA-pinned actions, cold cache-isolate
 - **Ad-hoc (current)**: CI signs `runnyd` with `codesign -s -` plus the virtualization entitlement; the artifact boots VMs on any host. No setup required.
 - **Developer ID (when distribution matters)**: requires an Apple Developer Program membership. Export the Developer ID Application certificate as `.p12` and provision it (plus the App Store Connect notary key) onto the `release` environment via `tools/setup-secrets.sh`. The signing workflow upgrade lands once those secrets exist.
 
+**Clean-machine Gatekeeper check before a release tag.** The `.app` now carries `runnyd`/`runnyctl` as nested Mach-Os, signed inside-out. `bazel test`'s `bundle_contents_test` proves each is validly signed, but on the build host that only attests the local/ad-hoc trust — it cannot prove Apple *notarized the nested binaries* so Gatekeeper accepts them offline. Before tagging a release, verify the notarized `.dmg` on a clean machine (or a fresh VM with networking off, forcing offline ticket validation): `spctl -a -vv Runny.app` must report `accepted` / `source=Notarized Developer ID`, and launching it must not be blocked. This is the one gate the build host can't run; skipping it ships a bundle that passes CI yet Gatekeeper-rejects on a user's Mac.
+
 ## Boundaries
 
 - `bazel-*` symlinks and `node_modules/` are generated; never edit them.

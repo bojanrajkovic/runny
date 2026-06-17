@@ -98,7 +98,13 @@ func run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	c := &ctl{client: client, json: *jsonOut, out: os.Stdout}
+	c := &ctl{client: client, json: *jsonOut, out: os.Stdout, err: os.Stderr}
+	// A skew warning before any command output, on every daemon-dialing path.
+	// version is the one local command that must work without a daemon, so it is
+	// excluded — it returns below before any RPC.
+	if args[0] != "version" {
+		c.warnSkew(ctx)
+	}
 	switch cmd, rest := args[0], args[1:]; cmd {
 	case "version":
 		fmt.Fprintln(c.out, version)
@@ -209,6 +215,7 @@ type ctl struct {
 	client runnyv1.RunnyServiceClient
 	json   bool
 	out    io.Writer
+	err    io.Writer
 }
 
 func (c *ctl) emit(m proto.Message) error {

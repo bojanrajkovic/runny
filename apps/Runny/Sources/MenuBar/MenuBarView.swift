@@ -5,6 +5,7 @@ import SwiftUI
 struct MenuBarView: View {
     @Environment(DaemonStore.self) private var store
     @Environment(ActivationCoordinator.self) private var activation
+    @Environment(CLIInstallModel.self) private var cli
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -56,12 +57,42 @@ struct MenuBarView: View {
                 .scrollBounceBehavior(.basedOnSize)
                 .frame(maxHeight: CGFloat(min(store.slots.count, 8)) * 46 + 12)
             }
+            // A gentle nudge ONLY while the CLI is absent (never on a dev build,
+            // where refresh() leaves a non-.notInstalled state) — the primary
+            // surface is Settings; this just points there, like VS Code's
+            // "Shell Command: Install" in the palette rather than the status bar.
+            if cli.state == .notInstalled {
+                Divider()
+                cliNudge
+            }
             Divider()
             footer
                 .padding(Metrics.pad)
         }
         .frame(width: Metrics.popoverWidth)
-        .onAppear { store.start() }
+        .onAppear {
+            store.start()
+            cli.refresh()
+        }
+    }
+
+    private var cliNudge: some View {
+        SettingsLink {
+            HStack(spacing: 6) {
+                Image(systemName: "terminal")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Install command-line tool")
+                    .font(.caption)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, Metrics.pad)
+        .padding(.vertical, 6)
     }
 
     private var emptyState: some View {

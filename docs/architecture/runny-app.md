@@ -247,11 +247,61 @@ socket lives. The app reads nothing else from the runny home — files under
 `~/.runny` belong to the daemon (ADR-0006 symmetry: the app knows only the
 contract).
 
+## Command-line tool vending
+
+The `.app` carries the same `runnyd` and `runnyctl` the Homebrew tarball ships,
+at `Contents/MacOS/{runnyd,runnyctl}` under their exact bare names. They are
+placed and signed **inside-out** by `codesign_app`: each nested binary is signed
+first with its own entitlements — the daemon keeps
+`com.apple.security.virtualization`, the CLI gets none, both asserted at build
+time — then the single outer `codesign` seals the bundle over them. This is not
+deprecated `--deep` *signing*; the bundle's notarization then registers a ticket
+for each nested Mach-O so Gatekeeper accepts them. The bundled `runnyd` is inert
+cargo today; it exists so the bits are signed and notarized once and so a future
+launchd `BundleProgram` has a stable in-bundle path to point at.
+
+Settings exposes an **Install command-line tool** action that vends the bundled
+`runnyctl` as `/usr/local/bin/runnyctl` — the OrbStack/Docker pattern, which
+version-locks the CLI to the app for free. The decision logic is two pure
+functions in `apps/Runny/Sources/Install/CLIInstallPlan.swift`: a `plan` that
+classifies the filesystem state into a verdict, and a `verify` that reads the
+result back from disk. Those verdict and result cases are the authority and are
+not enumerated here; the invariants the surface guarantees are:
+
+- **Never clobber a foreign file.** A regular file, or a symlink that doesn't
+  point into a `Runny.app`, is something another channel owns (a `brew`
+  `runnyctl`); the action refuses it and names the conflict rather than overwrite.
+- **Fail closed from a translocated bundle.** A link into a translocated
+  `…/AppTranslocation/…` copy evaporates on next launch, so the action refuses and
+  asks the operator to move Runny to Applications first. (The Security SPI that
+  answers translocation authoritatively isn't in the Swift import surface, so the
+  detector matches the App Translocation mount path, which Gatekeeper always uses.)
+- **One privileged line, guarded at write time.** An unprivileged
+  `createSymbolicLink` is tried first; only when `/usr/local/bin` needs admin does
+  it escalate, through one `with administrator privileges` shell line whose body
+  re-checks the foreign guard at the moment of mutation (test-and-create, never
+  `ln -f`), closing the TOCTOU window a `brew install` landing between plan and
+  write would open. The path is shell-quoted through the AppleScript layer.
+- **Confirmed from disk, never the exit code.** The model flips to *installed*
+  only on a read-back that resolves to this bundle, with a distinct *installed-but-
+  not-on-PATH* state and loud `conflict`/`translocated`/`failed`/`cancelled`
+  states; the admin prompt is bounded by a visible cancel, so it is never a silent
+  spinner. The app is accessory, so it activates to the foreground before raising
+  the prompt and reverts after.
+
+A menu-bar row nudges toward the action only while the CLI is absent (never on a
+dev build that carries no bundled `runnyctl`); the primary surface is Settings.
+The vended `runnyctl` can lag a Homebrew-managed `runnyd` on a shared host, so it
+carries the same version-skew warning the app does, on its own CLI axis — warn,
+never refuse, printed to stderr before command output.
+
 ## Build shape
 
 `swift_library` → `macos_application` (rules_apple) → the sign / notarize /
-dmg chain in `apps/Runny/BUILD` — no .xcodeproj, ever (ADR-0007). All Swift
-targets are darwin-only (`target_compatible_with`), so non-macOS hosts prune
-them from `//...` before toolchain resolution. Building the app requires
-full Xcode as SDK vendor; it is never opened. Distribution is a notarized,
-stapled .dmg (ADR-0016).
+dmg chain in `apps/Runny/BUILD` — no .xcodeproj, ever (ADR-0007). `codesign_app`
+also places and signs the bundled `runnyd`/`runnyctl` inside-out (above); a
+Darwin-gated `bundle_contents_test` asserts their names, signatures, per-binary
+entitlements, and that each execs. All Swift targets are darwin-only
+(`target_compatible_with`), so non-macOS hosts prune them from `//...` before
+toolchain resolution. Building the app requires full Xcode as SDK vendor; it is
+never opened. Distribution is a notarized, stapled .dmg (ADR-0016).

@@ -5,12 +5,14 @@ import SwiftUI
 struct RunnyApp: App {
     @State private var store = DaemonStore()
     @State private var activation = ActivationCoordinator()
+    @State private var cliInstall = CLIInstallModel()
 
     var body: some Scene {
         MenuBarExtra("Runny", image: "MenuBarIcon") {
             MenuBarView()
                 .environment(store)
                 .environment(activation)
+                .environment(cliInstall)
         }
         .menuBarExtraStyle(.window)
 
@@ -20,7 +22,7 @@ struct RunnyApp: App {
                 .environment(activation)
                 .onAppear {
                     store.start()
-                    activation.mainWindowAppeared()
+                    activation.windowAppeared()
                 }
         }
         .defaultSize(width: 920, height: 600)
@@ -28,6 +30,15 @@ struct RunnyApp: App {
         // it reads as a stranded second title. The toolbar (traffic lights,
         // sidebar toggle) stays; the content header is the sole title.
         .windowStyle(.hiddenTitleBar)
+
+        // The CLI-install surface. It earns Settings back after the home-override
+        // form was removed — its onAppear registers the same accessory↔regular
+        // observer the main window does, so closing it never strands the app.
+        Settings {
+            SettingsView()
+                .environment(cliInstall)
+                .environment(activation)
+        }
     }
 
     init() {
@@ -64,7 +75,11 @@ final class ActivationCoordinator {
         dismissMenuBarPanel()
     }
 
-    func mainWindowAppeared() {
+    /// Called when the main window OR Settings appears: go `.regular` and register
+    /// the close observer once. The observer reverts to `.accessory` only when no
+    /// regular, key-able, non-panel window remains, so whichever of the two
+    /// outlives the other keeps the app visible until both are gone.
+    func windowAppeared() {
         NSApp.setActivationPolicy(.regular)
         guard closeObserver == nil else { return }
         closeObserver = NotificationCenter.default.addObserver(

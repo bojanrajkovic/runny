@@ -176,7 +176,7 @@ def notarize_binary(name, binary, **kwargs):
         **kwargs
     )
 
-def codesign_app(name, app_zip, **kwargs):
+def codesign_app(name, app_zip, binaries = {}, entitlements = {}, entitlement_keys = {}, **kwargs):
     """Re-sign a macos_application archive's .app bundle.
 
     rules_apple signs the bundle ad-hoc in-rule; this target re-signs it
@@ -186,9 +186,19 @@ def codesign_app(name, app_zip, **kwargs):
     runtime restrictions the release ships with; Developer ID adds the
     trusted timestamp (the timestamp server rejects '-').
 
-    The bundle is signed with a single codesign of the .app — never --deep
-    (deprecated, signs inside-out in unspecified order). The app's only
-    nested Mach-O is its main executable, which signing the bundle covers.
+    Nested binaries (the daemon + CLI carried in Contents/MacOS) are placed
+    and signed FIRST, then the single outer codesign of the .app seals over
+    them — inside-out, by hand. This is NOT --deep SIGNING (deprecated; signs
+    inside-out in an unspecified order with the wrong flags on nested Mach-Os):
+    each nested binary is signed explicitly, with its own entitlements, before
+    the bundle seal. Verification (below) DOES use --deep, which is a different
+    operation — it only WALKS the seals to confirm each is valid, in no
+    particular order, and is not deprecated. Do not "consistency-fix" the two
+    to match.
+
+    With no `binaries`, the macro behaves exactly as it did before nesting was
+    added: one outer codesign, no placement, no extra assertions — so any
+    bundle whose only Mach-O is its own executable is unaffected.
 
     app_zip must resolve to exactly one file: with --apple_generate_dsym
     or include_symbols_in_bundle, macos_application's default output grows
@@ -199,10 +209,81 @@ def codesign_app(name, app_zip, **kwargs):
         name:    Target name. Output is <name>.zip containing the signed .app.
         app_zip: Label of a .zip containing the .app at its root (a
                  macos_application target's default output).
+        binaries: dict of bare bundle name -> signed-binary label, placed at
+                 Contents/MacOS/<bare-name> and signed inside-out. The bare
+                 name is exact (no .bin suffix): a launchd BundleProgram and a
+                 vended-CLI symlink both depend on it.
+        entitlements: dict of bare name -> entitlements .plist label embedded
+                 when signing that binary. A name absent here is signed plain.
+        entitlement_keys: dict of bare name -> the one entitlement key that
+                 binary MUST carry (e.g. com.apple.security.virtualization for
+                 the daemon). Every such key is treated as sensitive across the
+                 whole bundle: the build asserts the owning binary HAS it and
+                 every OTHER nested binary does NOT — so a CLI can never inherit
+                 the daemon's VM grant, and a daemon that lost it fails the build
+                 red (the silent VM-denial this guards).
     """
+    srcs = [app_zip] + list(binaries.values()) + list(entitlements.values())
+
+    # A plist or required-key named for a binary not in `binaries` is a typo that
+    # would silently drop that binary's must-have assertion — fail loud at analysis.
+    # (Loop var must NOT be `name`: that would rebind the genrule's name parameter.)
+    for keyed in list(entitlements.keys()) + list(entitlement_keys.keys()):
+        if keyed not in binaries:
+            fail("codesign_app: entitlements/entitlement_keys names %r, which is not in binaries %s" %
+                 (keyed, sorted(binaries.keys())))
+
+    # The sensitive keys across the bundle: each owning binary must carry its
+    # own, and no other nested binary may. Deduped, order-stable.
+    sensitive = []
+    for key in entitlement_keys.values():
+        if key not in sensitive:
+            sensitive.append(key)
+
+    nested = ""
+    asserts = ""
+    verify = ""
+    if binaries:
+        nested_lines = []
+        verify_lines = []
+        assert_lines = []
+        for bare, label in binaries.items():
+            dest = '"$$APP/Contents/MacOS/%s"' % bare
+            ent_flag = ""
+            if bare in entitlements:
+                ent_flag = "--entitlements $(location %s) " % entitlements[bare]
+            nested_lines.append(
+                "cp $(location %s) %s\n" % (label, dest) +
+                "chmod +wx %s\n" % dest +
+                'codesign -s "$$IDENTITY" $$EXTRA_FLAGS %s--force %s\n' % (ent_flag, dest),
+            )
+
+            # Each nested Mach-O must validate on its own, so even an ad-hoc dev
+            # build proves the inside-out seal — not just the outer bundle.
+            verify_lines.append("codesign --verify --strict %s\n" % dest)
+            own = entitlement_keys.get(bare)
+            for key in sensitive:
+                # grep -qF -- : exact fixed string, so the dots in the key aren't
+                # regex wildcards and a key that is a prefix of another can't match.
+                if key == own:
+                    assert_lines.append(
+                        'codesign -d --entitlements :- %s 2>/dev/null | grep -qF -- %s || { echo "%s is missing required entitlement %s" >&2; exit 1; }\n' % (dest, key, bare, key),
+                    )
+                else:
+                    assert_lines.append(
+                        'if codesign -d --entitlements :- %s 2>/dev/null | grep -qF -- %s; then echo "%s carries entitlement %s it must not" >&2; exit 1; fi\n' % (dest, key, bare, key),
+                    )
+        nested = "".join(nested_lines)
+        asserts = "".join(assert_lines)
+
+        # --deep here is verification, not signing (see the docstring): it walks
+        # every nested seal to confirm validity. Paired with the per-binary
+        # --verify --strict above so a missing nested signature fails the build.
+        verify = "".join(verify_lines) + 'codesign --verify --deep --strict "$$APP"\n'
+
     native.genrule(
         name = name,
-        srcs = [app_zip],
+        srcs = srcs,
         outs = [name + ".zip"],
         cmd = """
             IDENTITY="$${{CODESIGN_IDENTITY:--}}"
@@ -215,9 +296,9 @@ def codesign_app(name, app_zip, **kwargs):
             trap 'rm -rf "$$WORK"' EXIT
             ditto -x -k $(location {app_zip}) "$$WORK"
             APP=$$(echo "$$WORK"/*.app)
-            codesign -s "$$IDENTITY" $$EXTRA_FLAGS --force "$$APP"
-            ditto -c -k --keepParent "$$APP" "$@"
-        """.format(app_zip = app_zip),
+            {nested}codesign -s "$$IDENTITY" $$EXTRA_FLAGS --force "$$APP"
+            {asserts}{verify}ditto -c -k --keepParent "$$APP" "$@"
+        """.format(app_zip = app_zip, nested = nested, asserts = asserts, verify = verify),
         # no-sandbox: codesign needs keychain access (securityd) and network
         # access to Apple's timestamp/OCSP servers; Bazel's macOS sandbox
         # blocks both.

@@ -211,7 +211,10 @@ residual skew is **made loud**.
   exist or be writable without an admin prompt; the create-and-symlink step is an
   implementation detail tracked in #62.
 - The release still emits both the `brew` tarball (headless) and the `.dmg` (now
-  carrying the binaries) — the same notarized bits in two containers.
+  carrying the binaries) — the same *source* binaries, but the `.app` re-signs its
+  nested copies inside-out, so their CDHash differs from the tarball's separately
+  notarized ones. Each container is signed and notarized on its own; the
+  version-skew detector, not a CDHash match, is what proves two installs agree.
 - `docs/deploy.md` gains the app-managed install path beside `brew` and manual,
   and states the audience split; `docs/security.md` notes the app as a daemon
   installer under the existing signing posture.

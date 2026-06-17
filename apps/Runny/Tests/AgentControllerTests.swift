@@ -16,14 +16,17 @@ final class AgentControllerTests: XCTestCase {
         var registerError: Error?
         var unregisterError: Error?
         var bootoutOutcome: BootoutOutcome = .notLoaded
+        var kickstartError: Error?
         private(set) var registerCalls = 0
         private(set) var unregisterCalls = 0
         private(set) var bootoutCalls = 0
+        private(set) var kickstartCalls = 0
 
         func status() -> SMAppService.Status { nextStatus }
         func register() throws { registerCalls += 1; if let registerError { throw registerError } }
         func unregister() throws { unregisterCalls += 1; if let unregisterError { throw unregisterError } }
         func bootout() async -> BootoutOutcome { bootoutCalls += 1; return bootoutOutcome }
+        func kickstart() async throws { kickstartCalls += 1; if let kickstartError { throw kickstartError } }
     }
 
     struct StubError: Error {}
@@ -99,6 +102,60 @@ final class AgentControllerTests: XCTestCase {
     func testEligibilityReflectsInjectedProvider() {
         let c = AgentController(registrar: MockRegistrar(), eligibility: { .translocated })
         XCTAssertEqual(c.eligibility, .translocated)
+    }
+
+    // MARK: - Start affordance
+
+    func testStartAffordanceOnlyWhenInstalledAndUnreachable() {
+        XCTAssertEqual(LaunchAgentStatus.startAffordance(state: .installed, daemonUnreachable: true), .start)
+        XCTAssertEqual(LaunchAgentStatus.startAffordance(state: .installed, daemonUnreachable: false), .none)
+        XCTAssertEqual(LaunchAgentStatus.startAffordance(state: .notInstalled, daemonUnreachable: true), .none)
+    }
+
+    func testRequiresApprovalIsApprovalNeverStart() {
+        // The dead-Start-button failure mode: a registered-but-unapproved agent must
+        // route to the approval CTA, never a Start that kickstarts a job launchd won't run.
+        XCTAssertEqual(LaunchAgentStatus.startAffordance(state: .requiresApproval, daemonUnreachable: true), .approval)
+        XCTAssertEqual(LaunchAgentStatus.startAffordance(state: .requiresApproval, daemonUnreachable: false), .approval)
+    }
+
+    func testStartConfirmsFromConnectionNotKickstartReturn() async {
+        let mock = MockRegistrar()
+        let c = AgentController(registrar: mock)
+        await c.start(isConnected: { true }) // already connected → came up
+        XCTAssertEqual(mock.kickstartCalls, 1)
+        XCTAssertEqual(c.startOutcome, .cameUp)
+    }
+
+    func testStartThatNeverConnectsIsLoudNotSilent() async {
+        let mock = MockRegistrar()
+        let c = AgentController(registrar: mock)
+        await c.start(isConnected: { false }, within: .milliseconds(60), poll: .milliseconds(10))
+        XCTAssertEqual(c.startOutcome, .didNotComeUp)
+    }
+
+    func testStartGateDenyDoesNotKickstart() async {
+        let mock = MockRegistrar()
+        let c = AgentController(registrar: mock, spawnGate: { .deny(reason: "deferred") })
+        await c.start(isConnected: { true })
+        XCTAssertEqual(mock.kickstartCalls, 0, "a denied gate must NOT kickstart")
+        guard case .refused = c.startOutcome else {
+            return XCTFail("a denied start must be loud, got \(c.startOutcome)")
+        }
+    }
+
+    func testStartKickstartFailureIsRefusedNotInstalledStateChange() async {
+        let mock = MockRegistrar()
+        mock.nextStatus = .enabled
+        mock.kickstartError = StubError()
+        let c = AgentController(registrar: mock)
+        c.refresh() // installed
+        await c.start(isConnected: { false }, within: .milliseconds(60), poll: .milliseconds(10))
+        guard case .refused = c.startOutcome else {
+            return XCTFail("a kickstart failure must surface refused, got \(c.startOutcome)")
+        }
+        // A failed START must not flip the INSTALL state to failed — the agent is still installed.
+        XCTAssertEqual(c.installState, .installed)
     }
 
     func testClassifyBootout() {

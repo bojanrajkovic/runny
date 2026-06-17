@@ -81,4 +81,26 @@ enum LaunchAgentStatus {
     nonisolated static func isCanonicalAgentProgram(_ programPath: String) -> Bool {
         programPath == canonicalAgentProgram
     }
+
+    /// What the daemon-not-running surface should offer.
+    enum StartAffordance: Equatable {
+        /// Not installed, or the daemon is reachable — offer nothing.
+        case none
+        /// Installed but the daemon is unreachable — offer Start (kickstart).
+        case start
+        /// Registered but Login Items approval is pending — offer the approval CTA,
+        /// NEVER a Start that would kickstart a job launchd refuses to run.
+        case approval
+    }
+
+    /// The Start gate. Start is offered ONLY when the agent is installed AND the
+    /// daemon is unreachable; `requiresApproval` is its own approval CTA, so a dead
+    /// Start button can never no-op against a job launchd won't run.
+    nonisolated static func startAffordance(state: State, daemonUnreachable: Bool) -> StartAffordance {
+        switch state {
+        case .requiresApproval: .approval
+        case .installed: daemonUnreachable ? .start : .none
+        case .notInstalled, .notFound, .registrationFailed: .none
+        }
+    }
 }

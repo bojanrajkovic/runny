@@ -57,6 +57,9 @@ struct MenuBarView: View {
                 .scrollBounceBehavior(.basedOnSize)
                 .frame(maxHeight: CGFloat(min(store.slots.count, 8)) * 46 + 12)
             }
+            // Daemon-not-running Start affordance (self-hides unless the agent is
+            // installed and the daemon is unreachable, or approval is pending).
+            DaemonStartAffordance()
             // A gentle nudge ONLY while the CLI is absent (never on a dev build,
             // where refresh() leaves a non-.notInstalled state) — the primary
             // surface is Settings; this just points there, like VS Code's

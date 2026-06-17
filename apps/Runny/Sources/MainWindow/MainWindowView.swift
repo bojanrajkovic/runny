@@ -122,6 +122,9 @@ struct DaemonCard: View {
                     .foregroundStyle(.orange)
                     .lineLimit(3)
             }
+            // Self-hides unless the agent is installed and the daemon is unreachable
+            // (Start), or approval is pending (Login Items CTA).
+            DaemonStartAffordance()
             HStack {
                 Button(store.reloadInFlight ? "Validating…" : "Reload Config…") {
                     store.requestReload()

@@ -40,6 +40,23 @@ protocol ServiceRegistrar {
     func register() throws
     func unregister() throws
     func bootout() async -> BootoutOutcome
+    /// Start a registered-but-stopped agent (`launchctl kickstart`, no `-k` — never
+    /// a SIGKILL of a running daemon). Throws on failure/timeout; the daemon coming
+    /// up is confirmed from the connection, not this call's return.
+    func kickstart() async throws
+}
+
+/// The outcome of a Start affordance: the daemon coming up is confirmed from a
+/// later `.connected` snapshot within a bound, never from the kickstart return.
+enum StartOutcome: Equatable {
+    case idle
+    case starting
+    case cameUp
+    /// kickstart issued, but no `.connected` within the recovery bound — surfaced
+    /// loud ("Start issued but the daemon hasn't come up"), never a silent spinner.
+    case didNotComeUp
+    /// The gate denied the start, or kickstart itself failed.
+    case refused(String)
 }
 
 /// The thin side-effect wrapper over `SMAppService.agent`, exposing a published
@@ -58,6 +75,17 @@ final class AgentController {
     /// The last spawn-gate refusal (P5 fills the gate; P4 ships `.allow`, so this
     /// stays nil in P4). Surfaced loud, never a silent no-op.
     private(set) var spawnRefusal: String?
+
+    /// The Start affordance's progress/outcome. Distinct from `installState`: a
+    /// failed start leaves the agent installed, so it must not flip the install
+    /// state to failed.
+    private(set) var startOutcome: StartOutcome = .idle
+
+    /// How long to wait for the daemon to answer after a kickstart before
+    /// surfacing "didn't come up". A cold start (launchd spawn + socket listen) is
+    /// normally a second or two; this is a healthy-magnitude × margin bound — NOT
+    /// derived from any sum of the daemon's own check budgets.
+    static let startRecoveryBound: Duration = .seconds(30)
 
     private let registrar: ServiceRegistrar
     private let spawnGate: () async -> SpawnGate
@@ -102,12 +130,56 @@ final class AgentController {
     /// Install = register the agent. RunAtLoad means registering it IS enabling
     /// start-at-login, so the toggle's enable path and install are one action.
     func install() async {
-        await attemptSpawn("install") { try self.registrar.register() }
+        switch await attemptSpawn("install", { try self.registrar.register() }) {
+        case .ran: refresh()
+        case .denied: break // spawnRefusal already set; installState unchanged
+        case let .failed(error):
+            installState = .registrationFailed(reason: "install failed: \(error.localizedDescription)")
+        }
     }
 
     /// The start-at-login toggle's ON position. Identical to `install()` — there
     /// is no separate "enabled but not installed" state for a bundled agent.
     func enableStartAtLogin() async { await install() }
+
+    /// Start a registered-but-stopped daemon (the menu/window Start affordance, and
+    /// the kickstart fallback). Funnels through the gate, then confirms the daemon
+    /// actually came up from a later `.connected` snapshot within the recovery
+    /// bound — never from the kickstart return. On expiry it surfaces
+    /// `didNotComeUp` loudly. `isConnected` is the live connection read (injected so
+    /// the controller need not own the daemon stream); `within`/`poll` are
+    /// overridable for tests.
+    func start(
+        isConnected: @escaping () -> Bool,
+        within bound: Duration = AgentController.startRecoveryBound,
+        poll: Duration = .milliseconds(500)
+    ) async {
+        startOutcome = .starting
+        switch await attemptSpawn("start", { try await self.registrar.kickstart() }) {
+        case .denied:
+            startOutcome = .refused(spawnRefusal ?? "start was blocked")
+            return
+        case let .failed(error):
+            startOutcome = .refused("could not start runnyd: \(error.localizedDescription)")
+            return
+        case .ran:
+            break
+        }
+        // Confirm recovery from the connection, never the kickstart return.
+        let deadline = ContinuousClock.now.advanced(by: bound)
+        while ContinuousClock.now < deadline {
+            if isConnected() {
+                startOutcome = .cameUp
+                return
+            }
+            try? await Task.sleep(for: poll)
+        }
+        startOutcome = isConnected() ? .cameUp : .didNotComeUp
+    }
+
+    /// Reset the Start outcome (e.g. when the surface reappears) so a stale
+    /// `didNotComeUp`/`cameUp` from a prior attempt doesn't linger.
+    func clearStartOutcome() { startOutcome = .idle }
 
     // MARK: - Teardown (NOT spawn-triggering — no gate)
 
@@ -134,25 +206,34 @@ final class AgentController {
 
     // MARK: - The single spawn chokepoint
 
-    /// Every spawn-triggering action runs through here. Consults `spawnGate` and,
-    /// on `.deny`, aborts LOUDLY — records the refusal and does NOT call the
-    /// registrar (no spawn). On `.allow` it runs the action and re-derives
-    /// `installState` from status, mapping a throw to `registrationFailed`. A
-    /// direct `SMAppService`/launchctl call in a view action — bypassing this — is
-    /// the anti-pattern the seam exists to prevent; P5 fills the gate here.
-    private func attemptSpawn(_ label: String, _ body: () throws -> Void) async {
+    /// The single gate every spawn-triggering action runs through. Consults
+    /// `spawnGate` and, on `.deny`, records the refusal and returns `.denied`
+    /// WITHOUT calling the registrar (no spawn). On `.allow` it runs the action and
+    /// reports `.ran`/`.failed` — the per-action caller decides what state that
+    /// maps to (a register throw is a failed install; a kickstart throw is a failed
+    /// start, the agent still installed). A direct `SMAppService`/launchctl call in
+    /// a view action — bypassing this — is the anti-pattern the seam prevents; P5
+    /// fills the gate here.
+    private func attemptSpawn(_ label: String, _ body: () async throws -> Void) async -> SpawnResult {
         if case let .deny(reason) = await spawnGate() {
             spawnRefusal = "\(label) was not started: \(reason)"
-            return
+            return .denied
         }
         spawnRefusal = nil
         do {
-            try body()
+            try await body()
+            return .ran
         } catch {
-            installState = .registrationFailed(reason: "\(label) failed: \(error.localizedDescription)")
-            return
+            return .failed(error)
         }
-        refresh()
+    }
+
+    /// The gate's verdict for one spawn attempt — kept loud and explicit so each
+    /// caller maps a failure to its own surface rather than a shared default.
+    private enum SpawnResult {
+        case ran
+        case denied
+        case failed(Error)
     }
 }
 

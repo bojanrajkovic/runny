@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 import ServiceManagement
@@ -129,6 +130,8 @@ final class AgentController {
     private let spawnGate: () async -> SpawnGate
     private let eligibilityProvider: () -> LaunchAgentStatus.Eligibility
 
+    private var activationObserver: NSObjectProtocol?
+
     init(
         registrar: ServiceRegistrar,
         spawnGate: @escaping () async -> SpawnGate = { .allow },
@@ -137,6 +140,19 @@ final class AgentController {
         self.registrar = registrar
         self.spawnGate = spawnGate
         eligibilityProvider = eligibility
+        // Re-read the install status when the app returns to the foreground — e.g.
+        // after the user enabled the agent in System Settings via the Login Items
+        // CTA — so an already-open window doesn't stay stale at .requiresApproval
+        // until it is reopened. Cheap (an SMAppService status read), so it's fine on
+        // every activation; reconcile is left to the per-surface appear.
+        // [weak self] + app-lifetime AgentController: no explicit removal needed (a
+        // nonisolated deinit can't touch the MainActor property anyway, and the
+        // controller never deinits — it's a @State for the app's whole run).
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh() }
+        }
     }
 
     /// Whether this running bundle may install its agent — translocated, in
@@ -169,10 +185,23 @@ final class AgentController {
     /// start-at-login, so the toggle's enable path and install are one action.
     func install() async {
         switch await attemptSpawn("install", { try self.registrar.register() }) {
-        case .ran: refresh()
+        case .ran:
+            refresh()
+            reconcileState = .notChecked // the registration changed — re-check on next appear
         case .denied: break // spawnRefusal already set; installState unchanged
         case let .failed(error):
             installState = .registrationFailed(reason: "install failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// A later live connection proved the daemon recovered — clear a TERMINAL Start
+    /// outcome so a subsequent unrelated outage shows a fresh Start, not the stale
+    /// "Start issued"/"Try Again" from a prior attempt. Leaves an in-flight
+    /// `.starting` alone (start()'s own poll owns that).
+    func noteRecovered() {
+        switch startOutcome {
+        case .didNotComeUp, .refused, .cameUp: startOutcome = .idle
+        case .idle, .starting: break
         }
     }
 
@@ -253,6 +282,9 @@ final class AgentController {
             installState = .registrationFailed(reason: "unregister failed: \(error.localizedDescription)")
             return
         }
+        // The registration is gone — clear any stale reconcile verdict so a reinstall
+        // in the same session re-checks instead of staying hidden behind a dead .foreign.
+        reconcileState = .notChecked
         switch await registrar.bootout() {
         case .removed, .notLoaded:
             refresh()

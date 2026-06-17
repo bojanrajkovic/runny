@@ -227,6 +227,28 @@ final class AgentControllerTests: XCTestCase {
         XCTAssertNil(AgentController.parseLaunchctlProgram("state = running\npid = 42"))
     }
 
+    func testReconcileResetsAfterUninstall() async {
+        let mock = MockRegistrar()
+        mock.programResult = .program("/foreign/Runny.app/Contents/MacOS/runnyd")
+        let c = AgentController(registrar: mock)
+        await c.runReconcile()
+        XCTAssertEqual(c.reconcileState, .foreign(path: "/foreign/Runny.app/Contents/MacOS/runnyd"))
+        // Uninstall must clear the stale verdict so a reinstall in the same session
+        // re-checks and Start/Update aren't left hidden behind a dead .foreign.
+        await c.uninstall()
+        XCTAssertEqual(c.reconcileState, .notChecked)
+    }
+
+    func testNoteRecoveredResetsTerminalStartOutcome() async {
+        let c = AgentController(registrar: MockRegistrar())
+        await c.start(isConnected: { false }, within: .milliseconds(40), poll: .milliseconds(10))
+        XCTAssertEqual(c.startOutcome, .didNotComeUp)
+        // A later live connection proves recovery — clear the terminal outcome so the
+        // next unrelated outage shows a fresh Start, not the stale "Try Again".
+        c.noteRecovered()
+        XCTAssertEqual(c.startOutcome, .idle)
+    }
+
     func testClassifyBootout() {
         XCTAssertEqual(AgentController.classifyBootout(exitCode: 0, stderr: ""), .removed)
         XCTAssertEqual(

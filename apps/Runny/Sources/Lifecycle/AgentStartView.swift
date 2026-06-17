@@ -13,21 +13,29 @@ struct DaemonStartAffordance: View {
     @Environment(DaemonStore.self) private var store
 
     var body: some View {
-        switch LaunchAgentStatus.startAffordance(
-            state: agent.installState, daemonUnreachable: daemonUnreachable, canonical: agentCanonical
-        ) {
-        case .none:
-            EmptyView()
-        case .approval:
-            AffordanceRow(
-                systemImage: icon,
-                text: "runnyd is installed but needs approval in Login Items.",
-                tint: .orange
+        // A stable Group host so the recovery .onChange fires even when the
+        // affordance self-hides (the row disappears the instant the daemon is
+        // reachable, which is exactly when we want to clear a terminal Start outcome).
+        Group {
+            switch LaunchAgentStatus.startAffordance(
+                state: agent.installState, daemonUnreachable: daemonUnreachable, canonical: agentCanonical
             ) {
-                Button("Approve…") { SMAppService.openSystemSettingsLoginItems() }
+            case .none:
+                EmptyView()
+            case .approval:
+                AffordanceRow(
+                    systemImage: icon,
+                    text: "runnyd is installed but needs approval in Login Items.",
+                    tint: .orange
+                ) {
+                    Button("Approve…") { SMAppService.openSystemSettingsLoginItems() }
+                }
+            case .start:
+                startRow
             }
-        case .start:
-            startRow
+        }
+        .onChange(of: daemonUnreachable) { _, unreachable in
+            if !unreachable { agent.noteRecovered() }
         }
     }
 

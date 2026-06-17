@@ -108,12 +108,11 @@ struct AgentInstallRow: View {
         }
     }
 
-    /// The toggle is actionable only from an eligible location and when there is a
-    /// bundled daemon to register. `notFound` is a dev build with no bundled plist;
-    /// `registrationFailed` stays toggle-able so the operator can retry.
+    /// Eligibility gates only install (turning on); an installed agent stays
+    /// toggle-able anywhere so a stale agent can be uninstalled even from a
+    /// translocated/moved launch. See `LaunchAgentStatus.canToggle`.
     private var canToggle: Bool {
-        guard agent.eligibility == .eligible else { return false }
-        return agent.installState != .notFound
+        LaunchAgentStatus.canToggle(state: agent.installState, eligibility: agent.eligibility)
     }
 
     private var detail: String? {

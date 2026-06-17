@@ -74,6 +74,19 @@ enum LaunchAgentStatus {
         return .notInApplications(path: bundlePath)
     }
 
+    /// Whether the start-at-login toggle is actionable. Eligibility gates only
+    /// turning it ON (install needs a stable `/Applications` location); a
+    /// registered agent stays toggle-able regardless of location so a stale or
+    /// unwanted agent can always be uninstalled — including from the translocated /
+    /// moved-out-of-Applications recovery cases the row reports.
+    nonisolated static func canToggle(state: State, eligibility: Eligibility) -> Bool {
+        switch state {
+        case .installed, .requiresApproval: true // registered → allow uninstall anywhere
+        case .notFound: false // no bundled plist to register or remove
+        case .notInstalled, .registrationFailed: eligibility == .eligible // install gate
+        }
+    }
+
     /// A registered agent is foreign/stale when its program path is not THIS
     /// app's canonical agent program. Compared against `canonicalAgentProgram`,
     /// never the running bundle's path — a `/Applications` agent observed from a

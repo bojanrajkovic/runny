@@ -12,7 +12,10 @@ struct DaemonUpdateAffordance: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        switch store.daemonUpdate(agentInstalled: agent.installState == .installed) {
+        switch store.daemonUpdate(
+            agentInstalled: agent.installState == .installed,
+            agentCanonical: agentCanonical
+        ) {
         case .none:
             EmptyView()
         case .available:
@@ -43,5 +46,12 @@ struct DaemonUpdateAffordance: View {
     private func update() {
         activation.openMainWindow(openWindow)
         store.requestDaemonUpdate()
+    }
+
+    /// A reconcile that affirmatively found a foreign-path agent blocks the update
+    /// (a reload would respawn the foreign binary). `.ok`/`.undetermined` are
+    /// canonical-enough — reconcile may not have run on this surface yet.
+    private var agentCanonical: Bool {
+        if case .foreign = agent.reconcileState { false } else { true }
     }
 }

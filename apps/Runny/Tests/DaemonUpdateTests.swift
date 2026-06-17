@@ -25,17 +25,17 @@ final class DaemonUpdateTests: XCTestCase {
 
     func testUpdateOfferedOnlyToAppInstalledNewerAgent() {
         XCTAssertEqual(
-            DaemonStore.daemonUpdate(agentInstalled: true, appNewer: true, protocolBehind: false, daemonCore: "0.5.0", reloadPending: false, attempted: false),
+            DaemonStore.daemonUpdate(agentInstalled: true, agentCanonical: true, appNewer: true, protocolBehind: false, daemonCore: "0.5.0", reloadPending: false, attempted: false),
             .available
         )
         // A brew/manual daemon (agent not app-installed) is never offered the
         // futile fleet-draining update — only the generic skew banner.
         XCTAssertEqual(
-            DaemonStore.daemonUpdate(agentInstalled: false, appNewer: true, protocolBehind: false, daemonCore: "0.5.0", reloadPending: false, attempted: false),
+            DaemonStore.daemonUpdate(agentInstalled: false, agentCanonical: true, appNewer: true, protocolBehind: false, daemonCore: "0.5.0", reloadPending: false, attempted: false),
             .none
         )
         XCTAssertEqual(
-            DaemonStore.daemonUpdate(agentInstalled: true, appNewer: false, protocolBehind: false, daemonCore: "0.6.0", reloadPending: false, attempted: false),
+            DaemonStore.daemonUpdate(agentInstalled: true, agentCanonical: true, appNewer: false, protocolBehind: false, daemonCore: "0.6.0", reloadPending: false, attempted: false),
             .none
         )
     }
@@ -61,13 +61,27 @@ final class DaemonUpdateTests: XCTestCase {
         // newer bundled binary, so an app-installed agent gets the update, not just
         // the generic skew banner.
         XCTAssertEqual(
-            DaemonStore.daemonUpdate(agentInstalled: true, appNewer: false, protocolBehind: true, daemonCore: "0.6.0", reloadPending: false, attempted: false),
+            DaemonStore.daemonUpdate(agentInstalled: true, agentCanonical: true, appNewer: false, protocolBehind: true, daemonCore: "0.6.0", reloadPending: false, attempted: false),
             .available
         )
         // Neither axis ahead → nothing to offer.
         XCTAssertEqual(
-            DaemonStore.daemonUpdate(agentInstalled: true, appNewer: false, protocolBehind: false, daemonCore: "0.6.0", reloadPending: false, attempted: false),
+            DaemonStore.daemonUpdate(agentInstalled: true, agentCanonical: true, appNewer: false, protocolBehind: false, daemonCore: "0.6.0", reloadPending: false, attempted: false),
             .none
+        )
+    }
+
+    func testUpdateHiddenForForeignAgent() {
+        // A foreign-path agent: a reload respawns the foreign BundleProgram, not
+        // this app's bundled runnyd, so the update can't take — don't offer it.
+        XCTAssertEqual(
+            DaemonStore.daemonUpdate(agentInstalled: true, agentCanonical: false, appNewer: true, protocolBehind: false, daemonCore: "0.5.0", reloadPending: false, attempted: false),
+            .none
+        )
+        // Canonical + ahead → still offered.
+        XCTAssertEqual(
+            DaemonStore.daemonUpdate(agentInstalled: true, agentCanonical: true, appNewer: true, protocolBehind: false, daemonCore: "0.5.0", reloadPending: false, attempted: false),
+            .available
         )
     }
 
@@ -83,13 +97,13 @@ final class DaemonUpdateTests: XCTestCase {
 
     func testUpdateInProgressThenDidNotTake() {
         XCTAssertEqual(
-            DaemonStore.daemonUpdate(agentInstalled: true, appNewer: true, protocolBehind: false, daemonCore: "0.5.0", reloadPending: true, attempted: true),
+            DaemonStore.daemonUpdate(agentInstalled: true, agentCanonical: true, appNewer: true, protocolBehind: false, daemonCore: "0.5.0", reloadPending: true, attempted: true),
             .inProgress
         )
         // Reload resolved (not pending) but still app-newer after an attempt → loud,
         // named "didn't take", never a silent re-arm or a generic reload note.
         XCTAssertEqual(
-            DaemonStore.daemonUpdate(agentInstalled: true, appNewer: true, protocolBehind: false, daemonCore: "0.5.0", reloadPending: false, attempted: true),
+            DaemonStore.daemonUpdate(agentInstalled: true, agentCanonical: true, appNewer: true, protocolBehind: false, daemonCore: "0.5.0", reloadPending: false, attempted: true),
             .didNotTake(daemonCore: "0.5.0")
         )
     }

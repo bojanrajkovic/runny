@@ -49,6 +49,18 @@ final class LaunchAgentStatusTests: XCTestCase {
         )
     }
 
+    func testCanToggleAllowsUninstallFromAnyLocationButGatesInstall() {
+        // Installed (or approval-pending) → always toggle-able so a stale agent can
+        // be uninstalled, even from a translocated or moved bundle.
+        XCTAssertTrue(LaunchAgentStatus.canToggle(state: .installed, eligibility: .translocated))
+        XCTAssertTrue(LaunchAgentStatus.canToggle(state: .requiresApproval, eligibility: .notInApplications(path: "/x")))
+        // Not installed → only from an eligible location (install gate).
+        XCTAssertTrue(LaunchAgentStatus.canToggle(state: .notInstalled, eligibility: .eligible))
+        XCTAssertFalse(LaunchAgentStatus.canToggle(state: .notInstalled, eligibility: .translocated))
+        // No bundled plist → nothing to register or remove.
+        XCTAssertFalse(LaunchAgentStatus.canToggle(state: .notFound, eligibility: .eligible))
+    }
+
     func testReconcileComparesCanonicalProgramNotRunningBundle() {
         XCTAssertTrue(
             LaunchAgentStatus.isCanonicalAgentProgram("/Applications/Runny.app/Contents/MacOS/runnyd")

@@ -111,10 +111,15 @@ final class AgentController {
     private var startInFlight = false
 
     /// How long to wait for the daemon to answer after a kickstart before
-    /// surfacing "didn't come up". A cold start (launchd spawn + socket listen) is
-    /// normally a second or two; this is a healthy-magnitude × margin bound — NOT
-    /// derived from any sum of the daemon's own check budgets.
-    static let startRecoveryBound: Duration = .seconds(30)
+    /// surfacing "didn't come up". A healthy cold start is NOT just the launchd
+    /// spawn — the socket opens only AFTER startup validation (the GitHub
+    /// permission check + a sequential image-resolve per pool), so on a normal
+    /// config that healthy magnitude is several seconds, more for a large fleet.
+    /// This bound is that healthy magnitude × margin — deliberately NOT the sum of
+    /// the daemon's per-check budgets (the degraded envelope). And it self-corrects:
+    /// `didNotComeUp` clears the instant the daemon's own stream connects, so a
+    /// genuinely slow-but-healthy start surfaces only a transient message.
+    static let startRecoveryBound: Duration = .seconds(60)
 
     private let registrar: ServiceRegistrar
     private let spawnGate: () async -> SpawnGate

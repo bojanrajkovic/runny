@@ -113,6 +113,13 @@ final class DaemonStore {
     /// `draining`.
     private(set) var exitHeld = false
 
+    /// The daemon's live Local Network (TCC) grant classification from the latest
+    /// snapshot, driving the proactive grant card (`localNetworkCard`). UNSPECIFIED
+    /// from a daemon predating the field, or when no snapshot has arrived. This is
+    /// the daemon-authoritative signal — NOT the button-gated `doctorChecks`, which
+    /// is nil until Run Checks and reports ok until a guest boots.
+    private(set) var localNetworkGrant: Runny_V1_LocalNetworkGrant = .unspecified
+
     /// The current version-skew verdict, recomputed from each snapshot, or nil
     /// when the app and daemon match / the daemon's version isn't known yet / the
     /// app is an unstamped dev build / the daemon is merely newer. Surfaces read
@@ -508,6 +515,7 @@ final class DaemonStore {
         bootID = snapshot.bootID
         drainSeq = snapshot.drainSeq
         exitHeld = snapshot.exitHeld
+        localNetworkGrant = snapshot.localNetworkGrant
         lastUpdate = Date()
         confirmPending()
         trackReloadDrain()

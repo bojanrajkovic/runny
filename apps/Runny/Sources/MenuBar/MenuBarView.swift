@@ -60,6 +60,9 @@ struct MenuBarView: View {
             // Daemon-not-running Start affordance (self-hides unless the agent is
             // installed and the daemon is unreachable, or approval is pending).
             DaemonStartAffordance()
+            // Proactive Local Network grant card (self-hides unless the daemon
+            // reports an unknown/denied grant) — fires before a dial fails.
+            LocalNetworkGrantCard()
             // A gentle nudge ONLY while the CLI is absent (never on a dev build,
             // where refresh() leaves a non-.notInstalled state) — the primary
             // surface is Settings; this just points there, like VS Code's

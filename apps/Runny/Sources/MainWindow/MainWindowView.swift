@@ -125,6 +125,9 @@ struct DaemonCard: View {
             // Self-hides unless the agent is installed and the daemon is unreachable
             // (Start), or approval is pending (Login Items CTA).
             DaemonStartAffordance()
+            // Proactive Local Network grant card — self-hides unless the daemon
+            // reports an unknown/denied grant.
+            LocalNetworkGrantCard()
             HStack {
                 Button(store.reloadInFlight ? "Validating…" : "Reload Config…") {
                     store.requestReload()

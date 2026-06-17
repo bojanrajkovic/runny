@@ -7,6 +7,7 @@ target_compatible_with before toolchain resolution.
 
 load("@rules_apple//apple:macos.bzl", "macos_application", "macos_unit_test")
 load("@rules_apple//apple:versioning.bzl", "apple_bundle_version")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("@rules_swift//swift:swift.bzl", "swift_library")
 load("//tools/sign:sign.bzl", "app_dmg", "codesign_app", "notarize_app", "notarize_dmg")
 
@@ -95,6 +96,21 @@ codesign_app(
     entitlement_keys = {"runnyd": "com.apple.security.virtualization"},
     entitlements = {"runnyd": "//tools/sign:runnyd.entitlements"},
     visibility = ["//visibility:public"],
+)
+
+# Runs in `bazel test //...`, so the release inherits it: a packaging or signing
+# regression that drops a binary, strips the daemon's entitlement, over-grants the
+# CLI, or ships a non-executable Mach-O fails here, not on a user's machine.
+sh_test(
+    name = "bundle_contents_test",
+    size = "small",
+    srcs = ["bundle_contents_test.sh"],
+    args = ["$(rootpath :Runny_signed)"],
+    data = [":Runny_signed"],
+    # codesign --verify and exec'ing freshly signed binaries need securityd; the
+    # macOS test sandbox blocks it (same reason the signing genrules are tagged).
+    tags = ["no-sandbox"],
+    target_compatible_with = ["@platforms//os:macos"],
 )
 
 notarize_app(

@@ -51,7 +51,15 @@ func main() {
 func run() error {
 	configFlag := flag.String("config", "", "config path (default <home>/config.yaml)")
 	checkOnly := flag.Bool("doctor", false, "run validation checks and exit")
+	showVersion := flag.Bool("version", false, "print the daemon version and exit")
 	flag.Parse()
+
+	// Side-effect-free: no home, no config, no lock — so it works against an
+	// uninstalled binary (the bundled-app exec probe) and a misconfigured host.
+	if *showVersion {
+		fmt.Println(version)
+		return nil
+	}
 
 	dir, err := home.Resolve()
 	if err != nil {

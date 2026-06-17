@@ -13,7 +13,9 @@ struct DaemonStartAffordance: View {
     @Environment(DaemonStore.self) private var store
 
     var body: some View {
-        switch LaunchAgentStatus.startAffordance(state: agent.installState, daemonUnreachable: daemonUnreachable) {
+        switch LaunchAgentStatus.startAffordance(
+            state: agent.installState, daemonUnreachable: daemonUnreachable, canonical: agentCanonical
+        ) {
         case .none:
             EmptyView()
         case .approval:
@@ -63,5 +65,12 @@ struct DaemonStartAffordance: View {
 
     private var daemonUnreachable: Bool {
         if case .unreachable = store.connection { true } else { false }
+    }
+
+    /// Start requires affirmative canonical confirmation (`.ok`), not the unchecked
+    /// default — kickstarting a foreign agent would start the wrong binary. The
+    /// surfaces run reconcile on appear, so this resolves shortly after.
+    private var agentCanonical: Bool {
+        agent.reconcileState == .ok
     }
 }

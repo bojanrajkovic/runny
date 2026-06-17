@@ -101,16 +101,29 @@ final class AgentControllerTests: XCTestCase {
     // MARK: - Start affordance
 
     func testStartAffordanceOnlyWhenInstalledAndUnreachable() {
-        XCTAssertEqual(LaunchAgentStatus.startAffordance(state: .installed, daemonUnreachable: true), .start)
-        XCTAssertEqual(LaunchAgentStatus.startAffordance(state: .installed, daemonUnreachable: false), .none)
-        XCTAssertEqual(LaunchAgentStatus.startAffordance(state: .notInstalled, daemonUnreachable: true), .none)
+        XCTAssertEqual(LaunchAgentStatus.startAffordance(state: .installed, daemonUnreachable: true, canonical: true), .start)
+        XCTAssertEqual(LaunchAgentStatus.startAffordance(state: .installed, daemonUnreachable: false, canonical: true), .none)
+        XCTAssertEqual(LaunchAgentStatus.startAffordance(state: .notInstalled, daemonUnreachable: true, canonical: true), .none)
+    }
+
+    func testStartHiddenForNonCanonicalAgent() {
+        // A foreign or unverified agent: don't offer Start — it would kickstart the
+        // foreign BundleProgram. Hidden until reconcile affirms canonical.
+        XCTAssertEqual(
+            LaunchAgentStatus.startAffordance(state: .installed, daemonUnreachable: true, canonical: false),
+            .none
+        )
+        XCTAssertEqual(
+            LaunchAgentStatus.startAffordance(state: .installed, daemonUnreachable: true, canonical: true),
+            .start
+        )
     }
 
     func testRequiresApprovalIsApprovalNeverStart() {
         // The dead-Start-button failure mode: a registered-but-unapproved agent must
         // route to the approval CTA, never a Start that kickstarts a job launchd won't run.
-        XCTAssertEqual(LaunchAgentStatus.startAffordance(state: .requiresApproval, daemonUnreachable: true), .approval)
-        XCTAssertEqual(LaunchAgentStatus.startAffordance(state: .requiresApproval, daemonUnreachable: false), .approval)
+        XCTAssertEqual(LaunchAgentStatus.startAffordance(state: .requiresApproval, daemonUnreachable: true, canonical: true), .approval)
+        XCTAssertEqual(LaunchAgentStatus.startAffordance(state: .requiresApproval, daemonUnreachable: false, canonical: true), .approval)
     }
 
     func testStartConfirmsFromConnectionNotKickstartReturn() async {

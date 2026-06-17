@@ -106,11 +106,15 @@ enum LaunchAgentStatus {
         case approval
     }
 
-    /// The Start gate. Start is offered ONLY when the agent is installed AND the
-    /// daemon is unreachable; `requiresApproval` is its own approval CTA, so a dead
-    /// Start button can never no-op against a job launchd won't run.
-    nonisolated static func startAffordance(state: State, daemonUnreachable: Bool) -> StartAffordance {
-        switch state {
+    /// The Start gate. Start is offered ONLY when the agent is installed, the
+    /// daemon is unreachable, AND reconcile affirms the agent is canonical — a
+    /// foreign/unverified agent would kickstart the wrong `BundleProgram`, so it is
+    /// hidden (the operator is routed to reinstall via the reconcile warning).
+    /// `requiresApproval` is its own approval CTA, so a dead Start button can never
+    /// no-op against a job launchd won't run.
+    nonisolated static func startAffordance(state: State, daemonUnreachable: Bool, canonical: Bool) -> StartAffordance {
+        guard canonical else { return .none }
+        return switch state {
         case .requiresApproval: .approval
         case .installed: daemonUnreachable ? .start : .none
         case .notInstalled, .notFound, .registrationFailed: .none

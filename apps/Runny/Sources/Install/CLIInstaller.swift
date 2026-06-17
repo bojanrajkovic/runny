@@ -48,30 +48,43 @@ final class CLIInstallModel {
     }
 
     /// Recompute the resting state from disk — on appear, and after every op.
-    func refresh() {
+    func refresh() { state = restingState() }
+
+    /// The state the disk implies right now. Shared by `refresh()` and the
+    /// post-remove read-back, so both encode the install/conflict/onPath rule once.
+    private func restingState() -> State {
         guard let bundle = Self.bundleCLIPath else {
-            state = .failed("this build carries no bundled runnyctl")
-            return
+            return .failed("this build carries no bundled runnyctl")
         }
         switch Self.readExisting(Self.linkPath) {
         case .absent:
-            state = .notInstalled
+            return .notInstalled
         case .regularFile:
-            state = .conflict(owner: Self.linkPath)
+            return .conflict(owner: Self.linkPath)
         case let .symlink(resolved):
             if resolved == bundle {
-                state = Self.dirOnPath(Self.binDir) ? .installed : .installedButNotOnPath
+                return Self.dirOnPath(Self.binDir) ? .installed : .installedButNotOnPath
             } else if CLIInstall.isRunnyBundleCLI(resolved) {
-                state = .notInstalled // a moved/older Runny.app link; install re-points it
+                return .notInstalled // a moved/older Runny.app link; install re-points it
             } else {
-                state = .conflict(owner: resolved)
+                return .conflict(owner: resolved)
             }
         }
     }
 
+    /// Confirm a removal from disk — the requested≠done invariant for uninstall,
+    /// mirroring `confirm()` for install: a privileged remove that returned 0 but
+    /// left the link (a race re-created it, a foreign file the guard skipped) must
+    /// re-derive the true state, never claim .notInstalled off the exit code.
+    private func confirmRemoved(gen: Int) { apply(restingState(), gen: gen) }
+
     func install() {
         guard state != .installing else { return }
         generation += 1
+        // Enter .installing synchronously, before the Task suspends — otherwise a
+        // second tap reads the resting state, passes this guard too, and stacks a
+        // second admin prompt.
+        state = .installing
         let gen = generation
         Task { await runInstall(gen: gen) }
     }
@@ -79,6 +92,7 @@ final class CLIInstallModel {
     func uninstall() {
         guard state != .installing else { return }
         generation += 1
+        state = .installing
         let gen = generation
         Task { await runUninstall(gen: gen) }
     }
@@ -144,14 +158,12 @@ final class CLIInstallModel {
         switch verdict {
         case .removeOurs:
             if Self.dirWritable(Self.binDir) {
-                apply(.installing, gen: gen)
                 let err = Self.removeUnprivileged(Self.linkPath)
-                if let err { apply(.failed(err), gen: gen) } else { apply(.notInstalled, gen: gen) }
+                if let err { apply(.failed(err), gen: gen) } else { confirmRemoved(gen: gen) }
             } else {
-                apply(.installing, gen: gen)
                 let outcome = await runPrivilegedRemove(gen: gen)
                 switch outcome {
-                case .ok: apply(.notInstalled, gen: gen)
+                case .ok: confirmRemoved(gen: gen)
                 case .cancelled: apply(.cancelled, gen: gen)
                 case .refusedForeign: apply(.conflict(owner: Self.resolvedLink(Self.linkPath) ?? Self.linkPath), gen: gen)
                 case let .failed(m): apply(.failed(m), gen: gen)
@@ -267,11 +279,25 @@ extension CLIInstallModel {
     /// user-dismissed auth prompt is AppleScript error -128.
     nonisolated static func outcomeForOsascript(exitCode: Int32, stderr: String) -> PrivilegedOutcome {
         if exitCode == 0 { return .ok }
-        if stderr.contains("-128") || stderr.localizedCaseInsensitiveContains("User canceled") {
+        // `do shell script` renders the inner shell exit (or AppleScript's own
+        // error) as the FINAL parenthesized number: (-128) for a user-dismissed
+        // prompt, (3) for our foreign-guard exit. Match the trailing token, not a
+        // bare substring, so a path or message containing "(3)" earlier can't
+        // misclassify a genuine failure as a benign foreign-refusal.
+        let code = trailingParenCode(stderr)
+        if code == -128 || stderr.localizedCaseInsensitiveContains("User canceled") {
             return .cancelled
         }
-        if stderr.contains("(3)") { return .refusedForeign }
+        if code == 3 { return .refusedForeign }
         return .failed(stderr.isEmpty ? "the privileged step failed (exit \(exitCode))" : stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// The final parenthesized integer in an osascript error string (e.g. "… (3)"
+    /// → 3, "… (-128)" → -128), or nil if the message doesn't end in one.
+    nonisolated static func trailingParenCode(_ s: String) -> Int? {
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard t.hasSuffix(")"), let open = t.lastIndex(of: "(") else { return nil }
+        return Int(t[t.index(after: open) ..< t.index(before: t.endIndex)])
     }
 
     /// True when the bundle is translocated or at a transient path — a link into
@@ -290,10 +316,14 @@ extension CLIInstallModel {
     /// only when the existing entry is itself a Runny.app link, never a foreign file.
     nonisolated static func installScript(target: String) -> String {
         let sh = "mkdir -p /usr/local/bin && "
-            + "if [ -e /usr/local/bin/runnyctl ]; then "
+            + "if [ -L /usr/local/bin/runnyctl ]; then "
             + "case \"$(readlink /usr/local/bin/runnyctl 2>/dev/null)\" in "
             + "*/Runny.app/Contents/MacOS/runnyctl) : ;; "
-            + "*) exit 3 ;; esac; fi; "
+            + "*) exit 3 ;; esac; "
+            // A non-symlink that exists is a foreign regular file — refuse it.
+            // ([ -L ] above also catches a dangling foreign symlink, which a plain
+            // [ -e ] follows and misses.)
+            + "elif [ -e /usr/local/bin/runnyctl ]; then exit 3; fi; "
             + "ln -sfn \(shellSingleQuote(target)) /usr/local/bin/runnyctl"
         return appleScript(doShell: sh)
     }
@@ -362,8 +392,16 @@ extension CLIInstallModel {
     /// may differ from an interactive shell's, so a false here is a hint, not a
     /// certainty — surfaced as the distinct installedButNotOnPath state.
     nonisolated static func dirOnPath(_ dir: String) -> Bool {
-        (ProcessInfo.processInfo.environment["PATH"] ?? "")
-            .split(separator: ":").contains { $0 == Substring(dir) }
+        pathContains(ProcessInfo.processInfo.environment["PATH"] ?? "", dir: dir)
+    }
+
+    /// Pure: is `dir` an element of a ":"-joined PATH, modulo a single trailing
+    /// slash? `/usr/local/bin/` in PATH is the same directory as `/usr/local/bin`,
+    /// and treating them as different would false-flag a reachable install.
+    nonisolated static func pathContains(_ path: String, dir: String) -> Bool {
+        func norm(_ s: Substring) -> Substring { s.count > 1 && s.hasSuffix("/") ? s.dropLast() : s }
+        let want = norm(Substring(dir))
+        return path.split(separator: ":").contains { norm($0) == want }
     }
 
     /// Create or re-point the link without escalation. Returns an error message

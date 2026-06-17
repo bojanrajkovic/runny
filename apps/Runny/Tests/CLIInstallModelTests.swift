@@ -35,7 +35,7 @@ final class CLIInstallModelTests: XCTestCase {
 
     func testOutcomeRefusedForeign() {
         // The foreign guard inside `do shell script` exits 3; osascript surfaces it
-        // in parentheses.
+        // as the trailing parenthesized code.
         XCTAssertEqual(
             CLIInstallModel.outcomeForOsascript(exitCode: 1, stderr: "execution error: ... (3)"),
             .refusedForeign
@@ -46,12 +46,36 @@ final class CLIInstallModelTests: XCTestCase {
         if case .failed = CLIInstallModel.outcomeForOsascript(exitCode: 1, stderr: "some other error (5)") {} else {
             XCTFail("an unrecognized nonzero exit must be a loud failure")
         }
+        // A "(3)" embedded earlier must NOT be read as a foreign-refusal when the
+        // real trailing exit code is something else — the precise-parse guard that
+        // keeps a genuine failure from being silently downgraded to .conflict.
+        if case .failed = CLIInstallModel.outcomeForOsascript(exitCode: 1, stderr: "ln: /Volumes/Disk (3)/x: failed (1)") {} else {
+            XCTFail("embedded (3) must not misclassify a real failure as refusedForeign")
+        }
         // Empty stderr still yields a non-empty message (no blank failure).
         if case let .failed(m) = CLIInstallModel.outcomeForOsascript(exitCode: 2, stderr: "") {
             XCTAssertFalse(m.isEmpty)
         } else {
             XCTFail("expected failed")
         }
+    }
+
+    func testTrailingParenCode() {
+        XCTAssertEqual(CLIInstallModel.trailingParenCode("execution error: ... (3)"), 3)
+        XCTAssertEqual(CLIInstallModel.trailingParenCode("User canceled. (-128)"), -128)
+        // The LAST parenthesized code wins; an earlier "(3)" is ignored.
+        XCTAssertEqual(CLIInstallModel.trailingParenCode("path (3)/x failed (1)"), 1)
+        XCTAssertNil(CLIInstallModel.trailingParenCode("no trailing code here"))
+        XCTAssertNil(CLIInstallModel.trailingParenCode(""))
+    }
+
+    func testPathContainsNormalizesTrailingSlash() {
+        XCTAssertTrue(CLIInstallModel.pathContains("/usr/bin:/usr/local/bin:/bin", dir: "/usr/local/bin"))
+        // A trailing slash on the PATH entry (or the queried dir) is the same dir.
+        XCTAssertTrue(CLIInstallModel.pathContains("/usr/bin:/usr/local/bin/:/bin", dir: "/usr/local/bin"))
+        XCTAssertTrue(CLIInstallModel.pathContains("/usr/bin:/usr/local/bin:/bin", dir: "/usr/local/bin/"))
+        XCTAssertFalse(CLIInstallModel.pathContains("/usr/bin:/opt/homebrew/bin", dir: "/usr/local/bin"))
+        XCTAssertFalse(CLIInstallModel.pathContains("", dir: "/usr/local/bin"))
     }
 
     // MARK: - translocation
@@ -94,8 +118,11 @@ final class CLIInstallModelTests: XCTestCase {
         XCTAssertTrue(s.contains("with administrator privileges"))
         XCTAssertTrue(s.contains("ln -sfn"))
         // The TOCTOU-safe foreign guard re-checks at write time and refuses (exit 3)
-        // anything that isn't a Runny.app link.
+        // anything that isn't a Runny.app link — a foreign symlink (incl. a dangling
+        // one, caught by [ -L ]) and a foreign regular file (the elif [ -e ]).
+        XCTAssertTrue(s.contains("if [ -L /usr/local/bin/runnyctl ]"))
         XCTAssertTrue(s.contains("*/Runny.app/Contents/MacOS/runnyctl)"))
+        XCTAssertTrue(s.contains("elif [ -e /usr/local/bin/runnyctl ]; then exit 3"))
         XCTAssertTrue(s.contains("exit 3"))
         // The target is single-quoted (escaped through the AppleScript layer).
         XCTAssertTrue(s.contains("'/Applications/Runny.app/Contents/MacOS/runnyctl'"))

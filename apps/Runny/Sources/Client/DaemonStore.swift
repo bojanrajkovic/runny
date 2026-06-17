@@ -210,6 +210,20 @@ final class DaemonStore {
         let severity: Severity
     }
 
+    /// A version/protocol skew between this app and the daemon it watches. There
+    /// is deliberately no `severity`: skew is ALWAYS a warning by construction (a
+    /// `SkewVerdict` exists only to warn — it never disables a control or drops a
+    /// connection), so no single-case enum fakes one. The `kind` is the
+    /// machine-readable axis — read it, never string-match the `text` (the same
+    /// anti-re-parsing discipline the wire contract enforces for
+    /// `draining`/`exit_held`). `Equatable` so a dismissal keys on the whole value:
+    /// a worsening or different-axis skew on the same version re-surfaces.
+    struct SkewVerdict: Equatable {
+        enum Kind: Equatable { case versionMismatch, protocolBehind }
+        let kind: Kind
+        let text: String
+    }
+
     /// The client of the current healthy stream; log/timeline views borrow
     /// it. nil while unreachable — actions fail fast instead of hanging.
     private(set) var client: RunnyClient?
@@ -242,6 +256,13 @@ final class DaemonStore {
     /// floor at which pause/resume are confirmable. Kept in lockstep with the
     /// daemon's `WireProtocolVersion`.
     static let ackProtocolVersion: UInt32 = 1
+    /// The wire-protocol version this app's stubs were built against — the exact
+    /// protocol the app expects, set to the literal current `WireProtocolVersion`.
+    /// A daemon reporting a lower number predates a capability the app relies on
+    /// (the upgrade-window skew the matched `x.y.z` cores hide). Kept in lockstep
+    /// with the daemon's `WireProtocolVersion`: bump both together. This is not a
+    /// backstop or a cap — the healthy-magnitude sizing rule does not apply.
+    static let expectedProtocolVersion: UInt32 = 2
 
     func start() {
         guard supervisor == nil else { return }
@@ -1007,5 +1028,82 @@ final class DaemonStore {
 
     nonisolated static func shortSHA(_ s: String) -> String {
         s.count > 12 ? String(s.prefix(12)) : s
+    }
+
+    // MARK: - Version skew (warn, never refuse)
+
+    /// The `x.y.z` core of a version string — the first `\d+.\d+.\d+` match, or
+    /// nil if there is none. The daemon publishes its full build label
+    /// (`0.6.0-beta.<sha>`) while the app's bundle version is already stripped to
+    /// its core by the build, so normalizing both sides to the core before
+    /// comparing keeps a same-commit beta pair from false-alarming. A string with
+    /// no extractable core (empty, or junk like a dev label) yields nil → quiet.
+    /// Mirrors the build's `\d+\.\d+\.\d+` capture.
+    nonisolated static func versionCore(_ s: String) -> String? {
+        guard let range = s.range(of: #"\d+\.\d+\.\d+"#, options: .regularExpression)
+        else { return nil }
+        return String(s[range])
+    }
+
+    /// Pure: the version-skew verdict between this app and the daemon it watches,
+    /// or nil when they match, the daemon's version isn't known yet, the app is an
+    /// unstamped dev build, or the daemon is merely newer (the safe monotone
+    /// direction). Static and parameterized on the four facts — never reading
+    /// `Bundle.main` — so every branch is unit-testable without a live daemon.
+    ///
+    /// Two independent axes, neither implied by the other:
+    ///  - `versionMismatch`: the normalized `x.y.z` cores differ — the shared-host
+    ///    brew-daemon-at-another-release case. Symmetric.
+    ///  - `protocolBehind`: the cores match but the daemon's protocol is below what
+    ///    this app's wire stubs expect — the new-app/old-daemon upgrade window,
+    ///    invisible to the version axis (same `x.y.z`) and the ONLY detector for it.
+    nonisolated static func skewVerdict(
+        appVersion: String, appExpectedProtocol: UInt32,
+        daemonVersion: String, daemonProtocol: UInt32
+    ) -> SkewVerdict? {
+        // No version heard from the daemon yet (fresh connect, or a daemon
+        // predating the field): never warn about a version we don't have.
+        guard let daemonCore = versionCore(daemonVersion) else { return nil }
+        // An unstamped dev build — or a missing bundle key coalesced to 0.0.0 —
+        // must not wear a permanent false banner. It accepts that a dev build
+        // could miss a real skew; a dev build is never a shipped install.
+        guard let appCore = versionCore(appVersion), appCore != "0.0.0" else { return nil }
+        // Different release lines — the shared-host / lagging-channel case. Show
+        // the daemon's FULL string so the operator sees exactly what they have.
+        if appCore != daemonCore {
+            return SkewVerdict(
+                kind: .versionMismatch,
+                text: "this app is \(appCore) but the daemon is \(daemonVersion) — "
+                    + "different releases; upgrade the lagging install"
+            )
+        }
+        // Same release, but the daemon predates a capability this app's stubs
+        // expect — the upgrade window the matched cores hide. `<`, not `!=`: a
+        // newer daemon serving an older-expecting app degrades nothing.
+        if daemonProtocol < appExpectedProtocol {
+            return SkewVerdict(
+                kind: .protocolBehind,
+                text: "the running daemon predates a capability this app expects — "
+                    + "some features may not work; upgrade or restart runnyd"
+            )
+        }
+        return nil
+    }
+
+    /// Pure: the skew to actually render, applying the two visibility gates that
+    /// keep the detector from itself failing silently. Static so both are
+    /// unit-testable without a live store.
+    ///  - Connection gate: on a drop/stale/unreachable transition the supervisor
+    ///    flips `connection` WITHOUT calling `apply()`, so a stored `skew` would
+    ///    linger and assert skew about a daemon that may have recycled — show
+    ///    nothing unless the connection is live.
+    ///  - Dismiss gate: suppress a skew the operator dismissed, keyed on the full
+    ///    `Equatable` verdict, so a worsening or different-axis skew on the same
+    ///    version string is new news and re-surfaces.
+    nonisolated static func shownSkew(
+        skew: SkewVerdict?, connection: ConnectionState, dismissed: SkewVerdict?
+    ) -> SkewVerdict? {
+        guard connection == .connected, let skew, skew != dismissed else { return nil }
+        return skew
     }
 }

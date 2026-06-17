@@ -423,7 +423,37 @@ extension CLIInstallModel {
     /// may differ from an interactive shell's, so a false here is a hint, not a
     /// certainty — surfaced as the distinct installedButNotOnPath state.
     nonisolated static func dirOnPath(_ dir: String) -> Bool {
-        pathContains(ProcessInfo.processInfo.environment["PATH"] ?? "", dir: dir)
+        reachable(processPath: ProcessInfo.processInfo.environment["PATH"] ?? "",
+                  systemPath: systemPath(), dir: dir)
+    }
+
+    /// Reachable in a fresh interactive shell iff `dir` is in EITHER the process
+    /// PATH or the system path source. A Finder/login-item launch inherits
+    /// launchd's PATH, which omits /usr/local/bin even though Terminal has it (via
+    /// path_helper reading /etc/paths(.d)); checking only the process PATH would
+    /// false-warn "not on PATH" on a normal install. The union avoids that while
+    /// still catching the genuine /opt/homebrew-only case (in neither source).
+    nonisolated static func reachable(processPath: String, systemPath: String, dir: String) -> Bool {
+        pathContains(processPath, dir: dir) || pathContains(systemPath, dir: dir)
+    }
+
+    /// The path entries path_helper feeds every login shell: /etc/paths then each
+    /// /etc/paths.d file, newline-separated, joined as a PATH string. Bounded file
+    /// reads — no shell spawn, no side effects.
+    nonisolated static func systemPath() -> String {
+        var entries: [String] = []
+        func add(_ contents: String) {
+            entries += contents.split(whereSeparator: \.isNewline)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+        }
+        if let s = try? String(contentsOfFile: "/etc/paths", encoding: .utf8) { add(s) }
+        if let files = try? FileManager.default.contentsOfDirectory(atPath: "/etc/paths.d") {
+            for f in files.sorted() where !f.hasPrefix(".") {
+                if let s = try? String(contentsOfFile: "/etc/paths.d/\(f)", encoding: .utf8) { add(s) }
+            }
+        }
+        return entries.joined(separator: ":")
     }
 
     /// Pure: is `dir` an element of a ":"-joined PATH, modulo a single trailing

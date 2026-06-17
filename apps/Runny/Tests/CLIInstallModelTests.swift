@@ -69,6 +69,25 @@ final class CLIInstallModelTests: XCTestCase {
         XCTAssertNil(CLIInstallModel.trailingParenCode(""))
     }
 
+    func testReachableUnionsProcessAndSystemPath() {
+        // The fix case: a Finder-launched app's process PATH omits /usr/local/bin,
+        // but the system source (/etc/paths) has it → reachable, no false warning.
+        XCTAssertTrue(CLIInstallModel.reachable(
+            processPath: "/usr/bin:/bin", systemPath: "/usr/local/bin:/usr/bin:/bin",
+            dir: "/usr/local/bin"
+        ))
+        // In neither source → genuinely not reachable (the /opt/homebrew-only case).
+        XCTAssertFalse(CLIInstallModel.reachable(
+            processPath: "/usr/bin:/bin", systemPath: "/usr/bin:/bin",
+            dir: "/usr/local/bin"
+        ))
+        // Present in the process PATH alone is enough.
+        XCTAssertTrue(CLIInstallModel.reachable(
+            processPath: "/usr/local/bin:/usr/bin", systemPath: "",
+            dir: "/usr/local/bin"
+        ))
+    }
+
     func testPathContainsNormalizesTrailingSlash() {
         XCTAssertTrue(CLIInstallModel.pathContains("/usr/bin:/usr/local/bin:/bin", dir: "/usr/local/bin"))
         // A trailing slash on the PATH entry (or the queried dir) is the same dir.

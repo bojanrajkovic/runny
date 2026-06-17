@@ -184,10 +184,16 @@ func TestResolveIgnoresEnvAndIsHomeRooted(t *testing.T) {
 }
 
 // launchd can hand an agent a degenerate $HOME; with no override left to correct
-// it, Resolve must fail loudly rather than serve "/.runny".
+// it, Resolve must fail loudly rather than derive a wrong home. The guard is
+// structural (IsAbs + non-root Clean), so every spelling of root and any
+// relative home is rejected — not just the literal "/".
 func TestResolveRejectsDegenerateHome(t *testing.T) {
-	t.Setenv("HOME", "/")
-	if _, err := Resolve(); err == nil {
-		t.Fatal(`Resolve() with $HOME="/" must error, not silently serve /.runny`)
+	for _, h := range []string{"/", "//", "///", "relative/home", "."} {
+		t.Run(h, func(t *testing.T) {
+			t.Setenv("HOME", h)
+			if _, err := Resolve(); err == nil {
+				t.Fatalf("Resolve() with $HOME=%q must error, not derive a wrong home", h)
+			}
+		})
 	}
 }

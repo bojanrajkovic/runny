@@ -67,7 +67,9 @@ the ADR-0010 bundled-distribution shape exists.
   bundles the daemon and CLI, Tailscale-style — remains the destination;
   it depends on an SMAppService install story that doesn't exist yet, and a
   standalone observer app is useful on day one to anyone already running
-  runnyd. ADR-0010 carries a note to the same effect.
+  runnyd. ADR-0010 carries a note to the same effect. That destination — the
+  bundled `.app`, its `SMAppService` install, and Homebrew reconciliation — is
+  decided in [ADR-0018](0018-bundled-app-distribution.md).
 
 ## Rejected alternatives
 

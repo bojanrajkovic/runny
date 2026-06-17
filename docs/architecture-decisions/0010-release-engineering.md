@@ -61,8 +61,9 @@ from conventional commits) + goreleaser (build, package, publish, brew tap).
 - RunnyBar distribution (later) follows the Tailscale shape: the .app
   bundles the daemon+CLI, signed and notarized — Developer ID signing
   upgrades this pipeline when certificates exist (see CONTRIBUTING.md).
-  Note: the app (now Runny) ships standalone first (ADR-0016); bundling
-  remains the eventual shape.
+  Note: the app (now Runny) ships standalone first (ADR-0016); the bundled
+  shape, its lifecycle owner, and version coherence are decided in
+  [ADR-0018](0018-bundled-app-distribution.md).
 - release-please PRs are created with `GITHUB_TOKEN`, whose events do not
   trigger CI; the release PR shows checks only after a manual nudge or a
   PAT upgrade. Acceptable for now.

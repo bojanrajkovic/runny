@@ -122,11 +122,21 @@ struct DaemonCard: View {
                     .foregroundStyle(.orange)
                     .lineLimit(3)
             }
-            Button(store.reloadInFlight ? "Validating…" : "Reload Config…") {
-                store.requestReload()
+            HStack {
+                Button(store.reloadInFlight ? "Validating…" : "Reload Config…") {
+                    store.requestReload()
+                }
+                .disabled(store.reloadInFlight || store.client == nil)
+                // Manual re-dial of the same daemon at the fixed ~/.runny.
+                // Disabled while a reload is draining so a re-dial can't tear
+                // down the stream and discard the convergence verdict mid-drain;
+                // a genuine mid-drain hang stays loud via the wedged-drain path.
+                Button("Reconnect") {
+                    store.restart()
+                }
+                .disabled(store.reloadPending)
             }
             .controlSize(.small)
-            .disabled(store.reloadInFlight || store.client == nil)
             .padding(.top, 2)
         }
         .padding(8)

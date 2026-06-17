@@ -198,6 +198,12 @@ final class DaemonStore {
     /// pre-reload start time as the protocol-1 fallback discriminator. nil when
     /// no reload is in flight.
     private var pendingReload: PendingReload?
+    /// True while a reload is draining toward its respawn (a pendingReload is
+    /// armed) — the window in which a manual Reconnect would tear down the stream
+    /// and silently discard the convergence verdict the operator is waiting on.
+    /// The daemon-card Reconnect is disabled on this; restart()'s teardown is
+    /// otherwise unchanged.
+    var reloadPending: Bool { pendingReload != nil }
     /// Whether a slot was running a job in the last old-process snapshot before
     /// the respawn — colors the success verdict (a job may have been
     /// interrupted). Tracked across the drain, read when the respawn resolves.
@@ -207,10 +213,12 @@ final class DaemonStore {
     /// held) is the wedged-but-serving daemon the silence deadline can't catch.
     private var reloadStallSeq: UInt64 = 0
     private var reloadStallSince: Date?
-    /// The in-flight reload RPC's task, held so `restart()` (a runny-home change)
-    /// can cancel it — otherwise a late "accepted" answered against the old home
-    /// would arm a pending reload against the new home's supervisor and produce a
-    /// false verdict for a daemon the app is no longer watching.
+    /// The in-flight reload RPC's task, held so `restart()` can cancel it —
+    /// otherwise a late "accepted" answered after a supervisor teardown would arm
+    /// a pending reload against the freshly-dialed supervisor and produce a
+    /// verdict the app can no longer correctly track. Reconnect is disabled once a
+    /// reload is pending, but the RPC-in-flight window *before* the accept is not,
+    /// so this cancellation is still load-bearing for that window.
     private var reloadTask: Task<Void, Never>?
     /// Monotonic reload identity. Cancellation is cooperative: a cancelled reload
     /// task's `defer { reloadInFlight = false }` still runs as it unwinds, which
@@ -322,7 +330,11 @@ final class DaemonStore {
         supervisor = Task { await superviseForever() }
     }
 
-    /// Restart from scratch (Settings changed the runny home).
+    /// Manual re-dial: tear down the supervisor and socket watch, then start()
+    /// fresh against the same daemon at the fixed ~/.runny (the daemon-card
+    /// Reconnect). That affordance is disabled while `reloadPending`, so this
+    /// never runs mid-drain; its full state wipe — including pendingReload and the
+    /// reloadGeneration bump — is reachable only when no reload verdict is live.
     func restart() {
         supervisor?.cancel()
         supervisor = nil
@@ -335,8 +347,9 @@ final class DaemonStore {
         bootID = ""
         drainSeq = 0
         exitHeld = false
-        // A home change may point at a different daemon entirely, so a stale skew
-        // — and any dismissal of it — must not carry across.
+        // A reconnect re-establishes the stream from scratch, so a stale skew —
+        // and any dismissal of it — must not carry across: the verdict is
+        // recomputed against whatever the re-dial actually reaches.
         skew = nil
         dismissedSkew = nil
         pendingReload = nil

@@ -106,6 +106,10 @@ final class AgentController {
     /// state to failed.
     private(set) var startOutcome: StartOutcome = .idle
 
+    /// Guards against a second `start()` stacking a concurrent recovery poll while
+    /// one is already running. Reset on every exit (including cancellation).
+    private var startInFlight = false
+
     /// How long to wait for the daemon to answer after a kickstart before
     /// surfacing "didn't come up". A cold start (launchd spawn + socket listen) is
     /// normally a second or two; this is a healthy-magnitude × margin bound — NOT
@@ -163,10 +167,6 @@ final class AgentController {
         }
     }
 
-    /// The start-at-login toggle's ON position. Identical to `install()` — there
-    /// is no separate "enabled but not installed" state for a bundled agent.
-    func enableStartAtLogin() async { await install() }
-
     /// Start a registered-but-stopped daemon (the menu/window Start affordance, and
     /// the kickstart fallback). Funnels through the gate, then confirms the daemon
     /// actually came up from a later `.connected` snapshot within the recovery
@@ -179,6 +179,9 @@ final class AgentController {
         within bound: Duration = AgentController.startRecoveryBound,
         poll: Duration = .milliseconds(500)
     ) async {
+        guard !startInFlight else { return } // a recovery poll is already running
+        startInFlight = true
+        defer { startInFlight = false }
         startOutcome = .starting
         switch await attemptSpawn("start", { try await self.registrar.kickstart() }) {
         case .denied:
@@ -197,14 +200,17 @@ final class AgentController {
                 startOutcome = .cameUp
                 return
             }
-            try? await Task.sleep(for: poll)
+            do {
+                try await Task.sleep(for: poll)
+            } catch {
+                // Cancelled (the surface went away): stop the poll and clear the
+                // spinner rather than busy-spinning to the deadline.
+                startOutcome = .idle
+                return
+            }
         }
         startOutcome = isConnected() ? .cameUp : .didNotComeUp
     }
-
-    /// Reset the Start outcome (e.g. when the surface reappears) so a stale
-    /// `didNotComeUp`/`cameUp` from a prior attempt doesn't linger.
-    func clearStartOutcome() { startOutcome = .idle }
 
     /// The last reconcile verdict — whether the registered agent points where it
     /// should. Surface-only in P4 (repair is a follow-up).

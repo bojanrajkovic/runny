@@ -93,14 +93,6 @@ final class AgentControllerTests: XCTestCase {
         XCTAssertEqual(c.installState, .notInstalled, "a denied install must not flip to installed")
     }
 
-    func testEnableStartAtLoginAlsoRoutesThroughTheGate() async {
-        let mock = MockRegistrar()
-        let c = AgentController(registrar: mock, spawnGate: { .deny(reason: "deferred") })
-        await c.enableStartAtLogin()
-        XCTAssertEqual(mock.registerCalls, 0, "start-at-login enable must funnel through the same gate")
-        XCTAssertNotNil(c.spawnRefusal)
-    }
-
     func testEligibilityReflectsInjectedProvider() {
         let c = AgentController(registrar: MockRegistrar(), eligibility: { .translocated })
         XCTAssertEqual(c.eligibility, .translocated)

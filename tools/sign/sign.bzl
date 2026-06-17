@@ -203,6 +203,11 @@ def inject_launch_agent(name, plist, app_zip, **kwargs):
             trap 'rm -rf "$$WORK"' EXIT
             ditto -x -k $(location {app_zip}) "$$WORK"
             APP=$$(echo "$$WORK"/*.app)
+            # Fail loud if extraction didn't yield exactly one .app: an unmatched
+            # glob leaves the literal "*.app" (not a dir), and a multi-match makes
+            # APP two space-separated paths — either way [ -d ] is false, so we
+            # never mkdir/cp/zip a bogus tree that codesign_app would choke on later.
+            [ -d "$$APP" ] || {{ echo "inject_launch_agent: expected exactly one .app in the archive, got: $$APP" >&2; exit 1; }}
             mkdir -p "$$APP/Contents/Library/LaunchAgents"
             cp $(location {plist}) "$$APP/Contents/Library/LaunchAgents/"
             ditto -c -k --keepParent "$$APP" "$@"

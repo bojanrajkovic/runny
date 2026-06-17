@@ -39,6 +39,7 @@ struct RunnyApp: App {
         // observer the main window does, so closing it never strands the app.
         Settings {
             SettingsView()
+                .environment(store)
                 .environment(cliInstall)
                 .environment(agent)
                 .environment(activation)

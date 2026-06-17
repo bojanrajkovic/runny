@@ -34,6 +34,27 @@ func TestLocalNetworkReachSkipsWithoutVmnet(t *testing.T) {
 	}
 }
 
+// Only a routing error is the TCC-denial signature; a timeout (or other
+// ambiguous error) must NOT read as denied — else a slow gateway at guest boot
+// pops a false red "access denied" card.
+func TestDeniedErr(t *testing.T) {
+	if !deniedErr(syscall.EHOSTUNREACH) {
+		t.Error("'no route to host' must read as denied — the TCC-denial signature")
+	}
+	if !deniedErr(syscall.ENETUNREACH) {
+		t.Error("'network unreachable' must read as denied")
+	}
+	if deniedErr(syscall.ETIMEDOUT) {
+		t.Error("a dial timeout must NOT read as denied — it is ambiguous, not a routing failure")
+	}
+	if deniedErr(syscall.ECONNREFUSED) {
+		t.Error("a refused connection is reachable, not denied")
+	}
+	if deniedErr(nil) {
+		t.Error("a successful dial is not denied")
+	}
+}
+
 // Without a vmnet interface the daemon cannot determine its grant, so the honest
 // classification is UNKNOWN — which the app renders as "prompt may be pending",
 // never a false REACHABLE or DENIED.

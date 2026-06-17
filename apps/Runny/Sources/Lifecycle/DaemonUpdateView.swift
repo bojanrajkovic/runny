@@ -8,6 +8,8 @@ import SwiftUI
 struct DaemonUpdateAffordance: View {
     @Environment(DaemonStore.self) private var store
     @Environment(AgentController.self) private var agent
+    @Environment(ActivationCoordinator.self) private var activation
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         switch store.daemonUpdate(agentInstalled: agent.installState == .installed) {
@@ -18,7 +20,7 @@ struct DaemonUpdateAffordance: View {
                 "A newer runnyd ships with this app. Update drains running jobs first, then restarts.",
                 tint: .orange
             ) {
-                Button("Update Daemon") { store.requestDaemonUpdate() }
+                Button("Update Daemon") { update() }
             }
         case .inProgress:
             row("Updating runnyd — draining running jobs first…", tint: .secondary) {
@@ -26,9 +28,18 @@ struct DaemonUpdateAffordance: View {
             }
         case let .didNotTake(core):
             row("Update didn't take — runnyd is still \(core).", tint: .red) {
-                Button("Try Again") { store.requestDaemonUpdate() }
+                Button("Try Again") { update() }
             }
         }
+    }
+
+    /// The update's confirmation dialog is hosted only on the main window, so —
+    /// like the footer Reload button — open the main window first. From the main
+    /// window itself this just refocuses it; from the popover it's load-bearing
+    /// (otherwise the dialog has no presenter and the update silently no-ops).
+    private func update() {
+        activation.openMainWindow(openWindow)
+        store.requestDaemonUpdate()
     }
 
     private func row(_ text: String, tint: Color, @ViewBuilder action: () -> some View) -> some View {

@@ -166,10 +166,17 @@ final class DaemonStore {
         case didNotTake(daemonCore: String)
     }
 
-    /// True only set once an Update was issued; reset when the update takes (the
-    /// daemon stops being older) or on a reconnect. Distinguishes "an update is
-    /// available" from "you tried and it didn't take".
+    /// Set once an Update reload is ACCEPTED (drain started), reset when the update
+    /// takes (the daemon stops being older) or on a reconnect. Distinguishes "an
+    /// update is available" from "you tried and it didn't take". NOT set merely by
+    /// clicking Update — a cancelled confirmation must leave it false.
     private(set) var daemonUpdateAttempted = false
+
+    /// Transient: the pending reload was requested as a daemon UPDATE (vs a plain
+    /// config reload), so its acceptance sets `daemonUpdateAttempted`. Consumed by
+    /// `performReload`; cleared by a plain `requestReload` so a regular reload after
+    /// a cancelled update can't inherit the stale intent.
+    private var pendingUpdateIntent = false
 
     /// Is the app a strictly newer build than the running daemon? The upgrade
     /// direction the symmetric skew verdict does not itself report.
@@ -177,10 +184,14 @@ final class DaemonStore {
         Self.appNewerThanDaemon(appVersion: Self.appVersion, daemonVersion: daemonVersion)
     }
 
-    /// Slots currently running a job. Uninstalling the agent boots out the daemon,
-    /// killing the in-process VM — so a job here is abandoned. The uninstall
-    /// confirmation names these slots rather than tearing down silently.
-    var runningJobSlots: [String] { slots.filter { $0.state == .job }.map(\.slot) }
+    /// Slots with a live in-process guest that uninstalling would abandon —
+    /// matching the FSM's own consent rule (`.job` OR `.debug`): a DEBUG-held guest
+    /// is a parked VM an operator deliberately kept alive, so booting out the daemon
+    /// destroys it just as surely as a running job. The uninstall confirmation names
+    /// these slots rather than tearing down silently.
+    var liveGuestSlots: [String] {
+        slots.filter { $0.state == .job || $0.state == .debug }.map(\.slot)
+    }
 
     /// The update surface, gated on a live connection (a stale verdict from a
     /// dropped daemon must not linger — the Start affordance owns "daemon down").
@@ -854,15 +865,20 @@ final class DaemonStore {
     /// Stage the reload confirmation dialog. Reload restarts the whole daemon
     /// and drains every slot (jobs finish first), so it's gated behind explicit
     /// consent like the `-force` recycle cases.
-    func requestReload() { reloadConfirm = true }
+    func requestReload() {
+        pendingUpdateIntent = false
+        reloadConfirm = true
+    }
 
     /// Issue a daemon update: identical to a reload (drain jobs, then exit for
     /// launchd to cold-start the freshly-bundled binary), tagged so a non-converged
     /// result surfaces "update didn't take" rather than the generic reload note.
     /// Inherits the reload's drain-stall arm and convergence confirmation wholesale.
+    /// The intent is consumed only when the reload is ACCEPTED (in performReload),
+    /// so cancelling the confirmation leaves no "didn't take" residue.
     func requestDaemonUpdate() {
-        daemonUpdateAttempted = true
-        requestReload()
+        pendingUpdateIntent = true
+        reloadConfirm = true
     }
 
     /// The confirmed path: send the reload. Acceptance arms a pendingReload that
@@ -878,6 +894,11 @@ final class DaemonStore {
         }
         guard !reloadInFlight else { return }
         reloadInFlight = true
+        // Consume the update intent synchronously, before the Task suspends, so a
+        // concurrent request can't change it mid-flight. Only an ACCEPTED update
+        // reload (below) records the attempt.
+        let isUpdate = pendingUpdateIntent
+        pendingUpdateIntent = false
         // The protocol-1 fallback discriminator. The real discriminator is the
         // accepting process's boot id, carried in the response, so there is no
         // pre-RPC read whose process could differ from the one that accepts.
@@ -905,6 +926,10 @@ final class DaemonStore {
                     commandError = Self.describeRefusal(resp)
                     return
                 }
+                // An accepted update reload records the attempt — so a respawn that
+                // comes back still older surfaces "update didn't take", while a
+                // cancelled or refused one never does.
+                if isUpdate { daemonUpdateAttempted = true }
                 // Seed from the slots visible at acceptance, so a daemon that
                 // dies before its next snapshot still carries a job-in-flight
                 // warning into the verdict; later old-process snapshots refine it.

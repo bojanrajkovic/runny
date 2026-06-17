@@ -49,6 +49,14 @@ func reachableErr(err error) bool {
 	return err == nil || errors.Is(err, syscall.ECONNREFUSED)
 }
 
+// deniedErr: a routing failure — no route to host / network unreachable — is the
+// definitive signature of a denied Local Network (TCC) grant (the host shell
+// reaches the subnet; this process does not). A timeout or any other error is
+// ambiguous, NOT a denial, so it must not classify as DENIED.
+func deniedErr(err error) bool {
+	return errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH)
+}
+
 func vmnetInterfaceUp() bool {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
@@ -78,10 +86,19 @@ func localNetworkGrant() runnyv1.LocalNetworkGrant {
 	if conn != nil {
 		_ = conn.Close()
 	}
-	if reachableErr(err) {
+	switch {
+	case reachableErr(err):
 		return runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_REACHABLE
+	case deniedErr(err):
+		return runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_DENIED
+	default:
+		// A dial TIMEOUT (or any non-routing error) is NOT the TCC-denial
+		// signature — the gateway may just be slow to answer right at guest boot.
+		// Reporting DENIED here would pop a false red "access denied" card for a
+		// grant that is actually fine; UNKNOWN shows the soft "may be pending" card
+		// and self-corrects on the next sample.
+		return runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNKNOWN
 	}
-	return runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_DENIED
 }
 
 // localNetworkSampleInterval bounds how stale the published grant can be. Coarse

@@ -50,15 +50,16 @@ struct AgentInstallRow: View {
                 + "runnyd, cancel and remove that first.")
         }
         .confirmationDialog(
-            "Remove runnyd while a job is running?",
+            "Remove runnyd while a guest is live?",
             isPresented: $confirmingUninstall,
             titleVisibility: .visible
         ) {
-            Button("Remove and Abandon Job", role: .destructive) { Task { await agent.uninstall() } }
+            Button("Remove and Abandon", role: .destructive) { Task { await agent.uninstall() } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Removing the daemon stops it immediately, abandoning the running "
-                + "job on \(abandonedSlotsText). The job will not finish.")
+            Text("Removing the daemon stops it immediately, abandoning the work on "
+                + "\(abandonedSlotsText). A running job will not finish, and a "
+                + "debug-held guest is destroyed.")
         }
     }
 
@@ -74,7 +75,7 @@ struct AgentInstallRow: View {
             set: { wantOn in
                 if wantOn {
                     confirmingInstall = true
-                } else if store.runningJobSlots.isEmpty {
+                } else if store.liveGuestSlots.isEmpty {
                     Task { await agent.uninstall() }
                 } else {
                     confirmingUninstall = true
@@ -84,7 +85,7 @@ struct AgentInstallRow: View {
     }
 
     private var abandonedSlotsText: String {
-        let slots = store.runningJobSlots
+        let slots = store.liveGuestSlots
         return slots.count == 1 ? "slot \(slots[0])" : "slots \(slots.joined(separator: ", "))"
     }
 

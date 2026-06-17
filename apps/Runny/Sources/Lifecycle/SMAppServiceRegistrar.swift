@@ -43,9 +43,15 @@ final class SMAppServiceRegistrar: ServiceRegistrar {
         switch await runLaunchctl(["print", jobTarget]) {
         case .timedOut, .launchFailed:
             return .undetermined
-        case let .exited(code, stdout, _):
-            // Non-zero is "Could not find service" — the job isn't loaded.
-            guard code == 0 else { return .notRegistered }
+        case let .exited(code, stdout, stderr):
+            if code != 0 {
+                // "Could not find service" = the job genuinely isn't loaded. Any
+                // OTHER non-zero (a permission error on a managed host, a corrupt
+                // service DB) must NOT masquerade as not-registered — that would
+                // mark reconcile .ok and hide a foreign/wedged agent. Surface it as
+                // undetermined instead.
+                return stderr.lowercased().contains("could not find") ? .notRegistered : .undetermined
+            }
             // Loaded: pull the program path; an unparseable dump is undetermined,
             // never a false "foreign".
             if let program = AgentController.parseLaunchctlProgram(stdout) {
@@ -93,13 +99,16 @@ final class SMAppServiceRegistrar: ServiceRegistrar {
             return .launchFailed("could not launch launchctl: \(error.localizedDescription)")
         }
         return await withCheckedContinuation { (cont: CheckedContinuation<LaunchctlResult, Never>) in
-            // If launchctl hasn't exited by the bound, mark it timed-out and
-            // terminate so waitUntilExit returns. The flag disambiguates a natural
-            // exit from a terminate-on-timeout in the wait closure.
-            let timedOut = TimeoutFlag()
+            // Resume the CALLER on the timeout regardless of whether the process has
+            // exited — so a launchctl that ignores SIGTERM can never hang the caller
+            // (the wait closure may leak a thread in that pathological case, but the
+            // bound is honored). The resume-once gate also resolves the natural race:
+            // a clean exit a hair before the deadline resumes `.exited` first, so it
+            // is reported correctly rather than as a false `.timedOut`.
+            let gate = ResumeOnce()
             let killer = DispatchWorkItem {
-                timedOut.set()
-                proc.terminate()
+                proc.terminate() // best-effort SIGTERM; the caller is freed either way
+                if gate.claim() { cont.resume(returning: .timedOut) }
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + Self.launchctlTimeout, execute: killer)
             DispatchQueue.global().async {
@@ -111,15 +120,13 @@ final class SMAppServiceRegistrar: ServiceRegistrar {
                 let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
                 proc.waitUntilExit()
                 killer.cancel()
-                if timedOut.isSet {
-                    cont.resume(returning: .timedOut)
-                    return
+                if gate.claim() {
+                    cont.resume(returning: .exited(
+                        code: proc.terminationStatus,
+                        stdout: String(data: outData, encoding: .utf8) ?? "",
+                        stderr: String(data: errData, encoding: .utf8) ?? ""
+                    ))
                 }
-                cont.resume(returning: .exited(
-                    code: proc.terminationStatus,
-                    stdout: String(data: outData, encoding: .utf8) ?? "",
-                    stderr: String(data: errData, encoding: .utf8) ?? ""
-                ))
             }
         }
     }
@@ -139,12 +146,18 @@ struct LaunchctlFailure: LocalizedError {
     var errorDescription: String? { message }
 }
 
-/// A tiny thread-safe bool: the timeout killer (one queue) and the wait closure
-/// (another) race on it, so the read/write is lock-guarded. Self-contained rather
-/// than pulling in Synchronization.Mutex for one flag.
-private final class TimeoutFlag: @unchecked Sendable {
+/// A one-shot gate so the timeout killer and the wait closure (different queues)
+/// resume the continuation exactly once: whoever calls `claim()` first wins, the
+/// loser's `claim()` returns false and it does nothing. Self-contained rather than
+/// pulling in Synchronization.Mutex for one flag.
+private final class ResumeOnce: @unchecked Sendable {
     private let lock = NSLock()
-    private var value = false
-    func set() { lock.withLock { value = true } }
-    var isSet: Bool { lock.withLock { value } }
+    private var claimed = false
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if claimed { return false }
+        claimed = true
+        return true
+    }
 }

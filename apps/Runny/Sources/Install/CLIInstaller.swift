@@ -47,8 +47,14 @@ final class CLIInstallModel {
         return url.resolvingSymlinksInPath().path
     }
 
-    /// Recompute the resting state from disk — on appear, and after every op.
-    func refresh() { state = restingState() }
+    /// Recompute the resting state from disk — on appear, and after every op. A
+    /// no-op while an op is in flight: onAppear (Settings + popover) calls this,
+    /// and overwriting .installing mid-prompt would hide Cancel and let a second
+    /// tap stack a duplicate admin prompt.
+    func refresh() {
+        guard state != .installing else { return }
+        state = restingState()
+    }
 
     /// The state the disk implies right now. Shared by `refresh()` and the
     /// post-remove read-back, so both encode the install/conflict/onPath rule once.
@@ -158,7 +164,7 @@ final class CLIInstallModel {
         switch verdict {
         case .removeOurs:
             if Self.dirWritable(Self.binDir) {
-                let err = Self.removeUnprivileged(Self.linkPath)
+                let err = Self.removeUnprivileged(Self.linkPath, bundleCLIPath: bundle)
                 if let err { apply(.failed(err), gen: gen) } else { confirmRemoved(gen: gen) }
             } else {
                 let outcome = await runPrivilegedRemove(gen: gen)
@@ -221,10 +227,12 @@ final class CLIInstallModel {
     /// window dance), then revert. The process handle is held so `cancel()` can
     /// terminate it; a system-dismissed prompt comes back as `.cancelled`.
     private func runOsascript(_ script: String, gen: Int) async -> PrivilegedOutcome {
-        let priorPolicy = NSApp.activationPolicy()
-        NSApp.setActivationPolicy(.regular)
+        // Bring the app forward so the system admin prompt has focus. Do NOT flip
+        // and restore the activation policy here: the install surface is Settings
+        // (already .regular), and blindly restoring a saved policy would strand the
+        // app .regular if its window closed during the prompt (the LSUIElement bug
+        // ActivationCoordinator's remaining-window check exists to avoid).
         NSApp.activate(ignoringOtherApps: true)
-        defer { NSApp.setActivationPolicy(priorPolicy) }
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
@@ -316,15 +324,14 @@ extension CLIInstallModel {
     /// only when the existing entry is itself a Runny.app link, never a foreign file.
     nonisolated static func installScript(target: String) -> String {
         let sh = "mkdir -p /usr/local/bin && "
-            + "if [ -L /usr/local/bin/runnyctl ]; then "
-            + "case \"$(readlink /usr/local/bin/runnyctl 2>/dev/null)\" in "
-            + "*/Runny.app/Contents/MacOS/runnyctl) : ;; "
-            + "*) exit 3 ;; esac; "
-            // A non-symlink that exists is a foreign regular file — refuse it.
-            // ([ -L ] above also catches a dangling foreign symlink, which a plain
-            // [ -e ] follows and misses.)
-            + "elif [ -e /usr/local/bin/runnyctl ]; then exit 3; fi; "
-            + "ln -sfn \(shellSingleQuote(target)) /usr/local/bin/runnyctl"
+            + "existing=\"$(readlink /usr/local/bin/runnyctl 2>/dev/null)\"; "
+            // Remove ONLY a link we own (this or another Runny.app). Then refuse if
+            // anything still remains — a foreign file, or one that raced in.
+            + "case \"$existing\" in */Runny.app/Contents/MacOS/runnyctl) rm -f /usr/local/bin/runnyctl ;; esac; "
+            + "if [ -e /usr/local/bin/runnyctl ] || [ -L /usr/local/bin/runnyctl ]; then exit 3; fi; "
+            // Non-forcing (no -f): a file racing in between the check and here makes
+            // ln fail loudly rather than force-clobber a foreign runnyctl.
+            + "ln -s \(shellSingleQuote(target)) /usr/local/bin/runnyctl"
         return appleScript(doShell: sh)
     }
 
@@ -372,11 +379,24 @@ extension CLIInstallModel {
         return .regularFile
     }
 
-    /// The fully resolved target of the link at `path`, or nil if nothing is there.
+    /// The link's target as an absolute path, or nil if nothing is there. For a
+    /// live link the fully-resolved canonical path matches bundleCLIPath (also
+    /// canonical). For a DANGLING link (target moved/deleted) resolvingSymlinksInPath
+    /// gives back the link path itself, so fall back to the raw symlink destination
+    /// (made absolute) — that still names the Runny.app a stale link points into, so
+    /// it can be adopted/repaired rather than shown as an unfixable foreign conflict.
     nonisolated static func resolvedLink(_ path: String) -> String? {
         let fm = FileManager.default
-        guard (try? fm.attributesOfItem(atPath: path)) != nil else { return nil }
-        return URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        guard let attrs = try? fm.attributesOfItem(atPath: path) else { return nil }
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        if resolved != path { return resolved } // reached a live target
+        // resolved == path → not a symlink, or a dangling one: read its destination.
+        guard (attrs[.type] as? FileAttributeType) == .typeSymbolicLink,
+              let dest = try? fm.destinationOfSymbolicLink(atPath: path)
+        else { return resolved }
+        if dest.hasPrefix("/") { return dest }
+        return URL(fileURLWithPath: (path as NSString).deletingLastPathComponent)
+            .appendingPathComponent(dest).standardized.path
     }
 
     /// Can the link be created without admin? True when the dir exists and is
@@ -409,12 +429,24 @@ extension CLIInstallModel {
     /// (createSymbolicLink won't overwrite); the planner already proved it ours.
     nonisolated static func createUnprivileged(linkPath: String, target: String) -> String? {
         let fm = FileManager.default
-        do {
-            try? fm.createDirectory(atPath: (linkPath as NSString).deletingLastPathComponent,
-                                    withIntermediateDirectories: true)
-            if (try? fm.attributesOfItem(atPath: linkPath)) != nil {
-                try fm.removeItem(atPath: linkPath)
+        try? fm.createDirectory(atPath: (linkPath as NSString).deletingLastPathComponent,
+                                withIntermediateDirectories: true)
+        // Re-classify at the moment of write — the planner's read can be stale by a
+        // concurrent install. Remove only an entry we still own (a Runny.app
+        // symlink); never a foreign file that appeared. createSymbolicLink is
+        // non-forcing, so a file racing in after this check fails loudly instead of
+        // being clobbered.
+        switch readExisting(linkPath) {
+        case .absent:
+            break
+        case let .symlink(resolved) where CLIInstall.isRunnyBundleCLI(resolved):
+            if (try? fm.removeItem(atPath: linkPath)) == nil {
+                return "could not replace the existing runny link"
             }
+        default:
+            return "another runnyctl appeared at \(linkPath) — not replaced"
+        }
+        do {
             try fm.createSymbolicLink(atPath: linkPath, withDestinationPath: target)
             return nil
         } catch {
@@ -422,12 +454,21 @@ extension CLIInstallModel {
         }
     }
 
-    nonisolated static func removeUnprivileged(_ linkPath: String) -> String? {
-        do {
-            try FileManager.default.removeItem(atPath: linkPath)
+    nonisolated static func removeUnprivileged(_ linkPath: String, bundleCLIPath: String) -> String? {
+        // Re-verify at write time: remove only a link that still resolves to THIS
+        // bundle, never a foreign file that raced into the path.
+        switch readExisting(linkPath) {
+        case .absent:
             return nil
-        } catch {
-            return "could not remove the link: \(error.localizedDescription)"
+        case let .symlink(resolved) where resolved == bundleCLIPath:
+            do {
+                try FileManager.default.removeItem(atPath: linkPath)
+                return nil
+            } catch {
+                return "could not remove the link: \(error.localizedDescription)"
+            }
+        default:
+            return "another runnyctl now owns \(linkPath) — not removed"
         }
     }
 }

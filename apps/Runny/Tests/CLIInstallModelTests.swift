@@ -116,18 +116,34 @@ final class CLIInstallModelTests: XCTestCase {
     func testInstallScriptStructure() {
         let s = CLIInstallModel.installScript(target: "/Applications/Runny.app/Contents/MacOS/runnyctl")
         XCTAssertTrue(s.contains("with administrator privileges"))
-        XCTAssertTrue(s.contains("ln -sfn"))
-        // The TOCTOU-safe foreign guard re-checks at write time and refuses (exit 3)
-        // anything that isn't a Runny.app link — a foreign symlink (incl. a dangling
-        // one, caught by [ -L ]) and a foreign regular file (the elif [ -e ]).
-        XCTAssertTrue(s.contains("if [ -L /usr/local/bin/runnyctl ]"))
-        XCTAssertTrue(s.contains("*/Runny.app/Contents/MacOS/runnyctl)"))
-        XCTAssertTrue(s.contains("elif [ -e /usr/local/bin/runnyctl ]; then exit 3"))
-        XCTAssertTrue(s.contains("exit 3"))
-        // The target is single-quoted (escaped through the AppleScript layer).
-        XCTAssertTrue(s.contains("'/Applications/Runny.app/Contents/MacOS/runnyctl'"))
+        // Non-forcing create (single-quoted target through the AppleScript layer):
+        // never `ln -sfn`, whose -f would clobber a foreign file that raced in after
+        // the guard.
+        XCTAssertTrue(s.contains("ln -s '/Applications/Runny.app/Contents/MacOS/runnyctl'"))
+        XCTAssertFalse(s.contains("ln -sfn"))
+        // The write-time guard removes ONLY a Runny.app link, then refuses (exit 3)
+        // anything still at the path — a foreign file, or one that raced in.
+        XCTAssertTrue(s.contains("*/Runny.app/Contents/MacOS/runnyctl) rm -f"))
+        XCTAssertTrue(s.contains("if [ -e /usr/local/bin/runnyctl ] || [ -L /usr/local/bin/runnyctl ]; then exit 3"))
         // mkdir -p so a missing /usr/local/bin is created under escalation.
         XCTAssertTrue(s.contains("mkdir -p /usr/local/bin"))
+    }
+
+    func testResolvedLinkFollowsDanglingRunnyTarget() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("runny-resolvedlink-\(UUID().uuidString)")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let link = dir.appendingPathComponent("runnyctl").path
+        // A link into a Runny.app that does NOT exist (the app was moved/deleted):
+        // resolvingSymlinksInPath can't reach it, so the resolver must fall back to
+        // the raw destination — otherwise a stale Runny link reads as foreign.
+        let deadTarget = dir.appendingPathComponent("Runny.app/Contents/MacOS/runnyctl").path
+        try fm.createSymbolicLink(atPath: link, withDestinationPath: deadTarget)
+        let resolved = CLIInstallModel.resolvedLink(link)
+        XCTAssertEqual(resolved, deadTarget)
+        XCTAssertTrue(CLIInstall.isRunnyBundleCLI(resolved ?? ""),
+                      "a dangling Runny.app link must classify as Runny-owned, not foreign")
     }
 
     func testRemoveScriptOnlyTouchesRunnyLinks() {

@@ -6,10 +6,21 @@ import SwiftUI
 /// never an action's return — so the row always reflects what is on disk.
 struct SettingsView: View {
     @Environment(CLIInstallModel.self) private var cli
+    @Environment(AgentController.self) private var agent
     @Environment(ActivationCoordinator.self) private var activation
 
     var body: some View {
         Form {
+            Section {
+                AgentInstallRow()
+            } header: {
+                Text("Daemon")
+            } footer: {
+                Text("Installs runnyd as a login agent so it starts with your session and survives "
+                    + "upgrades. Requires Runny in your Applications folder.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section {
                 CLIInstallRow()
             } header: {
@@ -22,12 +33,13 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 480, height: 200)
+        .frame(width: 480, height: 320)
         .onAppear {
             // Settings is a regular window; keep the accessory↔regular dance sane
-            // (the app is LSUIElement) and refresh the row from disk on open.
+            // (the app is LSUIElement) and refresh both rows from their sources on open.
             activation.windowAppeared()
             cli.refresh()
+            agent.refresh()
         }
     }
 }

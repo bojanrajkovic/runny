@@ -96,6 +96,11 @@ final class AgentControllerTests: XCTestCase {
         XCTAssertNotNil(c.spawnRefusal)
     }
 
+    func testEligibilityReflectsInjectedProvider() {
+        let c = AgentController(registrar: MockRegistrar(), eligibility: { .translocated })
+        XCTAssertEqual(c.eligibility, .translocated)
+    }
+
     func testClassifyBootout() {
         XCTAssertEqual(AgentController.classifyBootout(exitCode: 0, stderr: ""), .removed)
         XCTAssertEqual(

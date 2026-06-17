@@ -61,10 +61,34 @@ final class AgentController {
 
     private let registrar: ServiceRegistrar
     private let spawnGate: () async -> SpawnGate
+    private let eligibilityProvider: () -> LaunchAgentStatus.Eligibility
 
-    init(registrar: ServiceRegistrar, spawnGate: @escaping () async -> SpawnGate = { .allow }) {
+    init(
+        registrar: ServiceRegistrar,
+        spawnGate: @escaping () async -> SpawnGate = { .allow },
+        eligibility: @escaping () -> LaunchAgentStatus.Eligibility = { AgentController.bundleEligibility() }
+    ) {
         self.registrar = registrar
         self.spawnGate = spawnGate
+        eligibilityProvider = eligibility
+    }
+
+    /// Whether this running bundle may install its agent — translocated, in
+    /// `/Applications`, or somewhere else. Read live (the bundle's location and
+    /// translocation are fixed for a launch, but the surface re-reads on appear).
+    var eligibility: LaunchAgentStatus.Eligibility { eligibilityProvider() }
+
+    /// The real eligibility read: this bundle's location and translocation. Reuses
+    /// the one translocation heuristic in `CLIInstallModel` (no drifting copy of a
+    /// safety check), and strips a trailing slash so a directory-URL path still
+    /// matches the canonical `/Applications/Runny.app`.
+    nonisolated static func bundleEligibility() -> LaunchAgentStatus.Eligibility {
+        var path = Bundle.main.bundleURL.path
+        if path.count > 1, path.hasSuffix("/") { path.removeLast() }
+        return LaunchAgentStatus.eligibility(
+            bundlePath: path,
+            translocated: CLIInstallModel.isTranslocated(path)
+        )
     }
 
     /// Recompute `installState` from the registrar's status. Called on appear and

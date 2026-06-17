@@ -16,22 +16,25 @@ struct DaemonUpdateAffordance: View {
         case .none:
             EmptyView()
         case .available:
-            row(
-                "A newer runnyd ships with this app. Update drains running jobs first, then restarts.",
+            AffordanceRow(
+                systemImage: icon,
+                text: "A newer runnyd ships with this app. Update drains running jobs first, then restarts.",
                 tint: .orange
             ) {
                 Button("Update Daemon") { update() }
             }
         case .inProgress:
-            row("Updating runnyd — draining running jobs first…", tint: .secondary) {
+            AffordanceRow(systemImage: icon, text: "Updating runnyd — draining running jobs first…", tint: .secondary) {
                 ProgressView().controlSize(.small)
             }
         case let .didNotTake(core):
-            row("Update didn't take — runnyd is still \(core).", tint: .red) {
+            AffordanceRow(systemImage: icon, text: "Update didn't take — runnyd is still \(core).", tint: .red) {
                 Button("Try Again") { update() }
             }
         }
     }
+
+    private let icon = "arrow.down.circle"
 
     /// The update's confirmation dialog is hosted only on the main window, so —
     /// like the footer Reload button — open the main window first. From the main
@@ -40,22 +43,5 @@ struct DaemonUpdateAffordance: View {
     private func update() {
         activation.openMainWindow(openWindow)
         store.requestDaemonUpdate()
-    }
-
-    private func row(_ text: String, tint: Color, @ViewBuilder action: () -> some View) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: "arrow.down.circle")
-                .font(.caption)
-                .foregroundStyle(tint)
-            Text(text)
-                .font(.caption)
-                .foregroundStyle(.primary)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 4)
-            action()
-        }
-        .padding(.horizontal, Metrics.pad)
-        .padding(.vertical, 6)
-        .background(tint == .secondary ? Color.clear : tint.opacity(0.08))
     }
 }

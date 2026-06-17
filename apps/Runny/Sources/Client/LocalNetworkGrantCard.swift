@@ -72,22 +72,11 @@ struct LocalNetworkGrantCard: View {
     }
 
     private func card(_ text: String, tint: Color) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: "network.badge.shield.half.filled")
-                .font(.caption)
-                .foregroundStyle(tint)
-            Text(text)
-                .font(.caption)
-                .foregroundStyle(.primary)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 4)
+        AffordanceRow(systemImage: "network.badge.shield.half.filled", text: text, tint: tint) {
             Button("Open Settings") {
                 if let url = Self.settingsURL { NSWorkspace.shared.open(url) }
             }
             .controlSize(.small)
         }
-        .padding(.horizontal, Metrics.pad)
-        .padding(.vertical, 6)
-        .background(tint.opacity(0.08))
     }
 }

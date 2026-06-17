@@ -17,7 +17,8 @@ struct DaemonStartAffordance: View {
         case .none:
             EmptyView()
         case .approval:
-            row(
+            AffordanceRow(
+                systemImage: icon,
                 text: "runnyd is installed but needs approval in Login Items.",
                 tint: .orange
             ) {
@@ -32,23 +33,25 @@ struct DaemonStartAffordance: View {
     private var startRow: some View {
         switch agent.startOutcome {
         case .starting:
-            row(text: "Starting runnyd…", tint: .secondary) {
+            AffordanceRow(systemImage: icon, text: "Starting runnyd…", tint: .secondary) {
                 ProgressView().controlSize(.small)
             }
         case .didNotComeUp:
-            row(text: "Start issued, but runnyd hasn't come up.", tint: .orange) {
+            AffordanceRow(systemImage: icon, text: "Start issued, but runnyd hasn't come up.", tint: .orange) {
                 Button("Try Again") { startDaemon() }
             }
         case let .refused(reason):
-            row(text: reason, tint: .red) {
+            AffordanceRow(systemImage: icon, text: reason, tint: .red) {
                 Button("Try Again") { startDaemon() }
             }
         case .idle, .cameUp:
-            row(text: "runnyd is installed but not running.", tint: .secondary) {
+            AffordanceRow(systemImage: icon, text: "runnyd is installed but not running.", tint: .secondary) {
                 Button("Start") { startDaemon() }
             }
         }
     }
+
+    private let icon = "bolt.horizontal.circle"
 
     private func startDaemon() {
         Task {
@@ -60,22 +63,5 @@ struct DaemonStartAffordance: View {
 
     private var daemonUnreachable: Bool {
         if case .unreachable = store.connection { true } else { false }
-    }
-
-    private func row(text: String, tint: Color, @ViewBuilder action: () -> some View) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: "bolt.horizontal.circle")
-                .font(.caption)
-                .foregroundStyle(tint)
-            Text(text)
-                .font(.caption)
-                .foregroundStyle(.primary)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 4)
-            action()
-        }
-        .padding(.horizontal, Metrics.pad)
-        .padding(.vertical, 6)
-        .background(tint == .secondary ? Color.clear : tint.opacity(0.08))
     }
 }

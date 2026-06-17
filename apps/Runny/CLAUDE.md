@@ -108,3 +108,15 @@ bounds) and ADR-0016 (decisions). Sharp edges below.
   nudge shows only while the CLI is absent (the model's `.notInstalled`), so a dev
   build that carries no bundled `runnyctl` — `refresh()` leaves it `.failed` —
   never nags.
+- **Daemon lifecycle lives in `Sources/Lifecycle/` — read its `CLAUDE.md` for the
+  sharp edges, don't duplicate them here.** The load-bearing ones a broad change
+  must respect: `SMAppService` success means *requested*, so `installState` is
+  derived from `service.status`, never a call return; every spawn-triggering action
+  funnels through `AgentController.attemptSpawn` (the gate the Homebrew-reconcile
+  step fills) — no view calls `SMAppService`/`launchctl` directly; the bundled
+  LaunchAgent plist is `BundleProgram`-relative and is NOT the host-install
+  template (two shapes, do not unify); the Local Network grant card reads the
+  **daemon-published `local_network_grant`**, never the button-gated `doctorChecks`;
+  uninstall best-effort-`bootout`s ("No such process" = success), never kills; the
+  reconcile compares the **canonical `/Applications/Runny.app`**, never
+  `Bundle.main.bundlePath` (the translocation mount on a `~/Downloads` launch).

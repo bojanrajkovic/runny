@@ -134,11 +134,12 @@ is single-use.
 
 ## The app's privileged surface
 
-The Runny app's only privileged action is vending the CLI — symlinking the
-bundled `runnyctl` to `/usr/local/bin/runnyctl`. It tries an unprivileged
-`createSymbolicLink` first and escalates only when `/usr/local/bin` is not
-user-writable, through **one** `with administrator privileges` shell line — no
-privileged helper, no `SMJobBless`, no System Extension
+The app's only action that escalates to **administrator** is vending the CLI —
+symlinking the bundled `runnyctl` to `/usr/local/bin/runnyctl` (installing the
+daemon agent, below, is user-scoped and never asks for admin). It tries an
+unprivileged `createSymbolicLink` first and escalates only when `/usr/local/bin`
+is not user-writable, through **one** `with administrator privileges` shell line —
+no privileged helper, no `SMJobBless`, no System Extension
 ([ADR-0018](architecture-decisions/0018-bundled-app-distribution.md) rejects a
 root helper for this surface). The escalated command is minimal and TOCTOU-safe:
 it re-checks the foreign guard at the moment of mutation (test-and-create, never
@@ -150,3 +151,18 @@ confirmed by reading the link back from disk, never trusted from the privileged
 step's exit code. The bundled binaries are signed inside-out — the daemon carries
 `com.apple.security.virtualization`, the CLI carries none, both asserted at build
 time, so the CLI can never inherit the VM grant.
+
+The app can also **install `runnyd` as a per-user LaunchAgent** via `SMAppService`
+— and this is *not* a root operation. The agent registers into the user's own
+login session (gated by the user's Login Items approval), the bundled plist is
+covered by the signature and notarization staple (injected before signing), and
+the only OS interactions beyond `SMAppService` are bounded `launchctl` calls
+(`bootout`/`kickstart`/`print`) scoped to the user's own `gui/<uid>` domain. There
+is **no privileged helper, no `SMJobBless`, no System Extension**
+([ADR-0018](architecture-decisions/0018-bundled-app-distribution.md) rejects a
+root helper for the entire app surface). The daemon's Local Network (TCC) grant is
+keyed to the bundled `runnyd`'s own code identity — so the one-time prompt names
+`runnyd` (not the app), and the grant persists across upgrades only while the
+signing identifier stays stable. The bundled `runnyd` raises that prompt with no
+embedded `NSLocalNetworkUsageDescription`: a signed bare binary run as a per-user
+agent prompts on its own, and macOS supplies generic text, ignoring any embed.

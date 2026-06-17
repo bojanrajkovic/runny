@@ -256,9 +256,9 @@ first with its own entitlements — the daemon keeps
 `com.apple.security.virtualization`, the CLI gets none, both asserted at build
 time — then the single outer `codesign` seals the bundle over them. This is not
 deprecated `--deep` *signing*; the bundle's notarization then registers a ticket
-for each nested Mach-O so Gatekeeper accepts them. The bundled `runnyd` is inert
-cargo today; it exists so the bits are signed and notarized once and so a future
-launchd `BundleProgram` has a stable in-bundle path to point at.
+for each nested Mach-O so Gatekeeper accepts them. The bundled `runnyd` is what
+the app registers as a LaunchAgent (see "Daemon lifecycle" below); its stable
+in-bundle path is the `BundleProgram` the agent's plist names.
 
 Settings exposes an **Install command-line tool** action that vends the bundled
 `runnyctl` as `/usr/local/bin/runnyctl` — the OrbStack/Docker pattern, which
@@ -295,13 +295,72 @@ The vended `runnyctl` can lag a Homebrew-managed `runnyd` on a shared host, so i
 carries the same version-skew warning the app does, on its own CLI axis — warn,
 never refuse, printed to stderr before command output.
 
+## Daemon lifecycle (app-managed LaunchAgent)
+
+The app installs `runnyd` as a **per-user LaunchAgent via `SMAppService`** — the
+GUI install channel beside the Homebrew service (ADR-0018). The job's plist
+(`Contents/Library/LaunchAgents/com.coderinserepeat.runnyd.plist`) is injected
+into the bundle *before* signing so it is covered by the signature and the
+notarization staple, and names the daemon by a bundle-relative
+`BundleProgram = Contents/MacOS/runnyd` with
+`AssociatedBundleIdentifiers = [com.coderinserepeat.runny]`. The version lock is
+free: an in-place app upgrade replaces the bundle, so the job's program *is* the
+new binary, and a drain-gated respawn moves the running process onto it. This is
+not the host-install plist template (absolute `ProgramArguments`, `RUNNY_HOME`
+log paths) — two shapes for two channels, deliberately not unified.
+
+`Sources/Lifecycle/` mirrors `DaemonStore`'s split: pure `nonisolated static`
+verdicts (`LaunchAgentStatus`) plus a thin side-effect wrapper (`AgentController`)
+whose `SMAppService`/`launchctl` calls sit behind a `ServiceRegistrar` protocol
+seam, so every decision is unit-tested without launchd. The invariants:
+
+- **`SMAppService` success means *requested*, not *done*.** `installState` is a
+  closed, loud set derived from `service.status` — never a call's return:
+  `notInstalled`/`installed`/`requiresApproval`/`notFound`, plus
+  `registrationFailed(reason:)` for a register/unregister throw. `requiresApproval`
+  (Login Items pending) is a first-class CTA, never a silent `notInstalled`. "The
+  daemon is actually up" is a separate, later `.connected` snapshot.
+- **One spawn chokepoint.** Every spawn-triggering action (install, start-at-login
+  enable, Start) funnels through a single `attemptSpawn` that consults an
+  injectable `spawnGate` (the seam the Homebrew-reconciliation gate fills) and
+  aborts loud on deny — no view action calls `SMAppService`/`launchctl` directly.
+- **Install refuses outside `/Applications`, recoverably.** A translocated bundle
+  is refused with "re-launch from Applications" — recoverable, so a first-launch
+  quarantine of a correctly-installed app is never permanently locked out. Install
+  is behind an explicit click with a label-naming confirmation (a brew daemon is
+  never silently displaced).
+- **Start affordance** (menu bar + main window) shows only when the agent is
+  installed and the daemon is unreachable; `requiresApproval` routes to the Login
+  Items CTA, never a dead Start. It `kickstart`s (no `-k`) and confirms recovery
+  from a later `.connected` snapshot within a healthy-cold-start bound, surfacing
+  "Start issued but the daemon hasn't come up" on expiry — never a silent spinner.
+- **Proactive Local Network grant card**, driven by the daemon-published
+  `local_network_grant` tri-state, not the button-gated doctor check (which is
+  `ok` until a guest boots). It fires *before* the first guest dial fails: UNKNOWN
+  (no vmnet yet — prompt may be pending) and DENIED both surface a System-Settings
+  deep link; REACHABLE and a daemon predating the field show nothing.
+- **Post-upgrade update**, offered when the app-installed agent is a newer build
+  than the running daemon, is the existing drain-gated reload (jobs finish first,
+  then launchd cold-starts the new binary) — it adds nothing to the drain
+  mechanics. A non-converged result is named loud ("update didn't take — still
+  vX"), never folded into the generic reload note. A brew/manual daemon is offered
+  only the generic skew banner, not a futile fleet-draining update.
+- **Uninstall** is `unregister()` then a best-effort `launchctl bootout` ("No such
+  process" = success); a mid-job uninstall first raises a destructive confirmation
+  naming the abandoned slot. **Reconcile-on-launch** compares the registered
+  agent's program path (bounded `launchctl` introspection) against the canonical
+  `/Applications/Runny.app` — never the running bundle's path — and surfaces a
+  foreign/stale-path agent, or "couldn't determine" on a timeout.
+
 ## Build shape
 
-`swift_library` → `macos_application` (rules_apple) → the sign / notarize /
-dmg chain in `apps/Runny/BUILD` — no .xcodeproj, ever (ADR-0007). `codesign_app`
-also places and signs the bundled `runnyd`/`runnyctl` inside-out (above); a
-Darwin-gated `bundle_contents_test` asserts their names, signatures, per-binary
-entitlements, and that each execs. All Swift targets are darwin-only
+`swift_library` → `macos_application` (rules_apple) → plist injection → the sign /
+notarize / dmg chain in `apps/Runny/BUILD` — no .xcodeproj, ever (ADR-0007).
+`codesign_app` places and signs the bundled `runnyd`/`runnyctl` inside-out
+(above), and an `inject_launch_agent` genrule lands the LaunchAgent plist in the
+bundle before signing; a Darwin-gated `bundle_contents_test` asserts the binaries'
+names, signatures, per-binary entitlements, that each execs, and that the plist is
+present and sealed into the signature. All Swift targets are darwin-only
 (`target_compatible_with`), so non-macOS hosts prune them from `//...` before
 toolchain resolution. Building the app requires full Xcode as SDK vendor; it is
 never opened. Distribution is a notarized, stapled .dmg (ADR-0016).

@@ -41,4 +41,17 @@ never exercised live in tests.
   match); both surfaces share that single definition rather than drifting copies.
 - **Any `launchctl`/introspection carries a timeout.** There is no
   `bounded.Context` in Swift; a `launchctl print` can hang. A hung introspection
-  surfaces "couldn't determine agent state" loudly, never spins.
+  surfaces "couldn't determine agent state" loudly, never spins. The shared
+  `runLaunchctl` scaffold drains both pipes *before* `waitUntilExit`, so a verbose
+  `print` can't deadlock on a full pipe buffer.
+- **One spawn chokepoint.** Install, start-at-login enable, and Start all funnel
+  through `attemptSpawn`, which consults the injectable `spawnGate` (default
+  `.allow`; the Homebrew-reconcile step fills it) and aborts loud on deny. It
+  returns its verdict rather than mapping errors itself — a `register` throw is a
+  failed *install*, a `kickstart` throw a failed *start* with the agent still
+  installed, so the two never bleed into one shared state. Never call
+  `SMAppService`/`launchctl` from a view action; that bypasses the gate.
+- **The Start recovery bound is healthy-magnitude × margin, not a budget sum.**
+  `startRecoveryBound` is sized to a normal cold start, and recovery is confirmed
+  from a later `.connected` snapshot — never the `kickstart` return. On expiry it
+  is loud (`didNotComeUp`), never a silent spinner.

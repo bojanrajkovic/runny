@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"net"
+	"sync/atomic"
 	"syscall"
 	"time"
+
+	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
 // vmnetGateway is the default gateway of Apple's NAT/vmnet guest subnet.
@@ -56,4 +60,65 @@ func vmnetInterfaceUp() bool {
 		}
 	}
 	return false
+}
+
+// localNetworkGrant classifies this process's Local Network (TCC) access into
+// the three states the daemon can actually distinguish — the tri-state published
+// in GetStatusResponse.local_network_grant. It is the same probe localNetworkReach
+// runs (no vmnet → can't tell; vmnet up → reachable or denied), shaped for the
+// app's proactive grant card rather than the doctor's (ok, detail) pair. There
+// is no fourth "definitely never granted" state: macOS exposes no API to read a
+// process's own grant, so until a vmnet interface exists the honest answer is
+// UNKNOWN, which the app treats as "prompt may be pending".
+func localNetworkGrant() runnyv1.LocalNetworkGrant {
+	if !vmnetInterfaceUp() {
+		return runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNKNOWN
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(vmnetGateway, "1"), 2*time.Second)
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if reachableErr(err) {
+		return runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_REACHABLE
+	}
+	return runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_DENIED
+}
+
+// localNetworkSampleInterval bounds how stale the published grant can be. Coarse
+// on purpose: a TCC grant is a slow-changing fact, and the sampler's probe dial
+// (up to 2s when a vmnet interface is up) must stay well off the status hot path.
+const localNetworkSampleInterval = 15 * time.Second
+
+// localNetworkSampler classifies the Local Network grant on a timer and caches
+// the verdict, so the status snapshot reads a cached value rather than blocking
+// every WatchStatus tick on a probe dial. The grant changes only when the user
+// grants/revokes the TCC permission or a vmnet interface appears (first guest
+// boot), so a coarse cadence stays responsive for the app's grant card while
+// keeping every status response non-blocking.
+type localNetworkSampler struct {
+	grant atomic.Int32 // a runnyv1.LocalNetworkGrant, int32 for atomic access
+}
+
+// read returns the most recently sampled grant. UNSPECIFIED until the first
+// sample lands (the int32 zero value), which the app renders as no affordance.
+func (s *localNetworkSampler) read() runnyv1.LocalNetworkGrant {
+	return runnyv1.LocalNetworkGrant(s.grant.Load())
+}
+
+// run samples once immediately, then on every tick until ctx ends. Bounded by
+// design: each probe carries localNetworkGrant's 2s dial timeout, and the loop
+// stops with the daemon — no unbounded operation (ADR-0011).
+func (s *localNetworkSampler) run(ctx context.Context) {
+	sample := func() { s.grant.Store(int32(localNetworkGrant())) }
+	sample()
+	t := time.NewTicker(localNetworkSampleInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			sample()
+		}
+	}
 }

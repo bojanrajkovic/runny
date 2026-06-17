@@ -30,6 +30,7 @@ go_library(
         "//internal/sshx",
         "//internal/statemachine",
         "//internal/tart",
+        "//proto/runny/v1:runny",
         "@org_golang_x_sys//unix",
     ] + select({
         "@rules_go//go/platform:aix": [
@@ -117,5 +118,6 @@ go_test(
         "//internal/home",
         "//internal/socket",
         "//internal/statemachine",
+        "//proto/runny/v1:runny",
     ],
 )

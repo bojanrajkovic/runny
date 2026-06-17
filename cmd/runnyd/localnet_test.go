@@ -3,6 +3,8 @@ package main
 import (
 	"syscall"
 	"testing"
+
+	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
 func TestReachableErr(t *testing.T) {
@@ -29,5 +31,31 @@ func TestLocalNetworkReachSkipsWithoutVmnet(t *testing.T) {
 	ok, detail := localNetworkReach()
 	if !ok {
 		t.Errorf("idle host without vmnet should not fail the check: %q", detail)
+	}
+}
+
+// Without a vmnet interface the daemon cannot determine its grant, so the honest
+// classification is UNKNOWN — which the app renders as "prompt may be pending",
+// never a false REACHABLE or DENIED.
+func TestLocalNetworkGrantUnknownWithoutVmnet(t *testing.T) {
+	if vmnetInterfaceUp() {
+		t.Skip("a 192.168.64.0/24 interface is present; the live probe would run")
+	}
+	if got := localNetworkGrant(); got != runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNKNOWN {
+		t.Errorf("grant without vmnet = %v, want UNKNOWN", got)
+	}
+}
+
+// A fresh sampler reads UNSPECIFIED (the int32 zero) until its first sample
+// lands, and read() round-trips whatever the sampler stored — so the status hot
+// path never blocks on the probe.
+func TestLocalNetworkSamplerReadRoundTrips(t *testing.T) {
+	s := &localNetworkSampler{}
+	if got := s.read(); got != runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNSPECIFIED {
+		t.Errorf("fresh sampler read = %v, want UNSPECIFIED", got)
+	}
+	s.grant.Store(int32(runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_REACHABLE))
+	if got := s.read(); got != runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_REACHABLE {
+		t.Errorf("sampler read after store = %v, want REACHABLE", got)
 	}
 }

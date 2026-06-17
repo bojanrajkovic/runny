@@ -151,6 +151,40 @@ message SlotStatus {
 
 message GetStatusRequest {}
 
+// LocalNetworkGrant classifies the daemon's macOS Local Network (TCC) access —
+// the permission a per-user LaunchAgent needs to reach guests on the vmnet
+// subnet (a LaunchDaemon or background-reparented daemon is silently denied;
+// docs/deploy.md). The daemon cannot query its own TCC grant directly (no public
+// API); it infers from whether the guest subnet is reachable, which is
+// undetermined until a vmnet interface exists (first guest boot). The signal is
+// LIVE, never remembered: a cached "granted" would outlive a revoked grant — a
+// false negative that hides a real failure, which this project refuses.
+//
+// NOT gated on protocol_version. UNSPECIFIED is a reserved sentinel that already
+// means "this daemon does not publish the signal" (older than the field, or not
+// yet sampled), so a client detects availability from the value alone and needs
+// no version check. Do not "consistency-fix" this by bumping the protocol: the
+// boot_id/exit_held fields gated on >= 2 only because their zero values (""/false)
+// were ambiguous — a reserved enum zero is not.
+enum LocalNetworkGrant {
+  // The daemon does not publish this signal (predates the field) or has not yet
+  // sampled, and on non-darwin builds. Clients show no grant affordance and rely
+  // on the version-skew banner to surface a stale daemon.
+  LOCAL_NETWORK_GRANT_UNSPECIFIED = 0;
+  // No vmnet interface is up yet (no guest has booted this run), so reachability
+  // is undetermined. Clients treat this as "the Local Network prompt may be
+  // pending" and surface the grant affordance proactively — before the first
+  // guest dial can fail as "no route to host".
+  LOCAL_NETWORK_GRANT_UNKNOWN = 1;
+  // A vmnet interface is up and the guest subnet is reachable: the grant is
+  // present. No affordance.
+  LOCAL_NETWORK_GRANT_REACHABLE = 2;
+  // A vmnet interface is up but the guest subnet is unreachable from this
+  // process — the TCC-denial signature (the host shell reaches it; this daemon
+  // does not). Clients surface the grant affordance.
+  LOCAL_NETWORK_GRANT_DENIED = 3;
+}
+
 message GetStatusResponse {
   repeated SlotStatus slots = 1;
   google.protobuf.Timestamp daemon_started = 2;
@@ -213,6 +247,12 @@ message GetStatusResponse {
   // `draining` string (clients must never re-parse the reason). False from
   // protocol_version < 2.
   bool exit_held = 10;
+  // The daemon's live Local Network (TCC) grant classification (see
+  // LocalNetworkGrant). Sampled off the status hot path and cached, so it is at
+  // most one sampling interval stale. UNSPECIFIED from a daemon that predates
+  // this field, has not sampled yet, or runs on a non-darwin build — clients
+  // show no grant affordance for UNSPECIFIED.
+  LocalNetworkGrant local_network_grant = 11;
 }
 
 message WatchStatusRequest {}

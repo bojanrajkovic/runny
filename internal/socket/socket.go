@@ -124,6 +124,11 @@ type Server struct {
 	// DrainFn reports the structured drain state (reason, held flag, progress
 	// counter) as a unit. Nil = never draining.
 	DrainFn func() DrainState
+	// LocalNetworkGrantFn reports the daemon's live Local Network (TCC) grant
+	// classification, published as GetStatusResponse.local_network_grant. The
+	// daemon samples it off the hot path and caches it, so this reader is
+	// non-blocking. Nil (non-darwin, or unwired) publishes UNSPECIFIED.
+	LocalNetworkGrantFn func() runnyv1.LocalNetworkGrant
 	// Config carries the limits InjectDebugKey validates against (hold cap,
 	// the queue/service bounds for the synchronous wait).
 	Config *home.Config
@@ -232,6 +237,9 @@ func (s *Server) snapshot() *runnyv1.GetStatusResponse {
 		ConfigSha256:    s.ConfigSHA256,
 		DrainSeq:        ds.Seq,
 		ExitHeld:        ds.ExitHeld,
+	}
+	if s.LocalNetworkGrantFn != nil {
+		resp.LocalNetworkGrant = s.LocalNetworkGrantFn()
 	}
 	// The config-derived InjectDebugKey wait, so `runnyctl debug` can size its
 	// client deadline to outlast the daemon (else a timeout lies — see #0).

@@ -363,6 +363,17 @@ func run() error {
 	// rather than the 30s heartbeat.
 	d.onProgress = srv.NotifyProgress
 
+	// Publish the daemon's Local Network (TCC) grant so the app can surface the
+	// grant affordance proactively — before the first guest dial fails as "no
+	// route to host". Sampled off the status hot path (a probe dial is up to 2s)
+	// and cached; darwin-only, since the grant and the vmnet subnet it gates are
+	// macOS concepts — the doctor's local-network check gates on GOOS the same way.
+	if runtime.GOOS == "darwin" {
+		sampler := &localNetworkSampler{}
+		go sampler.run(ctx)
+		srv.LocalNetworkGrantFn = sampler.read
+	}
+
 	// SIGHUP maps to the same validated reload path; the channel was claimed
 	// before the startup gauntlet (above) so the default process-terminate
 	// disposition is already disarmed — a SIGHUP, or a foreground runnyd's

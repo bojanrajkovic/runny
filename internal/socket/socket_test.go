@@ -601,6 +601,22 @@ func TestSnapshotCarriesProtocolVersion(t *testing.T) {
 	}
 }
 
+// The grant signal is published verbatim from the injected sampler; nil
+// (non-darwin or unwired) leaves it UNSPECIFIED — the app's "show no affordance"
+// case, never a false DENIED.
+func TestSnapshotCarriesLocalNetworkGrant(t *testing.T) {
+	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	if got := srv.snapshot().GetLocalNetworkGrant(); got != runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNSPECIFIED {
+		t.Errorf("grant = %v with no LocalNetworkGrantFn, want UNSPECIFIED", got)
+	}
+	srv.LocalNetworkGrantFn = func() runnyv1.LocalNetworkGrant {
+		return runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_DENIED
+	}
+	if got := srv.snapshot().GetLocalNetworkGrant(); got != runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_DENIED {
+		t.Errorf("grant = %v, want DENIED", got)
+	}
+}
+
 func TestWatchStatusSendsInitialThenOnNotify(t *testing.T) {
 	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
 	c := dial(t, srv)

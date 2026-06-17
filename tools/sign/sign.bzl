@@ -176,6 +176,45 @@ def notarize_binary(name, binary, **kwargs):
         **kwargs
     )
 
+def inject_launch_agent(name, plist, app_zip, **kwargs):
+    """Inject a LaunchAgent plist into a macos_application bundle BEFORE signing.
+
+    rules_apple routes resources to Contents/Resources/ and has no first-class
+    LaunchAgents slot, so the plist is placed by hand at the SMAppService-resolved
+    Contents/Library/LaunchAgents/<basename>. This runs BETWEEN macos_application
+    and codesign_app: the plist must be inside the bundle when codesign_app seals
+    it (so the launchd job's config is covered by the signature) and inside the
+    bundle notarize_app submits (so the staple stays valid). A post-build
+    injection would invalidate both — the data flow `:app → inject → sign →
+    notarize` is load-bearing, not cosmetic.
+
+    Args:
+        name:    Target name. Output is <name>.zip containing the .app.
+        plist:   Label of the LaunchAgent .plist to inject.
+        app_zip: Label of a .zip containing the .app at its root (a
+                 macos_application target's default output).
+    """
+    native.genrule(
+        name = name,
+        srcs = [app_zip, plist],
+        outs = [name + ".zip"],
+        cmd = """
+            WORK=$$(mktemp -d /tmp/bazel-inject-agent.XXXXXX)
+            trap 'rm -rf "$$WORK"' EXIT
+            ditto -x -k $(location {app_zip}) "$$WORK"
+            APP=$$(echo "$$WORK"/*.app)
+            mkdir -p "$$APP/Contents/Library/LaunchAgents"
+            cp $(location {plist}) "$$APP/Contents/Library/LaunchAgents/"
+            ditto -c -k --keepParent "$$APP" "$@"
+        """.format(app_zip = app_zip, plist = plist),
+        # no-sandbox: ditto preserves the bundle's Apple metadata (xattrs,
+        # resource forks) most reliably outside Bazel's macOS sandbox, matching
+        # the codesign/dmg genrules it sits between.
+        tags = kwargs.pop("tags", []) + ["no-sandbox"],
+        target_compatible_with = ["@platforms//os:macos"],
+        **kwargs
+    )
+
 def codesign_app(name, app_zip, binaries = {}, entitlements = {}, entitlement_keys = {}, **kwargs):
     """Re-sign a macos_application archive's .app bundle.
 

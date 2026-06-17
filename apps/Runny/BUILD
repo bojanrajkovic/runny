@@ -78,9 +78,22 @@ macos_application(
 # ad-hoc signature → re-sign → notarize+staple the .app → dmg →
 # notarize+staple the dmg. Every notarize step is a pass-through copy at
 # the ad-hoc tier.
+# The .app carries the same runnyd + runnyctl the brew tarball ships, placed at
+# Contents/MacOS/{runnyd,runnyctl} under their bare names and signed inside-out
+# (the daemon keeps com.apple.security.virtualization; the CLI gets none, asserted
+# at build time). A launchd BundleProgram and the vended-CLI symlink both depend on
+# the exact bare names. The binaries are re-sealed here, so they are NOT byte-
+# identical to the tarball's _notarized copies (different CDHash) — same source,
+# separately sealed and notarized per container.
 codesign_app(
     name = "Runny_signed",
     app_zip = ":Runny",
+    binaries = {
+        "runnyd": "//cmd/runnyd:runnyd_signed",
+        "runnyctl": "//cmd/runnyctl:runnyctl_signed",
+    },
+    entitlement_keys = {"runnyd": "com.apple.security.virtualization"},
+    entitlements = {"runnyd": "//tools/sign:runnyd.entitlements"},
     visibility = ["//visibility:public"],
 )
 

@@ -10,7 +10,9 @@ import SwiftUI
 /// before detect-and-defer lands.
 struct AgentInstallRow: View {
     @Environment(AgentController.self) private var agent
+    @Environment(DaemonStore.self) private var store
     @State private var confirmingInstall = false
+    @State private var confirmingUninstall = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -27,6 +29,12 @@ struct AgentInstallRow: View {
                 Button("Open Login Items…") { SMAppService.openSystemSettingsLoginItems() }
                     .controlSize(.small)
             }
+            if let reconcile = reconcileWarning {
+                Label(reconcile, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(.vertical, 2)
         .confirmationDialog(
@@ -41,19 +49,52 @@ struct AgentInstallRow: View {
                 + "runnyd in your login session and start it at login. If another tool already manages "
                 + "runnyd, cancel and remove that first.")
         }
+        .confirmationDialog(
+            "Remove runnyd while a job is running?",
+            isPresented: $confirmingUninstall,
+            titleVisibility: .visible
+        ) {
+            Button("Remove and Abandon Job", role: .destructive) { Task { await agent.uninstall() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Removing the daemon stops it immediately, abandoning the running "
+                + "job on \(abandonedSlotsText). The job will not finish.")
+        }
     }
 
     /// ON when the agent is registered (installed, or registered-but-awaiting Login
-    /// Items approval). Turning ON raises the confirmation rather than registering
-    /// immediately; the toggle reflects the true state until install confirms, so a
-    /// cancelled confirmation leaves it OFF. Turning OFF unregisters.
+    /// Items approval). Turning ON raises the install confirmation; turning OFF
+    /// unregisters — but mid-job it raises the abandon-the-job confirmation first
+    /// (uninstall boots out the daemon, killing the in-process VM). The toggle
+    /// reflects the true state until the action confirms, so a cancelled dialog
+    /// leaves it where it was.
     private var toggleBinding: Binding<Bool> {
         Binding(
             get: { agent.installState == .installed || agent.installState == .requiresApproval },
             set: { wantOn in
-                if wantOn { confirmingInstall = true } else { Task { await agent.uninstall() } }
+                if wantOn {
+                    confirmingInstall = true
+                } else if store.runningJobSlots.isEmpty {
+                    Task { await agent.uninstall() }
+                } else {
+                    confirmingUninstall = true
+                }
             }
         )
+    }
+
+    private var abandonedSlotsText: String {
+        let slots = store.runningJobSlots
+        return slots.count == 1 ? "slot \(slots[0])" : "slots \(slots.joined(separator: ", "))"
+    }
+
+    private var reconcileWarning: String? {
+        switch agent.reconcileState {
+        case .ok: nil
+        case let .foreign(path): "A runnyd agent is registered from an unexpected location (\(path)). "
+            + "Reinstall from /Applications to repoint it."
+        case .undetermined: "Couldn't determine the registered runnyd agent's location."
+        }
     }
 
     /// The toggle is actionable only from an eligible location and when there is a

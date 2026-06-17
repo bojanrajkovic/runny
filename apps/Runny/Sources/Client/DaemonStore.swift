@@ -177,6 +177,11 @@ final class DaemonStore {
         Self.appNewerThanDaemon(appVersion: Self.appVersion, daemonVersion: daemonVersion)
     }
 
+    /// Slots currently running a job. Uninstalling the agent boots out the daemon,
+    /// killing the in-process VM — so a job here is abandoned. The uninstall
+    /// confirmation names these slots rather than tearing down silently.
+    var runningJobSlots: [String] { slots.filter { $0.state == .job }.map(\.slot) }
+
     /// The update surface, gated on a live connection (a stale verdict from a
     /// dropped daemon must not linger — the Start affordance owns "daemon down").
     /// `agentInstalled` is the app-installed-agent gate the view supplies from

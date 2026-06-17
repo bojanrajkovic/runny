@@ -32,10 +32,26 @@ final class SMAppServiceRegistrar: ServiceRegistrar {
         switch await runLaunchctl(["bootout", jobTarget]) {
         case .timedOut:
             .timedOut
-        case let .exited(code, stderr):
+        case let .exited(code, _, stderr):
             AgentController.classifyBootout(exitCode: code, stderr: stderr)
         case let .launchFailed(message):
             .failed(message)
+        }
+    }
+
+    func agentProgramPath() async -> AgentProgram {
+        switch await runLaunchctl(["print", jobTarget]) {
+        case .timedOut, .launchFailed:
+            return .undetermined
+        case let .exited(code, stdout, _):
+            // Non-zero is "Could not find service" — the job isn't loaded.
+            guard code == 0 else { return .notRegistered }
+            // Loaded: pull the program path; an unparseable dump is undetermined,
+            // never a false "foreign".
+            if let program = AgentController.parseLaunchctlProgram(stdout) {
+                return .program(program)
+            }
+            return .undetermined
         }
     }
 
@@ -46,7 +62,7 @@ final class SMAppServiceRegistrar: ServiceRegistrar {
         switch await runLaunchctl(["kickstart", jobTarget]) {
         case .timedOut:
             throw LaunchctlFailure(message: "launchctl kickstart did not respond within \(Int(Self.launchctlTimeout))s")
-        case let .exited(code, stderr) where code != 0:
+        case let .exited(code, _, stderr) where code != 0:
             throw LaunchctlFailure(message: stderr.isEmpty
                 ? "launchctl kickstart exited \(code)"
                 : stderr.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -67,9 +83,10 @@ final class SMAppServiceRegistrar: ServiceRegistrar {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
         proc.arguments = args
+        let outPipe = Pipe()
         let errPipe = Pipe()
+        proc.standardOutput = outPipe
         proc.standardError = errPipe
-        proc.standardOutput = Pipe()
         do {
             try proc.run()
         } catch {
@@ -86,15 +103,23 @@ final class SMAppServiceRegistrar: ServiceRegistrar {
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + Self.launchctlTimeout, execute: killer)
             DispatchQueue.global().async {
+                // Drain both pipes BEFORE waitUntilExit: a verbose `launchctl print`
+                // can fill the pipe buffer and deadlock a process that blocks on
+                // write while we wait on exit. Reading to EOF returns when the
+                // process closes its ends (on exit or terminate).
+                let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
                 proc.waitUntilExit()
                 killer.cancel()
                 if timedOut.isSet {
                     cont.resume(returning: .timedOut)
                     return
                 }
-                let data = errPipe.fileHandleForReading.readDataToEndOfFile()
-                let stderr = String(data: data, encoding: .utf8) ?? ""
-                cont.resume(returning: .exited(code: proc.terminationStatus, stderr: stderr))
+                cont.resume(returning: .exited(
+                    code: proc.terminationStatus,
+                    stdout: String(data: outData, encoding: .utf8) ?? "",
+                    stderr: String(data: errData, encoding: .utf8) ?? ""
+                ))
             }
         }
     }
@@ -102,7 +127,7 @@ final class SMAppServiceRegistrar: ServiceRegistrar {
 
 /// The raw result of a bounded launchctl run, before per-verb classification.
 private enum LaunchctlResult {
-    case exited(code: Int32, stderr: String)
+    case exited(code: Int32, stdout: String, stderr: String)
     case timedOut
     case launchFailed(String)
 }

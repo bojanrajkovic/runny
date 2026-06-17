@@ -17,6 +17,7 @@ final class AgentControllerTests: XCTestCase {
         var unregisterError: Error?
         var bootoutOutcome: BootoutOutcome = .notLoaded
         var kickstartError: Error?
+        var programResult: AgentProgram = .notRegistered
         private(set) var registerCalls = 0
         private(set) var unregisterCalls = 0
         private(set) var bootoutCalls = 0
@@ -27,6 +28,7 @@ final class AgentControllerTests: XCTestCase {
         func unregister() throws { unregisterCalls += 1; if let unregisterError { throw unregisterError } }
         func bootout() async -> BootoutOutcome { bootoutCalls += 1; return bootoutOutcome }
         func kickstart() async throws { kickstartCalls += 1; if let kickstartError { throw kickstartError } }
+        func agentProgramPath() async -> AgentProgram { programResult }
     }
 
     struct StubError: Error {}
@@ -156,6 +158,54 @@ final class AgentControllerTests: XCTestCase {
         }
         // A failed START must not flip the INSTALL state to failed — the agent is still installed.
         XCTAssertEqual(c.installState, .installed)
+    }
+
+    // MARK: - Reconcile
+
+    func testReconcileComparesAgainstCanonicalNotRunningBundle() async {
+        let mock = MockRegistrar()
+        // A /Applications agent is good even when observed from a translocated launch.
+        mock.programResult = .program("/Applications/Runny.app/Contents/MacOS/runnyd")
+        let c = AgentController(registrar: mock)
+        await c.runReconcile()
+        XCTAssertEqual(c.reconcileState, .ok)
+    }
+
+    func testReconcileFlagsForeignProgramPath() async {
+        let mock = MockRegistrar()
+        mock.programResult = .program("/Users/someone/Downloads/Runny.app/Contents/MacOS/runnyd")
+        let c = AgentController(registrar: mock)
+        await c.runReconcile()
+        XCTAssertEqual(c.reconcileState, .foreign(path: "/Users/someone/Downloads/Runny.app/Contents/MacOS/runnyd"))
+    }
+
+    func testReconcileNotRegisteredIsOkUndeterminedIsLoud() async {
+        let mock = MockRegistrar()
+        mock.programResult = .notRegistered
+        let c = AgentController(registrar: mock)
+        await c.runReconcile()
+        XCTAssertEqual(c.reconcileState, .ok)
+
+        mock.programResult = .undetermined
+        await c.runReconcile()
+        XCTAssertEqual(c.reconcileState, .undetermined)
+    }
+
+    func testParseLaunchctlProgram() {
+        let output = """
+        com.coderinserepeat.runnyd = {
+        \tactive count = 1
+        \tprogram = /Applications/Runny.app/Contents/MacOS/runnyd
+        \targuments = {
+        }
+        """
+        XCTAssertEqual(
+            AgentController.parseLaunchctlProgram(output),
+            "/Applications/Runny.app/Contents/MacOS/runnyd"
+        )
+        // No program line (old/unparseable format) → nil, which reconciles to
+        // undetermined rather than a false foreign.
+        XCTAssertNil(AgentController.parseLaunchctlProgram("state = running\npid = 42"))
     }
 
     func testClassifyBootout() {

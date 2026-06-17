@@ -44,6 +44,31 @@ protocol ServiceRegistrar {
     /// a SIGKILL of a running daemon). Throws on failure/timeout; the daemon coming
     /// up is confirmed from the connection, not this call's return.
     func kickstart() async throws
+    /// Read the registered agent's resolved program path (bounded launchctl
+    /// introspection), for the reconcile. Never hangs — times out to `.undetermined`.
+    func agentProgramPath() async -> AgentProgram
+}
+
+/// The registered agent's program, read by launchctl introspection for the
+/// reconcile. `undetermined` covers a timeout or unparseable output — surfaced as
+/// "couldn't determine", never a spin or a false "foreign".
+enum AgentProgram: Equatable {
+    case program(String)
+    case notRegistered
+    case undetermined
+}
+
+/// Whether the agent registered under our label points where it should. Compared
+/// against the CANONICAL `/Applications/Runny.app`, never the running bundle — a
+/// good `/Applications` agent observed from a translocated `~/Downloads` launch is
+/// not stale.
+enum AgentReconcile: Equatable {
+    /// Canonical, or no agent registered — nothing to surface.
+    case ok
+    /// A runnyd agent is registered from a non-canonical program path.
+    case foreign(path: String)
+    /// launchctl introspection timed out or didn't parse — surfaced, not alarmed.
+    case undetermined
 }
 
 /// The outcome of a Start affordance: the daemon coming up is confirmed from a
@@ -181,6 +206,17 @@ final class AgentController {
     /// `didNotComeUp`/`cameUp` from a prior attempt doesn't linger.
     func clearStartOutcome() { startOutcome = .idle }
 
+    /// The last reconcile verdict — whether the registered agent points where it
+    /// should. Surface-only in P4 (repair is a follow-up).
+    private(set) var reconcileState: AgentReconcile = .ok
+
+    /// Reconcile-on-launch: read the registered agent's program path and compare it
+    /// to the canonical install location. Surfaces a foreign/stale-path agent, and
+    /// an introspection that times out as "couldn't determine" — never a spin.
+    func runReconcile() async {
+        reconcileState = await Self.reconcileVerdict(registrar.agentProgramPath())
+    }
+
     // MARK: - Teardown (NOT spawn-triggering — no gate)
 
     /// Uninstall: `unregister()` THEN a best-effort `bootout` (ordered so the
@@ -254,5 +290,32 @@ extension AgentController {
                 ? "launchctl bootout exited \(exitCode)"
                 : stderr.trimmingCharacters(in: .whitespacesAndNewlines)
         )
+    }
+
+    /// Reconcile verdict: compare the registered agent's program against the
+    /// CANONICAL location. Pure → unit-tested. `notRegistered` and a canonical
+    /// program are both `.ok`; a non-canonical program is `.foreign`.
+    nonisolated static func reconcileVerdict(_ program: AgentProgram) -> AgentReconcile {
+        switch program {
+        case .notRegistered: .ok
+        case .undetermined: .undetermined
+        case let .program(path):
+            LaunchAgentStatus.isCanonicalAgentProgram(path) ? .ok : .foreign(path: path)
+        }
+    }
+
+    /// Pure: pull the resolved program path out of `launchctl print` output, which
+    /// prints a `program = /path` line for a loaded job. Defensive — returns nil if
+    /// the line is absent (an unparseable/old format reconciles to undetermined,
+    /// never a false foreign).
+    nonisolated static func parseLaunchctlProgram(_ output: String) -> String? {
+        for line in output.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if let range = trimmed.range(of: "program = "), range.lowerBound == trimmed.startIndex {
+                let value = trimmed[range.upperBound...].trimmingCharacters(in: .whitespaces)
+                return value.isEmpty ? nil : value
+            }
+        }
+        return nil
     }
 }

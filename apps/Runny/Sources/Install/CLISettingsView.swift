@@ -40,6 +40,7 @@ struct SettingsView: View {
             activation.windowAppeared()
             cli.refresh()
             agent.refresh()
+            Task { await agent.runReconcile() }
         }
     }
 }

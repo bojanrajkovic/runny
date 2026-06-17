@@ -1,0 +1,118 @@
+import SwiftUI
+
+/// The app's Settings surface. After the home became fixed (no override field),
+/// its one job is vending the CLI: install, repair, or remove the
+/// `/usr/local/bin/runnyctl` symlink. State is read from `CLIInstallModel` —
+/// never an action's return — so the row always reflects what is on disk.
+struct SettingsView: View {
+    @Environment(CLIInstallModel.self) private var cli
+    @Environment(ActivationCoordinator.self) private var activation
+
+    var body: some View {
+        Form {
+            Section {
+                CLIInstallRow()
+            } header: {
+                Text("Command-Line Tool")
+            } footer: {
+                Text("Vends runnyctl at /usr/local/bin/runnyctl so you can drive the daemon "
+                    + "from any terminal. The app and the CLI it installs are the same build.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 480, height: 200)
+        .onAppear {
+            // Settings is a regular window; keep the accessory↔regular dance sane
+            // (the app is LSUIElement) and refresh the row from disk on open.
+            activation.windowAppeared()
+            cli.refresh()
+        }
+    }
+}
+
+/// One row that renders every `CLIInstallModel.State` — the install/repair/remove
+/// affordance and a same-loud status line for the conflict, translocated, and
+/// failed states (none of which are silently swallowed).
+struct CLIInstallRow: View {
+    @Environment(CLIInstallModel.self) private var cli
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(headline).font(.body)
+                if let detail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(tint)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+            actions
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var headline: String {
+        switch cli.state {
+        case .notInstalled: "Not installed"
+        case .installing: "Installing…"
+        case .installed: "Installed"
+        case .installedButNotOnPath: "Installed — not on your PATH"
+        case .conflict: "A different runnyctl is in the way"
+        case .translocated: "Move Runny to Applications first"
+        case .failed: "Install failed"
+        case .cancelled: "Cancelled"
+        }
+    }
+
+    private var detail: String? {
+        switch cli.state {
+        case .notInstalled:
+            "Run runnyctl from any terminal without a path."
+        case .installing, .cancelled:
+            nil
+        case .installed:
+            CLIInstallModel.linkPath
+        case .installedButNotOnPath:
+            "/usr/local/bin isn't on your PATH — add it so runnyctl resolves."
+        case let .conflict(owner):
+            "\(CLIInstallModel.linkPath) → \(owner). Runny won't replace a file it doesn't manage."
+        case .translocated:
+            "Run Runny from /Applications (or ~/Applications), then install — a link into a "
+                + "translocated copy breaks on the next launch."
+        case let .failed(message):
+            message
+        }
+    }
+
+    private var tint: Color {
+        switch cli.state {
+        case .installed, .notInstalled, .installing, .cancelled: .secondary
+        case .installedButNotOnPath, .conflict, .translocated: .orange
+        case .failed: .red
+        }
+    }
+
+    @ViewBuilder
+    private var actions: some View {
+        switch cli.state {
+        case .notInstalled, .cancelled:
+            Button("Install") { cli.install() }
+        case .installing:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Button("Cancel") { cli.cancel() }
+            }
+        case .installed, .installedButNotOnPath:
+            Button("Remove") { cli.uninstall() }
+        case .conflict, .translocated:
+            Button("Re-check") { cli.refresh() }
+        case .failed:
+            Button("Try Again") { cli.install() }
+        }
+    }
+}

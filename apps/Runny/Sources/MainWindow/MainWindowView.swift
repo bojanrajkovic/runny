@@ -112,6 +112,16 @@ struct DaemonCard: View {
                     .foregroundStyle(.orange)
                     .lineLimit(2)
             }
+            // A standing condition, not a one-shot event — a row beside the version
+            // line, never an alert (a re-popping modal would be alarm fatigue). The
+            // card always shows it while connected; the popover banner is the
+            // dismissible surface.
+            if let skew = store.visibleSkew {
+                Label(skew.text, systemImage: "exclamationmark.triangle")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .lineLimit(3)
+            }
             Button(store.reloadInFlight ? "Validating…" : "Reload Config…") {
                 store.requestReload()
             }

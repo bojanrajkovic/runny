@@ -36,3 +36,29 @@ bounds) and ADR-0016 (decisions). Sharp edges below.
   that bite here: TimelineView at leaf Text only, no insert/remove
   transitions in hosted trees, static DateFormatters, explicit rebuilds of
   `@Observable` snapshot caches.
+- **Version skew compares `x.y.z` cores.** The daemon publishes its full build
+  label (`0.6.0-beta.<sha>`) while the app's `CFBundleShortVersionString` is
+  already regex-stripped to its core, so `skewVerdict` normalizes the daemon
+  string with `versionCore` (anchored at the start, mirroring the build's
+  `re.match`) before comparing — a raw compare false-alarms on every beta/CI
+  build (same commit, two spellings). The warning **names the cores, not the
+  daemon's full sha-bearing string**, so a same-core rebuild that only rotates
+  the build sha can't re-pop a dismissed banner; the full daemon version is
+  shown in the `runnyd <version>` line above. The human version is
+  `CFBundleShortVersionString`, not `CFBundleVersion`; a missing read coalesces
+  to the `unstampedVersion` sentinel (the build's `fallback_build_label`), the
+  same quiet branch a dev build takes, so a wrong key fails safe (quiet), never
+  loud-and-wrong.
+- **`expectedProtocolVersion` is kept in lockstep with the daemon's
+  `WireProtocolVersion` — bump both together.** It is the exact protocol the
+  app's stubs were built against, not a backstop or a cap; the protocol axis
+  fires only when the daemon is *behind* (`<`), the upgrade-window case the
+  matched `x.y.z` cores hide.
+- **Skew warns, never refuses, and is a row/banner, never an `.alert`.** No
+  control is disabled on `store.skew` (verify by the *absence* of any
+  `.disabled(store.skew…)` / connection-drop in review, not a sham test); a
+  standing condition rendered as a re-popping modal would be alarm fatigue.
+  Read the verdict's `kind`, never string-match its `text`. Both surfaces read
+  the connection-gated `visibleSkew` (the card) / `shownSkew` (the dismissible
+  popover banner) — never `skew` directly, so a stale verdict can't outlive the
+  live stream and lie about a daemon that may have recycled.

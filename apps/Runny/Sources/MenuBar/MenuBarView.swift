@@ -28,6 +28,14 @@ struct MenuBarView: View {
                 StatusBanner(text: note, systemImage: "info.circle.fill",
                              tint: .blue) { store.commandNote = nil }
             }
+            // Version skew is a standing warning, never a refusal. Ordered last in
+            // the banner stack so the red command-error above keeps its place and
+            // is never pushed down by it. Dismissal keys on the whole verdict, so a
+            // worsening or different-axis skew re-surfaces.
+            if let skew = store.shownSkew {
+                StatusBanner(text: skew.text, systemImage: "exclamationmark.triangle",
+                             tint: .orange) { store.dismissedSkew = skew }
+            }
             Divider()
             if store.slots.isEmpty {
                 emptyState

@@ -113,6 +113,36 @@ final class DaemonStore {
     /// `draining`.
     private(set) var exitHeld = false
 
+    /// The current version-skew verdict, recomputed from each snapshot, or nil
+    /// when the app and daemon match / the daemon's version isn't known yet / the
+    /// app is an unstamped dev build / the daemon is merely newer. Surfaces read
+    /// `shownSkew`, which gates this on a live connection and on dismissal — never
+    /// `skew` directly.
+    private(set) var skew: SkewVerdict?
+    /// The skew verdict the operator dismissed, if any. Keyed on the full
+    /// `Equatable` verdict (not the version string), so a worsening or
+    /// different-axis skew on the same version re-surfaces. Set by the dismiss
+    /// control.
+    var dismissedSkew: SkewVerdict?
+
+    /// The live skew — gated on a healthy connection only. The main-window card
+    /// reads this and renders it as an always-on status row, like the draining
+    /// line: the card is the authoritative status surface, so it keeps telling the
+    /// truth even after the popover's nag is dismissed. The connection gate lives
+    /// in the one `gatedSkew` step both this and `shownSkew` call, so no view
+    /// re-implements it. Passing `dismissed: nil` means "this surface ignores
+    /// dismissal" — deliberately, so the card never hides a standing condition.
+    var visibleSkew: SkewVerdict? {
+        Self.gatedSkew(skew: skew, connection: connection, dismissed: nil)
+    }
+
+    /// `visibleSkew` minus what the operator dismissed — the popover's dismissible
+    /// banner reads this, so a dismissal silences the glanceable nag while the card
+    /// keeps showing the standing condition.
+    var shownSkew: SkewVerdict? {
+        Self.gatedSkew(skew: skew, connection: connection, dismissed: dismissedSkew)
+    }
+
     private(set) var doctorChecks: [Runny_V1_DoctorCheck]?
     private(set) var doctorRanAt: Date?
     private(set) var doctorRunning = false
@@ -210,6 +240,20 @@ final class DaemonStore {
         let severity: Severity
     }
 
+    /// A version/protocol skew between this app and the daemon it watches. There
+    /// is deliberately no `severity`: skew is ALWAYS a warning by construction (a
+    /// `SkewVerdict` exists only to warn — it never disables a control or drops a
+    /// connection), so no single-case enum fakes one. The `kind` is the
+    /// machine-readable axis — read it, never string-match the `text` (the same
+    /// anti-re-parsing discipline the wire contract enforces for
+    /// `draining`/`exit_held`). `Equatable` so a dismissal keys on the whole value:
+    /// a worsening or different-axis skew on the same version re-surfaces.
+    struct SkewVerdict: Equatable {
+        enum Kind: Equatable { case versionMismatch, protocolBehind }
+        let kind: Kind
+        let text: String
+    }
+
     /// The client of the current healthy stream; log/timeline views borrow
     /// it. nil while unreachable — actions fail fast instead of hanging.
     private(set) var client: RunnyClient?
@@ -242,6 +286,26 @@ final class DaemonStore {
     /// floor at which pause/resume are confirmable. Kept in lockstep with the
     /// daemon's `WireProtocolVersion`.
     static let ackProtocolVersion: UInt32 = 1
+    /// The wire-protocol version this app's stubs were built against — the exact
+    /// protocol the app expects, set to the literal current `WireProtocolVersion`.
+    /// A daemon reporting a lower number predates a capability the app relies on
+    /// (the upgrade-window skew the matched `x.y.z` cores hide). Kept in lockstep
+    /// with the daemon's `WireProtocolVersion`: bump both together. This is not a
+    /// backstop or a cap — the healthy-magnitude sizing rule does not apply.
+    static let expectedProtocolVersion: UInt32 = 2
+    /// The version a build with no embedded stamp falls back to (the build's
+    /// `fallback_build_label`). Both the missing-key coalesce below and the skew
+    /// verdict's dev-build guard key on it, so the two halves of "this is an
+    /// unstamped build" can't drift apart.
+    static let unstampedVersion = "0.0.0"
+    /// The app's own stamped version core — `CFBundleShortVersionString`, already
+    /// regex-stripped to `x.y.z` by the build (`apple_bundle_version`). A missing
+    /// or non-string read coalesces to `unstampedVersion` — the same quiet branch
+    /// a dev build takes — so a wrong or missing key fails safe (quiet), never
+    /// loud-and-wrong. The one impure read in the skew path; the verdict never
+    /// touches the bundle (it takes this as a parameter).
+    static let appVersion: String =
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? unstampedVersion
 
     func start() {
         guard supervisor == nil else { return }
@@ -271,6 +335,10 @@ final class DaemonStore {
         bootID = ""
         drainSeq = 0
         exitHeld = false
+        // A home change may point at a different daemon entirely, so a stale skew
+        // — and any dismissal of it — must not carry across.
+        skew = nil
+        dismissedSkew = nil
         pendingReload = nil
         reloadJobInFlight = false
         reloadStallSince = nil
@@ -431,6 +499,12 @@ final class DaemonStore {
         confirmPending()
         trackReloadDrain()
         noteRespawnIfReady()
+        // Derived from this snapshot's version/protocol against the app's own
+        // stamped facts; recompute last so it reflects the values just applied.
+        skew = Self.skewVerdict(
+            appVersion: Self.appVersion, appExpectedProtocol: Self.expectedProtocolVersion,
+            daemonVersion: daemonVersion, daemonProtocol: protocolVersion
+        )
     }
 
     // MARK: - Commands (requested vs confirmed)
@@ -1007,5 +1081,89 @@ final class DaemonStore {
 
     nonisolated static func shortSHA(_ s: String) -> String {
         s.count > 12 ? String(s.prefix(12)) : s
+    }
+
+    // MARK: - Version skew (warn, never refuse)
+
+    /// The `x.y.z` core of a version string — the leading `\d+.\d+.\d+`, or nil if
+    /// the string doesn't start with one. The daemon publishes its full build
+    /// label (`0.6.0-beta.<sha>`) while the app's bundle version is already
+    /// stripped to its core by the build, so normalizing both sides to the core
+    /// before comparing keeps a same-commit beta pair from false-alarming. The
+    /// match is anchored at the start, mirroring the build's `re.match` capture, so
+    /// a label that doesn't begin with `x.y.z` (empty, a dev label, an unexpected
+    /// prefix) yields nil → quiet rather than mis-extracting a triple from
+    /// somewhere in the middle.
+    nonisolated static func versionCore(_ s: String) -> String? {
+        guard let range = s.range(of: #"^\d+\.\d+\.\d+"#, options: .regularExpression)
+        else { return nil }
+        return String(s[range])
+    }
+
+    /// Pure: the version-skew verdict between this app and the daemon it watches,
+    /// or nil when they match, the daemon's version isn't known yet, the app is an
+    /// unstamped dev build, or the daemon is merely newer (the safe monotone
+    /// direction). Static and parameterized on the four facts — never reading
+    /// `Bundle.main` — so every branch is unit-testable without a live daemon.
+    ///
+    /// Two independent axes, neither implied by the other:
+    ///  - `versionMismatch`: the normalized `x.y.z` cores differ — the shared-host
+    ///    brew-daemon-at-another-release case. Symmetric.
+    ///  - `protocolBehind`: the cores match but the daemon's protocol is below what
+    ///    this app's wire stubs expect — the new-app/old-daemon upgrade window,
+    ///    invisible to the version axis (same `x.y.z`) and the ONLY detector for it.
+    nonisolated static func skewVerdict(
+        appVersion: String, appExpectedProtocol: UInt32,
+        daemonVersion: String, daemonProtocol: UInt32
+    ) -> SkewVerdict? {
+        // No version heard from the daemon yet (fresh connect, or a daemon
+        // predating the field): never warn about a version we don't have.
+        guard let daemonCore = versionCore(daemonVersion) else { return nil }
+        // An unstamped dev build — or a missing bundle key coalesced to the
+        // unstamped sentinel — must not wear a permanent false banner. It accepts
+        // that a dev build could miss a real skew; a dev build is never a shipped
+        // install.
+        guard let appCore = versionCore(appVersion), appCore != unstampedVersion
+        else { return nil }
+        // Different release lines — the shared-host / lagging-channel case. Name
+        // the normalized cores, not the daemon's full suffix-bearing string: a
+        // same-core rebuild that only rotates the build sha must not change the
+        // verdict and re-pop a dismissed banner. The full daemon version is shown
+        // in the version line above either surface.
+        if appCore != daemonCore {
+            return SkewVerdict(
+                kind: .versionMismatch,
+                text: "this app is \(appCore) but the daemon is \(daemonCore) — "
+                    + "different releases; upgrade the lagging install"
+            )
+        }
+        // Same release, but the daemon predates a capability this app's stubs
+        // expect — the upgrade window the matched cores hide. `<`, not `!=`: a
+        // newer daemon serving an older-expecting app degrades nothing.
+        if daemonProtocol < appExpectedProtocol {
+            return SkewVerdict(
+                kind: .protocolBehind,
+                text: "the running daemon predates a capability this app expects — "
+                    + "some features may not work; upgrade or restart runnyd"
+            )
+        }
+        return nil
+    }
+
+    /// Pure: the skew to actually render, applying the two visibility gates that
+    /// keep the detector from itself failing silently. Static so both are
+    /// unit-testable without a live store.
+    ///  - Connection gate: on a drop/stale/unreachable transition the supervisor
+    ///    flips `connection` WITHOUT calling `apply()`, so a stored `skew` would
+    ///    linger and assert skew about a daemon that may have recycled — show
+    ///    nothing unless the connection is live.
+    ///  - Dismiss gate: suppress a skew the operator dismissed, keyed on the full
+    ///    `Equatable` verdict, so a worsening or different-axis skew on the same
+    ///    version string is new news and re-surfaces.
+    nonisolated static func gatedSkew(
+        skew: SkewVerdict?, connection: ConnectionState, dismissed: SkewVerdict?
+    ) -> SkewVerdict? {
+        guard connection == .connected, let skew, skew != dismissed else { return nil }
+        return skew
     }
 }

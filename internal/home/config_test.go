@@ -169,14 +169,25 @@ func TestPaths(t *testing.T) {
 	}
 }
 
-func TestResolve(t *testing.T) {
+// The home is fixed at ~/.runny derived from $HOME: a set RUNNY_HOME must be
+// ignored (the inverse of the removed override), not honored.
+func TestResolveIgnoresEnvAndIsHomeRooted(t *testing.T) {
+	t.Setenv("HOME", "/tmp/fakehome")
 	t.Setenv("RUNNY_HOME", "/custom")
-	d, err := Resolve("")
-	if err != nil || d.String() != "/custom" {
-		t.Errorf("Resolve env = %q, %v", d, err)
+	d, err := Resolve()
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
 	}
-	d, err = Resolve("/flag")
-	if err != nil || d.String() != "/flag" {
-		t.Errorf("Resolve flag = %q, %v", d, err)
+	if got, want := d.String(), filepath.Join("/tmp/fakehome", ".runny"); got != want {
+		t.Errorf("Resolve() = %q, want %q — RUNNY_HOME must be ignored, the home derived from $HOME", got, want)
+	}
+}
+
+// launchd can hand an agent a degenerate $HOME; with no override left to correct
+// it, Resolve must fail loudly rather than serve "/.runny".
+func TestResolveRejectsDegenerateHome(t *testing.T) {
+	t.Setenv("HOME", "/")
+	if _, err := Resolve(); err == nil {
+		t.Fatal(`Resolve() with $HOME="/" must error, not silently serve /.runny`)
 	}
 }

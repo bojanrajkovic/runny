@@ -36,15 +36,19 @@ bounds) and ADR-0016 (decisions). Sharp edges below.
   that bite here: TimelineView at leaf Text only, no insert/remove
   transitions in hosted trees, static DateFormatters, explicit rebuilds of
   `@Observable` snapshot caches.
-- **Version skew compares `x.y.z` cores, displays the full string.** The
-  daemon publishes its full build label (`0.6.0-beta.<sha>`) while the app's
-  `CFBundleShortVersionString` is already regex-stripped to its core, so
-  `skewVerdict` normalizes the daemon string with `versionCore` before
-  comparing — a raw compare false-alarms on every beta/CI build (same commit,
-  two spellings). The banner shows the daemon's *full* string; the comparison
-  is on cores. The human version is `CFBundleShortVersionString`, not
-  `CFBundleVersion`; a missing read coalesces to `0.0.0`, the same quiet branch
-  a dev build takes, so a wrong key fails safe (quiet), never loud-and-wrong.
+- **Version skew compares `x.y.z` cores.** The daemon publishes its full build
+  label (`0.6.0-beta.<sha>`) while the app's `CFBundleShortVersionString` is
+  already regex-stripped to its core, so `skewVerdict` normalizes the daemon
+  string with `versionCore` (anchored at the start, mirroring the build's
+  `re.match`) before comparing — a raw compare false-alarms on every beta/CI
+  build (same commit, two spellings). The warning **names the cores, not the
+  daemon's full sha-bearing string**, so a same-core rebuild that only rotates
+  the build sha can't re-pop a dismissed banner; the full daemon version is
+  shown in the `runnyd <version>` line above. The human version is
+  `CFBundleShortVersionString`, not `CFBundleVersion`; a missing read coalesces
+  to the `unstampedVersion` sentinel (the build's `fallback_build_label`), the
+  same quiet branch a dev build takes, so a wrong key fails safe (quiet), never
+  loud-and-wrong.
 - **`expectedProtocolVersion` is kept in lockstep with the daemon's
   `WireProtocolVersion` — bump both together.** It is the exact protocol the
   app's stubs were built against, not a backstop or a cap; the protocol axis

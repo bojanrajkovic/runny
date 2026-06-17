@@ -156,8 +156,11 @@ express their version differently: the daemon publishes its full build label
 (`0.6.0-beta.<sha>`) while the app's `CFBundleShortVersionString` is already
 regex-stripped by the build to its `x.y.z` core. A raw string compare would
 false-alarm on every beta and CI build — the same commit, reported two ways — so
-the app normalizes the daemon string to its `x.y.z` core before comparing, and
-**displays the daemon's full string while comparing on cores**. The **protocol**
+the app normalizes the daemon string to its `x.y.z` core before comparing. The
+skew warning **names the normalized cores**, not the daemon's full sha-bearing
+string — the full daemon version is shown in the `runnyd <version>` line above
+either surface — so a same-core daemon rebuild that only rotates its build sha
+doesn't re-pop a dismissed warning. The **protocol**
 axis asks "can the app rely on the features it was built for?" — it compares the
 daemon's monotone `protocol_version` against the version the app's wire stubs
 expect. After normalization this is the *only* detector for a same-`x.y.z`

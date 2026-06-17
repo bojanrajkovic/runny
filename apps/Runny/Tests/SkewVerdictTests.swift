@@ -35,6 +35,11 @@ final class SkewVerdictTests: XCTestCase {
         XCTAssertEqual(DaemonStore.versionCore("12.34.56-rc.1"), "12.34.56")
         XCTAssertNil(DaemonStore.versionCore(""))
         XCTAssertNil(DaemonStore.versionCore("dev"))
+        // Anchored at the start (mirroring the build's re.match): a triple that
+        // isn't the leading token must not be mis-extracted from the middle, so a
+        // non-conforming label fails safe to nil → quiet rather than guessing.
+        XCTAssertNil(DaemonStore.versionCore("v0.6.0"))
+        XCTAssertNil(DaemonStore.versionCore("ci-2024.01.15-0.6.0"))
     }
 
     func testEmptyDaemonVersionIsQuiet() {
@@ -57,12 +62,18 @@ final class SkewVerdictTests: XCTestCase {
         XCTAssertTrue(v?.text.contains("0.5.0") ?? false, "names the daemon version")
     }
 
-    func testDifferentReleaseShowsDaemonFullString() {
-        // Display the daemon's FULL suffix-bearing string even though we compared
-        // on cores — the operator sees exactly the build they have.
-        let v = verdict(app: "0.6.0", daemon: "0.5.0-beta.deadbeef")
-        XCTAssertEqual(v?.kind, .versionMismatch)
-        XCTAssertTrue(v?.text.contains("0.5.0-beta.deadbeef") ?? false)
+    func testVersionMismatchTextUsesStableCoreNotVolatileSuffix() {
+        // The text names the daemon's CORE, not its full sha-bearing string, so a
+        // same-core daemon rebuild that only rotates the build sha produces an
+        // identical verdict — a dismissed banner stays dismissed instead of
+        // re-popping on cosmetic churn. The full daemon version is shown in the
+        // version line above the banner, so nothing is lost.
+        let v1 = verdict(app: "0.6.0", daemon: "0.5.0-beta.deadbeef")
+        let v2 = verdict(app: "0.6.0", daemon: "0.5.0-beta.cafef00d")
+        XCTAssertEqual(v1?.kind, .versionMismatch)
+        XCTAssertTrue(v1?.text.contains("0.5.0") ?? false, "names the daemon core")
+        XCTAssertFalse(v1?.text.contains("deadbeef") ?? true, "excludes the volatile suffix")
+        XCTAssertEqual(v1, v2, "a same-core sha rotation must yield an identical verdict")
     }
 
     func testUpgradeWindowProtocolBehindWarns() {
@@ -97,7 +108,7 @@ final class SkewVisibilityGateTests: XCTestCase {
 
     func testShownWhenConnectedAndNotDismissed() {
         XCTAssertEqual(
-            DaemonStore.shownSkew(skew: a, connection: .connected, dismissed: nil), a
+            DaemonStore.gatedSkew(skew: a, connection: .connected, dismissed: nil), a
         )
     }
 
@@ -112,14 +123,14 @@ final class SkewVisibilityGateTests: XCTestCase {
             .unreachable(reason: "no socket"),
         ] {
             XCTAssertNil(
-                DaemonStore.shownSkew(skew: a, connection: state, dismissed: nil),
+                DaemonStore.gatedSkew(skew: a, connection: state, dismissed: nil),
                 "skew must be hidden while \(state)"
             )
         }
     }
 
     func testDismissedSkewIsSuppressed() {
-        XCTAssertNil(DaemonStore.shownSkew(skew: a, connection: .connected, dismissed: a))
+        XCTAssertNil(DaemonStore.gatedSkew(skew: a, connection: .connected, dismissed: a))
     }
 
     func testWorseningSkewResurfacesPastDismissal() {
@@ -127,11 +138,11 @@ final class SkewVisibilityGateTests: XCTestCase {
         // a worsening on the same version string). Keying dismissal on the version
         // string would hide it; keying on the Equatable value re-surfaces it.
         XCTAssertEqual(
-            DaemonStore.shownSkew(skew: b, connection: .connected, dismissed: a), b
+            DaemonStore.gatedSkew(skew: b, connection: .connected, dismissed: a), b
         )
     }
 
     func testNoSkewShowsNothing() {
-        XCTAssertNil(DaemonStore.shownSkew(skew: nil, connection: .connected, dismissed: nil))
+        XCTAssertNil(DaemonStore.gatedSkew(skew: nil, connection: .connected, dismissed: nil))
     }
 }

@@ -129,17 +129,18 @@ final class DaemonStore {
     /// reads this and renders it as an always-on status row, like the draining
     /// line: the card is the authoritative status surface, so it keeps telling the
     /// truth even after the popover's nag is dismissed. The connection gate lives
-    /// in the one `shownSkew` step both this and `shownSkew` call, so no view
-    /// re-implements it.
+    /// in the one `gatedSkew` step both this and `shownSkew` call, so no view
+    /// re-implements it. Passing `dismissed: nil` means "this surface ignores
+    /// dismissal" — deliberately, so the card never hides a standing condition.
     var visibleSkew: SkewVerdict? {
-        Self.shownSkew(skew: skew, connection: connection, dismissed: nil)
+        Self.gatedSkew(skew: skew, connection: connection, dismissed: nil)
     }
 
     /// `visibleSkew` minus what the operator dismissed — the popover's dismissible
     /// banner reads this, so a dismissal silences the glanceable nag while the card
     /// keeps showing the standing condition.
     var shownSkew: SkewVerdict? {
-        Self.shownSkew(skew: skew, connection: connection, dismissed: dismissedSkew)
+        Self.gatedSkew(skew: skew, connection: connection, dismissed: dismissedSkew)
     }
 
     private(set) var doctorChecks: [Runny_V1_DoctorCheck]?
@@ -292,14 +293,19 @@ final class DaemonStore {
     /// with the daemon's `WireProtocolVersion`: bump both together. This is not a
     /// backstop or a cap — the healthy-magnitude sizing rule does not apply.
     static let expectedProtocolVersion: UInt32 = 2
+    /// The version a build with no embedded stamp falls back to (the build's
+    /// `fallback_build_label`). Both the missing-key coalesce below and the skew
+    /// verdict's dev-build guard key on it, so the two halves of "this is an
+    /// unstamped build" can't drift apart.
+    static let unstampedVersion = "0.0.0"
     /// The app's own stamped version core — `CFBundleShortVersionString`, already
     /// regex-stripped to `x.y.z` by the build (`apple_bundle_version`). A missing
-    /// or non-string read coalesces to the unstamped sentinel `"0.0.0"` — the same
-    /// quiet branch a dev build takes — so a wrong or missing key fails safe
-    /// (quiet), never loud-and-wrong. The one impure read in the skew path; the
-    /// verdict never touches the bundle (it takes this as a parameter).
+    /// or non-string read coalesces to `unstampedVersion` — the same quiet branch
+    /// a dev build takes — so a wrong or missing key fails safe (quiet), never
+    /// loud-and-wrong. The one impure read in the skew path; the verdict never
+    /// touches the bundle (it takes this as a parameter).
     static let appVersion: String =
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? unstampedVersion
 
     func start() {
         guard supervisor == nil else { return }
@@ -1079,15 +1085,17 @@ final class DaemonStore {
 
     // MARK: - Version skew (warn, never refuse)
 
-    /// The `x.y.z` core of a version string — the first `\d+.\d+.\d+` match, or
-    /// nil if there is none. The daemon publishes its full build label
-    /// (`0.6.0-beta.<sha>`) while the app's bundle version is already stripped to
-    /// its core by the build, so normalizing both sides to the core before
-    /// comparing keeps a same-commit beta pair from false-alarming. A string with
-    /// no extractable core (empty, or junk like a dev label) yields nil → quiet.
-    /// Mirrors the build's `\d+\.\d+\.\d+` capture.
+    /// The `x.y.z` core of a version string — the leading `\d+.\d+.\d+`, or nil if
+    /// the string doesn't start with one. The daemon publishes its full build
+    /// label (`0.6.0-beta.<sha>`) while the app's bundle version is already
+    /// stripped to its core by the build, so normalizing both sides to the core
+    /// before comparing keeps a same-commit beta pair from false-alarming. The
+    /// match is anchored at the start, mirroring the build's `re.match` capture, so
+    /// a label that doesn't begin with `x.y.z` (empty, a dev label, an unexpected
+    /// prefix) yields nil → quiet rather than mis-extracting a triple from
+    /// somewhere in the middle.
     nonisolated static func versionCore(_ s: String) -> String? {
-        guard let range = s.range(of: #"\d+\.\d+\.\d+"#, options: .regularExpression)
+        guard let range = s.range(of: #"^\d+\.\d+\.\d+"#, options: .regularExpression)
         else { return nil }
         return String(s[range])
     }
@@ -1111,16 +1119,21 @@ final class DaemonStore {
         // No version heard from the daemon yet (fresh connect, or a daemon
         // predating the field): never warn about a version we don't have.
         guard let daemonCore = versionCore(daemonVersion) else { return nil }
-        // An unstamped dev build — or a missing bundle key coalesced to 0.0.0 —
-        // must not wear a permanent false banner. It accepts that a dev build
-        // could miss a real skew; a dev build is never a shipped install.
-        guard let appCore = versionCore(appVersion), appCore != "0.0.0" else { return nil }
-        // Different release lines — the shared-host / lagging-channel case. Show
-        // the daemon's FULL string so the operator sees exactly what they have.
+        // An unstamped dev build — or a missing bundle key coalesced to the
+        // unstamped sentinel — must not wear a permanent false banner. It accepts
+        // that a dev build could miss a real skew; a dev build is never a shipped
+        // install.
+        guard let appCore = versionCore(appVersion), appCore != unstampedVersion
+        else { return nil }
+        // Different release lines — the shared-host / lagging-channel case. Name
+        // the normalized cores, not the daemon's full suffix-bearing string: a
+        // same-core rebuild that only rotates the build sha must not change the
+        // verdict and re-pop a dismissed banner. The full daemon version is shown
+        // in the version line above either surface.
         if appCore != daemonCore {
             return SkewVerdict(
                 kind: .versionMismatch,
-                text: "this app is \(appCore) but the daemon is \(daemonVersion) — "
+                text: "this app is \(appCore) but the daemon is \(daemonCore) — "
                     + "different releases; upgrade the lagging install"
             )
         }
@@ -1147,7 +1160,7 @@ final class DaemonStore {
     ///  - Dismiss gate: suppress a skew the operator dismissed, keyed on the full
     ///    `Equatable` verdict, so a worsening or different-axis skew on the same
     ///    version string is new news and re-surfaces.
-    nonisolated static func shownSkew(
+    nonisolated static func gatedSkew(
         skew: SkewVerdict?, connection: ConnectionState, dismissed: SkewVerdict?
     ) -> SkewVerdict? {
         guard connection == .connected, let skew, skew != dismissed else { return nil }

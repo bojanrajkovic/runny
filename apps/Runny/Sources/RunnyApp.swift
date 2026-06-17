@@ -107,23 +107,13 @@ final class ActivationCoordinator {
 }
 
 struct SettingsView: View {
-    @Environment(DaemonStore.self) private var store
-    @AppStorage(RunnyHome.overrideDefaultsKey) private var homeOverride = ""
-
     var body: some View {
         Form {
             Section {
-                TextField("Runny home", text: $homeOverride, prompt: Text("~/.runny"))
-                    .help("Where runnyd keeps its socket. Matches the daemon's --home / RUNNY_HOME. Leave empty for ~/.runny.")
-                    // Restart on commit, not per keystroke — every restart
-                    // tears down and redials the whole client stack.
-                    .onSubmit { store.restart() }
+                // The home is fixed at ~/.runny with no override, so the socket
+                // path is read-only — shown for diagnostics only. The manual
+                // Reconnect affordance lives on the main-window daemon card.
                 LabeledContent("Socket", value: RunnyHome.displaySocketPath)
-                Button("Reconnect") { store.restart() }
-            } footer: {
-                Text("A daemon started with a custom home is invisible to the app unless this matches — Finder-launched apps never see shell environment variables. Press Return (or Reconnect) to apply.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

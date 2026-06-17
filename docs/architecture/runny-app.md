@@ -141,6 +141,48 @@ truth before reading them, so a retry in the brief window after a command's 10s
 bound elapses but before its entry is reaped can't overwrite a still-live
 pending and lose its watchdog.
 
+## Version skew
+
+The app and the daemon it watches can be at different versions — a host where a
+Homebrew-managed `runnyd` runs at one release while the app is at another, or the
+upgrade window where a new app is already talking to a not-yet-restarted old
+daemon. The app renders that divergence as a first-class **warning, never a
+refusal**: no control is disabled, no connection is dropped, no command is
+blocked on skew.
+
+The detector compares two independent axes, neither implied by the other. The
+**version** axis asks "is this the same release line?" — but the two sides
+express their version differently: the daemon publishes its full build label
+(`0.6.0-beta.<sha>`) while the app's `CFBundleShortVersionString` is already
+regex-stripped by the build to its `x.y.z` core. A raw string compare would
+false-alarm on every beta and CI build — the same commit, reported two ways — so
+the app normalizes the daemon string to its `x.y.z` core before comparing, and
+**displays the daemon's full string while comparing on cores**. The **protocol**
+axis asks "can the app rely on the features it was built for?" — it compares the
+daemon's monotone `protocol_version` against the version the app's wire stubs
+expect. After normalization this is the *only* detector for a same-`x.y.z`
+new-app/old-daemon pair, so it is load-bearing, not a backstop. It fires only
+when the daemon is *behind* (`<`); a newer daemon serving an older-expecting app
+is the safe monotone direction and stays quiet.
+
+The verdict carries a machine-readable `kind` (`versionMismatch` or
+`protocolBehind`) rather than only prose, so a consumer acts on the axis, never
+by re-parsing the text — the same discipline the wire contract keeps for
+`draining`/`exit_held`. It stays quiet for the cases that would otherwise nag
+falsely: a daemon whose version isn't known yet (fresh connect, or one predating
+the field), and an unstamped dev build (`0.0.0`).
+
+Both surfaces read a single connection-gated `visibleSkew`, so neither view
+re-implements the connection check: on a drop the supervisor flips the connection
+state without re-running `apply()`, and a stored verdict that outlived the live
+stream would assert skew about a daemon that may have recycled. The popover shows
+it as a dismissible banner (reading `shownSkew`, `visibleSkew` minus what the
+operator dismissed); the main-window daemon card shows it as an always-on row,
+since the card is the authoritative status surface and keeps telling the truth
+after the popover's nag is silenced. Dismissal is keyed on the whole verdict
+value, so a worsening or different-axis skew on the same version string
+re-surfaces as new news rather than staying hidden.
+
 ## Reload
 
 A Reload control in the popover footer and on the main-window daemon card

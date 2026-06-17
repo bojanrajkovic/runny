@@ -63,6 +63,9 @@ struct MenuBarView: View {
             // Proactive Local Network grant card (self-hides unless the daemon
             // reports an unknown/denied grant) — fires before a dial fails.
             LocalNetworkGrantCard()
+            // Post-upgrade daemon-update affordance (self-hides unless the
+            // app-installed agent is newer than the running daemon).
+            DaemonUpdateAffordance()
             // A gentle nudge ONLY while the CLI is absent (never on a dev build,
             // where refresh() leaves a non-.notInstalled state) — the primary
             // surface is Settings; this just points there, like VS Code's

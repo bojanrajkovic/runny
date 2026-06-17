@@ -128,6 +128,9 @@ struct DaemonCard: View {
             // Proactive Local Network grant card — self-hides unless the daemon
             // reports an unknown/denied grant.
             LocalNetworkGrantCard()
+            // Post-upgrade daemon-update affordance — self-hides unless the
+            // app-installed agent is newer than the running daemon.
+            DaemonUpdateAffordance()
             HStack {
                 Button(store.reloadInFlight ? "Validating…" : "Reload Config…") {
                     store.requestReload()

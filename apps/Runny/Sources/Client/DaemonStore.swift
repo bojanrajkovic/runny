@@ -150,6 +150,48 @@ final class DaemonStore {
         Self.gatedSkew(skew: skew, connection: connection, dismissed: dismissedSkew)
     }
 
+    /// What the post-upgrade daemon-update surface should show. The app can update
+    /// the daemon (by reloading onto the freshly-bundled binary) only when it
+    /// installed the agent AND it is the newer build — a brew/manual daemon would
+    /// drain its fleet for a respawn of the same old binary, so it is offered only
+    /// the generic skew banner, never this.
+    enum DaemonUpdate: Equatable {
+        case none
+        /// App-installed agent, app newer than the running daemon — offer Update.
+        case available
+        /// An update reload is draining toward its respawn.
+        case inProgress
+        /// The reload resolved but the daemon is still the old version — surfaced
+        /// loud (named, with the stuck version), never the generic reload note.
+        case didNotTake(daemonCore: String)
+    }
+
+    /// True only set once an Update was issued; reset when the update takes (the
+    /// daemon stops being older) or on a reconnect. Distinguishes "an update is
+    /// available" from "you tried and it didn't take".
+    private(set) var daemonUpdateAttempted = false
+
+    /// Is the app a strictly newer build than the running daemon? The upgrade
+    /// direction the symmetric skew verdict does not itself report.
+    var appNewerThanDaemon: Bool {
+        Self.appNewerThanDaemon(appVersion: Self.appVersion, daemonVersion: daemonVersion)
+    }
+
+    /// The update surface, gated on a live connection (a stale verdict from a
+    /// dropped daemon must not linger — the Start affordance owns "daemon down").
+    /// `agentInstalled` is the app-installed-agent gate the view supplies from
+    /// `AgentController` (DaemonStore doesn't observe the lifecycle layer).
+    func daemonUpdate(agentInstalled: Bool) -> DaemonUpdate {
+        guard case .connected = connection else { return .none }
+        return Self.daemonUpdate(
+            agentInstalled: agentInstalled,
+            appNewer: appNewerThanDaemon,
+            daemonCore: Self.versionCore(daemonVersion) ?? daemonVersion,
+            reloadPending: reloadPending,
+            attempted: daemonUpdateAttempted
+        )
+    }
+
     private(set) var doctorChecks: [Runny_V1_DoctorCheck]?
     private(set) var doctorRanAt: Date?
     private(set) var doctorRunning = false
@@ -359,6 +401,7 @@ final class DaemonStore {
         // recomputed against whatever the re-dial actually reaches.
         skew = nil
         dismissedSkew = nil
+        daemonUpdateAttempted = false
         pendingReload = nil
         reloadJobInFlight = false
         reloadStallSince = nil
@@ -526,6 +569,10 @@ final class DaemonStore {
             appVersion: Self.appVersion, appExpectedProtocol: Self.expectedProtocolVersion,
             daemonVersion: daemonVersion, daemonProtocol: protocolVersion
         )
+        // Once the daemon is no longer older — the update took, or the daemon was
+        // never older — clear the attempt flag so a future skew shows "available",
+        // not a stale "didn't take".
+        if !appNewerThanDaemon { daemonUpdateAttempted = false }
     }
 
     // MARK: - Commands (requested vs confirmed)
@@ -803,6 +850,15 @@ final class DaemonStore {
     /// and drains every slot (jobs finish first), so it's gated behind explicit
     /// consent like the `-force` recycle cases.
     func requestReload() { reloadConfirm = true }
+
+    /// Issue a daemon update: identical to a reload (drain jobs, then exit for
+    /// launchd to cold-start the freshly-bundled binary), tagged so a non-converged
+    /// result surfaces "update didn't take" rather than the generic reload note.
+    /// Inherits the reload's drain-stall arm and convergence confirmation wholesale.
+    func requestDaemonUpdate() {
+        daemonUpdateAttempted = true
+        requestReload()
+    }
 
     /// The confirmed path: send the reload. Acceptance arms a pendingReload that
     /// `noteRespawnIfReady` resolves into a verdict once a new daemon (a changed
@@ -1169,6 +1225,42 @@ final class DaemonStore {
             )
         }
         return nil
+    }
+
+    /// Pure: is the app a strictly newer build than the daemon? The direction the
+    /// symmetric skew verdict doesn't compute. False for an unstamped dev app (it
+    /// can't meaningfully "update" anything) or a daemon with no version yet.
+    nonisolated static func appNewerThanDaemon(appVersion: String, daemonVersion: String) -> Bool {
+        guard let app = versionCore(appVersion), app != unstampedVersion,
+              let daemon = versionCore(daemonVersion)
+        else { return false }
+        return semverGreater(app, daemon)
+    }
+
+    /// Pure: numeric (not lexical) compare of two `x.y.z` cores — so 0.10.0 > 0.9.0.
+    nonisolated static func semverGreater(_ a: String, _ b: String) -> Bool {
+        let pa = a.split(separator: ".").map { Int($0) ?? 0 }
+        let pb = b.split(separator: ".").map { Int($0) ?? 0 }
+        for i in 0 ..< max(pa.count, pb.count) {
+            let x = i < pa.count ? pa[i] : 0
+            let y = i < pb.count ? pb[i] : 0
+            if x != y { return x > y }
+        }
+        return false
+    }
+
+    /// Pure: the daemon-update surface. Offered ONLY for an app-installed agent the
+    /// app is newer than — a brew/manual daemon would drain its fleet for a respawn
+    /// of the same binary, so it never sees this. While the update reload drains,
+    /// `inProgress`; after it resolves still-older, `didNotTake` (named, loud).
+    nonisolated static func daemonUpdate(
+        agentInstalled: Bool, appNewer: Bool, daemonCore: String,
+        reloadPending: Bool, attempted: Bool
+    ) -> DaemonUpdate {
+        guard agentInstalled, appNewer else { return .none }
+        if reloadPending { return .inProgress }
+        if attempted { return .didNotTake(daemonCore: daemonCore) }
+        return .available
     }
 
     /// Pure: the skew to actually render, applying the two visibility gates that

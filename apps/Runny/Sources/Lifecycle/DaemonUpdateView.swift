@@ -14,7 +14,8 @@ struct DaemonUpdateAffordance: View {
     var body: some View {
         switch store.daemonUpdate(
             agentInstalled: agent.installState == .installed,
-            agentCanonical: agentCanonical
+            agentCanonical: agentCanonical,
+            runningBundleCanonical: agent.eligibility == .eligible
         ) {
         case .none:
             EmptyView()

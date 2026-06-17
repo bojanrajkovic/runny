@@ -211,11 +211,12 @@ final class DaemonStore {
     /// dropped daemon must not linger — the Start affordance owns "daemon down").
     /// `agentInstalled` is the app-installed-agent gate the view supplies from
     /// `AgentController` (DaemonStore doesn't observe the lifecycle layer).
-    func daemonUpdate(agentInstalled: Bool, agentCanonical: Bool) -> DaemonUpdate {
+    func daemonUpdate(agentInstalled: Bool, agentCanonical: Bool, runningBundleCanonical: Bool) -> DaemonUpdate {
         guard case .connected = connection else { return .none }
         return Self.daemonUpdate(
             agentInstalled: agentInstalled,
             agentCanonical: agentCanonical,
+            runningBundleCanonical: runningBundleCanonical,
             appNewer: appNewerThanDaemon,
             protocolBehind: protocolBehind,
             daemonCore: Self.versionCore(daemonVersion) ?? daemonVersion,
@@ -1315,13 +1316,18 @@ final class DaemonStore {
     /// it never sees this. While the update reload drains, `inProgress`; after it
     /// resolves still-behind, `didNotTake` (named, loud).
     nonisolated static func daemonUpdate(
-        agentInstalled: Bool, agentCanonical: Bool, appNewer: Bool, protocolBehind: Bool, daemonCore: String,
+        agentInstalled: Bool, agentCanonical: Bool, runningBundleCanonical: Bool,
+        appNewer: Bool, protocolBehind: Bool, daemonCore: String,
         reloadPending: Bool, attempted: Bool
     ) -> DaemonUpdate {
-        // agentCanonical: the registered job points at THIS app's bundle. A foreign
-        // agent would respawn its own BundleProgram on reload, so the update could
-        // never take — don't offer a futile fleet-draining cycle.
-        guard agentInstalled, agentCanonical, appNewer || protocolBehind else { return .none }
+        // agentCanonical: the registered job points at THIS app's /Applications
+        // bundle (a reload respawns it). runningBundleCanonical: the RUNNING bundle
+        // IS that /Applications app — so the appNewer comparison reflects the binary
+        // the reload will actually respawn. Both are required: a newer app run from
+        // Downloads (running bundle not canonical) reads as appNewer, but the reload
+        // respawns the older /Applications binary, so the update could never take.
+        guard agentInstalled, agentCanonical, runningBundleCanonical, appNewer || protocolBehind
+        else { return .none }
         if reloadPending { return .inProgress }
         if attempted { return .didNotTake(daemonCore: daemonCore) }
         return .available

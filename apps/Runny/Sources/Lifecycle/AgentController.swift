@@ -269,6 +269,28 @@ final class AgentController {
         reconcileState = await Self.reconcileVerdict(registrar.agentProgramPath())
     }
 
+    /// Repair a foreign/stale-path agent by re-registering the canonical agent,
+    /// which re-points the SMAppService job's bundle-relative program to this
+    /// bundle, then re-reconciling to self-verify the re-point actually took.
+    /// Funnels through the spawn chokepoint exactly like `install()`. Only
+    /// meaningful from a canonical-eligible bundle — re-registering elsewhere would
+    /// install ANOTHER non-canonical agent — so the surface gates the action on
+    /// `canRepair`, the same way it gates install on `canToggle`. If the re-point
+    /// does not take (a foreign MANAGER still owns the label, the deferred
+    /// detect-and-defer case), the re-run reconcile honestly keeps showing foreign
+    /// rather than a false all-clear off the register return.
+    func repair() async {
+        switch await attemptSpawn("repair", { try self.registrar.register() }) {
+        case .ran:
+            refresh()
+            await runReconcile()
+        case .denied:
+            break // spawnRefusal already set; reconcileState unchanged
+        case let .failed(error):
+            installState = .registrationFailed(reason: "repair failed: \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - Teardown (NOT spawn-triggering — no gate)
 
     /// Uninstall: `unregister()` THEN a best-effort `bootout` (ordered so the
@@ -357,6 +379,16 @@ extension AgentController {
         case let .program(path):
             LaunchAgentStatus.isCanonicalAgentProgram(path) ? .ok : .foreign(path: path)
         }
+    }
+
+    /// Whether to offer the in-app repair for a foreign/stale-path agent. Only a
+    /// canonical-eligible bundle can repair by re-registering — from a translocated
+    /// or non-`/Applications` bundle, re-registering would install ANOTHER
+    /// non-canonical agent, so the surface shows move-to-`/Applications` guidance
+    /// rather than a repair button. Pure → unit-tested.
+    nonisolated static func canRepair(reconcile: AgentReconcile, eligibility: LaunchAgentStatus.Eligibility) -> Bool {
+        if case .foreign = reconcile, eligibility == .eligible { return true }
+        return false
     }
 
     /// Pure: pull the resolved program path out of `launchctl print` output, which

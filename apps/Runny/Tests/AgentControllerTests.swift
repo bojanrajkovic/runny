@@ -263,4 +263,68 @@ final class AgentControllerTests: XCTestCase {
             return XCTFail("a real launchctl error must classify as failed")
         }
     }
+
+    // MARK: - Reconcile repair
+
+    func testCanRepairOnlyWhenForeignAndEligible() {
+        XCTAssertTrue(AgentController.canRepair(reconcile: .foreign(path: "/x"), eligibility: .eligible))
+        // A non-canonical bundle can't repair by re-registering — it would install
+        // ANOTHER non-canonical agent; the surface shows move-to-/Applications guidance.
+        XCTAssertFalse(AgentController.canRepair(reconcile: .foreign(path: "/x"), eligibility: .translocated))
+        XCTAssertFalse(
+            AgentController.canRepair(reconcile: .foreign(path: "/x"), eligibility: .notInApplications(path: "/y"))
+        )
+        // Nothing to repair unless the verdict is foreign.
+        XCTAssertFalse(AgentController.canRepair(reconcile: .ok, eligibility: .eligible))
+        XCTAssertFalse(AgentController.canRepair(reconcile: .notChecked, eligibility: .eligible))
+        XCTAssertFalse(AgentController.canRepair(reconcile: .undetermined, eligibility: .eligible))
+    }
+
+    func testRepairReRegistersThenReReconcilesToSelfVerify() async {
+        let mock = MockRegistrar()
+        mock.programResult = .program("/foreign/Runny.app/Contents/MacOS/runnyd")
+        mock.nextStatus = .enabled
+        let c = AgentController(registrar: mock, eligibility: { .eligible })
+        await c.runReconcile()
+        XCTAssertEqual(c.reconcileState, .foreign(path: "/foreign/Runny.app/Contents/MacOS/runnyd"))
+
+        // The re-register re-points the job; simulate the now-canonical program path.
+        mock.programResult = .program("/Applications/Runny.app/Contents/MacOS/runnyd")
+        await c.repair()
+        XCTAssertEqual(mock.registerCalls, 1, "repair must re-register through the gate")
+        XCTAssertEqual(c.reconcileState, .ok, "repair re-runs reconcile to confirm the re-point took")
+        XCTAssertEqual(c.installState, .installed)
+    }
+
+    func testRepairThatDoesNotTakeStaysForeignNotFalseOk() async {
+        // A foreign MANAGER still owning the label (the deferred detect-and-defer
+        // case): re-register doesn't re-point, so the re-run reconcile must keep
+        // showing foreign — never a false all-clear off the register call's return.
+        let mock = MockRegistrar()
+        mock.programResult = .program("/opt/homebrew/Cellar/runny/bin/runnyd")
+        mock.nextStatus = .enabled
+        let c = AgentController(registrar: mock, eligibility: { .eligible })
+        await c.repair()
+        XCTAssertEqual(c.reconcileState, .foreign(path: "/opt/homebrew/Cellar/runny/bin/runnyd"))
+    }
+
+    func testRepairDenyGateDoesNotReRegister() async {
+        let mock = MockRegistrar()
+        let c = AgentController(
+            registrar: mock, spawnGate: { .deny(reason: "another manager owns it") }, eligibility: { .eligible }
+        )
+        await c.repair()
+        XCTAssertEqual(mock.registerCalls, 0, "a denied gate must NOT re-register")
+        XCTAssertNotNil(c.spawnRefusal)
+    }
+
+    func testRepairRegisterThrowIsLoud() async {
+        let mock = MockRegistrar()
+        mock.registerError = StubError()
+        let c = AgentController(registrar: mock, eligibility: { .eligible })
+        await c.repair()
+        guard case .registrationFailed = c.installState else {
+            return XCTFail("a register throw during repair must be loud, got \(c.installState)")
+        }
+    }
 }

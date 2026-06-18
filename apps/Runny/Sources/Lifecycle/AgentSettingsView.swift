@@ -34,6 +34,10 @@ struct AgentInstallRow: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
+                if canRepair {
+                    Button("Repair") { Task { await agent.repair() } }
+                        .controlSize(.small)
+                }
             }
         }
         .padding(.vertical, 2)
@@ -103,9 +107,17 @@ struct AgentInstallRow: View {
         switch agent.reconcileState {
         case .notChecked, .ok: nil
         case let .foreign(path): "A runnyd agent is registered from an unexpected location (\(path)). "
-            + "Reinstall from /Applications to repoint it."
+            + (canRepair ? "Repair re-registers it from /Applications." : "Reinstall from /Applications to repoint it.")
         case .undetermined: "Couldn't determine the registered runnyd agent's location."
         }
+    }
+
+    /// The repair re-registers the canonical agent — only safe from an eligible
+    /// `/Applications` bundle. A non-canonical bundle gets move-to-/Applications
+    /// guidance instead (no button), so a repair can never install a second
+    /// non-canonical agent. See `AgentController.canRepair`.
+    private var canRepair: Bool {
+        AgentController.canRepair(reconcile: agent.reconcileState, eligibility: agent.eligibility)
     }
 
     /// Eligibility gates only install (turning on); an installed agent stays

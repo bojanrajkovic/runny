@@ -151,6 +151,53 @@ final class AgentControllerTests: XCTestCase {
         XCTAssertEqual(dev.installState, .notFound)
     }
 
+    // MARK: - Ownership gate
+
+    func testGateForAllowsOwnAndUnmanagedDeniesEveryForeign() {
+        XCTAssertEqual(AgentController.gateFor(.unmanaged), .allow)
+        XCTAssertEqual(AgentController.gateFor(.selfManaged), .allow)
+        for owner: DaemonOwnership in [.foreignBrew, .foreignManual, .foreground, .awaitingApproval, .indeterminate] {
+            guard case .deny = AgentController.gateFor(owner) else {
+                return XCTFail("\(owner) must deny spawning")
+            }
+        }
+    }
+
+    func testRefreshOwnershipClassifiesFromGatheredInputs() async {
+        let mock = MockRegistrar()
+        mock.nextStatus = .notRegistered // not ours
+        let c = AgentController(
+            registrar: mock,
+            probe: { label in label == DaemonOwnership.brewLabel ? .registered : .notRegistered },
+            socketAnswers: { false },
+            homeIsCanonical: { true }
+        )
+        await c.refreshOwnership()
+        XCTAssertEqual(c.ownership, .foreignBrew, "a registered brew label with no self-agent is foreignBrew")
+    }
+
+    func testRefreshOwnershipSelfManagedWhenOurAgentEnabled() async {
+        let mock = MockRegistrar()
+        mock.nextStatus = .enabled // ours
+        let c = AgentController(
+            registrar: mock, probe: { _ in .notRegistered }, socketAnswers: { true }, homeIsCanonical: { true }
+        )
+        await c.refreshOwnership()
+        XCTAssertEqual(c.ownership, .selfManaged)
+    }
+
+    func testForeignOwnershipGateBlocksInstallWithoutRegistering() async {
+        // The production wiring end-to-end: a foreign verdict → gateFor → .deny →
+        // attemptSpawn refuses without ever calling register (no stomp).
+        let mock = MockRegistrar()
+        mock.nextStatus = .notRegistered
+        let c = AgentController(registrar: mock, spawnGate: { AgentController.gateFor(.foreignBrew) })
+        await c.install()
+        XCTAssertEqual(mock.registerCalls, 0, "a foreign verdict must block install")
+        XCTAssertNotNil(c.spawnRefusal)
+        XCTAssertEqual(c.installState, .notInstalled)
+    }
+
     // MARK: - Start affordance
 
     func testStartAffordanceOnlyWhenInstalledAndUnreachable() {

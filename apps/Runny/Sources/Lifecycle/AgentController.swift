@@ -130,6 +130,9 @@ final class AgentController {
     private let spawnGate: () async -> SpawnGate
     private let eligibilityProvider: () -> LaunchAgentStatus.Eligibility
     private let bundledAgentPresentProvider: () -> Bool
+    private let probeProvider: @Sendable (String) async -> LaunchdProbeResult
+    private let socketAnswersProvider: () -> Bool
+    private let homeIsCanonicalProvider: () -> Bool
 
     private var activationObserver: NSObjectProtocol?
 
@@ -137,25 +140,60 @@ final class AgentController {
         registrar: ServiceRegistrar,
         spawnGate: @escaping () async -> SpawnGate = { .allow },
         eligibility: @escaping () -> LaunchAgentStatus.Eligibility = { AgentController.bundleEligibility() },
-        bundledAgentPresent: @escaping () -> Bool = { AgentController.bundledAgentPresent() }
+        bundledAgentPresent: @escaping () -> Bool = { AgentController.bundledAgentPresent() },
+        probe: @escaping @Sendable (String) async -> LaunchdProbeResult = { await LaunchdProbe.probe(label: $0) },
+        socketAnswers: @escaping () -> Bool = { RunnyHome.socketExists },
+        homeIsCanonical: @escaping () -> Bool = { true }
     ) {
         self.registrar = registrar
         self.spawnGate = spawnGate
         eligibilityProvider = eligibility
         bundledAgentPresentProvider = bundledAgentPresent
-        // Re-read the install status when the app returns to the foreground — e.g.
-        // after the user enabled the agent in System Settings via the Login Items
-        // CTA — so an already-open window doesn't stay stale at .requiresApproval
-        // until it is reopened. Cheap (an SMAppService status read), so it's fine on
-        // every activation; reconcile is left to the per-surface appear.
+        probeProvider = probe
+        socketAnswersProvider = socketAnswers
+        homeIsCanonicalProvider = homeIsCanonical
+        // Re-read the install status AND the ownership verdict when the app returns
+        // to the foreground — e.g. after the user enabled the agent in System
+        // Settings via the Login Items CTA, or a brew daemon appeared while the app
+        // was idle — so an already-open window doesn't stay stale. The status read is
+        // cheap; the ownership refresh runs the bounded probes off the main actor.
         // [weak self] + app-lifetime AgentController: no explicit removal needed (a
         // nonisolated deinit can't touch the MainActor property anyway, and the
         // controller never deinits — it's a @State for the app's whole run).
         activationObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refresh() }
+            MainActor.assumeIsolated {
+                self?.refresh()
+                Task { await self?.refreshOwnership() }
+            }
         }
+    }
+
+    /// The production controller: a real `SMAppServiceRegistrar`, and a spawn gate
+    /// that gathers the live ownership verdict and denies install/repair/start for
+    /// any foreign or indeterminate owner. The same gather feeds `refreshOwnership`
+    /// (the observer banner), so the gate and the UI never disagree.
+    @MainActor
+    static func live() -> AgentController {
+        let registrar = SMAppServiceRegistrar()
+        let probe: @Sendable (String) async -> LaunchdProbeResult = { await LaunchdProbe.probe(label: $0) }
+        let socketAnswers = { RunnyHome.socketExists }
+        let homeIsCanonical = { true }
+        let bundledAgentPresent = { AgentController.bundledAgentPresent() }
+        return AgentController(
+            registrar: registrar,
+            spawnGate: {
+                await gateFor(gatherOwnership(
+                    registrar: registrar, probe: probe, socketAnswers: socketAnswers,
+                    homeIsCanonical: homeIsCanonical, bundledAgentPresent: bundledAgentPresent
+                ))
+            },
+            bundledAgentPresent: bundledAgentPresent,
+            probe: probe,
+            socketAnswers: socketAnswers,
+            homeIsCanonical: homeIsCanonical
+        )
     }
 
     /// Whether this running bundle may install its agent — translocated, in
@@ -197,6 +235,48 @@ final class AgentController {
         installState = LaunchAgentStatus.state(
             from: registrar.status(), bundledAgentPresent: bundledAgentPresentProvider()
         )
+    }
+
+    /// Who manages the daemon, refreshed on app-foreground and (freshly, by the
+    /// production spawn gate) before any spawn. Read by the observer banner to name
+    /// the managing channel. Starts `.indeterminate` (defer until a real gather
+    /// runs); the gate never trusts this stale value — it gathers fresh per attempt.
+    private(set) var ownership: DaemonOwnership = .indeterminate
+
+    /// Gather the ownership inputs and publish the verdict (for the banner). The
+    /// gate's pre-act recheck calls `gatherOwnership` directly for a fresh verdict.
+    func refreshOwnership() async {
+        ownership = await Self.gatherOwnership(
+            registrar: registrar, probe: probeProvider, socketAnswers: socketAnswersProvider,
+            homeIsCanonical: homeIsCanonicalProvider, bundledAgentPresent: bundledAgentPresentProvider
+        )
+    }
+
+    /// Gather the four orthogonal facts and `classify` them. The two label probes
+    /// run concurrently (independent, each bounded) so the install tap waits at most
+    /// one probe bound, not two; the self-status read and the socket/home axes are
+    /// cheap. Static so both `refreshOwnership` and the production gate share one
+    /// gather without a self-reference cycle.
+    @MainActor
+    static func gatherOwnership(
+        registrar: ServiceRegistrar,
+        probe: @Sendable (String) async -> LaunchdProbeResult,
+        socketAnswers: () -> Bool,
+        homeIsCanonical: () -> Bool,
+        bundledAgentPresent: () -> Bool
+    ) async -> DaemonOwnership {
+        async let brew = probe(DaemonOwnership.brewLabel)
+        async let canonical = probe(DaemonOwnership.canonicalLabel)
+        let selfState = LaunchAgentStatus.state(
+            from: registrar.status(), bundledAgentPresent: bundledAgentPresent()
+        )
+        return await DaemonOwnership.classify(DaemonOwnershipInputs(
+            homeIsCanonical: homeIsCanonical(),
+            selfState: selfState,
+            brewProbe: brew,
+            canonicalProbe: canonical,
+            socketAnswers: socketAnswers()
+        ))
     }
 
     // MARK: - Spawn-triggering actions (every one funnels through attemptSpawn)
@@ -454,6 +534,30 @@ extension AgentController {
     nonisolated static func canRepair(reconcile: AgentReconcile, eligibility: LaunchAgentStatus.Eligibility) -> Bool {
         if case .foreign = reconcile, eligibility == .eligible { return true }
         return false
+    }
+
+    /// Map an ownership verdict to a spawn-gate decision. Install/repair/start
+    /// proceed only when the daemon is ours (`selfManaged`) or unowned
+    /// (`unmanaged`); every foreign or indeterminate verdict denies and routes the
+    /// surface to the observer banner — so the app never installs a second manager,
+    /// never kicks a hand-run daemon, and never acts on an inconclusive probe. Pure
+    /// → unit-tested. The `reason` is a short refusal; the banner carries the full
+    /// channel-specific guidance.
+    nonisolated static func gateFor(_ ownership: DaemonOwnership) -> SpawnGate {
+        switch ownership {
+        case .unmanaged, .selfManaged:
+            .allow
+        case .foreignBrew:
+            .deny(reason: "Homebrew manages runnyd on this host")
+        case .foreignManual:
+            .deny(reason: "a manually-installed LaunchAgent manages runnyd")
+        case .foreground:
+            .deny(reason: "a runnyd is already running with no managing agent")
+        case .awaitingApproval:
+            .deny(reason: "the runnyd agent is registered and awaiting Login Items approval")
+        case .indeterminate:
+            .deny(reason: "couldn't determine who manages runnyd")
+        }
     }
 
     /// Pure: pull the resolved program path out of `launchctl print` output, which

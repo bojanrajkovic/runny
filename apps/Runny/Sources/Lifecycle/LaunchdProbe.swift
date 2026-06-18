@@ -63,93 +63,11 @@ protocol CommandRunner: Sendable {
     func run(_ executable: String, _ args: [String], timeout: Duration, stdoutByteCap: Int) async -> CommandResult
 }
 
-/// The raw result of a bounded command run, before per-probe classification.
-enum CommandResult: Equatable {
-    case exited(code: Int32, stdout: String, stderr: String)
-    case timedOut
-    case launchFailed(String)
-}
-
-/// The real `CommandRunner`: the one impure piece. Runs the process, drains the
-/// pipes (byte-capping stdout), and on timeout sends SIGTERM, then SIGKILL after a
-/// grace, with a detached reaper so a SIGTERM-ignoring launchctl never leaks a
-/// process or pipe FDs — the bounded-operation discipline applied to the GUI.
+/// The real `CommandRunner`: delegates to the shared `BoundedProcess` runner, so
+/// the reaper/FD/byte-cap discipline lives in one place (shared with
+/// `SMAppServiceRegistrar`) rather than a copy per caller.
 struct ProcessCommandRunner: CommandRunner {
-    /// After SIGTERM on timeout, how long to wait before SIGKILL. The caller is
-    /// already freed at `timeout`; this grace + the force-kill run detached so the
-    /// zombie is reaped and the FDs closed even when SIGTERM is ignored.
-    static let killGrace: Duration = .seconds(2)
-
-    func run(
-        _ executable: String, _ args: [String], timeout: Duration, stdoutByteCap: Int
-    ) async -> CommandResult {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: executable)
-        proc.arguments = args
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        proc.standardOutput = outPipe
-        proc.standardError = errPipe
-        do {
-            try proc.run()
-        } catch {
-            return .launchFailed("could not launch \(executable): \(error.localizedDescription)")
-        }
-        return await withCheckedContinuation { (cont: CheckedContinuation<CommandResult, Never>) in
-            // Resume the caller at `timeout` regardless of whether the process has
-            // exited; the gate makes a clean exit a hair before the deadline win the
-            // race so it is reported correctly rather than as a false `.timedOut`.
-            let gate = ResumeOnce()
-            let killer = DispatchWorkItem {
-                proc.terminate() // SIGTERM, best-effort
-                let pid = proc.processIdentifier
-                // Force-kill if SIGTERM was ignored, so the reader's waitUntilExit
-                // returns and the process/FDs are reaped instead of leaking.
-                DispatchQueue.global().asyncAfter(deadline: .now() + Self.seconds(Self.killGrace)) {
-                    if proc.isRunning { kill(pid, SIGKILL) }
-                }
-                if gate.claim() { cont.resume(returning: .timedOut) }
-            }
-            DispatchQueue.global().asyncAfter(deadline: .now() + Self.seconds(timeout), execute: killer)
-            // The reader ALWAYS runs to EOF/exit, even after the caller was freed on
-            // timeout — so the process is reaped and the FDs closed in every path.
-            DispatchQueue.global().async {
-                // Drain stdout (capped) BEFORE waitUntilExit so a verbose dump can't
-                // deadlock on a full pipe buffer, then close the read end so a
-                // still-writing process gets SIGPIPE and unblocks rather than wedging
-                // the reaper. stderr is small (the "could not find" line), read whole.
-                let outData = Self.readCapped(outPipe.fileHandleForReading, cap: stdoutByteCap)
-                try? outPipe.fileHandleForReading.close()
-                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                try? errPipe.fileHandleForReading.close()
-                proc.waitUntilExit()
-                killer.cancel()
-                if gate.claim() {
-                    cont.resume(returning: .exited(
-                        code: proc.terminationStatus,
-                        stdout: String(data: outData, encoding: .utf8) ?? "",
-                        stderr: String(data: errData, encoding: .utf8) ?? ""
-                    ))
-                }
-            }
-        }
-    }
-
-    /// Read up to `cap` bytes, then stop — bounding memory against a process that
-    /// streams unbounded output. The caller closes the handle right after, so the
-    /// writer gets SIGPIPE instead of blocking forever on a pipe we stopped draining.
-    private static func readCapped(_ handle: FileHandle, cap: Int) -> Data {
-        var data = Data()
-        while data.count < cap {
-            let chunk = handle.readData(ofLength: min(64 * 1024, cap - data.count))
-            if chunk.isEmpty { break } // EOF
-            data.append(chunk)
-        }
-        return data
-    }
-
-    private static func seconds(_ duration: Duration) -> Double {
-        let c = duration.components
-        return Double(c.seconds) + Double(c.attoseconds) / 1e18
+    func run(_ executable: String, _ args: [String], timeout: Duration, stdoutByteCap: Int) async -> CommandResult {
+        await BoundedProcess.run(executable, args, timeout: timeout, stdoutByteCap: stdoutByteCap)
     }
 }

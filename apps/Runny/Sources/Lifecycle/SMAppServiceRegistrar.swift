@@ -79,64 +79,16 @@ final class SMAppServiceRegistrar: ServiceRegistrar {
         }
     }
 
-    /// The bounded launchctl subprocess scaffold both bootout and kickstart share:
-    /// run `/bin/launchctl <args>`, wait off the main actor, and if it hasn't
-    /// exited by `launchctlTimeout`, terminate it and report `.timedOut` — so a
-    /// wedged launchctl surfaces a named result instead of spinning (no
-    /// `bounded.Context` in Swift). Extracted because duplicating the timeout dance
-    /// across two call sites would risk one drifting from the other.
-    private func runLaunchctl(_ args: [String]) async -> LaunchctlResult {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        proc.arguments = args
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        proc.standardOutput = outPipe
-        proc.standardError = errPipe
-        do {
-            try proc.run()
-        } catch {
-            return .launchFailed("could not launch launchctl: \(error.localizedDescription)")
-        }
-        return await withCheckedContinuation { (cont: CheckedContinuation<LaunchctlResult, Never>) in
-            // Resume the CALLER on the timeout regardless of whether the process has
-            // exited — so a launchctl that ignores SIGTERM can never hang the caller
-            // (the wait closure may leak a thread in that pathological case, but the
-            // bound is honored). The resume-once gate also resolves the natural race:
-            // a clean exit a hair before the deadline resumes `.exited` first, so it
-            // is reported correctly rather than as a false `.timedOut`.
-            let gate = ResumeOnce()
-            let killer = DispatchWorkItem {
-                proc.terminate() // best-effort SIGTERM; the caller is freed either way
-                if gate.claim() { cont.resume(returning: .timedOut) }
-            }
-            DispatchQueue.global().asyncAfter(deadline: .now() + Self.launchctlTimeout, execute: killer)
-            DispatchQueue.global().async {
-                // Drain both pipes BEFORE waitUntilExit: a verbose `launchctl print`
-                // can fill the pipe buffer and deadlock a process that blocks on
-                // write while we wait on exit. Reading to EOF returns when the
-                // process closes its ends (on exit or terminate).
-                let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                proc.waitUntilExit()
-                killer.cancel()
-                if gate.claim() {
-                    cont.resume(returning: .exited(
-                        code: proc.terminationStatus,
-                        stdout: String(data: outData, encoding: .utf8) ?? "",
-                        stderr: String(data: errData, encoding: .utf8) ?? ""
-                    ))
-                }
-            }
-        }
+    /// Run a bounded `/bin/launchctl <args>` via the shared `BoundedProcess` runner
+    /// (the SIGTERM→SIGKILL reaper, FD close, and byte caps live there, shared with
+    /// `LaunchdProbe`). `bootout`/`kickstart`/`print` classify the `CommandResult`
+    /// themselves. `print` is the only verbose verb; a 64 KB stdout cap comfortably
+    /// contains the early `program = …` line `agentProgramPath` parses.
+    private func runLaunchctl(_ args: [String]) async -> CommandResult {
+        await BoundedProcess.run(
+            "/bin/launchctl", args, timeout: .seconds(Self.launchctlTimeout), stdoutByteCap: 64 * 1024
+        )
     }
-}
-
-/// The raw result of a bounded launchctl run, before per-verb classification.
-private enum LaunchctlResult {
-    case exited(code: Int32, stdout: String, stderr: String)
-    case timedOut
-    case launchFailed(String)
 }
 
 /// A launchctl verb failed or timed out. LocalizedError so the message reaches
@@ -144,21 +96,4 @@ private enum LaunchctlResult {
 struct LaunchctlFailure: LocalizedError {
     let message: String
     var errorDescription: String? { message }
-}
-
-/// A one-shot gate so the timeout killer and the wait closure (different queues)
-/// resume the continuation exactly once: whoever calls `claim()` first wins, the
-/// loser's `claim()` returns false and it does nothing. Self-contained rather than
-/// pulling in Synchronization.Mutex for one flag. Shared with `LaunchdProbe`, the
-/// other bounded-launchctl scaffold.
-final class ResumeOnce: @unchecked Sendable {
-    private let lock = NSLock()
-    private var claimed = false
-    func claim() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        if claimed { return false }
-        claimed = true
-        return true
-    }
 }

@@ -288,9 +288,29 @@ const (
 	noteColWidth = 60
 )
 
+// localNetworkNote returns an operator-facing line for the daemon's live Local
+// Network (TCC) grant, or "" when no affordance is warranted. It mirrors the
+// app's grant card for the headless channel: DENIED (runnyd can't reach the
+// guest subnet) is loud, UNKNOWN is a proactive heads-up that the grant is
+// pending confirmation, and REACHABLE / UNSPECIFIED (old or non-darwin daemon)
+// stay quiet so routine status output isn't cluttered.
+func localNetworkNote(g runnyv1.LocalNetworkGrant) string {
+	switch g {
+	case runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_DENIED:
+		return "local network: DENIED — runnyd can't reach the guest subnet; grant it Local Network access (see docs/deploy.md)"
+	case runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNKNOWN:
+		return "local network: unconfirmed — no guest has booted this run yet; the grant is verified on first guest boot"
+	default:
+		return ""
+	}
+}
+
 func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 	fmt.Fprintf(c.out, "runnyd %s, up %s\n\n", resp.GetVersion(),
 		durString(time.Since(resp.GetDaemonStarted().AsTime())))
+	if note := localNetworkNote(resp.GetLocalNetworkGrant()); note != "" {
+		fmt.Fprintf(c.out, "%s\n\n", note)
+	}
 	slots := append([]*runnyv1.SlotStatus{}, resp.GetSlots()...)
 	sort.Slice(slots, func(i, j int) bool { return slots[i].GetSlot() < slots[j].GetSlot() })
 	// The drain banner: why every slot is pausing/recycling, and which

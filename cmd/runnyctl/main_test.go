@@ -733,3 +733,48 @@ func TestConnHintPassesThroughNonConnectionErrors(t *testing.T) {
 		t.Errorf("nil must pass through as nil; got: %v", got)
 	}
 }
+
+// status mirrors the app's grant card for the headless operator: a DENIED grant
+// (runnyd can't reach the guest subnet) is loud, UNKNOWN is a proactive note,
+// and the healthy/absent states stay quiet so routine status output isn't
+// cluttered.
+func TestLocalNetworkNote(t *testing.T) {
+	if s := localNetworkNote(runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_DENIED); !strings.Contains(s, "DENIED") {
+		t.Errorf("DENIED note = %q, want it to flag the denial", s)
+	}
+	if s := localNetworkNote(runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNKNOWN); s == "" {
+		t.Error("UNKNOWN should surface a proactive note")
+	}
+	if s := localNetworkNote(runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_REACHABLE); s != "" {
+		t.Errorf("REACHABLE should be quiet; got %q", s)
+	}
+	if s := localNetworkNote(runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNSPECIFIED); s != "" {
+		t.Errorf("UNSPECIFIED (old/non-darwin daemon) should be quiet; got %q", s)
+	}
+}
+
+func TestRenderStatusShowsDeniedLocalNetwork(t *testing.T) {
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	c.renderStatus(&runnyv1.GetStatusResponse{
+		Version:           "test",
+		DaemonStarted:     timestamppb.New(time.Now()),
+		LocalNetworkGrant: runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_DENIED,
+	})
+	if !strings.Contains(buf.String(), "DENIED") {
+		t.Errorf("status did not surface a denied Local Network grant:\n%s", buf.String())
+	}
+}
+
+func TestRenderStatusQuietWhenLocalNetworkReachable(t *testing.T) {
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	c.renderStatus(&runnyv1.GetStatusResponse{
+		Version:           "test",
+		DaemonStarted:     timestamppb.New(time.Now()),
+		LocalNetworkGrant: runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_REACHABLE,
+	})
+	if strings.Contains(strings.ToLower(buf.String()), "local network") {
+		t.Errorf("a reachable grant should add no line; got:\n%s", buf.String())
+	}
+}

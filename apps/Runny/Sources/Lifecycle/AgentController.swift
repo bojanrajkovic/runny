@@ -299,6 +299,16 @@ final class AgentController {
     /// the re-point does not take (a foreign MANAGER still owns the label), the
     /// re-run reconcile honestly keeps showing foreign rather than a false
     /// all-clear off the register return.
+    ///
+    /// Known limitation, deliberately accepted: `register()` on an
+    /// already-registered agent is NOT a verified re-point — on some macOS
+    /// versions it returns already-registered rather than updating the program
+    /// path, which surfaces here as a loud `repairError` (the `.failed` arm
+    /// preserves the install state). The robust path — a verified
+    /// `unregister`→`register` replace plus a real ownership verdict in the spawn
+    /// gate — lands with detect-and-defer, which replaces this method wholesale.
+    /// Shipping the best-effort version is safe because no release falls between
+    /// here and that work, and it fails loudly rather than silently.
     func repair() async {
         repairError = nil
         switch await attemptSpawn("repair", { try self.registrar.register() }) {

@@ -330,7 +330,11 @@ final class AgentController {
         case .ran:
             refresh()
             reconcileState = .notChecked // the registration changed — re-check on next appear
-        case .denied: break // spawnRefusal already set; installState unchanged
+        case .denied:
+            // A foreign manager appeared since the last refresh, so the fresh pre-act
+            // gate denied. Publish the new verdict so the observer banner replaces the
+            // toggle — otherwise a dead Install button silently no-ops on every click.
+            await refreshOwnership()
         case let .failed(error):
             installState = .registrationFailed(reason: "install failed: \(error.localizedDescription)")
         }
@@ -619,11 +623,15 @@ extension AgentController {
                     + "`brew services restart runny`; Runny won't install a competing agent."
             )
         case .foreignManual:
+            // bootout removes the LOADED job; the manual installer also persists the
+            // plist to ~/Library/LaunchAgents, which launchd reloads at next login —
+            // so the command must rm it too, or the same-label conflict comes back.
             ObserverHint(
                 kind: .managedManually,
                 message: "A manually-installed LaunchAgent manages runnyd. To let Runny manage it "
-                    + "instead, remove that agent with "
-                    + "`launchctl bootout gui/$(id -u)/\(DaemonOwnership.canonicalLabel)`, then reopen Runny."
+                    + "instead, remove that agent with `launchctl bootout "
+                    + "gui/$(id -u)/\(DaemonOwnership.canonicalLabel) && "
+                    + "rm ~/Library/LaunchAgents/\(DaemonOwnership.canonicalLabel).plist`, then reopen Runny."
             )
         case .foreground:
             ObserverHint(

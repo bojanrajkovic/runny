@@ -198,6 +198,23 @@ final class AgentControllerTests: XCTestCase {
         XCTAssertEqual(c.installState, .notInstalled)
     }
 
+    func testDeniedInstallPublishesFreshOwnershipForTheBanner() async {
+        // A foreign manager that appeared since the last refresh denies the pre-act
+        // gate; install() must publish the fresh verdict so the observer banner
+        // replaces the toggle, not leave a dead Install that silently no-ops.
+        let mock = MockRegistrar()
+        mock.nextStatus = .notRegistered
+        let c = AgentController(
+            registrar: mock,
+            spawnGate: { AgentController.gateFor(.foreignBrew) },
+            probe: { label in label == DaemonOwnership.brewLabel ? .registered : .notRegistered },
+            socketAnswers: { false }, homeIsCanonical: { true }
+        )
+        await c.install()
+        XCTAssertEqual(mock.registerCalls, 0)
+        XCTAssertEqual(c.ownership, .foreignBrew, "a denied install must publish the fresh verdict so the banner appears")
+    }
+
     func testObserverMessageNamesTheManagingChannel() {
         // The app's own domain — no observer banner.
         XCTAssertNil(AgentController.observerMessage(for: .unmanaged))
@@ -215,6 +232,9 @@ final class AgentControllerTests: XCTestCase {
         // swapping in the deploy-script string and confirming this fails.
         XCTAssertEqual(manual?.message.contains("launchctl bootout"), true)
         XCTAssertEqual(manual?.message.contains("uninstall.sh"), false)
+        // Must also remove the persisted plist (install.sh writes it to
+        // ~/Library/LaunchAgents); bootout alone leaves it to reload at next login.
+        XCTAssertEqual(manual?.message.contains("rm ~/Library/LaunchAgents/"), true)
 
         XCTAssertEqual(AgentController.observerMessage(for: .foreground)?.kind, .foregroundDaemon)
         XCTAssertEqual(AgentController.observerMessage(for: .indeterminate)?.kind, .indeterminate)

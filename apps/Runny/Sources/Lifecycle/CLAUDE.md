@@ -56,13 +56,45 @@ never exercised live in tests.
   surfaces "couldn't determine agent state" loudly, never spins. The shared
   `runLaunchctl` scaffold drains both pipes *before* `waitUntilExit`, so a verbose
   `print` can't deadlock on a full pipe buffer.
-- **One spawn chokepoint.** Install, start-at-login enable, and Start all funnel
-  through `attemptSpawn`, which consults the injectable `spawnGate` (default
-  `.allow`; the Homebrew-reconcile step fills it) and aborts loud on deny. It
-  returns its verdict rather than mapping errors itself — a `register` throw is a
-  failed *install*, a `kickstart` throw a failed *start* with the agent still
-  installed, so the two never bleed into one shared state. Never call
-  `SMAppService`/`launchctl` from a view action; that bypasses the gate.
+- **One spawn chokepoint, gated on ownership.** Install, repair, start-at-login
+  enable, and Start all funnel through `attemptSpawn`, which consults the
+  `spawnGate` — in production the daemon-ownership verdict (`AgentController.live`
+  wires it; `gateFor` allows only `unmanaged`/`selfManaged`, denies every foreign/
+  indeterminate owner). It returns its verdict rather than mapping errors itself — a
+  `register` throw is a failed *install*, a `kickstart` throw a failed *start* with
+  the agent still installed, so the two never bleed into one shared state. Never
+  call `SMAppService`/`launchctl` from a view action; that bypasses the gate. The
+  default `spawnGate` stays `.allow` so the existing unit tests are unaffected; the
+  ownership gather is injected (probe/socket/home) so the verdict is tested with fakes.
+- **Ownership is by self-status, never a label match.** The canonical label
+  `com.coderinserepeat.runnyd` is shared by the app's own agent AND a manual
+  installer, so a registered label cannot tell "mine" from "theirs". `classify`
+  splits them by `SMAppService` self-status: `.enabled` (`.installed`) is ours
+  (`selfManaged`); registered-but-not-`.enabled` is `foreignManual`. Sound only
+  because a foreign `launchctl bootstrap` never flips the app's SMAppService status
+  to `.enabled` (the registration databases are separate; see
+  [ADR-0019](../../../../docs/architecture-decisions/0019-daemon-ownership-detection.md)).
+  Do NOT "simplify" detection to a label comparison — that reintroduces the stomp.
+- **Two orthogonal axes, and indeterminate dominates.** "An agent is registered
+  under label X" (a `LaunchdProbe` of the brew + canonical labels) and "a daemon
+  answers the socket" (`RunnyHome.socketExists`) are separate facts, plus a
+  home-canonical flag. `classify`'s precedence tests `indeterminate` (a non-canonical
+  home, or any probe that wedged or errored) **second**, ahead of every positive
+  branch, so an inconclusive probe defers and can never read as
+  install-a-second-manager or stop-a-hand-run-daemon. `unmanaged` (install allowed)
+  is reached only after every positive and every indeterminate branch.
+- **The probe is stdout-literal-match, bounded, and reaped.** `LaunchdProbe` runs
+  `launchctl print gui/$(getuid())/<label>` and decides registration by the literal
+  label appearing in byte-capped STDOUT — never exit code, never format parsing. A
+  registered job carries the label in stdout running OR stopped (so `brew services
+  stop` is caught) and an absent one echoes it only in STDERR, so a combined-stream
+  search would false-positive — search stdout only. On timeout it SIGTERMs then
+  SIGKILLs after a grace with a detached reaper and explicit FD close, so a wedged
+  launchctl yields `.indeterminate` without leaking a process or FDs.
+- **`gui/<uid>`-only is a named limitation.** A `sudo brew services` LaunchDaemon
+  (`system/` domain) is not detected — but that install is itself vmnet-broken, so
+  the undetected stomp is moot. The brew label `homebrew.mxcl.runny` is synthesized
+  by Homebrew (verify against a real `brew services` install), not literal in the repo.
 - **The Start recovery bound is healthy-magnitude × margin, not a budget sum.**
   `startRecoveryBound` is sized to a normal cold start, and recovery is confirmed
   from a later `.connected` snapshot — never the `kickstart` return. On expiry it

@@ -112,8 +112,9 @@ bounds) and ADR-0016 (decisions). Sharp edges below.
   sharp edges, don't duplicate them here.** The load-bearing ones a broad change
   must respect: `SMAppService` success means *requested*, so `installState` is
   derived from `service.status`, never a call return; every spawn-triggering action
-  funnels through `AgentController.attemptSpawn` (the gate the Homebrew-reconcile
-  step fills) — no view calls `SMAppService`/`launchctl` directly; the bundled
+  funnels through `AgentController.attemptSpawn` (the gate now carries the
+  daemon-ownership verdict — install/repair/start are denied for a foreign or
+  indeterminate owner) — no view calls `SMAppService`/`launchctl` directly; the bundled
   LaunchAgent plist is `BundleProgram`-relative and is NOT the host-install
   template (two shapes, do not unify); the Local Network grant card reads the
   **daemon-published `local_network_grant`**, never the button-gated `doctorChecks`;

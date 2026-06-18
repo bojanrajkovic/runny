@@ -65,16 +65,38 @@ final class DaemonOwnershipTests: XCTestCase {
         )
     }
 
-    func testIndeterminateProbeDominatesAPositiveRegistration() {
-        // A probe that wedged must not let a co-present positive registration decide:
-        // "not sure" defers ahead of every positive branch.
-        XCTAssertEqual(
-            DaemonOwnership.classify(inputs(brewProbe: .indeterminate, canonicalProbe: .registered)),
-            .indeterminate
-        )
+    func testDeterminateForeignSurfacesOverAnInconclusiveProbe() {
+        // A *registered* foreign owner is strictly more informative than
+        // "indeterminate" (both deny), so a positive registration surfaces even when
+        // the OTHER probe wedged — it must not be hidden behind a defer.
         XCTAssertEqual(
             DaemonOwnership.classify(inputs(brewProbe: .registered, canonicalProbe: .indeterminate)),
+            .foreignBrew
+        )
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(brewProbe: .indeterminate, canonicalProbe: .registered)),
+            .foreignManual
+        )
+    }
+
+    func testInconclusiveProbeDominatesThePermissiveVerdicts() {
+        // The real invariant: an inconclusive probe with NO determinate owner must
+        // never fall through to unmanaged (install) or foreground (stop the daemon).
+        XCTAssertEqual(DaemonOwnership.classify(inputs(brewProbe: .indeterminate)), .indeterminate)
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(canonicalProbe: .indeterminate, socketAnswers: true)),
             .indeterminate
+        )
+    }
+
+    func testPositiveBrewOverridesSelfOwnership() {
+        // When our agent is enabled AND a brew service is registered, that is a real
+        // two-manager conflict — surface the brew daemon, never hide it as selfManaged.
+        // (Self identity overrides an inconclusive probe, but not an affirmative
+        // foreign registration.)
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .installed, brewProbe: .registered)),
+            .foreignBrew
         )
     }
 

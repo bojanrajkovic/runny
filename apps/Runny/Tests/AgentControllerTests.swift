@@ -410,10 +410,12 @@ final class AgentControllerTests: XCTestCase {
         await c.runReconcile()
         XCTAssertEqual(c.reconcileState, .foreign(path: "/foreign/Runny.app/Contents/MacOS/runnyd"))
 
-        // The re-register re-points the job; simulate the now-canonical program path.
+        // The verified unregister→register re-points the job; simulate the
+        // now-canonical program path the reconcile reads afterward.
         mock.programResult = .program("/Applications/Runny.app/Contents/MacOS/runnyd")
         await c.repair()
-        XCTAssertEqual(mock.registerCalls, 1, "repair must re-register through the gate")
+        XCTAssertEqual(mock.unregisterCalls, 1, "verified repair unregisters first, then re-registers")
+        XCTAssertEqual(mock.registerCalls, 1, "repair re-registers through the gate")
         XCTAssertEqual(c.reconcileState, .ok, "repair re-runs reconcile to confirm the re-point took")
         XCTAssertEqual(c.installState, .installed)
     }
@@ -439,21 +441,23 @@ final class AgentControllerTests: XCTestCase {
         c.refresh() // installed
         await c.repair()
         XCTAssertEqual(mock.registerCalls, 0, "a denied gate must NOT re-register")
+        XCTAssertEqual(mock.unregisterCalls, 0, "a denied repair must NOT unregister — the foreign agent stays intact")
         XCTAssertNotNil(c.repairError, "a denied repair must be surfaced in the row, not silently no-op")
         XCTAssertEqual(c.installState, .installed, "a denied repair must not change the install state")
     }
 
-    func testRepairFailureKeepsInstalledStateAndSurfacesError() async {
+    func testRepairFailedReRegisterSurfacesErrorAndHonestState() async {
+        // The verified repair unregisters, then re-registers. If the re-register
+        // throws after the unregister took, the agent is genuinely gone — installState
+        // must honestly reflect that (the toggle then offers reinstall), and the
+        // failure is surfaced loudly rather than masquerading as still-installed.
         let mock = MockRegistrar()
-        mock.nextStatus = .enabled // a failed re-register does NOT unregister the existing agent
-        mock.registerError = StubError()
+        mock.registerError = StubError() // unregister succeeds, the re-register fails
+        mock.nextStatus = .notRegistered // so the agent is now gone
         let c = AgentController(registrar: mock, eligibility: { .eligible })
-        c.refresh() // installed
         await c.repair()
-        // installState stays derived from status, so the toggle keeps the uninstall
-        // path; the failure is surfaced separately rather than masquerading as an
-        // install failure that flips the toggle off.
-        XCTAssertEqual(c.installState, .installed, "a failed repair must not drop the uninstall path")
+        XCTAssertEqual(mock.unregisterCalls, 1, "verified repair unregisters first")
+        XCTAssertEqual(c.installState, .notInstalled, "a failed re-register after unregister leaves the agent gone — honestly")
         XCTAssertNotNil(c.repairError, "a failed repair must surface its error")
     }
 

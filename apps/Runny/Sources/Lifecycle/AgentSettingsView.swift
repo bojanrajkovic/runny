@@ -61,13 +61,13 @@ struct AgentInstallRow: View {
             Button("Repair") { Task { await agent.repair() } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            // The same foreign-manager guard as install: re-registering displaces
-            // whatever holds the label, and until detect-and-defer lands the spawn
-            // gate is .allow, so this consent is the guard against stomping a
-            // brew-managed daemon registered under the same label.
+            // The spawn gate now denies foreign/indeterminate owners and the observer
+            // banner replaces this section for them, so Repair is reached only for the
+            // app's own stale-path agent; the confirmation just notes the brief
+            // unregister→register re-point.
             Text("A runnyd agent is registered from an unexpected location. Repair re-registers "
                 + "Runny's bundled daemon under the launchd agent “\(SMAppServiceRegistrar.agentLabel)”, "
-                + "replacing it. If another tool (e.g. Homebrew) manages runnyd, cancel and remove that first.")
+                + "briefly removing and re-adding it to re-point it at this app.")
         }
     }
 

@@ -411,43 +411,43 @@ final class AgentController {
         } while reconcilePending
     }
 
-    /// Repair a foreign/stale-path agent by re-registering the canonical agent,
-    /// which re-points the SMAppService job's bundle-relative program to this
-    /// bundle, then re-reconciling to self-verify the re-point actually took.
-    /// Funnels through the spawn chokepoint exactly like `install()`. Only
-    /// meaningful from a canonical-eligible bundle — re-registering elsewhere would
-    /// install ANOTHER non-canonical agent — so the surface gates the action on
-    /// `canRepair`, the same way it gates install on `canToggle`, AND raises a
-    /// confirmation that warns about displacing a foreign manager (the spawn gate
-    /// is `.allow` until detect-and-defer lands, so the consent is the guard). If
-    /// the re-point does not take (a foreign MANAGER still owns the label), the
-    /// re-run reconcile honestly keeps showing foreign rather than a false
-    /// all-clear off the register return.
+    /// Repair a stale-path self-managed agent by a verified unregister→register
+    /// replace: `unregister()` clears the stale registration, then `register()`
+    /// re-adds it pointing at this (canonical) bundle. A bare `register()` on an
+    /// already-registered agent is NOT a reliable re-point — some macOS versions
+    /// return already-registered without updating the program path — so the replace
+    /// is what actually moves the program. Re-reconciles afterward to self-verify
+    /// the re-point took, rather than trusting the call's return.
     ///
-    /// Known limitation, deliberately accepted: `register()` on an
-    /// already-registered agent is NOT a verified re-point — on some macOS
-    /// versions it returns already-registered rather than updating the program
-    /// path, which surfaces here as a loud `repairError` (the `.failed` arm
-    /// preserves the install state). The robust path — a verified
-    /// `unregister`→`register` replace plus a real ownership verdict in the spawn
-    /// gate — lands with detect-and-defer, which replaces this method wholesale.
-    /// Shipping the best-effort version is safe because no release falls between
-    /// here and that work, and it fails loudly rather than silently.
+    /// Only the daemon's own stale agent is reached: the spawn gate denies every
+    /// foreign/indeterminate verdict, and the observer banner replaces the install
+    /// section (which hosts the Repair button) for a foreign owner — so a
+    /// brew/manual daemon is never reached here, let alone unregistered. The surface
+    /// also gates the button on `canRepair` (a canonical-eligible bundle only;
+    /// re-registering elsewhere would install ANOTHER non-canonical agent).
+    ///
+    /// Failure is honest: if `register()` throws after the `unregister()` took, the
+    /// agent is genuinely gone, so installState (derived from status) reflects that
+    /// and the toggle offers reinstall — recoverable and loud, never a silent stale
+    /// agent. A denied gate never unregisters, so the foreign agent stays intact.
     func repair() async {
         repairError = nil
-        switch await attemptSpawn("repair", { try self.registrar.register() }) {
+        switch await attemptSpawn("repair", {
+            try self.registrar.unregister()
+            try self.registrar.register()
+        }) {
         case .ran:
             refresh()
             await runReconcile()
         case .denied:
-            // The gate blocked the re-register. installState/reconcileState are
-            // unchanged, so without surfacing this the warning + button would just
-            // silently persist — surface the refusal loudly in the row.
+            // The gate blocked the replace before any unregister — installState and
+            // reconcileState are unchanged, so surface the refusal loudly rather than
+            // leaving the warning + button silently persisting.
             repairError = spawnRefusal
         case let .failed(error):
-            // A re-register throw does NOT unregister the existing (foreign) agent,
-            // so keep installState derived from status — the uninstall path must
-            // survive — and surface the repair error separately.
+            // unregister or register threw; installState derives from status (gone if
+            // the unregister took and the register then failed), so the uninstall/
+            // reinstall path stays honest. Surface the error separately, never silently.
             refresh()
             repairError = "repair failed: \(error.localizedDescription)"
         }

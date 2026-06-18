@@ -50,6 +50,31 @@ final class AgentControllerTests: XCTestCase {
         XCTAssertEqual(c.installState, .requiresApproval)
     }
 
+    // Re-approval-after-reinstall: uninstalling then reinstalling re-derives the
+    // approval state from status, so an agent macOS puts back in requiresApproval
+    // on reinstall re-surfaces the Login Items deep-link CTA (Settings' "Open
+    // Login Items…", the Start "Approve…" affordance) — it never gets stuck
+    // installed or notInstalled across the cycle. End-to-end guarantee for the
+    // approval-UX follow-up; the CTAs themselves gate on this state.
+    func testReinstallReSurfacesRequiresApproval() async {
+        let mock = MockRegistrar()
+        mock.nextStatus = .enabled
+        let c = AgentController(registrar: mock, eligibility: { .eligible })
+        await c.install()
+        XCTAssertEqual(c.installState, .installed)
+
+        mock.nextStatus = .notRegistered // uninstall returns the agent to notRegistered
+        await c.uninstall()
+        XCTAssertEqual(c.installState, .notInstalled)
+
+        mock.nextStatus = .requiresApproval // reinstall, but macOS now wants re-approval
+        await c.install()
+        XCTAssertEqual(
+            c.installState, .requiresApproval,
+            "a reinstalled agent pending re-approval must re-surface the Login Items CTA"
+        )
+    }
+
     func testRegisterThrowBecomesRegistrationFailedNeverSilentNotInstalled() async {
         let mock = MockRegistrar()
         mock.registerError = StubError()

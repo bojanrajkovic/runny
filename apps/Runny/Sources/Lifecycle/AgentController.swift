@@ -129,17 +129,20 @@ final class AgentController {
     private let registrar: ServiceRegistrar
     private let spawnGate: () async -> SpawnGate
     private let eligibilityProvider: () -> LaunchAgentStatus.Eligibility
+    private let bundledAgentPresentProvider: () -> Bool
 
     private var activationObserver: NSObjectProtocol?
 
     init(
         registrar: ServiceRegistrar,
         spawnGate: @escaping () async -> SpawnGate = { .allow },
-        eligibility: @escaping () -> LaunchAgentStatus.Eligibility = { AgentController.bundleEligibility() }
+        eligibility: @escaping () -> LaunchAgentStatus.Eligibility = { AgentController.bundleEligibility() },
+        bundledAgentPresent: @escaping () -> Bool = { AgentController.bundledAgentPresent() }
     ) {
         self.registrar = registrar
         self.spawnGate = spawnGate
         eligibilityProvider = eligibility
+        bundledAgentPresentProvider = bundledAgentPresent
         // Re-read the install status when the app returns to the foreground — e.g.
         // after the user enabled the agent in System Settings via the Login Items
         // CTA — so an already-open window doesn't stay stale at .requiresApproval
@@ -173,10 +176,27 @@ final class AgentController {
         )
     }
 
+    /// Whether the LaunchAgent plist is actually present in the running bundle at
+    /// the SMAppService-resolved `Contents/Library/LaunchAgents/<plistName>`. A
+    /// release carries it (injected before signing); a bare `bazel run` dev build
+    /// does not. This is the independent fact that disambiguates SMAppService's
+    /// overloaded `.notFound` — never-registered-but-bundled (installable) vs.
+    /// genuinely-no-agent (a dev build) — which the status alone cannot tell apart.
+    nonisolated static func bundledAgentPresent() -> Bool {
+        let url = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Library/LaunchAgents")
+            .appendingPathComponent(SMAppServiceRegistrar.plistName)
+        return FileManager.default.fileExists(atPath: url.path)
+    }
+
     /// Recompute `installState` from the registrar's status. Called on appear and
-    /// after every op — the single place a status maps to state.
+    /// after every op — the single place a status maps to state. Passes whether the
+    /// plist is actually bundled so the overloaded `.notFound` resolves correctly:
+    /// a never-registered release agent is installable, a no-plist dev build is not.
     func refresh() {
-        installState = LaunchAgentStatus.state(from: registrar.status())
+        installState = LaunchAgentStatus.state(
+            from: registrar.status(), bundledAgentPresent: bundledAgentPresentProvider()
+        )
     }
 
     // MARK: - Spawn-triggering actions (every one funnels through attemptSpawn)

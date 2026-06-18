@@ -37,12 +37,23 @@ enum LaunchAgentStatus {
     /// produced by `AgentController`, not here. A future status we do not model is
     /// a determination FAILURE surfaced loud, never silently rendered installed
     /// or not-installed.
-    nonisolated static func state(from status: SMAppService.Status) -> State {
+    ///
+    /// `.notFound` is overloaded and disambiguated by `bundledAgentPresent`: the
+    /// framework returns it both for a genuinely absent agent (a dev build with no
+    /// bundled plist) AND for a release whose bundled agent has simply never been
+    /// registered — the pristine first launch, where SMAppService has no record of
+    /// the (identity, plist) pair yet (distinct from the post-register/unregister
+    /// `.notRegistered`). With the plist bundled it is installable (`.notInstalled`,
+    /// toggle live); without it, the honest "no bundled daemon" (`.notFound`). The
+    /// split is what keeps a first-time user's very first launch from showing a
+    /// disabled toggle and a false "no daemon" message — a failure invisible to
+    /// developers, whose machines read `.notRegistered` forever after one register.
+    nonisolated static func state(from status: SMAppService.Status, bundledAgentPresent: Bool) -> State {
         switch status {
         case .notRegistered: .notInstalled
         case .enabled: .installed
         case .requiresApproval: .requiresApproval
-        case .notFound: .notFound
+        case .notFound: bundledAgentPresent ? .notInstalled : .notFound
         @unknown default:
             .registrationFailed(reason: "unrecognized SMAppService status (rawValue \(status.rawValue))")
         }

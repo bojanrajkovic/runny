@@ -27,6 +27,18 @@ never exercised live in tests.
   there is no silent fall-through to `notInstalled`. `requiresApproval` (Login
   Items pending) is a first-class CTA, not a disguised failure; an unmodeled
   future status maps to `registrationFailed`, not a guess.
+- **`.notFound` is two states in one hat, split by the bundled plist.**
+  SMAppService returns `.notFound` both for a genuinely absent agent (a `bazel
+  run` dev build carrying no injected plist) AND for a release whose bundled
+  agent has *never been registered* — the pristine first launch, where the
+  framework has no record of the (identity, plist) pair yet (distinct from the
+  post-register/unregister `.notRegistered`). `state(from:bundledAgentPresent:)`
+  resolves it by whether `Contents/Library/LaunchAgents/<plistName>` exists in
+  the bundle (`AgentController.bundledAgentPresent`): present ⇒ `.notInstalled`
+  (installable, toggle live), absent ⇒ `.notFound` (the honest "no bundled
+  daemon"). Without the split, a first-time user's very first launch is stuck
+  behind a disabled toggle and a false "no daemon" message — invisible to devs,
+  whose machines read `.notRegistered` forever after a single register cycle.
 - **The install location is canonical, not the running bundle.**
   `canonicalBundlePath` is `/Applications/Runny.app`; the agent's program path
   and the reconcile compare against it, **never** `Bundle.main.bundlePath` —

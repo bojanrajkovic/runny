@@ -9,10 +9,25 @@ import XCTest
 /// without launchd or a live SMAppService.
 final class LaunchAgentStatusTests: XCTestCase {
     func testStatusMapsToNamedStateNeverSilentNotInstalled() {
-        XCTAssertEqual(LaunchAgentStatus.state(from: .notRegistered), .notInstalled)
-        XCTAssertEqual(LaunchAgentStatus.state(from: .enabled), .installed)
-        XCTAssertEqual(LaunchAgentStatus.state(from: .requiresApproval), .requiresApproval)
-        XCTAssertEqual(LaunchAgentStatus.state(from: .notFound), .notFound)
+        XCTAssertEqual(LaunchAgentStatus.state(from: .notRegistered, bundledAgentPresent: true), .notInstalled)
+        XCTAssertEqual(LaunchAgentStatus.state(from: .enabled, bundledAgentPresent: true), .installed)
+        XCTAssertEqual(LaunchAgentStatus.state(from: .requiresApproval, bundledAgentPresent: true), .requiresApproval)
+    }
+
+    /// `.notFound` is overloaded. SMAppService returns it BOTH for a genuinely
+    /// absent agent (a dev build carrying no bundled plist) AND for a release
+    /// whose bundled agent has simply never been registered — a pristine first
+    /// launch, where the framework has no record of the (identity, plist) pair
+    /// yet, distinct from the post-register/unregister `.notRegistered`.
+    /// Disambiguated by whether the plist is actually in the bundle: present ⇒
+    /// installable (`.notInstalled`, toggle live), absent ⇒ the honest
+    /// "no bundled daemon" (`.notFound`). Without this split, a first-time user's
+    /// very first launch shows a disabled toggle + a false "no daemon" message and
+    /// can never install — invisible to developers, whose machines read
+    /// `.notRegistered` forever after a single register cycle.
+    func testNotFoundIsInstallableWhenBundledElseNoDaemon() {
+        XCTAssertEqual(LaunchAgentStatus.state(from: .notFound, bundledAgentPresent: true), .notInstalled)
+        XCTAssertEqual(LaunchAgentStatus.state(from: .notFound, bundledAgentPresent: false), .notFound)
     }
 
     func testEligibleOnlyInApplicationsAndNotTranslocated() {

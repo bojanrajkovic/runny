@@ -135,6 +135,22 @@ final class AgentControllerTests: XCTestCase {
         XCTAssertEqual(c.eligibility, .translocated)
     }
 
+    // A pristine first launch reports `.notFound` from SMAppService (no record of
+    // the agent yet, not the post-cycle `.notRegistered`). refresh() must consult
+    // whether the plist is actually bundled: a real release (plist present) is
+    // installable, a dev build (no plist) shows the honest no-daemon state — so a
+    // first-time user is never stuck behind a disabled toggle + false "no daemon".
+    func testRefreshTreatsNeverRegisteredBundledAgentAsInstallable() {
+        let mock = MockRegistrar()
+        mock.nextStatus = .notFound
+        let release = AgentController(registrar: mock, bundledAgentPresent: { true })
+        release.refresh()
+        XCTAssertEqual(release.installState, .notInstalled, "a bundled-but-never-registered agent must be installable")
+        let dev = AgentController(registrar: mock, bundledAgentPresent: { false })
+        dev.refresh()
+        XCTAssertEqual(dev.installState, .notFound)
+    }
+
     // MARK: - Start affordance
 
     func testStartAffordanceOnlyWhenInstalledAndUnreachable() {

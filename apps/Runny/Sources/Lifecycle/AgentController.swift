@@ -297,6 +297,13 @@ final class AgentController {
     /// bootout's "No such process" is the expected success, since unregister may
     /// already have removed the job). A unregister throw or a real bootout failure
     /// is surfaced loud, never swallowed.
+    ///
+    /// The explicit `bootout` is kept deliberately: it is not verified across the
+    /// supported macOS versions whether `unregister()` alone evicts the *running*
+    /// job, and dropping it on an OS that still needs it would silently leave the
+    /// daemon running after an uninstall — the silent-failure this project refuses.
+    /// Drop the explicit bootout only once it is proven redundant on every
+    /// supported OS.
     func uninstall() async {
         do {
             try registrar.unregister()

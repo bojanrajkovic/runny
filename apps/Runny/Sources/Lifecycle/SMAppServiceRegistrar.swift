@@ -149,8 +149,9 @@ struct LaunchctlFailure: LocalizedError {
 /// A one-shot gate so the timeout killer and the wait closure (different queues)
 /// resume the continuation exactly once: whoever calls `claim()` first wins, the
 /// loser's `claim()` returns false and it does nothing. Self-contained rather than
-/// pulling in Synchronization.Mutex for one flag.
-private final class ResumeOnce: @unchecked Sendable {
+/// pulling in Synchronization.Mutex for one flag. Shared with `LaunchdProbe`, the
+/// other bounded-launchctl scaffold.
+final class ResumeOnce: @unchecked Sendable {
     private let lock = NSLock()
     private var claimed = false
     func claim() -> Bool {

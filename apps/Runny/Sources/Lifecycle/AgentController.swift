@@ -148,7 +148,7 @@ final class AgentController {
     private let eligibilityProvider: () -> LaunchAgentStatus.Eligibility
     private let bundledAgentPresentProvider: () -> Bool
     private let probeProvider: @Sendable (String) async -> LaunchdProbeResult
-    private let socketAnswersProvider: @MainActor () -> Bool
+    private let socketAnswersProvider: () -> Bool
     private let homeIsCanonicalProvider: () -> Bool
 
     private var activationObserver: NSObjectProtocol?
@@ -159,7 +159,7 @@ final class AgentController {
         eligibility: @escaping () -> LaunchAgentStatus.Eligibility = { AgentController.bundleEligibility() },
         bundledAgentPresent: @escaping () -> Bool = { AgentController.bundledAgentPresent() },
         probe: @escaping @Sendable (String) async -> LaunchdProbeResult = { await LaunchdProbe.probe(label: $0) },
-        socketAnswers: @escaping @MainActor () -> Bool = { RunnyHome.socketExists },
+        socketAnswers: @escaping () -> Bool = { RunnyHome.socketExists },
         homeIsCanonical: @escaping () -> Bool = { true }
     ) {
         self.registrar = registrar
@@ -190,14 +190,15 @@ final class AgentController {
     /// The production controller: a real `SMAppServiceRegistrar`, and a spawn gate
     /// that gathers the live ownership verdict and denies install/repair/start for
     /// any foreign or indeterminate owner. The same gather feeds `refreshOwnership`
-    /// (the observer banner), so the gate and the UI never disagree. `socketAnswers`
-    /// is the live "a daemon answers the socket" signal (not a bare file stat) —
-    /// `RunnyApp` wires it to the `DaemonStore` connection so a stale socket left by a
-    /// crashed daemon doesn't read as a foreground daemon and block install.
+    /// (the observer banner), so the gate and the UI never disagree. The socket axis
+    /// is the conservative `RunnyHome.socketExists`: a present socket reads as
+    /// occupied (blocking install is safe), since a file stat can't distinguish a
+    /// stale inode from a wedged daemon — and a false "empty" would be the stomp.
     @MainActor
-    static func live(socketAnswers: @escaping @MainActor () -> Bool) -> AgentController {
+    static func live() -> AgentController {
         let registrar = SMAppServiceRegistrar()
         let probe: @Sendable (String) async -> LaunchdProbeResult = { await LaunchdProbe.probe(label: $0) }
+        let socketAnswers = { RunnyHome.socketExists }
         let homeIsCanonical = { true }
         let bundledAgentPresent = { AgentController.bundledAgentPresent() }
         return AgentController(
@@ -303,7 +304,7 @@ final class AgentController {
     static func gatherOwnership(
         registrar: ServiceRegistrar,
         probe: @Sendable (String) async -> LaunchdProbeResult,
-        socketAnswers: @MainActor () -> Bool,
+        socketAnswers: () -> Bool,
         homeIsCanonical: () -> Bool,
         bundledAgentPresent: () -> Bool
     ) async -> DaemonOwnership {
@@ -637,7 +638,8 @@ extension AgentController {
             ObserverHint(
                 kind: .foregroundDaemon,
                 message: "A runnyd is already serving the socket with no managing agent. Stop it "
-                    + "before installing the login agent, so two daemons don't race for the socket."
+                    + "before installing the login agent so two daemons don't race for the socket — "
+                    + "or, if nothing is running, remove a stale ~/.runny/runnyd.sock and reopen Runny."
             )
         case .indeterminate:
             ObserverHint(

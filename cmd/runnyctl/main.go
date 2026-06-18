@@ -16,6 +16,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -108,27 +109,19 @@ func run() error {
 		c.warnSkew(ctx)
 	}
 	err = c.dispatch(ctx, args)
-	// A dead socket dials lazily and only fails on a one-shot command's opening
-	// RPC, surfacing as a bare gRPC Unavailable with no clue why. Augment it with
-	// a home-aware hint naming the resolved socket — the CLI analogue of the app's
-	// connection diagnostic. The long-lived streamers (watch, logs) are excluded:
-	// a terminal Unavailable there is a daemon death/recycle AFTER a healthy
-	// session, where "different home?" would mislead. Non-connection errors and
-	// success pass through untouched.
-	if !streamingCommand(args[0]) && status.Code(err) == codes.Unavailable {
-		return connHint(err, dir.SocketPath(), socketFileExists(dir.SocketPath()))
+	// codes.Unavailable is overloaded: a transport/dial failure (the daemon was
+	// never reached this invocation — the connection never became Ready) AND a
+	// LIVE daemon's application response ("slot is not accepting commands") both
+	// use it, as does a stream that broke after connecting. Only the first is a
+	// connection problem the home-aware hint should explain, so gate on the
+	// connection state — a Ready conn means the daemon answered, and the bare
+	// error stands. This naturally covers watch/logs: a connection-time failure
+	// (never Ready) is hinted; a mid-stream daemon death (was Ready) is not.
+	// Non-connection errors and success pass through untouched.
+	if status.Code(err) == codes.Unavailable {
+		return connHint(err, dir.SocketPath(), socketFileExists(dir.SocketPath()), conn.GetState() == connectivity.Ready)
 	}
 	return err
-}
-
-// streamingCommand reports whether the command holds a long-lived stream open
-// after connecting, so a terminal gRPC Unavailable is a mid-stream daemon death
-// rather than a connection-time failure — and must not get connHint's "is runnyd
-// running, or serving a different home?" wording. reload (even with -wait) is
-// one-shot here: its opening Reload RPC is a genuine connection-time failure, and
-// the -wait follow phase manages the daemon's respawn with its own messaging.
-func streamingCommand(cmd string) bool {
-	return cmd == "watch" || cmd == "logs"
 }
 
 // dispatch runs a single runnyctl command. args[0] is the command (guaranteed
@@ -220,15 +213,18 @@ func (c *ctl) dispatch(ctx context.Context, args []string) error {
 	}
 }
 
-// connHint augments a connection-time gRPC Unavailable with a home-aware hint
-// naming the resolved socket, giving runnyctl the same diagnostic the app's
-// connection card shows. socketExists distinguishes a missing socket (daemon
-// down, or serving a different home) from a present-but-silent one (daemon hung
-// or still starting). Errors that are not Unavailable — a daemon-side refusal,
-// a validation failure — and a nil error pass through unchanged, so the hint
-// never misleads.
-func connHint(err error, socketPath string, socketExists bool) error {
-	if status.Code(err) != codes.Unavailable {
+// connHint augments a transport/dial-time gRPC Unavailable with a home-aware
+// hint naming the resolved socket, giving runnyctl the same diagnostic the app's
+// connection card shows. connReady reports whether the client connection ever
+// reached Ready: a Ready conn means the daemon answered, so an Unavailable there
+// is an application response (e.g. a slot not accepting commands), NOT a
+// connection failure — hinting it would misdiagnose a valid reply. socketExists
+// then distinguishes a missing socket (daemon down, or serving a different home)
+// from a present-but-silent one (daemon hung or still starting). Errors that are
+// not Unavailable and a nil error pass through unchanged, so the hint never
+// misleads.
+func connHint(err error, socketPath string, socketExists, connReady bool) error {
+	if connReady || status.Code(err) != codes.Unavailable {
 		return err
 	}
 	if socketExists {
@@ -312,7 +308,10 @@ func localNetworkNote(g runnyv1.LocalNetworkGrant) string {
 	case runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_DENIED:
 		return "local network: DENIED — runnyd can't reach the guest subnet; grant it Local Network access (see docs/deploy.md)"
 	case runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNKNOWN:
-		return "local network: unconfirmed — no guest has booted this run yet; the grant is verified on first guest boot"
+		// UNKNOWN spans two causes — no vmnet interface yet (no guest has booted)
+		// and a vmnet that is up but whose gateway probe timed out — so the note
+		// states the consequence, not a guessed cause.
+		return "local network: unconfirmed — runnyd can't yet confirm it reaches the guest subnet; if guests fail to connect, grant Local Network access (see docs/deploy.md)"
 	default:
 		return ""
 	}

@@ -18,6 +18,7 @@ go_library(
         "//proto/runny/v1:runny",
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//codes",
+        "@org_golang_google_grpc//connectivity",
         "@org_golang_google_grpc//credentials/insecure",
         "@org_golang_google_grpc//status",
         "@org_golang_google_protobuf//encoding/protojson",

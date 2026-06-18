@@ -686,13 +686,13 @@ func TestRecycleGuardsDebugAndJob(t *testing.T) {
 	}
 }
 
-// A dead socket first surfaces as a bare gRPC Unavailable on a command's
-// opening RPC. connHint augments it with a home-aware hint naming the resolved
-// socket — parity with the app's connection diagnostic — so the operator is
-// told *why*, not just handed the raw transport error.
+// A transport/dial failure (the daemon was never reached this invocation — the
+// connection never became Ready) surfaces as a bare gRPC Unavailable. connHint
+// augments it with a home-aware hint naming the resolved socket — parity with
+// the app's connection diagnostic — so the operator is told *why*.
 func TestConnHintNamesSocketAndHomeWhenSocketAbsent(t *testing.T) {
 	base := status.Error(codes.Unavailable, `connection error: dial unix /home/x/.runny/runnyd.sock: connect: no such file or directory`)
-	got := connHint(base, "/home/x/.runny/runnyd.sock", false)
+	got := connHint(base, "/home/x/.runny/runnyd.sock", false, false)
 	if got == nil {
 		t.Fatal("expected a wrapped error, got nil")
 	}
@@ -712,7 +712,7 @@ func TestConnHintNamesSocketAndHomeWhenSocketAbsent(t *testing.T) {
 // still starting, not absent. The hint must distinguish the two.
 func TestConnHintSaysNotAnsweringWhenSocketPresent(t *testing.T) {
 	base := status.Error(codes.Unavailable, "connection refused")
-	msg := connHint(base, "/home/x/.runny/runnyd.sock", true).Error()
+	msg := connHint(base, "/home/x/.runny/runnyd.sock", true, false).Error()
 	if !strings.Contains(msg, "isn't answering") {
 		t.Errorf("present-socket hint must say the daemon isn't answering; got: %s", msg)
 	}
@@ -721,15 +721,21 @@ func TestConnHintSaysNotAnsweringWhenSocketPresent(t *testing.T) {
 	}
 }
 
-// Only connection-time Unavailable earns the hint. A daemon-side refusal or
-// validation failure (and a nil error) must pass through untouched, or the
-// hint would mislead.
-func TestConnHintPassesThroughNonConnectionErrors(t *testing.T) {
+// The crux: codes.Unavailable is overloaded. A LIVE daemon returns it for
+// application conditions ("slot is not accepting commands") over a connection
+// that DID become Ready — augmenting that with "the socket isn't answering"
+// would misdiagnose a valid response. connReady gates the hint out. A daemon-side
+// refusal (FailedPrecondition) and a nil error also pass through untouched.
+func TestConnHintPassesThroughWhenConnectionWasReadyOrErrorIsNotUnavailable(t *testing.T) {
+	appLevel := status.Error(codes.Unavailable, "slot mac-1 is not accepting commands")
+	if got := connHint(appLevel, "/x", false, true); got.Error() != appLevel.Error() {
+		t.Errorf("an application-level Unavailable over a Ready conn must pass through; got: %s", got.Error())
+	}
 	refusal := status.Error(codes.FailedPrecondition, "2 check(s) failed")
-	if got := connHint(refusal, "/x", false); got.Error() != refusal.Error() {
+	if got := connHint(refusal, "/x", false, false); got.Error() != refusal.Error() {
 		t.Errorf("a non-Unavailable error must pass through unchanged; got: %s", got.Error())
 	}
-	if got := connHint(nil, "/x", false); got != nil {
+	if got := connHint(nil, "/x", false, false); got != nil {
 		t.Errorf("nil must pass through as nil; got: %v", got)
 	}
 }
@@ -744,30 +750,17 @@ func TestLocalNetworkNote(t *testing.T) {
 	}
 	if s := localNetworkNote(runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNKNOWN); s == "" {
 		t.Error("UNKNOWN should surface a proactive note")
+	} else if strings.Contains(s, "no guest has booted") {
+		// UNKNOWN also fires when a vmnet interface IS up but the gateway probe
+		// times out — asserting "no guest has booted" would misdirect an operator
+		// chasing a live network problem. The note must not claim a specific cause.
+		t.Errorf("UNKNOWN note must not assert a specific cause; got %q", s)
 	}
 	if s := localNetworkNote(runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_REACHABLE); s != "" {
 		t.Errorf("REACHABLE should be quiet; got %q", s)
 	}
 	if s := localNetworkNote(runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNSPECIFIED); s != "" {
 		t.Errorf("UNSPECIFIED (old/non-darwin daemon) should be quiet; got %q", s)
-	}
-}
-
-// connHint is for a one-shot command's connection-time failure. The long-lived
-// streamers (watch, logs) connect, then stream — a terminal Unavailable there is
-// a daemon death/recycle AFTER a healthy session, where "no socket, different
-// home?" misleads. They must be excluded from the hint; one-shot commands (and
-// reload, whose opening Reload RPC is a genuine connection-time failure) keep it.
-func TestStreamingCommandsExcludedFromConnHint(t *testing.T) {
-	for _, cmd := range []string{"watch", "logs"} {
-		if !streamingCommand(cmd) {
-			t.Errorf("%q streams after connecting; a mid-stream Unavailable must not get the connection hint", cmd)
-		}
-	}
-	for _, cmd := range []string{"status", "doctor", "recycle", "pause", "resume", "reload", "why", "debug"} {
-		if streamingCommand(cmd) {
-			t.Errorf("%q is one-shot; its opening RPC's Unavailable is a connection-time failure that should be hinted", cmd)
-		}
 	}
 }
 

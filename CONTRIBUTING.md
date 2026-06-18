@@ -75,6 +75,8 @@ The posture these workflows implement — SHA-pinned actions, cold cache-isolate
 
 **Clean-machine Gatekeeper check before a release tag.** The `.app` now carries `runnyd`/`runnyctl` as nested Mach-Os, signed inside-out. `bazel test`'s `bundle_contents_test` proves each is validly signed, but on the build host that only attests the local/ad-hoc trust — it cannot prove Apple *notarized the nested binaries* so Gatekeeper accepts them offline. Before tagging a release, verify the notarized `.dmg` on a clean machine (or a fresh VM with networking off, forcing offline ticket validation): `spctl -a -vv Runny.app` must report `accepted` / `source=Notarized Developer ID`, and launching it must not be blocked. This is the one gate the build host can't run; skipping it ships a bundle that passes CI yet Gatekeeper-rejects on a user's Mac.
 
+On that same clean machine — at the **minimum supported macOS** and in a **GUI login session** (the prompt only renders there) — also confirm the app-managed daemon path: install the agent, boot a guest, and verify the **Local Network prompt names `runnyd`** and the grant sticks. The daemon embeds no `NSLocalNetworkUsageDescription` because a signed bare per-user LaunchAgent raises the prompt on its own (verified on a later macOS; this gate re-confirms it on the floor version, where Local Network TCC first shipped). The grant must also **survive a version upgrade** (re-launch an upgraded build against an existing grant → no re-prompt), which holds only while the bundled `runnyd`'s signing identity stays stable across releases.
+
 ## Boundaries
 
 - `bazel-*` symlinks and `node_modules/` are generated; never edit them.

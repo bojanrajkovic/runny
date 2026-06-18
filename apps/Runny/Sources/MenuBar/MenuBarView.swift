@@ -6,6 +6,7 @@ struct MenuBarView: View {
     @Environment(DaemonStore.self) private var store
     @Environment(ActivationCoordinator.self) private var activation
     @Environment(CLIInstallModel.self) private var cli
+    @Environment(AgentController.self) private var agent
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -57,6 +58,15 @@ struct MenuBarView: View {
                 .scrollBounceBehavior(.basedOnSize)
                 .frame(maxHeight: CGFloat(min(store.slots.count, 8)) * 46 + 12)
             }
+            // Daemon-not-running Start affordance (self-hides unless the agent is
+            // installed and the daemon is unreachable, or approval is pending).
+            DaemonStartAffordance()
+            // Proactive Local Network grant card (self-hides unless the daemon
+            // reports an unknown/denied grant) — fires before a dial fails.
+            LocalNetworkGrantCard()
+            // Post-upgrade daemon-update affordance (self-hides unless the
+            // app-installed agent is newer than the running daemon).
+            DaemonUpdateAffordance()
             // A gentle nudge ONLY while the CLI is absent (never on a dev build,
             // where refresh() leaves a non-.notInstalled state) — the primary
             // surface is Settings; this just points there, like VS Code's
@@ -73,6 +83,12 @@ struct MenuBarView: View {
         .onAppear {
             store.start()
             cli.refresh()
+            // Refresh the agent's install state so the Start/Update affordances here
+            // (and in the main window) reflect an already-registered agent on launch,
+            // not the default .notInstalled until Settings is opened. Reconcile too,
+            // so Update gates on a fresh canonical verdict rather than the default.
+            agent.refresh()
+            Task { await agent.runReconcile() }
         }
     }
 

@@ -52,4 +52,16 @@ fi
 "$MACOS/runnyctl" version  >/dev/null 2>&1 || fail "runnyctl does not exec"
 "$MACOS/runnyd"   -version >/dev/null 2>&1 || fail "runnyd does not exec"
 
-echo "ok: runnyd + runnyctl present, signed inside-out, correctly entitled, executable"
+# 5. The LaunchAgent plist is present at the SMAppService-resolved path, names
+#    the bundle-relative daemon, AND is sealed by the signature. Presence alone
+#    is insufficient: a launchd job config outside the seal could be swapped to
+#    re-point BundleProgram without breaking Gatekeeper, so it MUST be enrolled
+#    in CodeResources (which is also what keeps it inside the notarized bundle).
+PLIST="$APP/Contents/Library/LaunchAgents/com.coderinserepeat.runnyd.plist"
+[ -f "$PLIST" ] || fail "Contents/Library/LaunchAgents/com.coderinserepeat.runnyd.plist is missing"
+/usr/libexec/PlistBuddy -c 'Print :BundleProgram' "$PLIST" 2>/dev/null | grep -qx 'Contents/MacOS/runnyd' \
+  || fail "bundled LaunchAgent plist lost its bundle-relative BundleProgram"
+grep -q 'Library/LaunchAgents/com.coderinserepeat.runnyd.plist' "$APP/Contents/_CodeSignature/CodeResources" \
+  || fail "LaunchAgent plist is not enrolled in the bundle signature (would fall outside the notarization staple)"
+
+echo "ok: runnyd + runnyctl signed inside-out + entitled + executable; LaunchAgent plist sealed in"

@@ -85,10 +85,30 @@ admin prompt only when `/usr/local/bin` needs it; it refuses to overwrite a
 translocated app (move Runny to your Applications folder first). The same pane
 removes the link.
 
-The app does **not** yet install or manage the daemon — `runnyd` still runs under
-the Homebrew service or the manual LaunchAgent above. A bundled `runnyctl` placed
-on PATH can lag a `brew`-managed `runnyd`; when it does, `runnyctl` prints a
-one-line version-skew warning to stderr before its output (warn, never refuse).
+The app can also **install and manage the daemon** as a per-user LaunchAgent —
+the desktop-GUI install channel, beside the Homebrew service for headless fleets.
+From a copy of Runny in `/Applications`:
+
+- **Settings → Daemon → "Start runnyd at login"** registers the bundled `runnyd`
+  via `SMAppService` (one confirmation names the launchd label). The first guest
+  boot raises the **Local Network** prompt; the app surfaces a grant card
+  proactively if the grant is missing or pending, *before* a guest dial fails (the
+  same Local-Network requirement as "Why this is not just `launchctl load`" above —
+  it is why the agent is per-user, not a LaunchDaemon).
+- A **Start** affordance appears in the menu bar and main window when the agent is
+  installed but the daemon isn't running.
+- After upgrading the app to a newer build, **"Update Daemon"** drains running
+  jobs, then restarts onto the freshly-bundled binary (a `runnyctl reload -wait`
+  by another name).
+- Toggling it off uninstalls the agent; mid-job it warns that the running job is
+  abandoned.
+
+Install requires Runny in `/Applications` (a translocated or `~/Downloads` launch
+is refused, recoverably). The app manages only the per-user agent — not the brew
+service or the manual LaunchAgent; running both for the same daemon is the
+operator's call until reconciliation lands. A bundled `runnyctl` on PATH can lag a
+`brew`-managed `runnyd`; when it does, `runnyctl` prints a one-line version-skew
+warning to stderr before its output (warn, never refuse).
 
 ## Applying config changes
 

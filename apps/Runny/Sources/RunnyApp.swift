@@ -6,6 +6,7 @@ struct RunnyApp: App {
     @State private var store = DaemonStore()
     @State private var activation = ActivationCoordinator()
     @State private var cliInstall = CLIInstallModel()
+    @State private var agent = AgentController(registrar: SMAppServiceRegistrar())
 
     var body: some Scene {
         MenuBarExtra("Runny", image: "MenuBarIcon") {
@@ -13,6 +14,7 @@ struct RunnyApp: App {
                 .environment(store)
                 .environment(activation)
                 .environment(cliInstall)
+                .environment(agent)
         }
         .menuBarExtraStyle(.window)
 
@@ -20,9 +22,12 @@ struct RunnyApp: App {
             MainWindowView()
                 .environment(store)
                 .environment(activation)
+                .environment(agent)
                 .onAppear {
                     store.start()
                     activation.windowAppeared()
+                    agent.refresh()
+                    Task { await agent.runReconcile() }
                 }
         }
         .defaultSize(width: 920, height: 600)
@@ -31,12 +36,14 @@ struct RunnyApp: App {
         // sidebar toggle) stays; the content header is the sole title.
         .windowStyle(.hiddenTitleBar)
 
-        // The CLI-install surface. It earns Settings back after the home-override
+        // The install surface. It earns Settings back after the home-override
         // form was removed — its onAppear registers the same accessory↔regular
         // observer the main window does, so closing it never strands the app.
         Settings {
             SettingsView()
+                .environment(store)
                 .environment(cliInstall)
+                .environment(agent)
                 .environment(activation)
         }
     }

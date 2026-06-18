@@ -9,7 +9,7 @@ load("@rules_apple//apple:macos.bzl", "macos_application", "macos_unit_test")
 load("@rules_apple//apple:versioning.bzl", "apple_bundle_version")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("@rules_swift//swift:swift.bzl", "swift_library")
-load("//tools/sign:sign.bzl", "app_dmg", "codesign_app", "notarize_app", "notarize_dmg")
+load("//tools/sign:sign.bzl", "app_dmg", "codesign_app", "inject_launch_agent", "notarize_app", "notarize_dmg")
 
 swift_library(
     name = "RunnyLib",
@@ -76,9 +76,20 @@ macos_application(
 )
 
 # Distribution chain (see tools/sign/sign.bzl): rules_apple's in-rule
-# ad-hoc signature → re-sign → notarize+staple the .app → dmg →
-# notarize+staple the dmg. Every notarize step is a pass-through copy at
-# the ad-hoc tier.
+# ad-hoc signature → inject the LaunchAgent plist → re-sign → notarize+staple
+# the .app → dmg → notarize+staple the dmg. Every notarize step is a
+# pass-through copy at the ad-hoc tier.
+#
+# The LaunchAgent plist is injected BEFORE signing so it is covered by the
+# bundle signature and the notarization staple — it is the launchd job config
+# the app registers via SMAppService, and a tampered job config is exactly what
+# the seal must catch. rules_apple has no LaunchAgents slot, hence the genrule.
+inject_launch_agent(
+    name = "Runny_with_agent",
+    app_zip = ":Runny",
+    plist = "Resources/com.coderinserepeat.runnyd.plist",
+)
+
 # The .app carries the same runnyd + runnyctl the brew tarball ships, placed at
 # Contents/MacOS/{runnyd,runnyctl} under their bare names and signed inside-out
 # (the daemon keeps com.apple.security.virtualization; the CLI gets none, asserted
@@ -88,7 +99,7 @@ macos_application(
 # separately sealed and notarized per container.
 codesign_app(
     name = "Runny_signed",
-    app_zip = ":Runny",
+    app_zip = ":Runny_with_agent",
     binaries = {
         "runnyd": "//cmd/runnyd:runnyd_signed",
         "runnyctl": "//cmd/runnyctl:runnyctl_signed",

@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The LaunchAgent the Runny app registers via SMAppService. It is injected
+     into the bundle at Contents/Library/LaunchAgents/ BEFORE signing, so it is
+     covered by the bundle signature and notarization (see tools/sign/sign.bzl
+     inject_launch_agent).
+
+     This is NOT the host-install template (tools/deploy/com.coderinserepeat.runnyd.plist.tmpl):
+     that one runs an absolute @RUNNYD@ with @RUNNY_HOME@ log paths substituted at
+     install time. This one names the daemon by a bundle-relative BundleProgram and
+     ties the registration to the app via AssociatedBundleIdentifiers — the native
+     SMAppService shape. The two share only Label and the rationale comments below;
+     they are deliberately two shapes for two consumers and must NOT be unified. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.coderinserepeat.runnyd</string>
+
+  <!-- BundleProgram is resolved relative to the registering app's bundle root,
+       so an in-place app upgrade re-points the job at the new binary by
+       construction — no second on-disk copy to skew, no install/uninstall sync.
+       The base is the bundle root: Contents/MacOS/runnyd. -->
+  <key>BundleProgram</key>
+  <string>Contents/MacOS/runnyd</string>
+
+  <!-- Ties this agent's lifecycle to the Runny app for SMAppService bookkeeping
+       (registration, upgrade, unregister). NOTE: this does NOT key the Local
+       Network (TCC) grant — that is keyed to the daemon binary's own code
+       identity, so the prompt names "runnyd", not the app. -->
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>com.coderinserepeat.runny</string>
+  </array>
+
+  <!-- A LaunchAgent (registered into the user's GUI login session via
+       SMAppService), NOT a system LaunchDaemon: it runs inside that session,
+       which is what lets the one-time macOS "Local Network" (TCC) prompt appear
+       and the grant persist. A LaunchDaemon or a background-reparented runnyd is
+       silently denied vmnet access — guest dials fail "no route to host". See
+       docs/deploy.md. -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- KeepAlive is load-bearing for the wedge restart AND for config reload:
+       when a guest survives force-stop, or after a `runnyctl reload` drains the
+       fleet, runnyd exits non-zero expecting launchd to cold-start it — process
+       exit is the only thing that reclaims an in-process VM, and the respawn is
+       what applies a reloaded config (and, here, an upgraded bundle binary). Stop
+       the daemon with `launchctl bootout`, never by killing it, to avoid an
+       immediate respawn. -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <!-- No StandardOutPath/StandardErrorPath: launchd does not expand ~ or $HOME in
+       those literal paths, and a static bundled plist cannot substitute the
+       run-user's ~/.runny the way the host template does. runnyd writes its own
+       structured log to ~/.runny/logs/runnyd.log regardless; pre-log crash output
+       falls to the unified log (`log show`), not a per-home file. -->
+
+  <key>ProcessType</key>
+  <string>Interactive</string>
+</dict>
+</plist>

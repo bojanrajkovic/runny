@@ -113,6 +113,13 @@ final class DaemonStore {
     /// `draining`.
     private(set) var exitHeld = false
 
+    /// The daemon's live Local Network (TCC) grant classification from the latest
+    /// snapshot, driving the proactive grant card (`localNetworkCard`). UNSPECIFIED
+    /// from a daemon predating the field, or when no snapshot has arrived. This is
+    /// the daemon-authoritative signal — NOT the button-gated `doctorChecks`, which
+    /// is nil until Run Checks and reports ok until a guest boots.
+    private(set) var localNetworkGrant: Runny_V1_LocalNetworkGrant = .unspecified
+
     /// The current version-skew verdict, recomputed from each snapshot, or nil
     /// when the app and daemon match / the daemon's version isn't known yet / the
     /// app is an unstamped dev build / the daemon is merely newer. Surfaces read
@@ -141,6 +148,81 @@ final class DaemonStore {
     /// keeps showing the standing condition.
     var shownSkew: SkewVerdict? {
         Self.gatedSkew(skew: skew, connection: connection, dismissed: dismissedSkew)
+    }
+
+    /// What the post-upgrade daemon-update surface should show. The app can update
+    /// the daemon (by reloading onto the freshly-bundled binary) only when it
+    /// installed the agent AND it is the newer build — a brew/manual daemon would
+    /// drain its fleet for a respawn of the same old binary, so it is offered only
+    /// the generic skew banner, never this.
+    enum DaemonUpdate: Equatable {
+        case none
+        /// App-installed agent, app newer than the running daemon — offer Update.
+        case available
+        /// An update reload is draining toward its respawn.
+        case inProgress
+        /// The reload resolved but the daemon is still the old version — surfaced
+        /// loud (named, with the stuck version), never the generic reload note.
+        case didNotTake(daemonCore: String)
+    }
+
+    /// Set once an Update reload is ACCEPTED (drain started), reset when the update
+    /// takes (the daemon stops being older) or on a reconnect. Distinguishes "an
+    /// update is available" from "you tried and it didn't take". NOT set merely by
+    /// clicking Update — a cancelled confirmation must leave it false.
+    private(set) var daemonUpdateAttempted = false
+
+    /// Transient: the pending reload was requested as a daemon UPDATE (vs a plain
+    /// config reload), so its acceptance sets `daemonUpdateAttempted`. Consumed by
+    /// `performReload`; cleared by a plain `requestReload` so a regular reload after
+    /// a cancelled update can't inherit the stale intent.
+    private var pendingUpdateIntent = false
+
+    /// Is the app a strictly newer build than the running daemon? The upgrade
+    /// direction the symmetric skew verdict does not itself report.
+    var appNewerThanDaemon: Bool {
+        Self.appNewerThanDaemon(appVersion: Self.appVersion, daemonVersion: daemonVersion)
+    }
+
+    /// Same version core, daemon's protocol older than this app expects — the
+    /// protocol-only upgrade window.
+    var protocolBehind: Bool {
+        Self.protocolBehind(
+            appVersion: Self.appVersion, daemonVersion: daemonVersion,
+            daemonProtocol: protocolVersion, appExpectedProtocol: Self.expectedProtocolVersion
+        )
+    }
+
+    /// The app is ahead of the running daemon on either axis — a reload would
+    /// update it. The condition that gates the update affordance and clears the
+    /// attempt flag once an update takes.
+    var appAheadOfDaemon: Bool { appNewerThanDaemon || protocolBehind }
+
+    /// Slots with a live in-process guest that uninstalling would abandon —
+    /// matching the FSM's own consent rule (`.job` OR `.debug`): a DEBUG-held guest
+    /// is a parked VM an operator deliberately kept alive, so booting out the daemon
+    /// destroys it just as surely as a running job. The uninstall confirmation names
+    /// these slots rather than tearing down silently.
+    var liveGuestSlots: [String] {
+        slots.filter { $0.state == .job || $0.state == .debug }.map(\.slot)
+    }
+
+    /// The update surface, gated on a live connection (a stale verdict from a
+    /// dropped daemon must not linger — the Start affordance owns "daemon down").
+    /// `agentInstalled` is the app-installed-agent gate the view supplies from
+    /// `AgentController` (DaemonStore doesn't observe the lifecycle layer).
+    func daemonUpdate(agentInstalled: Bool, agentCanonical: Bool, runningBundleCanonical: Bool) -> DaemonUpdate {
+        guard case .connected = connection else { return .none }
+        return Self.daemonUpdate(
+            agentInstalled: agentInstalled,
+            agentCanonical: agentCanonical,
+            runningBundleCanonical: runningBundleCanonical,
+            appNewer: appNewerThanDaemon,
+            protocolBehind: protocolBehind,
+            daemonCore: Self.versionCore(daemonVersion) ?? daemonVersion,
+            reloadPending: reloadPending,
+            attempted: daemonUpdateAttempted
+        )
     }
 
     private(set) var doctorChecks: [Runny_V1_DoctorCheck]?
@@ -352,6 +434,7 @@ final class DaemonStore {
         // recomputed against whatever the re-dial actually reaches.
         skew = nil
         dismissedSkew = nil
+        daemonUpdateAttempted = false
         pendingReload = nil
         reloadJobInFlight = false
         reloadStallSince = nil
@@ -508,6 +591,7 @@ final class DaemonStore {
         bootID = snapshot.bootID
         drainSeq = snapshot.drainSeq
         exitHeld = snapshot.exitHeld
+        localNetworkGrant = snapshot.localNetworkGrant
         lastUpdate = Date()
         confirmPending()
         trackReloadDrain()
@@ -518,6 +602,10 @@ final class DaemonStore {
             appVersion: Self.appVersion, appExpectedProtocol: Self.expectedProtocolVersion,
             daemonVersion: daemonVersion, daemonProtocol: protocolVersion
         )
+        // Once the app is no longer ahead on either axis — the update took, or it
+        // was never behind — clear the attempt flag so a future skew shows
+        // "available", not a stale "didn't take".
+        if !appAheadOfDaemon { daemonUpdateAttempted = false }
     }
 
     // MARK: - Commands (requested vs confirmed)
@@ -794,7 +882,21 @@ final class DaemonStore {
     /// Stage the reload confirmation dialog. Reload restarts the whole daemon
     /// and drains every slot (jobs finish first), so it's gated behind explicit
     /// consent like the `-force` recycle cases.
-    func requestReload() { reloadConfirm = true }
+    func requestReload() {
+        pendingUpdateIntent = false
+        reloadConfirm = true
+    }
+
+    /// Issue a daemon update: identical to a reload (drain jobs, then exit for
+    /// launchd to cold-start the freshly-bundled binary), tagged so a non-converged
+    /// result surfaces "update didn't take" rather than the generic reload note.
+    /// Inherits the reload's drain-stall arm and convergence confirmation wholesale.
+    /// The intent is consumed only when the reload is ACCEPTED (in performReload),
+    /// so cancelling the confirmation leaves no "didn't take" residue.
+    func requestDaemonUpdate() {
+        pendingUpdateIntent = true
+        reloadConfirm = true
+    }
 
     /// The confirmed path: send the reload. Acceptance arms a pendingReload that
     /// `noteRespawnIfReady` resolves into a verdict once a new daemon (a changed
@@ -809,6 +911,11 @@ final class DaemonStore {
         }
         guard !reloadInFlight else { return }
         reloadInFlight = true
+        // Consume the update intent synchronously, before the Task suspends, so a
+        // concurrent request can't change it mid-flight. Only an ACCEPTED update
+        // reload (below) records the attempt.
+        let isUpdate = pendingUpdateIntent
+        pendingUpdateIntent = false
         // The protocol-1 fallback discriminator. The real discriminator is the
         // accepting process's boot id, carried in the response, so there is no
         // pre-RPC read whose process could differ from the one that accepts.
@@ -836,6 +943,10 @@ final class DaemonStore {
                     commandError = Self.describeRefusal(resp)
                     return
                 }
+                // An accepted update reload records the attempt — so a respawn that
+                // comes back still older surfaces "update didn't take", while a
+                // cancelled or refused one never does.
+                if isUpdate { daemonUpdateAttempted = true }
                 // Seed from the slots visible at acceptance, so a daemon that
                 // dies before its next snapshot still carries a job-in-flight
                 // warning into the verdict; later old-process snapshots refine it.
@@ -1161,6 +1272,73 @@ final class DaemonStore {
             )
         }
         return nil
+    }
+
+    /// Pure: is the app a strictly newer build than the daemon? The direction the
+    /// symmetric skew verdict doesn't compute. False for an unstamped dev app (it
+    /// can't meaningfully "update" anything) or a daemon with no version yet.
+    nonisolated static func appNewerThanDaemon(appVersion: String, daemonVersion: String) -> Bool {
+        guard let app = versionCore(appVersion), app != unstampedVersion,
+              let daemon = versionCore(daemonVersion)
+        else { return false }
+        return semverGreater(app, daemon)
+    }
+
+    /// Pure: numeric (not lexical) compare of two `x.y.z` cores — so 0.10.0 > 0.9.0.
+    nonisolated static func semverGreater(_ a: String, _ b: String) -> Bool {
+        let pa = a.split(separator: ".").map { Int($0) ?? 0 }
+        let pb = b.split(separator: ".").map { Int($0) ?? 0 }
+        for i in 0 ..< max(pa.count, pb.count) {
+            let x = i < pa.count ? pa[i] : 0
+            let y = i < pb.count ? pb[i] : 0
+            if x != y { return x > y }
+        }
+        return false
+    }
+
+    /// Pure: same-core-older-protocol — the upgrade window the version compare
+    /// alone misses (e.g. a beta/rebuild whose stubs expect a newer protocol). A
+    /// reload moves launchd onto the bundled binary, so it IS update-eligible for
+    /// an app-installed agent. Mirrors `skewVerdict`'s protocol axis.
+    nonisolated static func protocolBehind(
+        appVersion: String, daemonVersion: String, daemonProtocol: UInt32, appExpectedProtocol: UInt32
+    ) -> Bool {
+        guard let app = versionCore(appVersion), app != unstampedVersion,
+              let daemon = versionCore(daemonVersion), app == daemon
+        else { return false }
+        return daemonProtocol < appExpectedProtocol
+    }
+
+    /// Pure: the daemon-update surface. Offered ONLY for an app-installed agent the
+    /// app is ahead of on EITHER axis — a newer version core, or the same core with
+    /// an older protocol (a reload picks up the bundled binary either way). A
+    /// brew/manual daemon would drain its fleet for a respawn of the same binary, so
+    /// it never sees this. While the update reload drains, `inProgress`; after it
+    /// resolves still-behind, `didNotTake` (named, loud).
+    nonisolated static func daemonUpdate(
+        agentInstalled: Bool, agentCanonical: Bool, runningBundleCanonical: Bool,
+        appNewer: Bool, protocolBehind: Bool, daemonCore: String,
+        reloadPending: Bool, attempted: Bool
+    ) -> DaemonUpdate {
+        // agentCanonical: the registered job points at THIS app's /Applications
+        // bundle (a reload respawns it). runningBundleCanonical: the RUNNING bundle
+        // IS that /Applications app — so the appNewer comparison reflects the binary
+        // the reload will actually respawn. Both are required: a newer app run from
+        // Downloads (running bundle not canonical) reads as appNewer, but the reload
+        // respawns the older /Applications binary, so the update could never take.
+        guard agentInstalled, agentCanonical, runningBundleCanonical, appNewer || protocolBehind
+        else { return .none }
+        if reloadPending { return .inProgress }
+        if attempted { return .didNotTake(daemonCore: daemonCore) }
+        return .available
+    }
+
+    /// Pure: must the uninstall raise the abandon confirmation? Yes whenever a live
+    /// guest is present OR the live-guest state is UNKNOWN — a disconnected or
+    /// pre-first-snapshot store reports an empty list that means "no snapshot", not
+    /// "no guest", so an empty list is safe to skip only while connected.
+    nonisolated static func uninstallNeedsConfirmation(connected: Bool, liveGuestSlots: [String]) -> Bool {
+        !liveGuestSlots.isEmpty || !connected
     }
 
     /// Pure: the skew to actually render, applying the two visibility gates that

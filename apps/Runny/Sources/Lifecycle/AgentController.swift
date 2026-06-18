@@ -89,6 +89,23 @@ enum StartOutcome: Equatable {
     case refused(String)
 }
 
+/// What the observer banner shows when the app is NOT the daemon's manager. The
+/// `kind` is read for styling/icon and so a surface can branch on the verdict
+/// without string-matching the prose; the `message` names the managing channel
+/// and the operator's next step. nil for `unmanaged`/`selfManaged`/`awaitingApproval`
+/// — those are the app's own install/approval UI, not an observer posture.
+struct ObserverHint: Equatable {
+    enum Kind: Equatable {
+        case managedByHomebrew
+        case managedManually
+        case foregroundDaemon
+        case indeterminate
+    }
+
+    let kind: Kind
+    let message: String
+}
+
 /// The thin side-effect wrapper over `SMAppService.agent`, exposing a published
 /// `installState` (the closed, loud `LaunchAgentStatus.State`) and the
 /// spawn-gated install/uninstall actions every surface drives. Decisions are the
@@ -243,6 +260,12 @@ final class AgentController {
     /// runs); the gate never trusts this stale value — it gathers fresh per attempt.
     private(set) var ownership: DaemonOwnership = .indeterminate
 
+    /// Whether a real gather has run yet. The initial `.indeterminate` is "not
+    /// checked", not a verdict — the banner shows "Checking…" until this flips, so a
+    /// pristine launch never flashes the indeterminate diagnostic before the probes
+    /// have run.
+    private(set) var ownershipChecked = false
+
     /// Gather the ownership inputs and publish the verdict (for the banner). The
     /// gate's pre-act recheck calls `gatherOwnership` directly for a fresh verdict.
     func refreshOwnership() async {
@@ -250,6 +273,7 @@ final class AgentController {
             registrar: registrar, probe: probeProvider, socketAnswers: socketAnswersProvider,
             homeIsCanonical: homeIsCanonicalProvider, bundledAgentPresent: bundledAgentPresentProvider
         )
+        ownershipChecked = true
     }
 
     /// Gather the four orthogonal facts and `classify` them. The two label probes
@@ -557,6 +581,44 @@ extension AgentController {
             .deny(reason: "the runnyd agent is registered and awaiting Login Items approval")
         case .indeterminate:
             .deny(reason: "couldn't determine who manages runnyd")
+        }
+    }
+
+    /// The observer banner for a verdict that is not the app's to install over.
+    /// `nil` for `unmanaged`/`selfManaged` (the install/toggle UI applies) and for
+    /// `awaitingApproval` (the Login Items approval CTA, driven by `installState`,
+    /// already covers it). The `foreignManual` command is the **checkout-free**
+    /// `launchctl bootout` — never `tools/deploy/uninstall.sh`, which a host that
+    /// installed from a one-off `.dmg` no longer has. Pure → unit-tested wording.
+    nonisolated static func observerMessage(for ownership: DaemonOwnership) -> ObserverHint? {
+        switch ownership {
+        case .unmanaged, .selfManaged, .awaitingApproval:
+            nil
+        case .foreignBrew:
+            ObserverHint(
+                kind: .managedByHomebrew,
+                message: "Homebrew manages runnyd on this host. Upgrade or restart it with "
+                    + "`brew services restart runny`; Runny won't install a competing agent."
+            )
+        case .foreignManual:
+            ObserverHint(
+                kind: .managedManually,
+                message: "A manually-installed LaunchAgent manages runnyd. To let Runny manage it "
+                    + "instead, remove that agent with "
+                    + "`launchctl bootout gui/$(id -u)/\(DaemonOwnership.canonicalLabel)`, then reopen Runny."
+            )
+        case .foreground:
+            ObserverHint(
+                kind: .foregroundDaemon,
+                message: "A runnyd is already serving the socket with no managing agent. Stop it "
+                    + "before installing the login agent, so two daemons don't race for the socket."
+            )
+        case .indeterminate:
+            ObserverHint(
+                kind: .indeterminate,
+                message: "Couldn't determine who manages runnyd, so Runny isn't installing. Check "
+                    + "`launchctl print gui/$(id -u)/\(DaemonOwnership.canonicalLabel)` and reopen Runny."
+            )
         }
     }
 

@@ -198,6 +198,28 @@ final class AgentControllerTests: XCTestCase {
         XCTAssertEqual(c.installState, .notInstalled)
     }
 
+    func testObserverMessageNamesTheManagingChannel() {
+        // The app's own domain — no observer banner.
+        XCTAssertNil(AgentController.observerMessage(for: .unmanaged))
+        XCTAssertNil(AgentController.observerMessage(for: .selfManaged))
+        XCTAssertNil(AgentController.observerMessage(for: .awaitingApproval))
+
+        let brew = AgentController.observerMessage(for: .foreignBrew)
+        XCTAssertEqual(brew?.kind, .managedByHomebrew)
+        XCTAssertEqual(brew?.message.contains("brew services restart runny"), true)
+
+        let manual = AgentController.observerMessage(for: .foreignManual)
+        XCTAssertEqual(manual?.kind, .managedManually)
+        // The checkout-free command, NOT tools/deploy/uninstall.sh — a host that
+        // installed from a one-off .dmg no longer has the checkout. Red-tested by
+        // swapping in the deploy-script string and confirming this fails.
+        XCTAssertEqual(manual?.message.contains("launchctl bootout"), true)
+        XCTAssertEqual(manual?.message.contains("uninstall.sh"), false)
+
+        XCTAssertEqual(AgentController.observerMessage(for: .foreground)?.kind, .foregroundDaemon)
+        XCTAssertEqual(AgentController.observerMessage(for: .indeterminate)?.kind, .indeterminate)
+    }
+
     // MARK: - Start affordance
 
     func testStartAffordanceOnlyWhenInstalledAndUnreachable() {

@@ -17,37 +17,10 @@ struct AgentInstallRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Toggle("Start runnyd at login", isOn: toggleBinding)
-                .disabled(!canToggle)
-            if let detail {
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(tint)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if agent.installState == .requiresApproval {
-                Button("Open Login Items…") { SMAppService.openSystemSettingsLoginItems() }
-                    .controlSize(.small)
-            }
-            if let reconcile = reconcileWarning {
-                Label(reconcile, systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-                if canRepair {
-                    Button("Repair…") { confirmingRepair = true }
-                        .controlSize(.small)
-                }
-                if let repairError = agent.repairError {
-                    Text(repairError)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
+            ownershipAwareContent
         }
         .padding(.vertical, 2)
+        .task { await agent.refreshOwnership() }
         .confirmationDialog(
             "Install the runnyd login agent?",
             isPresented: $confirmingInstall,
@@ -95,6 +68,85 @@ struct AgentInstallRow: View {
             Text("A runnyd agent is registered from an unexpected location. Repair re-registers "
                 + "Runny's bundled daemon under the launchd agent “\(SMAppServiceRegistrar.agentLabel)”, "
                 + "replacing it. If another tool (e.g. Homebrew) manages runnyd, cancel and remove that first.")
+        }
+    }
+
+    /// The Daemon row content, gated on the ownership verdict: "Checking…" until a
+    /// gather runs, then either the observer banner (a foreign/foreground/
+    /// indeterminate owner — install is replaced by guidance naming the channel) or
+    /// the normal install/toggle section (the daemon is the app's to manage).
+    @ViewBuilder private var ownershipAwareContent: some View {
+        if !agent.ownershipChecked {
+            Label("Checking who manages runnyd…", systemImage: "hourglass")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else if let hint = AgentController.observerMessage(for: agent.ownership) {
+            observerBanner(hint)
+        } else {
+            installSection
+        }
+    }
+
+    /// The install/toggle affordance — shown only when the daemon is the app's to
+    /// manage (unmanaged or self-managed). A foreign owner gets the banner instead.
+    @ViewBuilder private var installSection: some View {
+        Toggle("Start runnyd at login", isOn: toggleBinding)
+            .disabled(!canToggle)
+        if let detail {
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(tint)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if agent.installState == .requiresApproval {
+            Button("Open Login Items…") { SMAppService.openSystemSettingsLoginItems() }
+                .controlSize(.small)
+        }
+        if let reconcile = reconcileWarning {
+            Label(reconcile, systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            if canRepair {
+                Button("Repair…") { confirmingRepair = true }
+                    .controlSize(.small)
+            }
+            if let repairError = agent.repairError {
+                Text(repairError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// The observer banner: names the managing channel and the operator's next step,
+    /// in place of the install toggle. Icon/tint read the verdict's `kind`, never
+    /// the prose.
+    @ViewBuilder private func observerBanner(_ hint: ObserverHint) -> some View {
+        Label {
+            Text(hint.message)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        } icon: {
+            Image(systemName: bannerIcon(hint.kind))
+        }
+        .font(.caption)
+        .foregroundStyle(bannerTint(hint.kind))
+    }
+
+    private func bannerIcon(_ kind: ObserverHint.Kind) -> String {
+        switch kind {
+        case .managedByHomebrew, .managedManually: "info.circle"
+        case .foregroundDaemon, .indeterminate: "exclamationmark.triangle"
+        }
+    }
+
+    private func bannerTint(_ kind: ObserverHint.Kind) -> Color {
+        switch kind {
+        case .managedByHomebrew, .managedManually: .secondary
+        case .foregroundDaemon, .indeterminate: .orange
         }
     }
 

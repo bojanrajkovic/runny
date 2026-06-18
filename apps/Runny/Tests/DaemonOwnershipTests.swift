@@ -89,6 +89,31 @@ final class DaemonOwnershipTests: XCTestCase {
         )
     }
 
+    func testRequiresApprovalWithRegisteredCanonicalDefers() {
+        // Our agent is pending approval (not necessarily bootstrapped) AND the canonical
+        // label is registered — ambiguous (ours-pending vs a foreign manual one). Defer
+        // rather than expose app-owned teardown that could stop a foreign daemon.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .requiresApproval, canonicalProbe: .registered)),
+            .indeterminate
+        )
+        // Without a registered canonical label it stays the approval CTA.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .requiresApproval)),
+            .awaitingApproval
+        )
+    }
+
+    func testUnknownSelfStatusFailsClosed() {
+        // An unrecognized future SMAppService status maps to .registrationFailed — a
+        // determination FAILURE, not a confirmed not-installed. Defer (never install)
+        // rather than treat unknown registration state as install permission.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .registrationFailed(reason: "x"))),
+            .indeterminate
+        )
+    }
+
     func testPositiveBrewOverridesSelfOwnership() {
         // When our agent is enabled AND a brew service is registered, that is a real
         // two-manager conflict — surface the brew daemon, never hide it as selfManaged.

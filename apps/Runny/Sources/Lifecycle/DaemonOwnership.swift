@@ -84,9 +84,21 @@ extension DaemonOwnership {
         //      `.enabled`), so a wedged probe can't flip us to `indeterminate` and
         //      block managing/starting our own daemon.
         switch inputs.selfState {
-        case .installed: return .selfManaged
-        case .requiresApproval: return .awaitingApproval
-        case .notInstalled, .notFound, .registrationFailed: break
+        case .installed:
+            return .selfManaged
+        case .requiresApproval:
+            // Our registration is pending approval (not necessarily bootstrapped), so a
+            // bootstrapped canonical label is ambiguous — ours-pending vs a foreign
+            // manual one. Defer rather than expose app-owned teardown, since uninstall
+            // bootouts the shared label and could stop a foreign daemon.
+            return inputs.canonicalProbe == .registered ? .indeterminate : .awaitingApproval
+        case .registrationFailed:
+            // An unrecognized future SMAppService status is a determination FAILURE, not
+            // a confirmed not-installed — fail closed so an unknown registration state
+            // never becomes install permission.
+            return .indeterminate
+        case .notInstalled, .notFound:
+            break
         }
         // 5. The canonical label is registered but not ours — a manual installer.
         if inputs.canonicalProbe == .registered { return .foreignManual }

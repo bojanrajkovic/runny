@@ -58,26 +58,40 @@ struct AgentInstallRow: View {
             isPresented: $confirmingRepair,
             titleVisibility: .visible
         ) {
-            Button("Repair", role: store.liveGuestSlots.isEmpty ? nil : .destructive) {
+            Button("Repair", role: repairNeedsAbandonWarning ? .destructive : nil) {
                 Task { await agent.repair() }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
             // Repair briefly unregisters the agent, which can evict a running daemon on
-            // some macOS versions — so when a job is live this carries the same abandon
-            // warning uninstall does (informed consent IS the live-guest safety). The
-            // spawn gate + observer banner already keep a foreign daemon out of this
-            // path, so it is only ever the app's own stale agent here.
-            if store.liveGuestSlots.isEmpty {
+            // some macOS versions — so it carries the same abandon warning uninstall does
+            // whenever a job may be live, INCLUDING the disconnected-unknown case (an
+            // empty slot list while the daemon isn't connected is "can't prove nothing is
+            // running"). The spawn gate + observer banner keep a foreign daemon out of
+            // this path, so it is only ever the app's own stale agent here.
+            if !repairNeedsAbandonWarning {
                 Text("A runnyd agent is registered from an unexpected location. Repair re-registers "
                     + "Runny's bundled daemon under the launchd agent “\(SMAppServiceRegistrar.agentLabel)”, "
                     + "briefly removing and re-adding it to re-point it at this app.")
+            } else if store.liveGuestSlots.isEmpty {
+                Text("Repair briefly removes and re-adds the login agent. Runny can't confirm whether a "
+                    + "job is running because the daemon isn't connected, so this may abandon a running "
+                    + "job or a debug-held guest.")
             } else {
                 Text("Repair briefly removes and re-adds the login agent to re-point it. A job is "
                     + "running on \(abandonedSlotsText) — removing the agent may stop runnyd and abandon "
                     + "that work, which will not finish, and a debug-held guest is destroyed.")
             }
         }
+    }
+
+    /// Repair unregisters the agent, which can evict a running daemon — so it warns
+    /// (and goes destructive) whenever uninstall would: a live job, OR a disconnected
+    /// daemon whose guest state can't be proven empty. The same connection-aware check.
+    private var repairNeedsAbandonWarning: Bool {
+        DaemonStore.uninstallNeedsConfirmation(
+            connected: store.connection == .connected, liveGuestSlots: store.liveGuestSlots
+        )
     }
 
     /// The Daemon row content, gated on the ownership verdict: "Checking…" until a

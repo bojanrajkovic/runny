@@ -23,12 +23,21 @@ struct DaemonStartAffordance: View {
             case .none:
                 EmptyView()
             case .approval:
-                AffordanceRow(
-                    systemImage: icon,
-                    text: "runnyd is installed but needs approval in Login Items.",
-                    tint: .orange
-                ) {
-                    Button("Approve…") { SMAppService.openSystemSettingsLoginItems() }
+                // Approving launches the RunAtLoad agent from System Settings — OUTSIDE
+                // the spawn gate — so only prompt when ownership is safely
+                // awaitingApproval. A foreign/indeterminate owner means approving would
+                // start a competing daemon; the Settings observer banner surfaces that,
+                // and this prompt suppresses itself rather than inviting the conflict.
+                if agent.ownership == .awaitingApproval {
+                    AffordanceRow(
+                        systemImage: icon,
+                        text: "runnyd is installed but needs approval in Login Items.",
+                        tint: .orange
+                    ) {
+                        Button("Approve…") { SMAppService.openSystemSettingsLoginItems() }
+                    }
+                } else {
+                    EmptyView()
                 }
             case .start:
                 startRow

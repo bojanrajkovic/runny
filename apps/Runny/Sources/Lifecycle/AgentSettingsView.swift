@@ -105,6 +105,17 @@ struct AgentInstallRow: View {
                 .foregroundStyle(.secondary)
         } else if let hint = AgentController.observerMessage(for: agent.ownership) {
             observerBanner(hint)
+            if agent.ownership == .foreignBrew, agent.installState == .installed {
+                // Two-manager collision: Homebrew AND our own agent are both installed,
+                // so the banner's "restart brew" alone leaves the competing RunAtLoad app
+                // agent racing the same instance lock. Offer an in-app route to remove it.
+                Text("Runny's own agent is also installed and competing — remove it in Login Items.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Open Login Items…") { SMAppService.openSystemSettingsLoginItems() }
+                    .controlSize(.small)
+            }
         } else {
             installSection
         }

@@ -10,6 +10,8 @@ import (
 	"unicode/utf8"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
@@ -681,5 +683,121 @@ func TestRecycleGuardsDebugAndJob(t *testing.T) {
 	}
 	if fc.recycled.GetCancelRunningJob() {
 		t.Error("a forced recycle with unreadable status must not blindly cancel a job")
+	}
+}
+
+// shouldHint is the decision: only a transport/dial failure (the daemon never
+// answered this invocation) earns the hint. codes.Unavailable is overloaded — a
+// LIVE daemon also returns it for application conditions ("slot is not accepting
+// commands"), and a stream that broke after connecting surfaces it too — so an
+// Unavailable over a daemon that answered (a Ready conn, OR a stream that
+// received a record; both fold into daemonAnswered) must NOT be hinted. A
+// non-Unavailable error never is.
+func TestShouldHint(t *testing.T) {
+	unavail := status.Error(codes.Unavailable, "x")
+	if !shouldHint(unavail, false) {
+		t.Error("a transport-time Unavailable (daemon never answered) must be hinted")
+	}
+	if shouldHint(unavail, true) {
+		t.Error("an Unavailable after the daemon answered (app-level, or mid-stream) must NOT be hinted")
+	}
+	if shouldHint(status.Error(codes.FailedPrecondition, "x"), false) {
+		t.Error("a non-Unavailable error must never be hinted")
+	}
+	if shouldHint(nil, false) {
+		t.Error("nil must never be hinted")
+	}
+}
+
+// connHint is the wording layer (shouldHint having decided to hint): a missing
+// socket raises the different-home possibility; a present-but-silent one says
+// the daemon isn't answering. It stays total — a non-Unavailable or nil error
+// passes through unchanged.
+func TestConnHintNamesSocketAndHomeWhenSocketAbsent(t *testing.T) {
+	base := status.Error(codes.Unavailable, `connection error: dial unix /home/x/.runny/runnyd.sock: connect: no such file or directory`)
+	got := connHint(base, "/home/x/.runny/runnyd.sock", false)
+	if got == nil {
+		t.Fatal("expected a wrapped error, got nil")
+	}
+	msg := got.Error()
+	if !strings.Contains(msg, "/home/x/.runny/runnyd.sock") {
+		t.Errorf("hint must name the resolved socket path; got: %s", msg)
+	}
+	if !strings.Contains(msg, "different home") {
+		t.Errorf("missing-socket hint must raise the different-home possibility; got: %s", msg)
+	}
+	if !errors.Is(got, base) {
+		t.Error("connHint must wrap the original error, not replace it")
+	}
+}
+
+func TestConnHintSaysNotAnsweringWhenSocketPresent(t *testing.T) {
+	base := status.Error(codes.Unavailable, "connection refused")
+	msg := connHint(base, "/home/x/.runny/runnyd.sock", true).Error()
+	if !strings.Contains(msg, "isn't answering") {
+		t.Errorf("present-socket hint must say the daemon isn't answering; got: %s", msg)
+	}
+	if strings.Contains(msg, "different home") {
+		t.Errorf("a present socket rules out a home mismatch; got: %s", msg)
+	}
+}
+
+func TestConnHintPassesThroughNonUnavailable(t *testing.T) {
+	refusal := status.Error(codes.FailedPrecondition, "2 check(s) failed")
+	if got := connHint(refusal, "/x", false); got.Error() != refusal.Error() {
+		t.Errorf("a non-Unavailable error must pass through unchanged; got: %s", got.Error())
+	}
+	if got := connHint(nil, "/x", false); got != nil {
+		t.Errorf("nil must pass through as nil; got: %v", got)
+	}
+}
+
+// status mirrors the app's grant card for the headless operator: a DENIED grant
+// (runnyd can't reach the guest subnet) is loud, UNKNOWN is a proactive note,
+// and the healthy/absent states stay quiet so routine status output isn't
+// cluttered.
+func TestLocalNetworkNote(t *testing.T) {
+	if s := localNetworkNote(runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_DENIED); !strings.Contains(s, "DENIED") {
+		t.Errorf("DENIED note = %q, want it to flag the denial", s)
+	}
+	if s := localNetworkNote(runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNKNOWN); s == "" {
+		t.Error("UNKNOWN should surface a proactive note")
+	} else if strings.Contains(s, "no guest has booted") {
+		// UNKNOWN also fires when a vmnet interface IS up but the gateway probe
+		// times out — asserting "no guest has booted" would misdirect an operator
+		// chasing a live network problem. The note must not claim a specific cause.
+		t.Errorf("UNKNOWN note must not assert a specific cause; got %q", s)
+	}
+	if s := localNetworkNote(runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_REACHABLE); s != "" {
+		t.Errorf("REACHABLE should be quiet; got %q", s)
+	}
+	if s := localNetworkNote(runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNSPECIFIED); s != "" {
+		t.Errorf("UNSPECIFIED (old/non-darwin daemon) should be quiet; got %q", s)
+	}
+}
+
+func TestRenderStatusShowsDeniedLocalNetwork(t *testing.T) {
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	c.renderStatus(&runnyv1.GetStatusResponse{
+		Version:           "test",
+		DaemonStarted:     timestamppb.New(time.Now()),
+		LocalNetworkGrant: runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_DENIED,
+	})
+	if !strings.Contains(buf.String(), "DENIED") {
+		t.Errorf("status did not surface a denied Local Network grant:\n%s", buf.String())
+	}
+}
+
+func TestRenderStatusQuietWhenLocalNetworkReachable(t *testing.T) {
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	c.renderStatus(&runnyv1.GetStatusResponse{
+		Version:           "test",
+		DaemonStarted:     timestamppb.New(time.Now()),
+		LocalNetworkGrant: runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_REACHABLE,
+	})
+	if strings.Contains(strings.ToLower(buf.String()), "local network") {
+		t.Errorf("a reachable grant should add no line; got:\n%s", buf.String())
 	}
 }

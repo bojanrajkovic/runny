@@ -15,7 +15,10 @@ import (
 	"unicode/utf8"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -105,6 +108,23 @@ func run() error {
 	if args[0] != "version" {
 		c.warnSkew(ctx)
 	}
+	err = c.dispatch(ctx, args)
+	// codes.Unavailable is overloaded: a transport/dial failure (the daemon was
+	// never reached), a LIVE daemon's application response ("slot is not accepting
+	// commands"), and a stream that broke after connecting all use it. Only the
+	// first warrants the home-aware hint. The daemon "answered" if a stream
+	// received a record (c.connected — survives the connection leaving Ready on a
+	// mid-stream death) OR the connection is currently Ready (the one-shot
+	// app-level case, daemon alive). Otherwise the bare error stands.
+	if shouldHint(err, c.connected || conn.GetState() == connectivity.Ready) {
+		return connHint(err, dir.SocketPath(), socketFileExists(dir.SocketPath()))
+	}
+	return err
+}
+
+// dispatch runs a single runnyctl command. args[0] is the command (guaranteed
+// non-empty by run); the remainder are its arguments.
+func (c *ctl) dispatch(ctx context.Context, args []string) error {
 	switch cmd, rest := args[0], args[1:]; cmd {
 	case "version":
 		fmt.Fprintln(c.out, version)
@@ -191,6 +211,42 @@ func run() error {
 	}
 }
 
+// shouldHint reports whether a command's terminal error warrants the home-aware
+// connection hint: only a transport/dial failure (the daemon never answered this
+// invocation), never an application-level Unavailable or a post-connection
+// stream break. daemonAnswered folds the two "the daemon was reached" signals —
+// a stream that received at least one record, and a currently-Ready connection
+// (the one-shot app-level Unavailable case, daemon still alive). A daemon death
+// mid-stream is excluded by the stream signal, since gRPC moves the connection
+// out of Ready before Recv surfaces the error.
+func shouldHint(err error, daemonAnswered bool) bool {
+	return !daemonAnswered && status.Code(err) == codes.Unavailable
+}
+
+// connHint augments a transport/dial-time gRPC Unavailable with a home-aware
+// hint naming the resolved socket, giving runnyctl the same diagnostic the app's
+// connection card shows. socketExists distinguishes a missing socket (daemon
+// down, or serving a different home) from a present-but-silent one (daemon hung
+// or still starting). It assumes the caller has already decided to hint via
+// shouldHint; a non-Unavailable or nil error still passes through unchanged so
+// the function is total.
+func connHint(err error, socketPath string, socketExists bool) error {
+	if status.Code(err) != codes.Unavailable {
+		return err
+	}
+	if socketExists {
+		return fmt.Errorf("%w\n  hint: the socket at %s isn't answering — is runnyd hung or still starting?", err, socketPath)
+	}
+	return fmt.Errorf("%w\n  hint: no socket at %s — is runnyd running, or serving a different home?", err, socketPath)
+}
+
+// socketFileExists reports whether the daemon socket is present on disk. It only
+// steers connHint's wording, so a stat race is harmless either way.
+func socketFileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 func slotArg(fs *flag.FlagSet, rest []string) (string, error) {
 	// Accept both "cmd SLOT -flag" and "cmd -flag SLOT" (Go's flag package
 	// stops at the first non-flag arg, so slot-first needs special-casing).
@@ -216,6 +272,11 @@ type ctl struct {
 	json   bool
 	out    io.Writer
 	err    io.Writer
+	// connected latches true once a streaming command has received at least one
+	// record — proof the daemon answered, so a later mid-stream Unavailable keeps
+	// the bare error instead of the connection hint. A current-Ready check can't
+	// see this: gRPC leaves Ready before the stream's terminal error surfaces.
+	connected bool
 }
 
 func (c *ctl) emit(m proto.Message) error {
@@ -248,9 +309,32 @@ const (
 	noteColWidth = 60
 )
 
+// localNetworkNote returns an operator-facing line for the daemon's live Local
+// Network (TCC) grant, or "" when no affordance is warranted. It mirrors the
+// app's grant card for the headless channel: DENIED (runnyd can't reach the
+// guest subnet) is loud, UNKNOWN is a proactive heads-up that the grant is
+// pending confirmation, and REACHABLE / UNSPECIFIED (old or non-darwin daemon)
+// stay quiet so routine status output isn't cluttered.
+func localNetworkNote(g runnyv1.LocalNetworkGrant) string {
+	switch g {
+	case runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_DENIED:
+		return "local network: DENIED — runnyd can't reach the guest subnet; grant it Local Network access (see docs/deploy.md)"
+	case runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNKNOWN:
+		// UNKNOWN spans two causes — no vmnet interface yet (no guest has booted)
+		// and a vmnet that is up but whose gateway probe timed out — so the note
+		// states the consequence, not a guessed cause.
+		return "local network: unconfirmed — runnyd can't yet confirm it reaches the guest subnet; if guests fail to connect, grant Local Network access (see docs/deploy.md)"
+	default:
+		return ""
+	}
+}
+
 func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 	fmt.Fprintf(c.out, "runnyd %s, up %s\n\n", resp.GetVersion(),
 		durString(time.Since(resp.GetDaemonStarted().AsTime())))
+	if note := localNetworkNote(resp.GetLocalNetworkGrant()); note != "" {
+		fmt.Fprintf(c.out, "%s\n\n", note)
+	}
 	slots := append([]*runnyv1.SlotStatus{}, resp.GetSlots()...)
 	sort.Slice(slots, func(i, j int) bool { return slots[i].GetSlot() < slots[j].GetSlot() })
 	// The drain banner: why every slot is pausing/recycling, and which
@@ -357,6 +441,7 @@ func (c *ctl) watch(ctx context.Context) error {
 		if err != nil {
 			return streamErr(err)
 		}
+		c.connected = true // the daemon answered; a later mid-stream break keeps the bare error
 		if c.json {
 			if err := c.emit(resp); err != nil {
 				return err
@@ -380,6 +465,7 @@ func (c *ctl) logs(ctx context.Context, replay int, follow, daemon bool, slot st
 		if err != nil {
 			return streamErr(err)
 		}
+		c.connected = true // the daemon answered; a later mid-stream break keeps the bare error
 		if c.json {
 			if err := c.emit(line); err != nil {
 				return err

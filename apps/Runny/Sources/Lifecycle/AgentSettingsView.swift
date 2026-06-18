@@ -13,6 +13,7 @@ struct AgentInstallRow: View {
     @Environment(DaemonStore.self) private var store
     @State private var confirmingInstall = false
     @State private var confirmingUninstall = false
+    @State private var confirmingRepair = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -34,6 +35,16 @@ struct AgentInstallRow: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
+                if canRepair {
+                    Button("Repair…") { confirmingRepair = true }
+                        .controlSize(.small)
+                }
+                if let repairError = agent.repairError {
+                    Text(repairError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
         .padding(.vertical, 2)
@@ -69,6 +80,22 @@ struct AgentInstallRow: View {
                     + "debug-held guest is destroyed.")
             }
         }
+        .confirmationDialog(
+            "Repair the runnyd login agent?",
+            isPresented: $confirmingRepair,
+            titleVisibility: .visible
+        ) {
+            Button("Repair") { Task { await agent.repair() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            // The same foreign-manager guard as install: re-registering displaces
+            // whatever holds the label, and until detect-and-defer lands the spawn
+            // gate is .allow, so this consent is the guard against stomping a
+            // brew-managed daemon registered under the same label.
+            Text("A runnyd agent is registered from an unexpected location. Repair re-registers "
+                + "Runny's bundled daemon under the launchd agent “\(SMAppServiceRegistrar.agentLabel)”, "
+                + "replacing it. If another tool (e.g. Homebrew) manages runnyd, cancel and remove that first.")
+        }
     }
 
     /// ON when the agent is registered (installed, or registered-but-awaiting Login
@@ -103,9 +130,17 @@ struct AgentInstallRow: View {
         switch agent.reconcileState {
         case .notChecked, .ok: nil
         case let .foreign(path): "A runnyd agent is registered from an unexpected location (\(path)). "
-            + "Reinstall from /Applications to repoint it."
+            + (canRepair ? "Repair re-registers it from /Applications." : "Reinstall from /Applications to repoint it.")
         case .undetermined: "Couldn't determine the registered runnyd agent's location."
         }
+    }
+
+    /// The repair re-registers the canonical agent — only safe from an eligible
+    /// `/Applications` bundle. A non-canonical bundle gets move-to-/Applications
+    /// guidance instead (no button), so a repair can never install a second
+    /// non-canonical agent. See `AgentController.canRepair`.
+    private var canRepair: Bool {
+        AgentController.canRepair(reconcile: agent.reconcileState, eligibility: agent.eligibility)
     }
 
     /// Eligibility gates only install (turning on); an installed agent stays

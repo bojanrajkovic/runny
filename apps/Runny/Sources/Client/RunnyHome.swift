@@ -20,6 +20,34 @@ enum RunnyHome {
         FileManager.default.fileExists(atPath: socketPath)
     }
 
+    /// Creates the home directory if it is absent, owner-only (0700) to match
+    /// the daemon. The socket-appearance watcher opens this directory with
+    /// O_EVTONLY; on a fresh install — before the first daemon run — it does not
+    /// exist, so the watch would silently fail to arm and the app would wait out
+    /// a full reconnect backoff instead of retrying the instant the socket
+    /// appears. Idempotent: an existing directory is left untouched, including
+    /// its permissions (the daemon owns the home's contents and may have
+    /// tightened or relaxed it). Returns whether the home exists as a directory
+    /// afterward. The `url` parameter exists for tests; production passes the
+    /// fixed `directory`.
+    @discardableResult
+    static func ensureDirectory(_ url: URL = directory) -> Bool {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: url.path, isDirectory: &isDir) {
+            return isDir.boolValue
+        }
+        do {
+            try fm.createDirectory(
+                at: url, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
     /// Abbreviated for display ("~/.runny/runnyd.sock").
     static var displaySocketPath: String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path

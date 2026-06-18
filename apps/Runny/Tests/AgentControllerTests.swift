@@ -18,17 +18,29 @@ final class AgentControllerTests: XCTestCase {
         var bootoutOutcome: BootoutOutcome = .notLoaded
         var kickstartError: Error?
         var programResult: AgentProgram = .notRegistered
+        /// Consumed in order if non-empty (otherwise programResult), so a test can
+        /// script a stale-then-fresh read across a coalesced reconcile.
+        var programResults: [AgentProgram] = []
+        /// Invoked once, inside the first agentProgramPath read, before it returns —
+        /// the deterministic hook for "a concurrent trigger arrives mid-read".
+        var onProgramPath: (() async -> Void)?
         private(set) var registerCalls = 0
         private(set) var unregisterCalls = 0
         private(set) var bootoutCalls = 0
         private(set) var kickstartCalls = 0
+        private(set) var programCalls = 0
 
         func status() -> SMAppService.Status { nextStatus }
         func register() throws { registerCalls += 1; if let registerError { throw registerError } }
         func unregister() throws { unregisterCalls += 1; if let unregisterError { throw unregisterError } }
         func bootout() async -> BootoutOutcome { bootoutCalls += 1; return bootoutOutcome }
         func kickstart() async throws { kickstartCalls += 1; if let kickstartError { throw kickstartError } }
-        func agentProgramPath() async -> AgentProgram { programResult }
+        func agentProgramPath() async -> AgentProgram {
+            programCalls += 1
+            if let hook = onProgramPath { onProgramPath = nil; await hook() }
+            if !programResults.isEmpty { return programResults.removeFirst() }
+            return programResult
+        }
     }
 
     struct StubError: Error {}
@@ -48,6 +60,31 @@ final class AgentControllerTests: XCTestCase {
         let c = AgentController(registrar: mock)
         await c.install()
         XCTAssertEqual(c.installState, .requiresApproval)
+    }
+
+    // Re-approval-after-reinstall: uninstalling then reinstalling re-derives the
+    // approval state from status, so an agent macOS puts back in requiresApproval
+    // on reinstall re-surfaces the Login Items deep-link CTA (Settings' "Open
+    // Login Items…", the Start "Approve…" affordance) — it never gets stuck
+    // installed or notInstalled across the cycle. End-to-end guarantee for the
+    // approval-UX follow-up; the CTAs themselves gate on this state.
+    func testReinstallReSurfacesRequiresApproval() async {
+        let mock = MockRegistrar()
+        mock.nextStatus = .enabled
+        let c = AgentController(registrar: mock, eligibility: { .eligible })
+        await c.install()
+        XCTAssertEqual(c.installState, .installed)
+
+        mock.nextStatus = .notRegistered // uninstall returns the agent to notRegistered
+        await c.uninstall()
+        XCTAssertEqual(c.installState, .notInstalled)
+
+        mock.nextStatus = .requiresApproval // reinstall, but macOS now wants re-approval
+        await c.install()
+        XCTAssertEqual(
+            c.installState, .requiresApproval,
+            "a reinstalled agent pending re-approval must re-surface the Login Items CTA"
+        )
     }
 
     func testRegisterThrowBecomesRegistrationFailedNeverSilentNotInstalled() async {
@@ -262,5 +299,95 @@ final class AgentControllerTests: XCTestCase {
         guard case .failed = AgentController.classifyBootout(exitCode: 1, stderr: "permission denied") else {
             return XCTFail("a real launchctl error must classify as failed")
         }
+    }
+
+    // MARK: - Reconcile repair
+
+    func testCanRepairOnlyWhenForeignAndEligible() {
+        XCTAssertTrue(AgentController.canRepair(reconcile: .foreign(path: "/x"), eligibility: .eligible))
+        // A non-canonical bundle can't repair by re-registering — it would install
+        // ANOTHER non-canonical agent; the surface shows move-to-/Applications guidance.
+        XCTAssertFalse(AgentController.canRepair(reconcile: .foreign(path: "/x"), eligibility: .translocated))
+        XCTAssertFalse(
+            AgentController.canRepair(reconcile: .foreign(path: "/x"), eligibility: .notInApplications(path: "/y"))
+        )
+        // Nothing to repair unless the verdict is foreign.
+        XCTAssertFalse(AgentController.canRepair(reconcile: .ok, eligibility: .eligible))
+        XCTAssertFalse(AgentController.canRepair(reconcile: .notChecked, eligibility: .eligible))
+        XCTAssertFalse(AgentController.canRepair(reconcile: .undetermined, eligibility: .eligible))
+    }
+
+    func testRepairReRegistersThenReReconcilesToSelfVerify() async {
+        let mock = MockRegistrar()
+        mock.programResult = .program("/foreign/Runny.app/Contents/MacOS/runnyd")
+        mock.nextStatus = .enabled
+        let c = AgentController(registrar: mock, eligibility: { .eligible })
+        await c.runReconcile()
+        XCTAssertEqual(c.reconcileState, .foreign(path: "/foreign/Runny.app/Contents/MacOS/runnyd"))
+
+        // The re-register re-points the job; simulate the now-canonical program path.
+        mock.programResult = .program("/Applications/Runny.app/Contents/MacOS/runnyd")
+        await c.repair()
+        XCTAssertEqual(mock.registerCalls, 1, "repair must re-register through the gate")
+        XCTAssertEqual(c.reconcileState, .ok, "repair re-runs reconcile to confirm the re-point took")
+        XCTAssertEqual(c.installState, .installed)
+    }
+
+    func testRepairThatDoesNotTakeStaysForeignNotFalseOk() async {
+        // A foreign MANAGER still owning the label (the deferred detect-and-defer
+        // case): re-register doesn't re-point, so the re-run reconcile must keep
+        // showing foreign — never a false all-clear off the register call's return.
+        let mock = MockRegistrar()
+        mock.programResult = .program("/opt/homebrew/Cellar/runny/bin/runnyd")
+        mock.nextStatus = .enabled
+        let c = AgentController(registrar: mock, eligibility: { .eligible })
+        await c.repair()
+        XCTAssertEqual(c.reconcileState, .foreign(path: "/opt/homebrew/Cellar/runny/bin/runnyd"))
+    }
+
+    func testRepairDenyGateDoesNotReRegisterAndIsSurfaced() async {
+        let mock = MockRegistrar()
+        mock.nextStatus = .enabled // the existing (foreign) agent is still registered
+        let c = AgentController(
+            registrar: mock, spawnGate: { .deny(reason: "another manager owns it") }, eligibility: { .eligible }
+        )
+        c.refresh() // installed
+        await c.repair()
+        XCTAssertEqual(mock.registerCalls, 0, "a denied gate must NOT re-register")
+        XCTAssertNotNil(c.repairError, "a denied repair must be surfaced in the row, not silently no-op")
+        XCTAssertEqual(c.installState, .installed, "a denied repair must not change the install state")
+    }
+
+    func testRepairFailureKeepsInstalledStateAndSurfacesError() async {
+        let mock = MockRegistrar()
+        mock.nextStatus = .enabled // a failed re-register does NOT unregister the existing agent
+        mock.registerError = StubError()
+        let c = AgentController(registrar: mock, eligibility: { .eligible })
+        c.refresh() // installed
+        await c.repair()
+        // installState stays derived from status, so the toggle keeps the uninstall
+        // path; the failure is surfaced separately rather than masquerading as an
+        // install failure that flips the toggle off.
+        XCTAssertEqual(c.installState, .installed, "a failed repair must not drop the uninstall path")
+        XCTAssertNotNil(c.repairError, "a failed repair must surface its error")
+    }
+
+    // The repair self-verify must not be dropped by the reconcile in-flight guard:
+    // if another surface's runReconcile() is mid-read when a fresh trigger arrives,
+    // the in-flight run coalesces it and re-reads against the latest registration,
+    // rather than publishing the stale pre-repair verdict.
+    func testReconcileCoalescesAConcurrentTrigger() async {
+        let mock = MockRegistrar()
+        let c = AgentController(registrar: mock)
+        mock.programResults = [
+            .program("/foreign/Runny.app/Contents/MacOS/runnyd"),
+            .program("/Applications/Runny.app/Contents/MacOS/runnyd"),
+        ]
+        // A second reconcile is triggered WHILE the first is mid-read — the exact
+        // window that would otherwise drop the verification.
+        mock.onProgramPath = { await c.runReconcile() }
+        await c.runReconcile()
+        XCTAssertEqual(mock.programCalls, 2, "a concurrent trigger must coalesce into a fresh read, not be dropped")
+        XCTAssertEqual(c.reconcileState, .ok, "the final verdict must reflect the latest read, not the stale first one")
     }
 }

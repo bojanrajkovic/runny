@@ -252,21 +252,81 @@ final class AgentController {
 
     /// The last reconcile verdict — whether the registered agent points where it
     /// should. Defaults to `.notChecked` (not canonical), so a surface that gates on
-    /// `.ok` shows nothing until reconcile actually runs. Surface-only in P4 (repair
-    /// is a follow-up).
+    /// `.ok` shows nothing until reconcile actually runs. A `.foreign` verdict is
+    /// repairable in place from a canonical bundle via `repair()`.
     private(set) var reconcileState: AgentReconcile = .notChecked
     private var reconcileInFlight = false
+    private var reconcilePending = false
+
+    /// A repair-specific failure or denial message, surfaced in the reconcile
+    /// warning row. Distinct from `installState`: a failed or denied repair leaves
+    /// the existing (foreign) agent registered, so the failure must NOT masquerade
+    /// as an install failure that flips the toggle off and drops the uninstall path.
+    private(set) var repairError: String?
 
     /// Reconcile-on-launch: read the registered agent's program path and compare it
     /// to the canonical install location. Surfaces a foreign/stale-path agent, and
-    /// an introspection that times out as "couldn't determine" — never a spin. The
-    /// in-flight guard keeps concurrent surface appears from stacking launchctl
-    /// subprocesses that race on the result.
+    /// an introspection that times out as "couldn't determine" — never a spin.
+    ///
+    /// Coalesces rather than drops: a trigger arriving while a read is in flight
+    /// (another surface appearing, or repair's self-verify) sets `reconcilePending`
+    /// so the active run loops once more and publishes a verdict against the LATEST
+    /// registration. The plain guard would let a stale pre-repair read win and
+    /// leave a successful repair reported as foreign until the next appear; it also
+    /// still prevents two launchctl subprocesses from racing concurrently.
     func runReconcile() async {
-        guard !reconcileInFlight else { return }
+        if reconcileInFlight {
+            reconcilePending = true
+            return
+        }
         reconcileInFlight = true
         defer { reconcileInFlight = false }
-        reconcileState = await Self.reconcileVerdict(registrar.agentProgramPath())
+        repeat {
+            reconcilePending = false
+            reconcileState = await Self.reconcileVerdict(registrar.agentProgramPath())
+        } while reconcilePending
+    }
+
+    /// Repair a foreign/stale-path agent by re-registering the canonical agent,
+    /// which re-points the SMAppService job's bundle-relative program to this
+    /// bundle, then re-reconciling to self-verify the re-point actually took.
+    /// Funnels through the spawn chokepoint exactly like `install()`. Only
+    /// meaningful from a canonical-eligible bundle — re-registering elsewhere would
+    /// install ANOTHER non-canonical agent — so the surface gates the action on
+    /// `canRepair`, the same way it gates install on `canToggle`, AND raises a
+    /// confirmation that warns about displacing a foreign manager (the spawn gate
+    /// is `.allow` until detect-and-defer lands, so the consent is the guard). If
+    /// the re-point does not take (a foreign MANAGER still owns the label), the
+    /// re-run reconcile honestly keeps showing foreign rather than a false
+    /// all-clear off the register return.
+    ///
+    /// Known limitation, deliberately accepted: `register()` on an
+    /// already-registered agent is NOT a verified re-point — on some macOS
+    /// versions it returns already-registered rather than updating the program
+    /// path, which surfaces here as a loud `repairError` (the `.failed` arm
+    /// preserves the install state). The robust path — a verified
+    /// `unregister`→`register` replace plus a real ownership verdict in the spawn
+    /// gate — lands with detect-and-defer, which replaces this method wholesale.
+    /// Shipping the best-effort version is safe because no release falls between
+    /// here and that work, and it fails loudly rather than silently.
+    func repair() async {
+        repairError = nil
+        switch await attemptSpawn("repair", { try self.registrar.register() }) {
+        case .ran:
+            refresh()
+            await runReconcile()
+        case .denied:
+            // The gate blocked the re-register. installState/reconcileState are
+            // unchanged, so without surfacing this the warning + button would just
+            // silently persist — surface the refusal loudly in the row.
+            repairError = spawnRefusal
+        case let .failed(error):
+            // A re-register throw does NOT unregister the existing (foreign) agent,
+            // so keep installState derived from status — the uninstall path must
+            // survive — and surface the repair error separately.
+            refresh()
+            repairError = "repair failed: \(error.localizedDescription)"
+        }
     }
 
     // MARK: - Teardown (NOT spawn-triggering — no gate)
@@ -275,6 +335,13 @@ final class AgentController {
     /// bootout's "No such process" is the expected success, since unregister may
     /// already have removed the job). A unregister throw or a real bootout failure
     /// is surfaced loud, never swallowed.
+    ///
+    /// The explicit `bootout` is kept deliberately: it is not verified across the
+    /// supported macOS versions whether `unregister()` alone evicts the *running*
+    /// job, and dropping it on an OS that still needs it would silently leave the
+    /// daemon running after an uninstall — the silent-failure this project refuses.
+    /// Drop the explicit bootout only once it is proven redundant on every
+    /// supported OS.
     func uninstall() async {
         do {
             try registrar.unregister()
@@ -357,6 +424,16 @@ extension AgentController {
         case let .program(path):
             LaunchAgentStatus.isCanonicalAgentProgram(path) ? .ok : .foreign(path: path)
         }
+    }
+
+    /// Whether to offer the in-app repair for a foreign/stale-path agent. Only a
+    /// canonical-eligible bundle can repair by re-registering — from a translocated
+    /// or non-`/Applications` bundle, re-registering would install ANOTHER
+    /// non-canonical agent, so the surface shows move-to-`/Applications` guidance
+    /// rather than a repair button. Pure → unit-tested.
+    nonisolated static func canRepair(reconcile: AgentReconcile, eligibility: LaunchAgentStatus.Eligibility) -> Bool {
+        if case .foreign = reconcile, eligibility == .eligible { return true }
+        return false
     }
 
     /// Pure: pull the resolved program path out of `launchctl print` output, which

@@ -15,7 +15,9 @@ import (
 	"unicode/utf8"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -105,6 +107,20 @@ func run() error {
 	if args[0] != "version" {
 		c.warnSkew(ctx)
 	}
+	err = c.dispatch(ctx, args)
+	// A dead socket dials lazily and only fails on the opening RPC, surfacing as
+	// a bare gRPC Unavailable with no clue why. Augment it with a home-aware hint
+	// naming the resolved socket — the CLI analogue of the app's connection
+	// diagnostic. Non-connection errors and success pass through untouched.
+	if status.Code(err) == codes.Unavailable {
+		return connHint(err, dir.SocketPath(), socketFileExists(dir.SocketPath()))
+	}
+	return err
+}
+
+// dispatch runs a single runnyctl command. args[0] is the command (guaranteed
+// non-empty by run); the remainder are its arguments.
+func (c *ctl) dispatch(ctx context.Context, args []string) error {
 	switch cmd, rest := args[0], args[1:]; cmd {
 	case "version":
 		fmt.Fprintln(c.out, version)
@@ -189,6 +205,30 @@ func run() error {
 		flag.Usage()
 		return fmt.Errorf("unknown command %q", cmd)
 	}
+}
+
+// connHint augments a connection-time gRPC Unavailable with a home-aware hint
+// naming the resolved socket, giving runnyctl the same diagnostic the app's
+// connection card shows. socketExists distinguishes a missing socket (daemon
+// down, or serving a different home) from a present-but-silent one (daemon hung
+// or still starting). Errors that are not Unavailable — a daemon-side refusal,
+// a validation failure — and a nil error pass through unchanged, so the hint
+// never misleads.
+func connHint(err error, socketPath string, socketExists bool) error {
+	if status.Code(err) != codes.Unavailable {
+		return err
+	}
+	if socketExists {
+		return fmt.Errorf("%w\n  hint: the socket at %s isn't answering — is runnyd hung or still starting?", err, socketPath)
+	}
+	return fmt.Errorf("%w\n  hint: no socket at %s — is runnyd running, or serving a different home?", err, socketPath)
+}
+
+// socketFileExists reports whether the daemon socket is present on disk. It only
+// steers connHint's wording, so a stat race is harmless either way.
+func socketFileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func slotArg(fs *flag.FlagSet, rest []string) (string, error) {

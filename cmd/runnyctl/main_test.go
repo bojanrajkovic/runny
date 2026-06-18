@@ -10,6 +10,8 @@ import (
 	"unicode/utf8"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
@@ -681,5 +683,53 @@ func TestRecycleGuardsDebugAndJob(t *testing.T) {
 	}
 	if fc.recycled.GetCancelRunningJob() {
 		t.Error("a forced recycle with unreadable status must not blindly cancel a job")
+	}
+}
+
+// A dead socket first surfaces as a bare gRPC Unavailable on a command's
+// opening RPC. connHint augments it with a home-aware hint naming the resolved
+// socket — parity with the app's connection diagnostic — so the operator is
+// told *why*, not just handed the raw transport error.
+func TestConnHintNamesSocketAndHomeWhenSocketAbsent(t *testing.T) {
+	base := status.Error(codes.Unavailable, `connection error: dial unix /home/x/.runny/runnyd.sock: connect: no such file or directory`)
+	got := connHint(base, "/home/x/.runny/runnyd.sock", false)
+	if got == nil {
+		t.Fatal("expected a wrapped error, got nil")
+	}
+	msg := got.Error()
+	if !strings.Contains(msg, "/home/x/.runny/runnyd.sock") {
+		t.Errorf("hint must name the resolved socket path; got: %s", msg)
+	}
+	if !strings.Contains(msg, "different home") {
+		t.Errorf("missing-socket hint must raise the different-home possibility; got: %s", msg)
+	}
+	if !errors.Is(got, base) {
+		t.Error("connHint must wrap the original error, not replace it")
+	}
+}
+
+// Socket present but unreachable is a different story — the daemon is hung or
+// still starting, not absent. The hint must distinguish the two.
+func TestConnHintSaysNotAnsweringWhenSocketPresent(t *testing.T) {
+	base := status.Error(codes.Unavailable, "connection refused")
+	msg := connHint(base, "/home/x/.runny/runnyd.sock", true).Error()
+	if !strings.Contains(msg, "isn't answering") {
+		t.Errorf("present-socket hint must say the daemon isn't answering; got: %s", msg)
+	}
+	if strings.Contains(msg, "different home") {
+		t.Errorf("a present socket rules out a home mismatch; got: %s", msg)
+	}
+}
+
+// Only connection-time Unavailable earns the hint. A daemon-side refusal or
+// validation failure (and a nil error) must pass through untouched, or the
+// hint would mislead.
+func TestConnHintPassesThroughNonConnectionErrors(t *testing.T) {
+	refusal := status.Error(codes.FailedPrecondition, "2 check(s) failed")
+	if got := connHint(refusal, "/x", false); got.Error() != refusal.Error() {
+		t.Errorf("a non-Unavailable error must pass through unchanged; got: %s", got.Error())
+	}
+	if got := connHint(nil, "/x", false); got != nil {
+		t.Errorf("nil must pass through as nil; got: %v", got)
 	}
 }

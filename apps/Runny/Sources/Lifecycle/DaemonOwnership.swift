@@ -87,11 +87,13 @@ extension DaemonOwnership {
         case .installed:
             return .selfManaged
         case .requiresApproval:
-            // Our registration is pending approval (not necessarily bootstrapped), so a
-            // bootstrapped canonical label is ambiguous — ours-pending vs a foreign
-            // manual one. Defer rather than expose app-owned teardown, since uninstall
-            // bootouts the shared label and could stop a foreign daemon.
-            return inputs.canonicalProbe == .registered ? .indeterminate : .awaitingApproval
+            // Approving launches the RunAtLoad agent OUTSIDE the spawn gate (a System
+            // Settings action), so awaitingApproval is safe only when nothing else owns
+            // the daemon. A bootstrapped canonical label (ambiguous — ours-pending vs a
+            // foreign manual one) OR an occupied socket (a foreground daemon) means
+            // approving would create a competing manager — defer.
+            return (inputs.canonicalProbe == .registered || inputs.socketAnswers)
+                ? .indeterminate : .awaitingApproval
         case .registrationFailed:
             // An unrecognized future SMAppService status is a determination FAILURE, not
             // a confirmed not-installed — fail closed so an unknown registration state

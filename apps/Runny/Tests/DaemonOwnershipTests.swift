@@ -89,15 +89,21 @@ final class DaemonOwnershipTests: XCTestCase {
         )
     }
 
-    func testRequiresApprovalWithRegisteredCanonicalDefers() {
-        // Our agent is pending approval (not necessarily bootstrapped) AND the canonical
-        // label is registered — ambiguous (ours-pending vs a foreign manual one). Defer
-        // rather than expose app-owned teardown that could stop a foreign daemon.
+    func testRequiresApprovalDefersWhenAnythingElseOwnsTheDaemon() {
+        // Approving launches the RunAtLoad agent OUTSIDE the spawn gate (a System
+        // Settings action), so awaitingApproval is safe only when nothing else owns
+        // the daemon. A registered canonical label (ambiguous: ours-pending vs a
+        // foreign manual one) OR an occupied socket (a foreground daemon) means
+        // approving would create a competing manager — defer.
         XCTAssertEqual(
             DaemonOwnership.classify(inputs(selfState: .requiresApproval, canonicalProbe: .registered)),
             .indeterminate
         )
-        // Without a registered canonical label it stays the approval CTA.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .requiresApproval, socketAnswers: true)),
+            .indeterminate
+        )
+        // With nothing else present it stays the approval CTA.
         XCTAssertEqual(
             DaemonOwnership.classify(inputs(selfState: .requiresApproval)),
             .awaitingApproval

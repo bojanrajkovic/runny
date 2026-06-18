@@ -449,14 +449,25 @@ final class AgentController {
     /// also gates the button on `canRepair` (a canonical-eligible bundle only;
     /// re-registering elsewhere would install ANOTHER non-canonical agent).
     ///
+    /// The replace waits for the unregister to actually take — an SMAppService call
+    /// returning means launchd ACCEPTED the request, not that it finished — so the
+    /// re-register can't race a still-converging removal into an already-registered
+    /// no-op. Bounded: an unconfirmed removal aborts loud rather than registering over
+    /// the old agent. The surface raises the same live-guest abandon confirmation
+    /// `uninstall()` uses before calling this, since `unregister()` can evict a
+    /// running job on some macOS versions.
+    ///
     /// Failure is honest: if `register()` throws after the `unregister()` took, the
     /// agent is genuinely gone, so installState (derived from status) reflects that
     /// and the toggle offers reinstall — recoverable and loud, never a silent stale
     /// agent. A denied gate never unregisters, so the foreign agent stays intact.
-    func repair() async {
+    func repair(
+        within bound: Duration = AgentController.unregisterConfirmBound, poll: Duration = .milliseconds(100)
+    ) async {
         repairError = nil
         switch await attemptSpawn("repair", {
             try self.registrar.unregister()
+            try await self.awaitUnregistered(within: bound, poll: poll)
             try self.registrar.register()
         }) {
         case .ran:
@@ -468,11 +479,34 @@ final class AgentController {
             // leaving the warning + button silently persisting.
             repairError = spawnRefusal
         case let .failed(error):
-            // unregister or register threw; installState derives from status (gone if
-            // the unregister took and the register then failed), so the uninstall/
-            // reinstall path stays honest. Surface the error separately, never silently.
+            // unregister/register/the wait threw; installState derives from status
+            // (gone if the unregister took and the register then failed), so the
+            // uninstall/reinstall path stays honest. Surface the error, never silently.
             refresh()
             repairError = "repair failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// How long to wait for `unregister()` to be reflected in status before giving up
+    /// — a launchd removal is near-instant, so this is healthy-magnitude × margin.
+    static let unregisterConfirmBound: Duration = .seconds(5)
+
+    /// Poll the authoritative status until it confirms the agent is gone
+    /// (`.notRegistered`/`.notFound`), bounded. Throws on expiry so repair aborts loud
+    /// rather than re-registering over a still-registered agent.
+    private func awaitUnregistered(within bound: Duration, poll: Duration) async throws {
+        let deadline = ContinuousClock.now.advanced(by: bound)
+        while true {
+            switch registrar.status() {
+            case .notRegistered, .notFound: return
+            default: break
+            }
+            if ContinuousClock.now >= deadline {
+                throw LaunchctlFailure(
+                    message: "the existing agent did not unregister in time; aborted to avoid re-registering over it"
+                )
+            }
+            try await Task.sleep(for: poll)
         }
     }
 

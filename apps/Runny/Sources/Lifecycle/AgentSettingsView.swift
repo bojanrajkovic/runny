@@ -58,16 +58,25 @@ struct AgentInstallRow: View {
             isPresented: $confirmingRepair,
             titleVisibility: .visible
         ) {
-            Button("Repair") { Task { await agent.repair() } }
+            Button("Repair", role: store.liveGuestSlots.isEmpty ? nil : .destructive) {
+                Task { await agent.repair() }
+            }
             Button("Cancel", role: .cancel) {}
         } message: {
-            // The spawn gate now denies foreign/indeterminate owners and the observer
-            // banner replaces this section for them, so Repair is reached only for the
-            // app's own stale-path agent; the confirmation just notes the brief
-            // unregister→register re-point.
-            Text("A runnyd agent is registered from an unexpected location. Repair re-registers "
-                + "Runny's bundled daemon under the launchd agent “\(SMAppServiceRegistrar.agentLabel)”, "
-                + "briefly removing and re-adding it to re-point it at this app.")
+            // Repair briefly unregisters the agent, which can evict a running daemon on
+            // some macOS versions — so when a job is live this carries the same abandon
+            // warning uninstall does (informed consent IS the live-guest safety). The
+            // spawn gate + observer banner already keep a foreign daemon out of this
+            // path, so it is only ever the app's own stale agent here.
+            if store.liveGuestSlots.isEmpty {
+                Text("A runnyd agent is registered from an unexpected location. Repair re-registers "
+                    + "Runny's bundled daemon under the launchd agent “\(SMAppServiceRegistrar.agentLabel)”, "
+                    + "briefly removing and re-adding it to re-point it at this app.")
+            } else {
+                Text("Repair briefly removes and re-adds the login agent to re-point it. A job is "
+                    + "running on \(abandonedSlotsText) — removing the agent may stop runnyd and abandon "
+                    + "that work, which will not finish, and a debug-held guest is destroyed.")
+            }
         }
     }
 

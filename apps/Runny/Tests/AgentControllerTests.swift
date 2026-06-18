@@ -15,6 +15,14 @@ final class AgentControllerTests: XCTestCase {
         var nextStatus: SMAppService.Status = .notRegistered
         var registerError: Error?
         var unregisterError: Error?
+        /// When true, a successful `unregister()` does NOT flip status to
+        /// `.notRegistered` — models launchd not yet processing the removal, so
+        /// repair's bounded wait-for-removal is exercised.
+        var unregisterDoesNotConfirm = false
+        /// Set by `unregister()` (cleared by a successful `register()`) so `status()`
+        /// reports the agent gone after a removal request — the requested-vs-done
+        /// transition repair waits on.
+        private var unregisteredPending = false
         var bootoutOutcome: BootoutOutcome = .notLoaded
         var kickstartError: Error?
         var programResult: AgentProgram = .notRegistered
@@ -30,9 +38,19 @@ final class AgentControllerTests: XCTestCase {
         private(set) var kickstartCalls = 0
         private(set) var programCalls = 0
 
-        func status() -> SMAppService.Status { nextStatus }
-        func register() throws { registerCalls += 1; if let registerError { throw registerError } }
-        func unregister() throws { unregisterCalls += 1; if let unregisterError { throw unregisterError } }
+        func status() -> SMAppService.Status { unregisteredPending ? .notRegistered : nextStatus }
+        func register() throws {
+            registerCalls += 1
+            if let registerError { throw registerError }
+            unregisteredPending = false // a re-register that took clears the removal
+        }
+
+        func unregister() throws {
+            unregisterCalls += 1
+            if let unregisterError { throw unregisterError }
+            if !unregisterDoesNotConfirm { unregisteredPending = true }
+        }
+
         func bootout() async -> BootoutOutcome { bootoutCalls += 1; return bootoutOutcome }
         func kickstart() async throws { kickstartCalls += 1; if let kickstartError { throw kickstartError } }
         func agentProgramPath() async -> AgentProgram {
@@ -479,6 +497,22 @@ final class AgentControllerTests: XCTestCase {
         XCTAssertEqual(mock.unregisterCalls, 1, "verified repair unregisters first")
         XCTAssertEqual(c.installState, .notInstalled, "a failed re-register after unregister leaves the agent gone — honestly")
         XCTAssertNotNil(c.repairError, "a failed repair must surface its error")
+    }
+
+    func testRepairAbortsIfUnregisterDoesNotConfirm() async {
+        // An SMAppService call returning means the request was ACCEPTED, not that
+        // launchd finished it. Repair must wait for status to confirm removal before
+        // re-registering — otherwise the replace races a still-converging unregister
+        // into an already-registered no-op. If removal never confirms within the
+        // bound, repair aborts loud rather than re-registering over the old agent.
+        let mock = MockRegistrar()
+        mock.nextStatus = .enabled
+        mock.unregisterDoesNotConfirm = true // launchd never processes the removal
+        let c = AgentController(registrar: mock, eligibility: { .eligible })
+        await c.repair(within: .milliseconds(60), poll: .milliseconds(10))
+        XCTAssertEqual(mock.unregisterCalls, 1)
+        XCTAssertEqual(mock.registerCalls, 0, "must NOT re-register before removal is confirmed")
+        XCTAssertNotNil(c.repairError, "an unconfirmed removal must surface a loud repair failure")
     }
 
     // The repair self-verify must not be dropped by the reconcile in-flight guard:

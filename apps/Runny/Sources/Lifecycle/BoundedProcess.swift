@@ -60,21 +60,29 @@ enum BoundedProcess {
             // The reader ALWAYS runs to EOF/exit, even after the caller was freed on
             // timeout — so the process is reaped and the FDs closed in every path.
             DispatchQueue.global().async {
-                // Drain stdout (capped) BEFORE waitUntilExit so a verbose dump can't
-                // deadlock on a full pipe buffer, then close the read end so a
-                // still-writing process gets SIGPIPE and unblocks rather than wedging
-                // the reaper; stderr is drained (capped) the same way.
+                // Drain BOTH pipes concurrently: reading stdout to EOF before stderr
+                // deadlocks if the child fills its stderr buffer first (it blocks
+                // writing the full pipe while we block reading the other), so a verbose
+                // diagnostic would falsely time out. Read stderr on its own queue,
+                // stdout here, join, then wait for exit. Closing each read end as it
+                // finishes gives a still-writing child SIGPIPE rather than wedging.
+                let errBox = ByteBox()
+                let errReady = DispatchSemaphore(value: 0)
+                DispatchQueue.global().async {
+                    errBox.bytes = readCapped(errPipe.fileHandleForReading, cap: stderrByteCap)
+                    try? errPipe.fileHandleForReading.close()
+                    errReady.signal()
+                }
                 let outData = readCapped(outPipe.fileHandleForReading, cap: stdoutByteCap)
                 try? outPipe.fileHandleForReading.close()
-                let errData = readCapped(errPipe.fileHandleForReading, cap: stderrByteCap)
-                try? errPipe.fileHandleForReading.close()
+                errReady.wait()
                 proc.waitUntilExit()
                 killer.cancel()
                 if gate.claim() {
                     cont.resume(returning: .exited(
                         code: proc.terminationStatus,
                         stdout: String(data: outData, encoding: .utf8) ?? "",
-                        stderr: String(data: errData, encoding: .utf8) ?? ""
+                        stderr: String(data: errBox.bytes, encoding: .utf8) ?? ""
                     ))
                 }
             }
@@ -98,6 +106,13 @@ enum BoundedProcess {
         let c = duration.components
         return Double(c.seconds) + Double(c.attoseconds) / 1e18
     }
+}
+
+/// A handoff for bytes read on one queue and consumed on another after a join
+/// (the concurrent stderr drain). Written by exactly one closure, read only after
+/// its semaphore signals, so the unchecked Sendable is sound.
+final class ByteBox: @unchecked Sendable {
+    var bytes = Data()
 }
 
 /// A one-shot gate so the timeout killer and the wait closure (different queues)

@@ -91,10 +91,14 @@ never exercised live in tests.
   search would false-positive — search stdout only. On timeout it SIGTERMs then
   SIGKILLs after a grace with a detached reaper and explicit FD close, so a wedged
   launchctl yields `.indeterminate` without leaking a process or FDs.
-- **`gui/<uid>`-only is a named limitation.** A `sudo brew services` LaunchDaemon
-  (`system/` domain) is not detected — but that install is itself vmnet-broken, so
-  the undetected stomp is moot. The brew label `homebrew.mxcl.runny` is synthesized
-  by Homebrew (verify against a real `brew services` install), not literal in the repo.
+- **`gui/<uid>`-only is a real limitation, not a moot one.** A `system/`-domain
+  LaunchDaemon — a `sudo brew services` root daemon, or the planned headless
+  non-root daemon (#76) — is NOT probed, yet it is functional (macOS auto-allows
+  local network to any launchd-started daemon regardless of uid), so the app could
+  install a competing per-user agent over a working system daemon. Extending the
+  probe to the `system/` domain travels with the headless LaunchDaemon work. The
+  brew label `homebrew.mxcl.runny` is synthesized by Homebrew (verify against a real
+  `brew services` install), not literal in the repo.
 - **The Start recovery bound is healthy-magnitude × margin, not a budget sum.**
   `startRecoveryBound` is sized to a normal cold start, and recovery is confirmed
   from a later `.connected` snapshot — never the `kickstart` return. On expiry it

@@ -82,10 +82,13 @@ GUI.
 - The shared canonical label is safe to disambiguate by self-status — documented as
   a sharp edge in `apps/Runny/CLAUDE.md` so a future maintainer does not "simplify"
   detection to a label match and reintroduce the stomp.
-- Detection covers only the `gui/<uid>` domain. A `sudo brew services` LaunchDaemon
-  (`system/` domain) is not detected — but that install is itself broken
-  (vmnet-denied per the formula caveats), so an undetected stomp there is moot. A
-  named limitation, not a silent gap.
+- Detection covers only the `gui/<uid>` domain. A `system/`-domain LaunchDaemon —
+  a `sudo brew services` root daemon today, or the dedicated non-root headless
+  daemon planned for fleet hosts (#76) — is NOT detected, yet it is fully
+  functional: macOS auto-allows local network access to any launchd-started daemon
+  regardless of uid (TN3179), so the app could install a competing per-user agent
+  over a working system daemon. A real limitation, not a moot one — extending the
+  probe to the `system/` domain travels with that headless LaunchDaemon path.
 - The literal-label discriminator is more stable than exit-code reading, but the
   `launchctl print` "not found" presentation and the brew label
   (`homebrew.mxcl.runny`, synthesized by Homebrew, verified against a real `brew

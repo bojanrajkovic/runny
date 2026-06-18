@@ -62,37 +62,42 @@ extension DaemonOwnership {
     static let brewLabel = "homebrew.mxcl.runny"
     static let canonicalLabel = "com.coderinserepeat.runnyd"
 
-    /// Reduce the gathered facts to a verdict. The ordering is load-bearing:
-    /// `indeterminate` is tested ahead of every positive branch, so the most
-    /// dangerous regression — "not sure" leaking to install or to a kill-the-daemon
-    /// message — is structurally impossible. `unmanaged` (install allowed) is
-    /// reached only by the explicit final fall-through, after every positive and
-    /// every indeterminate branch is exhausted.
+    /// Reduce the gathered facts to a verdict. The ordering is load-bearing.
+    /// Authoritative self-identity (SMAppService `.enabled`/`.requiresApproval`) is
+    /// tested FIRST — it is conclusive that the agent is ours (the C1 spike: a
+    /// foreign owner of the shared label never reads `.enabled`), so a wedged
+    /// foreign-label probe must not override it and defer managing our OWN installed
+    /// daemon. With self ruled out, `indeterminate` is tested ahead of the remaining
+    /// positives, so the dangerous regression — "not sure" leaking to
+    /// install-a-second-manager or stop-a-hand-run-daemon — is structurally
+    /// impossible. `unmanaged` (install allowed) is reached only by the final
+    /// fall-through.
     nonisolated static func classify(_ inputs: DaemonOwnershipInputs) -> DaemonOwnership {
         // 1. Non-canonical home: the socket and label axes would describe different
         //    homes. Defense-in-depth — the home is fixed now, but a re-introduced
         //    override must never let the app install over a daemon at the real home.
         if !inputs.homeIsCanonical { return .indeterminate }
-        // 2. An inconclusive probe dominates every positive branch: "not sure who
-        //    owns this" must never read as install-a-second-manager, and never as
-        //    kill-your-hand-run-daemon.
-        if inputs.brewProbe == .indeterminate || inputs.canonicalProbe == .indeterminate {
-            return .indeterminate
-        }
-        // 3-4. Self-identity is authoritative (the C1 spike: a foreign owner of the
-        //      shared label never reads `.enabled`), so it is checked before the
-        //      foreign branches — our own agent makes the canonical label register.
+        // 2-3. Authoritative self-identity FIRST. `.enabled` (`.installed`) means the
+        //      canonical label is ours regardless of any probe outcome, so a wedged
+        //      foreign-label probe can't flip us to `indeterminate` and block
+        //      managing/starting our own daemon.
         switch inputs.selfState {
         case .installed: return .selfManaged
         case .requiresApproval: return .awaitingApproval
         case .notInstalled, .notFound, .registrationFailed: break
+        }
+        // 4. With self ruled out, an inconclusive probe dominates the remaining
+        //    positives: "not sure who owns this" must never read as
+        //    install-a-second-manager, and never as kill-your-hand-run-daemon.
+        if inputs.brewProbe == .indeterminate || inputs.canonicalProbe == .indeterminate {
+            return .indeterminate
         }
         // 5-6. A foreign owner of either label: defer to an observer banner.
         if inputs.brewProbe == .registered { return .foreignBrew }
         if inputs.canonicalProbe == .registered { return .foreignManual }
         // 7. A daemon answers but no agent is registered — a hand-run runnyd. Reached
         //    only when both probes are positively `.notRegistered` (an errored probe
-        //    is `.indeterminate`, caught at step 2), so the app never tells an operator
+        //    is `.indeterminate`, caught at step 4), so the app never tells an operator
         //    to stop their daemon because a probe wedged.
         if inputs.socketAnswers { return .foreground }
         // 8. Nothing owns it — install allowed.

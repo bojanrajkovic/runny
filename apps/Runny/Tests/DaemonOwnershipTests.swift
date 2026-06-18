@@ -78,6 +78,20 @@ final class DaemonOwnershipTests: XCTestCase {
         )
     }
 
+    func testSelfIdentityDominatesAWedgedProbe() {
+        // A transient launchctl probe wedge must NOT override the authoritative
+        // SMAppService self-status: an installed (.enabled) agent is ours even if a
+        // foreign-label probe times out, so we never defer managing our own daemon.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .installed, brewProbe: .indeterminate)),
+            .selfManaged
+        )
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .requiresApproval, canonicalProbe: .indeterminate)),
+            .awaitingApproval
+        )
+    }
+
     func testErroredProbeNeverReadsAsForeground() {
         // The A3 guard: a socket answering + a probe error must be indeterminate,
         // NEVER foreground — the app must never tell an operator to kill their

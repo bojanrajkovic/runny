@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4
+      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
       - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: ~/.cache/bazel
@@ -59,7 +59,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4
+      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
       - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: ~/Library/Caches/bazel
@@ -86,7 +86,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4
+      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
       - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: ~/Library/Caches/bazel
@@ -142,7 +142,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0 # tools/version.sh needs tags + history
-      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4
+      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
         with:
           # No tool-install cache either: cold means cold. Tools come from
           # their pinned upstream releases, not a poisonable cache entry.

@@ -3,10 +3,10 @@ import SwiftUI
 
 @main
 struct RunnyApp: App {
-    @State private var store = DaemonStore()
+    @State private var store: DaemonStore
     @State private var activation = ActivationCoordinator()
     @State private var cliInstall = CLIInstallModel()
-    @State private var agent = AgentController.live()
+    @State private var agent: AgentController
 
     var body: some Scene {
         MenuBarExtra("Runny", image: "MenuBarIcon") {
@@ -56,6 +56,19 @@ struct RunnyApp: App {
         // LSUIElement keeps us out of the Dock at launch; the coordinator
         // flips to .regular while the main window is open.
         NSApp?.setActivationPolicy(.accessory)
+        // The ownership detector's socket axis is "a daemon ANSWERS", not "a socket
+        // file exists": a stale socket left by a crashed daemon would otherwise read
+        // as a foreground daemon and block install. Wire it to the live connection —
+        // the socket answers unless the supervisor has definitively given up
+        // (.unreachable). The conservative direction: block install on uncertainty
+        // (safe), never install over a live daemon (the stomp).
+        let store = DaemonStore()
+        _store = State(initialValue: store)
+        _agent = State(initialValue: AgentController.live(socketAnswers: {
+            guard RunnyHome.socketExists else { return false }
+            if case .unreachable = store.connection { return false }
+            return true
+        }))
     }
 }
 

@@ -148,7 +148,7 @@ final class AgentController {
     private let eligibilityProvider: () -> LaunchAgentStatus.Eligibility
     private let bundledAgentPresentProvider: () -> Bool
     private let probeProvider: @Sendable (String) async -> LaunchdProbeResult
-    private let socketAnswersProvider: () -> Bool
+    private let socketAnswersProvider: @MainActor () -> Bool
     private let homeIsCanonicalProvider: () -> Bool
 
     private var activationObserver: NSObjectProtocol?
@@ -159,7 +159,7 @@ final class AgentController {
         eligibility: @escaping () -> LaunchAgentStatus.Eligibility = { AgentController.bundleEligibility() },
         bundledAgentPresent: @escaping () -> Bool = { AgentController.bundledAgentPresent() },
         probe: @escaping @Sendable (String) async -> LaunchdProbeResult = { await LaunchdProbe.probe(label: $0) },
-        socketAnswers: @escaping () -> Bool = { RunnyHome.socketExists },
+        socketAnswers: @escaping @MainActor () -> Bool = { RunnyHome.socketExists },
         homeIsCanonical: @escaping () -> Bool = { true }
     ) {
         self.registrar = registrar
@@ -190,12 +190,14 @@ final class AgentController {
     /// The production controller: a real `SMAppServiceRegistrar`, and a spawn gate
     /// that gathers the live ownership verdict and denies install/repair/start for
     /// any foreign or indeterminate owner. The same gather feeds `refreshOwnership`
-    /// (the observer banner), so the gate and the UI never disagree.
+    /// (the observer banner), so the gate and the UI never disagree. `socketAnswers`
+    /// is the live "a daemon answers the socket" signal (not a bare file stat) —
+    /// `RunnyApp` wires it to the `DaemonStore` connection so a stale socket left by a
+    /// crashed daemon doesn't read as a foreground daemon and block install.
     @MainActor
-    static func live() -> AgentController {
+    static func live(socketAnswers: @escaping @MainActor () -> Bool) -> AgentController {
         let registrar = SMAppServiceRegistrar()
         let probe: @Sendable (String) async -> LaunchdProbeResult = { await LaunchdProbe.probe(label: $0) }
-        let socketAnswers = { RunnyHome.socketExists }
         let homeIsCanonical = { true }
         let bundledAgentPresent = { AgentController.bundledAgentPresent() }
         return AgentController(
@@ -266,14 +268,30 @@ final class AgentController {
     /// have run.
     private(set) var ownershipChecked = false
 
+    private var ownershipInFlight = false
+    private var ownershipPending = false
+
     /// Gather the ownership inputs and publish the verdict (for the banner). The
     /// gate's pre-act recheck calls `gatherOwnership` directly for a fresh verdict.
+    /// Coalesces overlapping triggers — the activation observer and a surface's
+    /// `.task` can both fire on one foreground — so a trigger arriving mid-gather
+    /// loops the active run once more against the latest state rather than spawning a
+    /// second concurrent probe pair and racing last-writer-wins to publish.
     func refreshOwnership() async {
-        ownership = await Self.gatherOwnership(
-            registrar: registrar, probe: probeProvider, socketAnswers: socketAnswersProvider,
-            homeIsCanonical: homeIsCanonicalProvider, bundledAgentPresent: bundledAgentPresentProvider
-        )
-        ownershipChecked = true
+        if ownershipInFlight {
+            ownershipPending = true
+            return
+        }
+        ownershipInFlight = true
+        defer { ownershipInFlight = false }
+        repeat {
+            ownershipPending = false
+            ownership = await Self.gatherOwnership(
+                registrar: registrar, probe: probeProvider, socketAnswers: socketAnswersProvider,
+                homeIsCanonical: homeIsCanonicalProvider, bundledAgentPresent: bundledAgentPresentProvider
+            )
+            ownershipChecked = true
+        } while ownershipPending
     }
 
     /// Gather the four orthogonal facts and `classify` them. The two label probes
@@ -285,7 +303,7 @@ final class AgentController {
     static func gatherOwnership(
         registrar: ServiceRegistrar,
         probe: @Sendable (String) async -> LaunchdProbeResult,
-        socketAnswers: () -> Bool,
+        socketAnswers: @MainActor () -> Bool,
         homeIsCanonical: () -> Bool,
         bundledAgentPresent: () -> Bool
     ) async -> DaemonOwnership {

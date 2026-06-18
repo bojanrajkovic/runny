@@ -686,13 +686,36 @@ func TestRecycleGuardsDebugAndJob(t *testing.T) {
 	}
 }
 
-// A transport/dial failure (the daemon was never reached this invocation — the
-// connection never became Ready) surfaces as a bare gRPC Unavailable. connHint
-// augments it with a home-aware hint naming the resolved socket — parity with
-// the app's connection diagnostic — so the operator is told *why*.
+// shouldHint is the decision: only a transport/dial failure (the daemon never
+// answered this invocation) earns the hint. codes.Unavailable is overloaded — a
+// LIVE daemon also returns it for application conditions ("slot is not accepting
+// commands"), and a stream that broke after connecting surfaces it too — so an
+// Unavailable over a daemon that answered (a Ready conn, OR a stream that
+// received a record; both fold into daemonAnswered) must NOT be hinted. A
+// non-Unavailable error never is.
+func TestShouldHint(t *testing.T) {
+	unavail := status.Error(codes.Unavailable, "x")
+	if !shouldHint(unavail, false) {
+		t.Error("a transport-time Unavailable (daemon never answered) must be hinted")
+	}
+	if shouldHint(unavail, true) {
+		t.Error("an Unavailable after the daemon answered (app-level, or mid-stream) must NOT be hinted")
+	}
+	if shouldHint(status.Error(codes.FailedPrecondition, "x"), false) {
+		t.Error("a non-Unavailable error must never be hinted")
+	}
+	if shouldHint(nil, false) {
+		t.Error("nil must never be hinted")
+	}
+}
+
+// connHint is the wording layer (shouldHint having decided to hint): a missing
+// socket raises the different-home possibility; a present-but-silent one says
+// the daemon isn't answering. It stays total — a non-Unavailable or nil error
+// passes through unchanged.
 func TestConnHintNamesSocketAndHomeWhenSocketAbsent(t *testing.T) {
 	base := status.Error(codes.Unavailable, `connection error: dial unix /home/x/.runny/runnyd.sock: connect: no such file or directory`)
-	got := connHint(base, "/home/x/.runny/runnyd.sock", false, false)
+	got := connHint(base, "/home/x/.runny/runnyd.sock", false)
 	if got == nil {
 		t.Fatal("expected a wrapped error, got nil")
 	}
@@ -708,11 +731,9 @@ func TestConnHintNamesSocketAndHomeWhenSocketAbsent(t *testing.T) {
 	}
 }
 
-// Socket present but unreachable is a different story — the daemon is hung or
-// still starting, not absent. The hint must distinguish the two.
 func TestConnHintSaysNotAnsweringWhenSocketPresent(t *testing.T) {
 	base := status.Error(codes.Unavailable, "connection refused")
-	msg := connHint(base, "/home/x/.runny/runnyd.sock", true, false).Error()
+	msg := connHint(base, "/home/x/.runny/runnyd.sock", true).Error()
 	if !strings.Contains(msg, "isn't answering") {
 		t.Errorf("present-socket hint must say the daemon isn't answering; got: %s", msg)
 	}
@@ -721,21 +742,12 @@ func TestConnHintSaysNotAnsweringWhenSocketPresent(t *testing.T) {
 	}
 }
 
-// The crux: codes.Unavailable is overloaded. A LIVE daemon returns it for
-// application conditions ("slot is not accepting commands") over a connection
-// that DID become Ready — augmenting that with "the socket isn't answering"
-// would misdiagnose a valid response. connReady gates the hint out. A daemon-side
-// refusal (FailedPrecondition) and a nil error also pass through untouched.
-func TestConnHintPassesThroughWhenConnectionWasReadyOrErrorIsNotUnavailable(t *testing.T) {
-	appLevel := status.Error(codes.Unavailable, "slot mac-1 is not accepting commands")
-	if got := connHint(appLevel, "/x", false, true); got.Error() != appLevel.Error() {
-		t.Errorf("an application-level Unavailable over a Ready conn must pass through; got: %s", got.Error())
-	}
+func TestConnHintPassesThroughNonUnavailable(t *testing.T) {
 	refusal := status.Error(codes.FailedPrecondition, "2 check(s) failed")
-	if got := connHint(refusal, "/x", false, false); got.Error() != refusal.Error() {
+	if got := connHint(refusal, "/x", false); got.Error() != refusal.Error() {
 		t.Errorf("a non-Unavailable error must pass through unchanged; got: %s", got.Error())
 	}
-	if got := connHint(nil, "/x", false, false); got != nil {
+	if got := connHint(nil, "/x", false); got != nil {
 		t.Errorf("nil must pass through as nil; got: %v", got)
 	}
 }

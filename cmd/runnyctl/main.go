@@ -110,16 +110,14 @@ func run() error {
 	}
 	err = c.dispatch(ctx, args)
 	// codes.Unavailable is overloaded: a transport/dial failure (the daemon was
-	// never reached this invocation — the connection never became Ready) AND a
-	// LIVE daemon's application response ("slot is not accepting commands") both
-	// use it, as does a stream that broke after connecting. Only the first is a
-	// connection problem the home-aware hint should explain, so gate on the
-	// connection state — a Ready conn means the daemon answered, and the bare
-	// error stands. This naturally covers watch/logs: a connection-time failure
-	// (never Ready) is hinted; a mid-stream daemon death (was Ready) is not.
-	// Non-connection errors and success pass through untouched.
-	if status.Code(err) == codes.Unavailable {
-		return connHint(err, dir.SocketPath(), socketFileExists(dir.SocketPath()), conn.GetState() == connectivity.Ready)
+	// never reached), a LIVE daemon's application response ("slot is not accepting
+	// commands"), and a stream that broke after connecting all use it. Only the
+	// first warrants the home-aware hint. The daemon "answered" if a stream
+	// received a record (c.connected — survives the connection leaving Ready on a
+	// mid-stream death) OR the connection is currently Ready (the one-shot
+	// app-level case, daemon alive). Otherwise the bare error stands.
+	if shouldHint(err, c.connected || conn.GetState() == connectivity.Ready) {
+		return connHint(err, dir.SocketPath(), socketFileExists(dir.SocketPath()))
 	}
 	return err
 }
@@ -213,18 +211,27 @@ func (c *ctl) dispatch(ctx context.Context, args []string) error {
 	}
 }
 
+// shouldHint reports whether a command's terminal error warrants the home-aware
+// connection hint: only a transport/dial failure (the daemon never answered this
+// invocation), never an application-level Unavailable or a post-connection
+// stream break. daemonAnswered folds the two "the daemon was reached" signals —
+// a stream that received at least one record, and a currently-Ready connection
+// (the one-shot app-level Unavailable case, daemon still alive). A daemon death
+// mid-stream is excluded by the stream signal, since gRPC moves the connection
+// out of Ready before Recv surfaces the error.
+func shouldHint(err error, daemonAnswered bool) bool {
+	return !daemonAnswered && status.Code(err) == codes.Unavailable
+}
+
 // connHint augments a transport/dial-time gRPC Unavailable with a home-aware
 // hint naming the resolved socket, giving runnyctl the same diagnostic the app's
-// connection card shows. connReady reports whether the client connection ever
-// reached Ready: a Ready conn means the daemon answered, so an Unavailable there
-// is an application response (e.g. a slot not accepting commands), NOT a
-// connection failure — hinting it would misdiagnose a valid reply. socketExists
-// then distinguishes a missing socket (daemon down, or serving a different home)
-// from a present-but-silent one (daemon hung or still starting). Errors that are
-// not Unavailable and a nil error pass through unchanged, so the hint never
-// misleads.
-func connHint(err error, socketPath string, socketExists, connReady bool) error {
-	if connReady || status.Code(err) != codes.Unavailable {
+// connection card shows. socketExists distinguishes a missing socket (daemon
+// down, or serving a different home) from a present-but-silent one (daemon hung
+// or still starting). It assumes the caller has already decided to hint via
+// shouldHint; a non-Unavailable or nil error still passes through unchanged so
+// the function is total.
+func connHint(err error, socketPath string, socketExists bool) error {
+	if status.Code(err) != codes.Unavailable {
 		return err
 	}
 	if socketExists {
@@ -265,6 +272,11 @@ type ctl struct {
 	json   bool
 	out    io.Writer
 	err    io.Writer
+	// connected latches true once a streaming command has received at least one
+	// record — proof the daemon answered, so a later mid-stream Unavailable keeps
+	// the bare error instead of the connection hint. A current-Ready check can't
+	// see this: gRPC leaves Ready before the stream's terminal error surfaces.
+	connected bool
 }
 
 func (c *ctl) emit(m proto.Message) error {
@@ -429,6 +441,7 @@ func (c *ctl) watch(ctx context.Context) error {
 		if err != nil {
 			return streamErr(err)
 		}
+		c.connected = true // the daemon answered; a later mid-stream break keeps the bare error
 		if c.json {
 			if err := c.emit(resp); err != nil {
 				return err
@@ -452,6 +465,7 @@ func (c *ctl) logs(ctx context.Context, replay int, follow, daemon bool, slot st
 		if err != nil {
 			return streamErr(err)
 		}
+		c.connected = true // the daemon answered; a later mid-stream break keeps the bare error
 		if c.json {
 			if err := c.emit(line); err != nil {
 				return err

@@ -350,7 +350,10 @@ seam, so every decision is unit-tested without launchd. The invariants:
   naming the abandoned slot. **Reconcile-on-launch** compares the registered
   agent's program path (bounded `launchctl` introspection) against the canonical
   `/Applications/Runny.app` — never the running bundle's path — and surfaces a
-  foreign/stale-path agent, or "couldn't determine" on a timeout.
+  foreign/stale-path agent, or "couldn't determine" on a timeout. A foreign agent
+  is repairable in place from a canonical bundle: **Repair** re-registers through
+  the spawn chokepoint to re-point the job, then re-reconciles to self-verify (a
+  re-point that doesn't take keeps showing foreign, never a false all-clear).
 
 ## Build shape
 

@@ -252,8 +252,8 @@ final class AgentController {
 
     /// The last reconcile verdict — whether the registered agent points where it
     /// should. Defaults to `.notChecked` (not canonical), so a surface that gates on
-    /// `.ok` shows nothing until reconcile actually runs. Surface-only in P4 (repair
-    /// is a follow-up).
+    /// `.ok` shows nothing until reconcile actually runs. A `.foreign` verdict is
+    /// repairable in place from a canonical bundle via `repair()`.
     private(set) var reconcileState: AgentReconcile = .notChecked
     private var reconcileInFlight = false
 

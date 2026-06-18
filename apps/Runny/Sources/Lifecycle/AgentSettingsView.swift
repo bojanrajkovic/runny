@@ -13,6 +13,7 @@ struct AgentInstallRow: View {
     @Environment(DaemonStore.self) private var store
     @State private var confirmingInstall = false
     @State private var confirmingUninstall = false
+    @State private var confirmingRepair = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -35,8 +36,14 @@ struct AgentInstallRow: View {
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
                 if canRepair {
-                    Button("Repair") { Task { await agent.repair() } }
+                    Button("Repair…") { confirmingRepair = true }
                         .controlSize(.small)
+                }
+                if let repairError = agent.repairError {
+                    Text(repairError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -72,6 +79,22 @@ struct AgentInstallRow: View {
                     + "\(abandonedSlotsText). A running job will not finish, and a "
                     + "debug-held guest is destroyed.")
             }
+        }
+        .confirmationDialog(
+            "Repair the runnyd login agent?",
+            isPresented: $confirmingRepair,
+            titleVisibility: .visible
+        ) {
+            Button("Repair") { Task { await agent.repair() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            // The same foreign-manager guard as install: re-registering displaces
+            // whatever holds the label, and until detect-and-defer lands the spawn
+            // gate is .allow, so this consent is the guard against stomping a
+            // brew-managed daemon registered under the same label.
+            Text("A runnyd agent is registered from an unexpected location. Repair re-registers "
+                + "Runny's bundled daemon under the launchd agent “\(SMAppServiceRegistrar.agentLabel)”, "
+                + "replacing it. If another tool (e.g. Homebrew) manages runnyd, cancel and remove that first.")
         }
     }
 

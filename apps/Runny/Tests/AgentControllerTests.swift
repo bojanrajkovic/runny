@@ -18,17 +18,29 @@ final class AgentControllerTests: XCTestCase {
         var bootoutOutcome: BootoutOutcome = .notLoaded
         var kickstartError: Error?
         var programResult: AgentProgram = .notRegistered
+        /// Consumed in order if non-empty (otherwise programResult), so a test can
+        /// script a stale-then-fresh read across a coalesced reconcile.
+        var programResults: [AgentProgram] = []
+        /// Invoked once, inside the first agentProgramPath read, before it returns —
+        /// the deterministic hook for "a concurrent trigger arrives mid-read".
+        var onProgramPath: (() async -> Void)?
         private(set) var registerCalls = 0
         private(set) var unregisterCalls = 0
         private(set) var bootoutCalls = 0
         private(set) var kickstartCalls = 0
+        private(set) var programCalls = 0
 
         func status() -> SMAppService.Status { nextStatus }
         func register() throws { registerCalls += 1; if let registerError { throw registerError } }
         func unregister() throws { unregisterCalls += 1; if let unregisterError { throw unregisterError } }
         func bootout() async -> BootoutOutcome { bootoutCalls += 1; return bootoutOutcome }
         func kickstart() async throws { kickstartCalls += 1; if let kickstartError { throw kickstartError } }
-        func agentProgramPath() async -> AgentProgram { programResult }
+        func agentProgramPath() async -> AgentProgram {
+            programCalls += 1
+            if let hook = onProgramPath { onProgramPath = nil; await hook() }
+            if !programResults.isEmpty { return programResults.removeFirst() }
+            return programResult
+        }
     }
 
     struct StubError: Error {}
@@ -333,23 +345,49 @@ final class AgentControllerTests: XCTestCase {
         XCTAssertEqual(c.reconcileState, .foreign(path: "/opt/homebrew/Cellar/runny/bin/runnyd"))
     }
 
-    func testRepairDenyGateDoesNotReRegister() async {
+    func testRepairDenyGateDoesNotReRegisterAndIsSurfaced() async {
         let mock = MockRegistrar()
+        mock.nextStatus = .enabled // the existing (foreign) agent is still registered
         let c = AgentController(
             registrar: mock, spawnGate: { .deny(reason: "another manager owns it") }, eligibility: { .eligible }
         )
+        c.refresh() // installed
         await c.repair()
         XCTAssertEqual(mock.registerCalls, 0, "a denied gate must NOT re-register")
-        XCTAssertNotNil(c.spawnRefusal)
+        XCTAssertNotNil(c.repairError, "a denied repair must be surfaced in the row, not silently no-op")
+        XCTAssertEqual(c.installState, .installed, "a denied repair must not change the install state")
     }
 
-    func testRepairRegisterThrowIsLoud() async {
+    func testRepairFailureKeepsInstalledStateAndSurfacesError() async {
         let mock = MockRegistrar()
+        mock.nextStatus = .enabled // a failed re-register does NOT unregister the existing agent
         mock.registerError = StubError()
         let c = AgentController(registrar: mock, eligibility: { .eligible })
+        c.refresh() // installed
         await c.repair()
-        guard case .registrationFailed = c.installState else {
-            return XCTFail("a register throw during repair must be loud, got \(c.installState)")
-        }
+        // installState stays derived from status, so the toggle keeps the uninstall
+        // path; the failure is surfaced separately rather than masquerading as an
+        // install failure that flips the toggle off.
+        XCTAssertEqual(c.installState, .installed, "a failed repair must not drop the uninstall path")
+        XCTAssertNotNil(c.repairError, "a failed repair must surface its error")
+    }
+
+    // The repair self-verify must not be dropped by the reconcile in-flight guard:
+    // if another surface's runReconcile() is mid-read when a fresh trigger arrives,
+    // the in-flight run coalesces it and re-reads against the latest registration,
+    // rather than publishing the stale pre-repair verdict.
+    func testReconcileCoalescesAConcurrentTrigger() async {
+        let mock = MockRegistrar()
+        let c = AgentController(registrar: mock)
+        mock.programResults = [
+            .program("/foreign/Runny.app/Contents/MacOS/runnyd"),
+            .program("/Applications/Runny.app/Contents/MacOS/runnyd"),
+        ]
+        // A second reconcile is triggered WHILE the first is mid-read — the exact
+        // window that would otherwise drop the verification.
+        mock.onProgramPath = { await c.runReconcile() }
+        await c.runReconcile()
+        XCTAssertEqual(mock.programCalls, 2, "a concurrent trigger must coalesce into a fresh read, not be dropped")
+        XCTAssertEqual(c.reconcileState, .ok, "the final verdict must reflect the latest read, not the stale first one")
     }
 }

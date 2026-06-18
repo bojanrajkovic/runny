@@ -351,9 +351,15 @@ seam, so every decision is unit-tested without launchd. The invariants:
   agent's program path (bounded `launchctl` introspection) against the canonical
   `/Applications/Runny.app` — never the running bundle's path — and surfaces a
   foreign/stale-path agent, or "couldn't determine" on a timeout. A foreign agent
-  is repairable in place from a canonical bundle: **Repair** re-registers through
-  the spawn chokepoint to re-point the job, then re-reconciles to self-verify (a
-  re-point that doesn't take keeps showing foreign, never a false all-clear).
+  is repairable in place from a canonical bundle: **Repair** raises a
+  confirmation (the same foreign-manager guard as install — re-registering
+  displaces whatever holds the label, and the spawn gate is `.allow` until
+  detect-and-defer lands), re-registers through the spawn chokepoint to re-point
+  the job, then re-reconciles to self-verify (the reconcile coalesces a
+  concurrent trigger so the verification is never dropped; a re-point that
+  doesn't take keeps showing foreign, never a false all-clear). A failed or
+  denied repair surfaces loudly and leaves the install state intact, so the
+  uninstall path survives.
 
 ## Build shape
 

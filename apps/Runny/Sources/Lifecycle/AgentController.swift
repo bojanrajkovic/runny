@@ -256,17 +256,35 @@ final class AgentController {
     /// repairable in place from a canonical bundle via `repair()`.
     private(set) var reconcileState: AgentReconcile = .notChecked
     private var reconcileInFlight = false
+    private var reconcilePending = false
+
+    /// A repair-specific failure or denial message, surfaced in the reconcile
+    /// warning row. Distinct from `installState`: a failed or denied repair leaves
+    /// the existing (foreign) agent registered, so the failure must NOT masquerade
+    /// as an install failure that flips the toggle off and drops the uninstall path.
+    private(set) var repairError: String?
 
     /// Reconcile-on-launch: read the registered agent's program path and compare it
     /// to the canonical install location. Surfaces a foreign/stale-path agent, and
-    /// an introspection that times out as "couldn't determine" — never a spin. The
-    /// in-flight guard keeps concurrent surface appears from stacking launchctl
-    /// subprocesses that race on the result.
+    /// an introspection that times out as "couldn't determine" — never a spin.
+    ///
+    /// Coalesces rather than drops: a trigger arriving while a read is in flight
+    /// (another surface appearing, or repair's self-verify) sets `reconcilePending`
+    /// so the active run loops once more and publishes a verdict against the LATEST
+    /// registration. The plain guard would let a stale pre-repair read win and
+    /// leave a successful repair reported as foreign until the next appear; it also
+    /// still prevents two launchctl subprocesses from racing concurrently.
     func runReconcile() async {
-        guard !reconcileInFlight else { return }
+        if reconcileInFlight {
+            reconcilePending = true
+            return
+        }
         reconcileInFlight = true
         defer { reconcileInFlight = false }
-        reconcileState = await Self.reconcileVerdict(registrar.agentProgramPath())
+        repeat {
+            reconcilePending = false
+            reconcileState = await Self.reconcileVerdict(registrar.agentProgramPath())
+        } while reconcilePending
     }
 
     /// Repair a foreign/stale-path agent by re-registering the canonical agent,
@@ -275,19 +293,29 @@ final class AgentController {
     /// Funnels through the spawn chokepoint exactly like `install()`. Only
     /// meaningful from a canonical-eligible bundle — re-registering elsewhere would
     /// install ANOTHER non-canonical agent — so the surface gates the action on
-    /// `canRepair`, the same way it gates install on `canToggle`. If the re-point
-    /// does not take (a foreign MANAGER still owns the label, the deferred
-    /// detect-and-defer case), the re-run reconcile honestly keeps showing foreign
-    /// rather than a false all-clear off the register return.
+    /// `canRepair`, the same way it gates install on `canToggle`, AND raises a
+    /// confirmation that warns about displacing a foreign manager (the spawn gate
+    /// is `.allow` until detect-and-defer lands, so the consent is the guard). If
+    /// the re-point does not take (a foreign MANAGER still owns the label), the
+    /// re-run reconcile honestly keeps showing foreign rather than a false
+    /// all-clear off the register return.
     func repair() async {
+        repairError = nil
         switch await attemptSpawn("repair", { try self.registrar.register() }) {
         case .ran:
             refresh()
             await runReconcile()
         case .denied:
-            break // spawnRefusal already set; reconcileState unchanged
+            // The gate blocked the re-register. installState/reconcileState are
+            // unchanged, so without surfacing this the warning + button would just
+            // silently persist — surface the refusal loudly in the row.
+            repairError = spawnRefusal
         case let .failed(error):
-            installState = .registrationFailed(reason: "repair failed: \(error.localizedDescription)")
+            // A re-register throw does NOT unregister the existing (foreign) agent,
+            // so keep installState derived from status — the uninstall path must
+            // survive — and surface the repair error separately.
+            refresh()
+            repairError = "repair failed: \(error.localizedDescription)"
         }
     }
 

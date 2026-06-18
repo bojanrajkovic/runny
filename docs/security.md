@@ -166,3 +166,15 @@ keyed to the bundled `runnyd`'s own code identity — so the one-time prompt nam
 signing identifier stays stable. The bundled `runnyd` raises that prompt with no
 embedded `NSLocalNetworkUsageDescription`: a signed bare binary run as a per-user
 agent prompts on its own, and macOS supplies generic text, ignoring any embed.
+
+The app installs that agent **only when it owns the daemon**. Before any spawn —
+install, repair, start-at-login enable, kickstart — it computes an ownership
+verdict (its own `SMAppService` self-status plus a bounded `launchctl` probe of
+the brew and canonical labels in the user's `gui/<uid>` domain) and proceeds only
+for an unowned or app-owned daemon; a Homebrew-managed or manually-installed
+daemon, or any inconclusive probe, denies the spawn and routes to an observer
+banner. So the app never registers a competing agent over a foreign manager, and
+the only TCC-prompting surface — the bundled `runnyd` actually spawning — is
+reached only on the unowned/app-owned path, so an observer never provokes a Local
+Network prompt. Detection is local, `gui/<uid>`-scoped, and read-only: it spawns
+`launchctl print` under a hard bound but mutates nothing.

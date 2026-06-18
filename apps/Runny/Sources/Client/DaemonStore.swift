@@ -454,6 +454,12 @@ final class DaemonStore {
     /// Watches the home directory so socket-file appearance retries
     /// immediately instead of waiting out a 30s backoff.
     private func watchHomeDirectory() {
+        // On a fresh install the home doesn't exist until the first daemon run,
+        // so O_EVTONLY would fail and the socket-appearance fast-retry would
+        // never arm — the app would wait out a full reconnect backoff. Create
+        // the top-level home (0700, matching the daemon) so the watch arms even
+        // on a clean machine.
+        RunnyHome.ensureDirectory()
         let fd = open(RunnyHome.directory.path, O_EVTONLY)
         guard fd >= 0 else { return }
         let source = DispatchSource.makeFileSystemObjectSource(

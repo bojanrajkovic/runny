@@ -753,6 +753,24 @@ func TestLocalNetworkNote(t *testing.T) {
 	}
 }
 
+// connHint is for a one-shot command's connection-time failure. The long-lived
+// streamers (watch, logs) connect, then stream — a terminal Unavailable there is
+// a daemon death/recycle AFTER a healthy session, where "no socket, different
+// home?" misleads. They must be excluded from the hint; one-shot commands (and
+// reload, whose opening Reload RPC is a genuine connection-time failure) keep it.
+func TestStreamingCommandsExcludedFromConnHint(t *testing.T) {
+	for _, cmd := range []string{"watch", "logs"} {
+		if !streamingCommand(cmd) {
+			t.Errorf("%q streams after connecting; a mid-stream Unavailable must not get the connection hint", cmd)
+		}
+	}
+	for _, cmd := range []string{"status", "doctor", "recycle", "pause", "resume", "reload", "why", "debug"} {
+		if streamingCommand(cmd) {
+			t.Errorf("%q is one-shot; its opening RPC's Unavailable is a connection-time failure that should be hinted", cmd)
+		}
+	}
+}
+
 func TestRenderStatusShowsDeniedLocalNetwork(t *testing.T) {
 	var buf bytes.Buffer
 	c := &ctl{out: &buf}

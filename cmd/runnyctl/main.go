@@ -108,14 +108,27 @@ func run() error {
 		c.warnSkew(ctx)
 	}
 	err = c.dispatch(ctx, args)
-	// A dead socket dials lazily and only fails on the opening RPC, surfacing as
-	// a bare gRPC Unavailable with no clue why. Augment it with a home-aware hint
-	// naming the resolved socket — the CLI analogue of the app's connection
-	// diagnostic. Non-connection errors and success pass through untouched.
-	if status.Code(err) == codes.Unavailable {
+	// A dead socket dials lazily and only fails on a one-shot command's opening
+	// RPC, surfacing as a bare gRPC Unavailable with no clue why. Augment it with
+	// a home-aware hint naming the resolved socket — the CLI analogue of the app's
+	// connection diagnostic. The long-lived streamers (watch, logs) are excluded:
+	// a terminal Unavailable there is a daemon death/recycle AFTER a healthy
+	// session, where "different home?" would mislead. Non-connection errors and
+	// success pass through untouched.
+	if !streamingCommand(args[0]) && status.Code(err) == codes.Unavailable {
 		return connHint(err, dir.SocketPath(), socketFileExists(dir.SocketPath()))
 	}
 	return err
+}
+
+// streamingCommand reports whether the command holds a long-lived stream open
+// after connecting, so a terminal gRPC Unavailable is a mid-stream daemon death
+// rather than a connection-time failure — and must not get connHint's "is runnyd
+// running, or serving a different home?" wording. reload (even with -wait) is
+// one-shot here: its opening Reload RPC is a genuine connection-time failure, and
+// the -wait follow phase manages the daemon's respawn with its own messaging.
+func streamingCommand(cmd string) bool {
+	return cmd == "watch" || cmd == "logs"
 }
 
 // dispatch runs a single runnyctl command. args[0] is the command (guaranteed

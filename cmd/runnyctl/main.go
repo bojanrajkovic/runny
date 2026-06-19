@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -71,6 +72,13 @@ by status and the GitHub runners page (<prefix>-mac-1-<cycle>).
 
 func main() {
 	if err := run(); err != nil {
+		// -h/-help on any subcommand surfaces as flag.ErrHelp (the per-command
+		// flag sets discard their own output); print usage once and exit 0, the
+		// same outcome the top-level `runnyctl -h` already produces.
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprint(os.Stderr, usage)
+			return
+		}
 		fmt.Fprintln(os.Stderr, "runnyctl:", err)
 		os.Exit(1)
 	}
@@ -123,56 +131,82 @@ func run() error {
 }
 
 // dispatch runs a single runnyctl command. args[0] is the command (guaranteed
-// non-empty by run); the remainder are its arguments.
+// non-empty by run); the remainder are its arguments. Every command parses its
+// own flag set via subFlags, so the global -json is honored after the
+// subcommand too and an unknown trailing flag errors rather than being
+// swallowed or exiting the process (issue #47).
 func (c *ctl) dispatch(ctx context.Context, args []string) error {
 	switch cmd, rest := args[0], args[1:]; cmd {
 	case "version":
+		fs, j := subFlags("version")
+		if err := c.parseNoArgs(fs, j, rest); err != nil {
+			return err
+		}
 		fmt.Fprintln(c.out, version)
 		return nil
 	case "status":
+		fs, j := subFlags("status")
+		if err := c.parseNoArgs(fs, j, rest); err != nil {
+			return err
+		}
 		return c.status(ctx)
 	case "watch":
+		fs, j := subFlags("watch")
+		if err := c.parseNoArgs(fs, j, rest); err != nil {
+			return err
+		}
 		return c.watch(ctx)
 	case "logs":
-		fs := flag.NewFlagSet("logs", flag.ExitOnError)
+		fs, j := subFlags("logs")
 		replay := fs.Int("replay", 50, "buffered lines to replay")
 		follow := fs.Bool("follow", true, "keep following after the replay")
 		daemon := fs.Bool("daemon", false, "stream the daemon's own log instead of runner output")
-		_ = fs.Parse(rest)
-		slot := fs.Arg(0)
+		// SLOT is optional here, so logs can't use slotArg (which requires
+		// exactly one); peel it the same way so a flag after the slot parses.
+		slot, rest := peelSlot(rest)
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		switch {
+		case slot == "" && fs.NArg() == 1: // slot after the flags
+			slot = fs.Arg(0)
+		case slot != "" && fs.NArg() > 0, slot == "" && fs.NArg() > 1:
+			return fmt.Errorf("logs takes at most one SLOT argument")
+		}
+		c.useJSON(j)
 		if *daemon && slot != "" {
 			return fmt.Errorf("-daemon and a slot filter are mutually exclusive")
 		}
 		return c.logs(ctx, *replay, *follow, *daemon, slot)
 	case "recycle":
-		fs := flag.NewFlagSet("recycle", flag.ExitOnError)
+		fs, j := subFlags("recycle")
 		reason := fs.String("reason", "operator request", "reason recorded in the cycle")
 		force := fs.Bool("force", false, "recycle a DEBUG hold, or cancel a RUNNING job")
-		slot, err := slotArg(fs, rest)
+		slot, err := c.slotArg(fs, j, rest)
 		if err != nil {
 			return err
 		}
 		return c.recycle(ctx, slot, *reason, *force)
 	case "debug":
-		fs := flag.NewFlagSet("debug", flag.ExitOnError)
+		fs, j := subFlags("debug")
 		pubkey := fs.String("pubkey", "", "public key file (default ~/.ssh/id_ed25519.pub)")
 		hold := fs.Duration("hold", 0, "auto-release after this long (0 = limits.max_debug_hold)")
 		reason := fs.String("reason", "", "audit note")
-		slot, err := slotArg(fs, rest)
+		slot, err := c.slotArg(fs, j, rest)
 		if err != nil {
 			return err
 		}
 		return c.debug(ctx, slot, *pubkey, *hold, *reason)
 	case "pause":
-		fs := flag.NewFlagSet("pause", flag.ExitOnError)
-		slot, err := slotArg(fs, rest)
+		fs, j := subFlags("pause")
+		slot, err := c.slotArg(fs, j, rest)
 		if err != nil {
 			return err
 		}
 		return c.pause(ctx, slot)
 	case "resume":
-		fs := flag.NewFlagSet("resume", flag.ExitOnError)
-		slot, err := slotArg(fs, rest)
+		fs, j := subFlags("resume")
+		slot, err := c.slotArg(fs, j, rest)
 		if err != nil {
 			return err
 		}
@@ -182,33 +216,72 @@ func (c *ctl) dispatch(ctx context.Context, args []string) error {
 		}
 		return err
 	case "reload":
-		fs := flag.NewFlagSet("reload", flag.ExitOnError)
+		fs, j := subFlags("reload")
 		reason := fs.String("reason", "", "reason recorded in the daemon log and cycle records")
 		wait := fs.Bool("wait", false, "follow the drain and confirm the respawn came up on this config")
 		respawnTimeout := fs.Duration("respawn-timeout", 90*time.Second, "max wait for the respawn after the daemon exits")
 		timeout := fs.Duration("timeout", 0, "optional hard cap on the entire wait (0 = none)")
-		_ = fs.Parse(rest)
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
 		if fs.NArg() != 0 {
 			return fmt.Errorf("reload takes no positional arguments")
 		}
+		c.useJSON(j)
 		if *wait {
 			return c.reloadWait(ctx, *reason, defaultFollowOpts(*respawnTimeout, *timeout))
 		}
 		return c.reload(ctx, *reason)
 	case "why":
-		fs := flag.NewFlagSet("why", flag.ExitOnError)
+		fs, j := subFlags("why")
 		cycles := fs.Int("cycles", 1, "how many recent cycles")
-		slot, err := slotArg(fs, rest)
+		slot, err := c.slotArg(fs, j, rest)
 		if err != nil {
 			return err
 		}
 		return c.why(ctx, slot, *cycles)
 	case "doctor":
+		fs, j := subFlags("doctor")
+		if err := c.parseNoArgs(fs, j, rest); err != nil {
+			return err
+		}
 		return c.doctor(ctx)
 	default:
 		flag.Usage()
 		return fmt.Errorf("unknown command %q", cmd)
 	}
+}
+
+// subFlags builds a subcommand flag set. It uses ContinueOnError so a bad flag
+// surfaces as an ordinary runnyctl error (printed once with the runnyctl:
+// prefix, and unit-testable) instead of a bare os.Exit(2), and discards the
+// flag package's own output so that error isn't also printed unprefixed. Every
+// subcommand registers -json here, so the global flag is accepted after the
+// command as well as before it (issue #47); fold the returned bool into c.json
+// with useJSON once parsing succeeds.
+func subFlags(name string) (*flag.FlagSet, *bool) {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	return fs, fs.Bool("json", false, "emit protojson instead of human rendering")
+}
+
+// useJSON folds a subcommand's trailing -json into the effective output mode,
+// OR-ing it with the global flag already in c.json so -json works in either
+// position.
+func (c *ctl) useJSON(local *bool) { c.json = c.json || *local }
+
+// parseNoArgs parses fs for a subcommand that takes no positional arguments,
+// folding -json. A stray positional errors rather than being silently ignored
+// — the same anti-swallow guard reload applies to its own arguments.
+func (c *ctl) parseNoArgs(fs *flag.FlagSet, j *bool, rest []string) error {
+	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("%s takes no arguments (got %q)", fs.Name(), fs.Arg(0))
+	}
+	c.useJSON(j)
+	return nil
 }
 
 // shouldHint reports whether a command's terminal error warrants the home-aware
@@ -247,24 +320,35 @@ func socketFileExists(path string) bool {
 	return err == nil
 }
 
-func slotArg(fs *flag.FlagSet, rest []string) (string, error) {
-	// Accept both "cmd SLOT -flag" and "cmd -flag SLOT" (Go's flag package
-	// stops at the first non-flag arg, so slot-first needs special-casing).
-	var slot string
+// peelSlot pulls an optional leading non-flag token (the SLOT) off rest so a
+// "cmd SLOT -flag" invocation parses: Go's flag package stops at the first
+// non-flag arg, so without this the slot would shadow every flag after it
+// (issue #47). Returns "" when rest is empty or starts with a flag, plus the
+// remaining args to hand to fs.Parse.
+func peelSlot(rest []string) (slot string, remaining []string) {
 	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
-		slot, rest = rest[0], rest[1:]
+		return rest[0], rest[1:]
 	}
+	return "", rest
+}
+
+// slotArg parses a command that requires exactly one SLOT, given before or after
+// the flags, and folds a trailing -json on success (so callers can't forget the
+// fold — the same ownership parseNoArgs has for no-arg commands).
+func (c *ctl) slotArg(fs *flag.FlagSet, j *bool, rest []string) (string, error) {
+	slot, rest := peelSlot(rest)
 	if err := fs.Parse(rest); err != nil {
 		return "", err
 	}
 	switch {
-	case slot != "" && fs.NArg() == 0:
-		return slot, nil
-	case slot == "" && fs.NArg() == 1:
-		return fs.Arg(0), nil
+	case slot != "" && fs.NArg() == 0: // slot before the flags
+	case slot == "" && fs.NArg() == 1: // slot after the flags
+		slot = fs.Arg(0)
 	default:
 		return "", fmt.Errorf("exactly one SLOT argument is required")
 	}
+	c.useJSON(j)
+	return slot, nil
 }
 
 type ctl struct {

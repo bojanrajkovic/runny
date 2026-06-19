@@ -77,7 +77,11 @@ never exercised live in tests.
   Do NOT "simplify" detection to a label comparison — that reintroduces the stomp.
 - **Two orthogonal axes, and indeterminate dominates all but self-identity.** "An
   agent is registered under label X" (a `LaunchdProbe` of the brew + canonical
-  labels) and "a daemon answers the socket" (`RunnyHome.socketExists`) are separate
+  labels) and "a daemon answers the socket" (a bounded `SocketProbe` connect, NOT a
+  file stat — `ECONNREFUSED` means a stale inode no listener holds, so a crashed
+  hand-run daemon's leftover socket reads empty and stops blocking install, while a
+  live OR wedged listener reads occupied; a timeout/error reads occupied, the safe
+  direction) are separate
   facts, plus a home-canonical flag and whether the manual installer's plist persists
   on disk (`AgentController.manualPlistPersisted` — a dormant owner the loaded-label
   probe is blind to, since launchd auto-loads `~/Library/LaunchAgents` at login;

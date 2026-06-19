@@ -51,13 +51,20 @@ func TestLocalNetworkReachFailsWhenOrphaned(t *testing.T) {
 	}
 }
 
-// The published status grant must read DENIED when orphaned, so the app's grant
-// card surfaces it proactively (the daemon cannot reach guests in this state).
-func TestLocalNetworkGrantDeniedWhenOrphaned(t *testing.T) {
+// The orphaned context must NOT be forced to the generic DENIED grant: runnyctl
+// and the app render DENIED as "grant Local Network in System Settings", a dead
+// end for a self-daemonized daemon (Codex review, #111). The cause is surfaced
+// via the local-network doctor check + the startup log instead; the grant stays
+// the honest empirical probe (UNKNOWN without a vmnet interface). A distinct
+// client-side remediation is app-track work (#112).
+func TestLocalNetworkGrantNotForcedDeniedWhenOrphaned(t *testing.T) {
+	if vmnetInterfaceUp() {
+		t.Skip("a 192.168.64.0/24 interface is present; the live probe would run")
+	}
 	defer func(orig func() launchContext) { launchContextNow = orig }(launchContextNow)
 	launchContextNow = func() launchContext { return launchOrphaned }
-	if got := localNetworkGrant(); got != runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_DENIED {
-		t.Errorf("orphaned grant = %v, want DENIED", got)
+	if got := localNetworkGrant(); got == runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_DENIED {
+		t.Errorf("orphaned grant must not be forced to DENIED (misleads the TCC remediation); got %v", got)
 	}
 }
 

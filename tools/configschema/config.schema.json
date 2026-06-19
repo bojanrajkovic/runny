@@ -1,0 +1,305 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/bojanrajkovic/runny/internal/home/config",
+  "$defs": {
+    "Deadlines": {
+      "properties": {
+        "clone": {
+          "type": "string",
+          "examples": [
+            "90s",
+            "2h",
+            "500ms"
+          ]
+        },
+        "boot": {
+          "type": "string",
+          "examples": [
+            "90s",
+            "2h",
+            "500ms"
+          ]
+        },
+        "await_ip": {
+          "type": "string",
+          "examples": [
+            "90s",
+            "2h",
+            "500ms"
+          ]
+        },
+        "await_ssh": {
+          "type": "string",
+          "examples": [
+            "90s",
+            "2h",
+            "500ms"
+          ]
+        },
+        "mint_jit": {
+          "type": "string",
+          "examples": [
+            "90s",
+            "2h",
+            "500ms"
+          ]
+        },
+        "provision": {
+          "type": "string",
+          "examples": [
+            "90s",
+            "2h",
+            "500ms"
+          ]
+        },
+        "teardown": {
+          "type": "string",
+          "examples": [
+            "90s",
+            "2h",
+            "500ms"
+          ]
+        },
+        "secure_ssh": {
+          "type": "string",
+          "examples": [
+            "90s",
+            "2h",
+            "500ms"
+          ]
+        },
+        "pull_stall": {
+          "type": "string",
+          "examples": [
+            "90s",
+            "2h",
+            "500ms"
+          ]
+        },
+        "resolve": {
+          "type": "string",
+          "examples": [
+            "90s",
+            "2h",
+            "500ms"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "GitHubConfig": {
+      "properties": {
+        "app_id": {
+          "type": "integer"
+        },
+        "private_key_path": {
+          "type": "string"
+        },
+        "api_base": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "app_id",
+        "private_key_path"
+      ]
+    },
+    "Limits": {
+      "properties": {
+        "max_job_duration": {
+          "type": "string",
+          "examples": [
+            "90s",
+            "2h",
+            "500ms"
+          ]
+        },
+        "max_idle": {
+          "type": "string",
+          "examples": [
+            "90s",
+            "2h",
+            "500ms"
+          ]
+        },
+        "backoff_base": {
+          "type": "string",
+          "examples": [
+            "90s",
+            "2h",
+            "500ms"
+          ]
+        },
+        "backoff_cap": {
+          "type": "string",
+          "examples": [
+            "90s",
+            "2h",
+            "500ms"
+          ]
+        },
+        "reconcile_interval": {
+          "type": "string",
+          "examples": [
+            "90s",
+            "2h",
+            "500ms"
+          ]
+        },
+        "max_debug_hold": {
+          "type": "string",
+          "examples": [
+            "90s",
+            "2h",
+            "500ms"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "PoolConfig": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "os": {
+          "type": "string",
+          "enum": [
+            "darwin",
+            "linux"
+          ]
+        },
+        "image": {
+          "type": "string"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "target": {
+          "$ref": "#/$defs/TargetConfig"
+        },
+        "github": {
+          "$ref": "#/$defs/GitHubConfig"
+        },
+        "labels": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "runner_group_id": {
+          "type": "integer"
+        },
+        "ssh_user": {
+          "type": "string"
+        },
+        "ssh_password": {
+          "type": "string"
+        },
+        "ssh_timeout": {
+          "type": "string",
+          "examples": [
+            "90s",
+            "2h",
+            "500ms"
+          ]
+        },
+        "ssh_hardening": {
+          "type": "string",
+          "enum": [
+            "rotate",
+            "off"
+          ]
+        },
+        "cpu_cores": {
+          "type": "integer"
+        },
+        "ram_gb": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "os",
+        "image",
+        "github",
+        "target"
+      ]
+    },
+    "Retention": {
+      "properties": {
+        "cycles_per_slot": {
+          "type": "integer"
+        },
+        "max_age": {
+          "type": "string",
+          "examples": [
+            "90s",
+            "2h",
+            "500ms"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "TargetConfig": {
+      "oneOf": [
+        {
+          "required": [
+            "org"
+          ]
+        },
+        {
+          "required": [
+            "owner",
+            "repo"
+          ]
+        }
+      ],
+      "properties": {
+        "org": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "repo": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    }
+  },
+  "properties": {
+    "pools": {
+      "items": {
+        "$ref": "#/$defs/PoolConfig"
+      },
+      "type": "array",
+      "minItems": 1
+    },
+    "deadlines": {
+      "$ref": "#/$defs/Deadlines"
+    },
+    "limits": {
+      "$ref": "#/$defs/Limits"
+    },
+    "retention": {
+      "$ref": "#/$defs/Retention"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "pools"
+  ]
+}

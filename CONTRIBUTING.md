@@ -16,6 +16,9 @@ The human-developer workflow. Agent-facing guidance and the project-wide index l
 | `bazel test //...` | Run the test suite |
 | `bazel run //tools/format` | Format the tree (gofumpt, buildifier, SwiftFormat — the nicklockwood tool, not apple/swift-format) |
 | `bazel run //:gazelle` | Regenerate BUILD files after import changes |
+| `bazel run //tools/configschema -- -write` | Regenerate `config.schema.json` after changing the `home.Config` struct |
+
+**Config schema:** `tools/configschema/config.schema.json` is generated from `home.Config` and committed (editors reference it; see docs/deploy.md). After any change to the config struct, regenerate it with the command above — a golden test (`//tools/configschema:configschema_test`) fails the build until the committed file matches the struct, the same no-silent-drift discipline as the `config-drift` doctor check.
 
 **Dependency workflow:** `go mod tidy -e` → `bazel run //:gazelle` → `bazel mod tidy`. Add Go deps at latest stable; Renovate keeps pins current.
 

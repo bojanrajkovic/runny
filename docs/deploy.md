@@ -38,6 +38,52 @@ An operator who previously set `RUNNY_HOME=/custom` must **relocate**
 is ignored, and a daemon that finds no `config.yaml` under `~/.runny` fails
 loudly at startup.
 
+## Authoring `config.yaml`
+
+A JSON Schema for the config file ships at
+[`tools/configschema/config.schema.json`](../tools/configschema/config.schema.json),
+generated from the `home.Config` struct (a golden test keeps the two from
+drifting). Point your editor at it for autocomplete, key-typo detection, and
+inline validation of the enums and required keys.
+
+Add a modeline to the top of `~/.runny/config.yaml` — the
+[YAML Language Server](https://github.com/redhat-developer/yaml-language-server)
+(bundled with the VS Code *YAML* extension and most LSP setups) reads it:
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/bojanrajkovic/runny/main/tools/configschema/config.schema.json
+```
+
+Or, without touching the file, map it in VS Code `settings.json`:
+
+```json
+"yaml.schemas": {
+  "https://raw.githubusercontent.com/bojanrajkovic/runny/main/tools/configschema/config.schema.json": "**/.runny/config.yaml"
+}
+```
+
+A minimal config (one org-scoped macOS pool), modeline included:
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/bojanrajkovic/runny/main/tools/configschema/config.schema.json
+pools:
+  - name: mac
+    os: darwin
+    image: ghcr.io/cirruslabs/macos-sequoia-xcode:latest
+    count: 2
+    target:
+      org: my-org
+    github:
+      app_id: 123456
+      private_key_path: ~/.runny/runner-app.pem
+```
+
+The schema describes the file's **shape** — keys, types, enums, the
+org-or-owner/repo target. The **semantic** rules it can't cleanly express
+(duration positivity, runner-name length, the macOS guest cap) stay with the
+daemon: `runnyd -doctor` and the load-time validation remain authoritative, and
+a config that passes the schema can still be refused there with a precise error.
+
 ## Install (for testing, from this checkout)
 
 ```sh

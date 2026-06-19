@@ -78,6 +78,14 @@ const (
 	SSHHardeningOff    = "off"
 )
 
+// PoolConfig.OS values. Exported so the config JSON Schema generator
+// (tools/configschema) constrains the same set validate() enforces, rather than
+// re-typing the literals.
+const (
+	OSDarwin = "darwin"
+	OSLinux  = "linux"
+)
+
 // TargetConfig holds exactly one of: Org, or Owner+Repo.
 type TargetConfig struct {
 	Org   string `yaml:"org"`
@@ -234,9 +242,9 @@ func (c *Config) applyDefaults() {
 		}
 		if len(p.Labels) == 0 {
 			switch p.OS {
-			case "darwin":
+			case OSDarwin:
 				p.Labels = []string{"self-hosted", "macOS", "ARM64"}
-			case "linux":
+			case OSLinux:
 				p.Labels = []string{"self-hosted", "Linux", "ARM64"}
 			}
 		}
@@ -265,7 +273,12 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-var poolNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+// PoolNamePattern is the regex a pool name must match: it becomes the slot-name
+// prefix, so it must be lowercase/label-safe. Exported so the config JSON Schema
+// generator (tools/configschema) constrains the same shape without re-typing it.
+const PoolNamePattern = `^[a-z0-9][a-z0-9-]*$`
+
+var poolNameRE = regexp.MustCompile(PoolNamePattern)
 
 func (c *Config) validate() error {
 	var errs []error
@@ -275,6 +288,11 @@ func (c *Config) validate() error {
 	seen := map[string]bool{}
 	for i, p := range c.Pools {
 		at := fmt.Sprintf("pools[%d]", i)
+		// The shape rules below (required keys, the os/ssh_hardening enums, the
+		// pool-name pattern) are mirrored in the config JSON Schema. The enums
+		// and pattern share the consts/var above; the required-key set is
+		// hand-kept in tools/configschema's enrich() — update it when adding a
+		// required key.
 		if !poolNameRE.MatchString(p.Name) {
 			errs = append(errs, fmt.Errorf("%s: name %q must be lowercase alphanumeric/hyphen", at, p.Name))
 		}
@@ -282,8 +300,8 @@ func (c *Config) validate() error {
 			errs = append(errs, fmt.Errorf("%s: duplicate pool name %q", at, p.Name))
 		}
 		seen[p.Name] = true
-		if p.OS != "darwin" && p.OS != "linux" {
-			errs = append(errs, fmt.Errorf("%s: os must be darwin or linux, got %q", at, p.OS))
+		if p.OS != OSDarwin && p.OS != OSLinux {
+			errs = append(errs, fmt.Errorf("%s: os must be %s or %s, got %q", at, OSDarwin, OSLinux, p.OS))
 		}
 		if p.Image == "" {
 			errs = append(errs, fmt.Errorf("%s: image is required", at))

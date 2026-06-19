@@ -75,6 +75,7 @@ struct CLIInstallRow: View {
         case .installing: "Installing…"
         case .installed: "Installed"
         case .installedButNotOnPath: "Installed — not on your PATH"
+        case .orphaned: "Leftover runnyctl link"
         case let .conflict(owner): conflictGuidance(owner).headline
         case .translocated: "Move Runny to Applications first"
         case .failed: "Install failed"
@@ -102,6 +103,9 @@ struct CLIInstallRow: View {
             CLIInstallModel.linkPath
         case .installedButNotOnPath:
             "/usr/local/bin isn't on your PATH — add it so runnyctl resolves."
+        case let .orphaned(target):
+            "\(CLIInstallModel.linkPath) → \(target), a Runny that's no longer installed. "
+                + "Remove the leftover link, or Install to point it at this copy."
         case let .conflict(owner):
             conflictGuidance(owner).detail
         case .translocated:
@@ -115,7 +119,7 @@ struct CLIInstallRow: View {
     private var tint: Color {
         switch cli.state {
         case .installed, .notInstalled, .installing, .cancelled: .secondary
-        case .installedButNotOnPath, .conflict, .translocated: .orange
+        case .installedButNotOnPath, .conflict, .translocated, .orphaned: .orange
         case .failed: .red
         }
     }
@@ -132,6 +136,12 @@ struct CLIInstallRow: View {
             }
         case .installed, .installedButNotOnPath:
             Button("Remove") { cli.uninstall() }
+        case .orphaned:
+            // Clean up the dangling leftover, or adopt the path onto this copy.
+            HStack(spacing: 8) {
+                Button("Remove") { cli.removeOrphan() }
+                Button("Install") { cli.install() }
+            }
         case .conflict, .translocated:
             Button("Re-check") { cli.refresh() }
         case .failed:

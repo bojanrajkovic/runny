@@ -21,6 +21,11 @@ final class CLIInstallModel {
         case installedButNotOnPath
         /// A foreign file owns the path; never overwritten. Carries its owner.
         case conflict(owner: String)
+        /// A Runny-owned symlink whose target bundle is GONE — the orphan a
+        /// drag-to-trash leaves behind, surfaced honestly (not silently as
+        /// `notInstalled`) so it can be removed. Carries the dangling target. Install
+        /// still re-points it onto the running bundle; Remove clears it.
+        case orphaned(target: String)
         /// The app is translocated / at a transient path; refused (fail closed).
         case translocated
         case failed(String)
@@ -58,24 +63,24 @@ final class CLIInstallModel {
 
     /// The state the disk implies right now. Shared by `refresh()` and the
     /// post-remove read-back, so both encode the install/conflict/onPath rule once.
+    /// Resolves the impure inputs (the link's state, whether a symlink's target still
+    /// exists, whether the dir is on PATH) and hands them to the pure classifier.
     private func restingState() -> State {
         guard let bundle = Self.bundleCLIPath else {
             return .failed("this build carries no bundled runnyctl")
         }
-        switch Self.readExisting(Self.linkPath) {
-        case .absent:
-            return .notInstalled
-        case .regularFile:
-            return .conflict(owner: Self.linkPath)
-        case let .symlink(resolved):
-            if resolved == bundle {
-                return Self.dirOnPath(Self.binDir) ? .installed : .installedButNotOnPath
-            } else if CLIInstall.isRunnyBundleCLI(resolved) {
-                return .notInstalled // a moved/older Runny.app link; install re-points it
-            } else {
-                return .conflict(owner: resolved)
-            }
+        let existing = Self.readExisting(Self.linkPath)
+        // Whether a symlink's target is still on disk — the signal that tells a live
+        // (re-pointable) Runny link from a dangling orphan. `fileExists` follows the
+        // link, so it is false exactly when the target bundle is gone.
+        let targetExists: Bool = if case let .symlink(resolved) = existing {
+            FileManager.default.fileExists(atPath: resolved)
+        } else {
+            false
         }
+        return Self.restingClassification(
+            existing: existing, bundle: bundle, onPath: Self.dirOnPath(Self.binDir), targetExists: targetExists
+        )
     }
 
     /// Confirm a removal from disk — the requested≠done invariant for uninstall,
@@ -101,6 +106,18 @@ final class CLIInstallModel {
         state = .installing
         let gen = generation
         Task { await runUninstall(gen: gen) }
+    }
+
+    /// Remove the dangling orphan link a removed Runny.app left behind. Unlike
+    /// `uninstall` (which removes only a link into THIS bundle), this removes any
+    /// Runny-owned link — the orphan points into a missing OTHER bundle — while still
+    /// refusing a foreign file. Surface-initiated only from the `.orphaned` state.
+    func removeOrphan() {
+        guard state != .installing else { return }
+        generation += 1
+        state = .installing
+        let gen = generation
+        Task { await runRemoveOrphan(gen: gen) }
     }
 
     /// Cancel an in-flight op: terminate the privileged process if one is up and
@@ -182,6 +199,26 @@ final class CLIInstallModel {
             apply(.conflict(owner: Self.resolvedLink(Self.linkPath) ?? Self.linkPath), gen: gen)
         case .alreadyInstalled, .createUnprivileged, .escalate, .refuseTranslocated:
             confirm(bundle: bundle, gen: gen)
+        }
+    }
+
+    private func runRemoveOrphan(gen: Int) async {
+        // No CLIInstall.plan call: the orphan is, by definition, a Runny-owned link we
+        // may always clear, so the action is unconditional removal — the script and the
+        // unprivileged helper enforce the safety (refuse a foreign file that raced in).
+        if Self.dirWritable(Self.binDir) {
+            guard gen == generation else { return } // cancelled before the write
+            let err = Self.removeOrphanUnprivileged(Self.linkPath)
+            if let err { apply(.failed(err), gen: gen) } else { confirmRemoved(gen: gen) }
+        } else {
+            guard gen == generation else { return }
+            let outcome = await runOsascript(CLIInstallModel.removeOrphanScript(), gen: gen)
+            switch outcome {
+            case .ok: confirmRemoved(gen: gen)
+            case .cancelled: apply(.cancelled, gen: gen)
+            case .refusedForeign: apply(.conflict(owner: Self.resolvedLink(Self.linkPath) ?? Self.linkPath), gen: gen)
+            case let .failed(m): apply(.failed(m), gen: gen)
+            }
         }
     }
 
@@ -283,6 +320,33 @@ extension CLIInstallModel {
         case failed(String)
     }
 
+    /// The resting state the disk implies, as a pure function of the resolved inputs
+    /// so the install/conflict/orphan classification is unit-tested without touching
+    /// `/usr/local/bin`. `targetExists` distinguishes a live Runny link (install
+    /// re-points it) from a dangling orphan into a now-missing bundle (surfaced for
+    /// cleanup) — the #89 case a bare `notInstalled` used to hide.
+    nonisolated static func restingClassification(
+        existing: CLIInstall.Existing, bundle: String, onPath: Bool, targetExists: Bool
+    ) -> State {
+        switch existing {
+        case .absent:
+            return .notInstalled
+        case .regularFile:
+            return .conflict(owner: linkPath)
+        case let .symlink(resolved):
+            if resolved == bundle {
+                return onPath ? .installed : .installedButNotOnPath
+            }
+            guard CLIInstall.isRunnyBundleCLI(resolved) else {
+                return .conflict(owner: resolved)
+            }
+            // A link into some OTHER Runny.app. If that bundle is still on disk, install
+            // adopts/re-points it (notInstalled). If it's gone, the link dangles — the
+            // orphan a drag-to-trash leaves: surface it for cleanup, not a silent notInstalled.
+            return targetExists ? .notInstalled : .orphaned(target: resolved)
+        }
+    }
+
     nonisolated static func stateForVerify(_ r: CLIInstall.VerifyResult) -> State {
         switch r {
         case .installed: .installed
@@ -354,6 +418,18 @@ extension CLIInstallModel {
         let sh = "existing=\"$(readlink /usr/local/bin/runnyctl 2>/dev/null)\"; "
             + "if [ \"$existing\" = \(shellSingleQuote(target)) ]; then rm -f /usr/local/bin/runnyctl; "
             + "elif [ -e /usr/local/bin/runnyctl ] || [ -L /usr/local/bin/runnyctl ]; then exit 3; fi"
+        return appleScript(doShell: sh)
+    }
+
+    /// The orphan-cleanup one-liner: remove ONLY a Runny-owned link (this or any
+    /// Runny.app) — the dangling leftover a removed app left behind — then refuse
+    /// (exit 3) anything else still present. This is `installScript`'s remove+guard
+    /// without the create; the `*/Runny.app/...` glob matches the orphan regardless of
+    /// which (now-missing) bundle it pointed into, while a foreign file is never touched.
+    nonisolated static func removeOrphanScript() -> String {
+        let sh = "existing=\"$(readlink /usr/local/bin/runnyctl 2>/dev/null)\"; "
+            + "case \"$existing\" in */Runny.app/Contents/MacOS/runnyctl) rm -f /usr/local/bin/runnyctl ;; esac; "
+            + "if [ -e /usr/local/bin/runnyctl ] || [ -L /usr/local/bin/runnyctl ]; then exit 3; fi"
         return appleScript(doShell: sh)
     }
 
@@ -507,6 +583,26 @@ extension CLIInstallModel {
                 return nil
             } catch {
                 return "could not remove the link: \(error.localizedDescription)"
+            }
+        default:
+            return "another runnyctl now owns \(linkPath) — not removed"
+        }
+    }
+
+    /// Remove a Runny-owned orphan link unprivileged. Like `removeUnprivileged` but
+    /// matches ANY Runny.app link (the orphan points into a missing OTHER bundle, not
+    /// this one), re-checked at write time so a foreign file that raced in is refused
+    /// rather than removed.
+    nonisolated static func removeOrphanUnprivileged(_ linkPath: String) -> String? {
+        switch readExisting(linkPath) {
+        case .absent:
+            return nil
+        case let .symlink(resolved) where CLIInstall.isRunnyBundleCLI(resolved):
+            do {
+                try FileManager.default.removeItem(atPath: linkPath)
+                return nil
+            } catch {
+                return "could not remove the leftover link: \(error.localizedDescription)"
             }
         default:
             return "another runnyctl now owns \(linkPath) — not removed"

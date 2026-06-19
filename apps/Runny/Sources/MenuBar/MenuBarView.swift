@@ -67,11 +67,11 @@ struct MenuBarView: View {
             // Post-upgrade daemon-update affordance (self-hides unless the
             // app-installed agent is newer than the running daemon).
             DaemonUpdateAffordance()
-            // A gentle nudge ONLY while the CLI is absent (never on a dev build,
-            // where refresh() leaves a non-.notInstalled state) — the primary
-            // surface is Settings; this just points there, like VS Code's
-            // "Shell Command: Install" in the palette rather than the status bar.
-            if cli.state == .notInstalled {
+            // A gentle nudge while the CLI is absent OR a leftover link dangles from a
+            // removed Runny (never on a dev build, where refresh() leaves a non-.notInstalled
+            // state) — the primary surface is Settings; this just points there, like VS
+            // Code's "Shell Command: Install" in the palette rather than the status bar.
+            if cli.state == .notInstalled || isOrphanedCLI {
                 Divider()
                 cliNudge
             }
@@ -92,13 +92,21 @@ struct MenuBarView: View {
         }
     }
 
+    /// A Runny-owned `runnyctl` link left dangling by a removed copy. `.orphaned`
+    /// carries its target, so it can't be compared with `==`.
+    private var isOrphanedCLI: Bool {
+        if case .orphaned = cli.state { return true }
+        return false
+    }
+
     private var cliNudge: some View {
         SettingsLink {
             HStack(spacing: 6) {
                 Image(systemName: "terminal")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text("Install command-line tool")
+                // An orphan is a cleanup, not a first install — name it accordingly.
+                Text(isOrphanedCLI ? "Clean up command-line tool link" : "Install command-line tool")
                     .font(.caption)
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right")

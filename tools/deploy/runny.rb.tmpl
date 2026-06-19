@@ -22,10 +22,11 @@ class Runny < Formula
   end
 
   # `brew services start runny` (NO sudo) loads this as a per-user LaunchAgent
-  # in the GUI session — the only context where macOS grants the Local Network
-  # permission runnyd needs to reach its guests. `sudo brew services` would
-  # install a LaunchDaemon, which is silently denied vmnet access. KeepAlive is
-  # load-bearing for the wedge restart (ADR-0012). See docs/deploy.md.
+  # in the GUI session — the context that surfaces the one-time macOS Local
+  # Network prompt runnyd needs to reach its guests. `sudo brew services` would
+  # instead run runnyd as a root LaunchDaemon — unnecessary privilege, not the
+  # per-user agent. KeepAlive is load-bearing for the wedge restart (ADR-0012).
+  # See docs/deploy.md.
   service do
     run [opt_bin/"runnyd"]
     keep_alive true
@@ -41,12 +42,13 @@ class Runny < Formula
 
         1. The binary ships signed with com.apple.security.virtualization.
         2. macOS Local Network permission. Start runnyd from a GUI login
-           session without sudo, so it runs as a LaunchAgent:
+           session without sudo, so it runs as a per-user LaunchAgent:
 
                brew services start runny
 
-           then accept the one-time "Local Network" prompt. A LaunchDaemon
-           (sudo) or a backgrounded runnyd is silently denied vmnet access.
+           then accept the one-time "Local Network" prompt. (sudo would run it
+           as a root LaunchDaemon — unnecessary privilege; a backgrounded
+           runnyd that reparents off launchd is silently denied vmnet access.)
 
       Write ~/.runny/config.yaml first; verify with `runnyd -doctor`.
     TEXT

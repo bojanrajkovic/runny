@@ -7,17 +7,24 @@ another runner manager.
 
 runnyd boots guests on Apple's NAT/vmnet network and reaches them over SSH on
 the `192.168.64.0/24` subnet. macOS gates that behind the **Local Network**
-privacy permission:
+privacy permission, and how a process is launched decides how that gate
+behaves:
 
-- A **system LaunchDaemon** or a **background-reparented** runnyd is *silently
-  denied* vmnet access — every guest dial fails `connect: no route to host`
-  while the host shell reaches the same address.
-- A **foreground child of `sshd`** inherits sshd's exemption.
-- A **LaunchAgent in a GUI login session** can show the one-time Local Network
-  prompt; once accepted, the grant sticks (it survives binary upgrades).
+- macOS keeps **separate** local-network privacy state per user account. A
+  per-user **LaunchAgent** is therefore subject to a one-time prompt — shown
+  only in a GUI login session — after which the grant sticks (it survives
+  binary upgrades). This is the path runnyd installs today.
+- A **foreground child of `sshd`** inherits sshd's exemption and reaches guests
+  with no prompt — handy for interactive debugging.
+- A runnyd that **self-daemonizes or reparents** away from launchd is neither a
+  launchd job nor an sshd child, and is *silently denied* — every guest dial
+  fails `connect: no route to host` while the host shell reaches the same
+  address. runnyd never backgrounds itself (crash-only KeepAlive keeps it a
+  launchd child); don't wrap it in something that does.
 
-So runnyd installs as a **per-user LaunchAgent**, not a LaunchDaemon. If
-guests are unreachable, see "Troubleshooting: Local Network permission".
+So runnyd installs as a **per-user LaunchAgent**, started by launchd in your GUI
+session so the one-time Local Network prompt can appear. If guests are
+unreachable, see "Troubleshooting: Local Network permission".
 
 ## Prerequisites
 
@@ -108,7 +115,8 @@ Install through the Homebrew tap (the formula installs both `runnyd` and
 ```sh
 brew install bojanrajkovic/tap/runny
 # write ~/.runny/config.yaml, then from a GUI login session, WITHOUT sudo
-# (sudo would install a Local-Network-denied LaunchDaemon):
+# (the per-user agent surfaces the one-time Local Network prompt; sudo would
+# instead run runnyd as a root LaunchDaemon — unnecessary privilege):
 brew services start runny
 ```
 
@@ -139,8 +147,8 @@ From a copy of Runny in `/Applications`:
   via `SMAppService` (one confirmation names the launchd label). The first guest
   boot raises the **Local Network** prompt; the app surfaces a grant card
   proactively if the grant is missing or pending, *before* a guest dial fails (the
-  same Local-Network requirement as "Why this is not just `launchctl load`" above —
-  it is why the agent is per-user, not a LaunchDaemon).
+  per-user agent is subject to that one-time prompt — see "Why this is not just
+  `launchctl load`" above).
 - A **Start** affordance appears in the menu bar and main window when the agent is
   installed but the daemon isn't running.
 - After upgrading the app to a newer build, **"Update Daemon"** drains running
@@ -236,9 +244,11 @@ If `local-network` is not ok:
    run `brew services restart runny`, wait for a guest to boot, and accept
    the **"runnyd would like to find and connect to devices on your local
    network"** prompt.
-3. Never start it with `sudo`: `sudo brew services` installs a LaunchDaemon,
-   which macOS denies without ever prompting. `sudo brew services stop runny`,
-   then start it without sudo from the GUI session.
+3. Don't start it with `sudo`. `sudo brew services` runs runnyd as a **root
+   LaunchDaemon** — unnecessary privilege, and a different install than the
+   per-user agent the rest of this guide assumes. If you ran it that way,
+   `sudo brew services stop runny`, then start it without sudo from the GUI
+   session.
 4. To isolate the permission from other network problems: run `runnyd` in the
    foreground of an interactive SSH session. That context is exempt — if
    guests provision there but not under the LaunchAgent, the permission is

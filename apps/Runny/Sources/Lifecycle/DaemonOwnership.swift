@@ -88,12 +88,15 @@ extension DaemonOwnership {
             return .selfManaged
         case .requiresApproval:
             // Approving launches the RunAtLoad agent OUTSIDE the spawn gate (a System
-            // Settings action), so awaitingApproval is safe only when nothing else owns
-            // the daemon. A bootstrapped canonical label (ambiguous — ours-pending vs a
-            // foreign manual one) OR an occupied socket (a foreground daemon) means
-            // approving would create a competing manager — defer.
-            return (inputs.canonicalProbe == .registered || inputs.socketAnswers)
-                ? .indeterminate : .awaitingApproval
+            // Settings action), so awaitingApproval is safe only once a foreign owner is
+            // DEFINITIVELY ruled out: both probes confirmed `.notRegistered` and no
+            // socket. A registered label, an occupied socket, OR an inconclusive probe
+            // (a stopped-but-registered brew service that timed out, say) means a
+            // competing owner might be present — defer.
+            if inputs.brewProbe == .notRegistered, inputs.canonicalProbe == .notRegistered, !inputs.socketAnswers {
+                return .awaitingApproval
+            }
+            return .indeterminate
         case .registrationFailed:
             // An unrecognized future SMAppService status is a determination FAILURE, not
             // a confirmed not-installed — fail closed so an unknown registration state

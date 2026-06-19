@@ -13,7 +13,11 @@ struct DaemonUpdateAffordance: View {
 
     var body: some View {
         switch store.daemonUpdate(
-            agentInstalled: agent.installState == .installed,
+            // Gate on ownership, not just installState: during a Homebrew collision the
+            // app's agent is .installed but brew's (possibly older) daemon is what runs,
+            // so a drain-gated "Update" would drain the foreign fleet for an update that
+            // can't take. selfManaged means the app's agent IS the running daemon.
+            agentInstalled: agent.ownership == .selfManaged,
             agentCanonical: agentCanonical,
             runningBundleCanonical: agent.eligibility == .eligible
         ) {

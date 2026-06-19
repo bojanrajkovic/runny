@@ -103,7 +103,17 @@ final class DaemonOwnershipTests: XCTestCase {
             DaemonOwnership.classify(inputs(selfState: .requiresApproval, socketAnswers: true)),
             .indeterminate
         )
-        // With nothing else present it stays the approval CTA.
+        // An INCONCLUSIVE brew/canonical probe also defers — approval is safe only when
+        // a foreign owner is definitively ruled out, not merely unprobed.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .requiresApproval, brewProbe: .indeterminate)),
+            .indeterminate
+        )
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .requiresApproval, canonicalProbe: .indeterminate)),
+            .indeterminate
+        )
+        // Only definitively all-clear stays the approval CTA.
         XCTAssertEqual(
             DaemonOwnership.classify(inputs(selfState: .requiresApproval)),
             .awaitingApproval
@@ -135,13 +145,13 @@ final class DaemonOwnershipTests: XCTestCase {
         // A transient launchctl probe wedge must NOT override the authoritative
         // SMAppService self-status: an installed (.enabled) agent is ours even if a
         // foreign-label probe times out, so we never defer managing our own daemon.
+        // Note this is .installed ONLY: .enabled is authoritative enough to override a
+        // wedge, but .requiresApproval is NOT (the pending agent isn't running, so it
+        // can't attest to the loaded label) — that case defers, asserted in
+        // testRequiresApprovalDefersWhenAnythingElseOwnsTheDaemon.
         XCTAssertEqual(
             DaemonOwnership.classify(inputs(selfState: .installed, brewProbe: .indeterminate)),
             .selfManaged
-        )
-        XCTAssertEqual(
-            DaemonOwnership.classify(inputs(selfState: .requiresApproval, canonicalProbe: .indeterminate)),
-            .awaitingApproval
         )
     }
 

@@ -108,12 +108,14 @@ struct AgentInstallRow: View {
             if agent.ownership == .foreignBrew, agent.installState == .installed {
                 // Two-manager collision: Homebrew AND our own agent are both installed,
                 // so the banner's "restart brew" alone leaves the competing RunAtLoad app
-                // agent racing the same instance lock. Offer an in-app route to remove it.
-                Text("Runny's own agent is also installed and competing — remove it in Login Items.")
+                // agent racing the same instance lock. Remove it through the SAME
+                // live-guest-aware teardown the toggle uses — disabling it in Login Items
+                // instead would stop a possibly-job-running agent with no abandon warning.
+                Text("Runny's own agent is also installed and competing — remove it to leave Homebrew in charge.")
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
-                Button("Open Login Items…") { SMAppService.openSystemSettingsLoginItems() }
+                Button("Remove Runny's agent") { requestUninstall() }
                     .controlSize(.small)
             }
         } else {
@@ -196,15 +198,25 @@ struct AgentInstallRow: View {
             set: { wantOn in
                 if wantOn {
                     confirmingInstall = true
-                } else if DaemonStore.uninstallNeedsConfirmation(
-                    connected: store.connection == .connected, liveGuestSlots: store.liveGuestSlots
-                ) {
-                    confirmingUninstall = true
                 } else {
-                    Task { await agent.uninstall() }
+                    requestUninstall()
                 }
             }
         )
+    }
+
+    /// Remove the app's agent through the live-guest-aware path: raise the abandon
+    /// confirmation when a job may be live (or the daemon is disconnected and we can't
+    /// prove otherwise), else uninstall directly. Shared by the toggle and the
+    /// brew-collision removal so neither route bypasses the warning.
+    private func requestUninstall() {
+        if DaemonStore.uninstallNeedsConfirmation(
+            connected: store.connection == .connected, liveGuestSlots: store.liveGuestSlots
+        ) {
+            confirmingUninstall = true
+        } else {
+            Task { await agent.uninstall() }
+        }
     }
 
     private var abandonedSlotsText: String {

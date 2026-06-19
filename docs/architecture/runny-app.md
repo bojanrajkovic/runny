@@ -268,9 +268,19 @@ classifies the filesystem state into a verdict, and a `verify` that reads the
 result back from disk. Those verdict and result cases are the authority and are
 not enumerated here; the invariants the surface guarantees are:
 
-- **Never clobber a foreign file.** A regular file, or a symlink that doesn't
-  point into a `Runny.app`, is something another channel owns (a `brew`
-  `runnyctl`); the action refuses it and names the conflict rather than overwrite.
+- **Never clobber a foreign file, and name the managing channel.** A regular file,
+  or a symlink that doesn't point into a `Runny.app`, is something another channel
+  owns; the action refuses it and surfaces the *channel* (Homebrew when the target
+  resolves into a Cellar, a hand-rolled link, or a dropped file) with its remediation
+  — `brew unlink runny`, say — mirroring the daemon observer banner, not just the raw
+  path. (Docker Desktop clobbers a brew-managed CLI; Runny defers.)
+- **Reconcile an orphaned link on launch — surface, don't auto-rewrite.** A
+  drag-to-trash leaves `/usr/local/bin/runnyctl` dangling (macOS has no uninstall
+  hook); a later launch detects the Runny-owned link into a now-missing bundle and
+  surfaces a distinct *orphaned* state offering Remove (or Install to re-point), where
+  it used to read silently as *not installed*. It never rewrites the link on launch
+  unprompted (that would re-raise the admin prompt every restart) and never clobbers a
+  foreign owner — the two failure modes Docker Desktop's every-launch re-link has.
 - **Fail closed from a translocated bundle.** A link into a translocated
   `…/AppTranslocation/…` copy evaporates on next launch, so the action refuses and
   asks the operator to move Runny to Applications first. (The Security SPI that

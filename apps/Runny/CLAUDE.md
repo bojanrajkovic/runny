@@ -105,9 +105,21 @@ bounds) and ADR-0016 (decisions). Sharp edges below.
   AppleScript layer; the app **activates before raising the prompt** (it's
   `LSUIElement`/accessory, so a prompt can present without focus) and confirms the
   result by reading the link back from disk, never from the exit code. The menu-bar
-  nudge shows only while the CLI is absent (the model's `.notInstalled`), so a dev
-  build that carries no bundled `runnyctl` — `refresh()` leaves it `.failed` —
-  never nags.
+  nudge shows only while the CLI is absent (`.notInstalled`) OR a leftover link
+  dangles (`.orphaned`), so a dev build that carries no bundled `runnyctl` —
+  `refresh()` leaves it `.failed` — never nags.
+- **A foreign conflict names the channel; an orphan reconciles on launch.** A
+  refused foreign owner is classified by `CLIInstall.foreignChannel` into Homebrew
+  (target resolves into a Cellar / brew prefix), a hand-rolled symlink, or a regular
+  file, and the row shows channel-specific remediation (e.g. `brew unlink runny`) —
+  the CLI sibling of the daemon observer banner, NOT just the raw path. A
+  drag-to-trash leaves the link dangling (macOS has no uninstall hook); a later
+  launch surfaces it as `.orphaned` (a Runny-owned link whose target bundle is gone —
+  the pure `restingClassification` keys this on `targetExists`) with a Remove action
+  (`removeOrphan` → `removeOrphanScript`, the `*/Runny.app/…` glob removal that
+  install already uses, minus the create). It SURFACES, never auto-rewrites on launch
+  (that would re-raise the admin prompt every restart — Docker's mistake) and never
+  clobbers a foreign owner.
 - **Daemon lifecycle lives in `Sources/Lifecycle/` — read its `CLAUDE.md` for the
   sharp edges, don't duplicate them here.** The load-bearing ones a broad change
   must respect: `SMAppService` success means *requested*, so `installState` is

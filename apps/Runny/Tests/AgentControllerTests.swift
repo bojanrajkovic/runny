@@ -19,6 +19,10 @@ final class AgentControllerTests: XCTestCase {
         /// `.notRegistered` — models launchd not yet processing the removal, so
         /// repair's bounded wait-for-removal is exercised.
         var unregisterDoesNotConfirm = false
+        /// When true, a successful `register()` does NOT flip status to the registered
+        /// state — models launchd accepting the re-register but not completing it, so
+        /// repair's bounded wait-for-registration (`awaitRegistered`) is exercised.
+        var registerDoesNotConfirm = false
         /// Set by `unregister()` (cleared by a successful `register()`) so `status()`
         /// reports the agent gone after a removal request — the requested-vs-done
         /// transition repair waits on.
@@ -42,7 +46,10 @@ final class AgentControllerTests: XCTestCase {
         func register() throws {
             registerCalls += 1
             if let registerError { throw registerError }
-            unregisteredPending = false // a re-register that took clears the removal
+            // A re-register that took clears the removal; with registerDoesNotConfirm the
+            // request is accepted but status keeps reading the removed state (launchd not
+            // yet done), so awaitRegistered is exercised.
+            if !registerDoesNotConfirm { unregisteredPending = false }
         }
 
         func unregister() throws {
@@ -607,7 +614,9 @@ final class AgentControllerTests: XCTestCase {
         let mock = MockRegistrar()
         mock.nextStatus = .enabled // the existing (foreign) agent is still registered
         let c = AgentController(
-            registrar: mock, spawnGate: { .deny(reason: "another manager owns it") }, eligibility: { .eligible }
+            registrar: mock, spawnGate: { .deny(reason: "another manager owns it") }, eligibility: { .eligible },
+            probe: { label in label == DaemonOwnership.brewLabel ? .registered : .notRegistered },
+            socketAnswers: { false }, manualPlistPersisted: { false }
         )
         c.refresh() // installed
         await c.repair()
@@ -615,6 +624,30 @@ final class AgentControllerTests: XCTestCase {
         XCTAssertEqual(mock.unregisterCalls, 0, "a denied repair must NOT unregister — the foreign agent stays intact")
         XCTAssertNotNil(c.repairError, "a denied repair must be surfaced in the row, not silently no-op")
         XCTAssertEqual(c.installState, .installed, "a denied repair must not change the install state")
+        // Round-9: like install/start, a denied repair must publish the fresh verdict the
+        // gate gathered, so the observer banner replaces the Repair UI instead of a button
+        // the gate re-denies on every press until the next app activation.
+        XCTAssertEqual(c.ownership, .foreignBrew, "a denied repair must publish the fresh foreign verdict")
+    }
+
+    func testRepairAbortsIfReRegisterDoesNotConfirm() async {
+        // Symmetric to the unregister wait: register() returning means launchd ACCEPTED,
+        // not completed. Repair must wait for the re-registered agent to actually appear
+        // (installed / approval-pending) before declaring the re-point verified — otherwise
+        // the immediate reconcile reads the still-absent agent as .notRegistered → .ok and
+        // the warning vanishes while the registration is still converging. If it never
+        // confirms within the bound, repair aborts loud rather than reporting a false re-point.
+        let mock = MockRegistrar()
+        mock.nextStatus = .enabled
+        mock.registerDoesNotConfirm = true // launchd accepts the re-register but never completes it
+        let c = AgentController(
+            registrar: mock, eligibility: { .eligible },
+            probe: { _ in .notRegistered }, socketAnswers: { false }, manualPlistPersisted: { false }
+        )
+        await c.repair(within: .milliseconds(60), poll: .milliseconds(10))
+        XCTAssertEqual(mock.unregisterCalls, 1, "verified repair unregisters first")
+        XCTAssertEqual(mock.registerCalls, 1, "then re-registers")
+        XCTAssertNotNil(c.repairError, "an unconfirmed re-register must surface a loud failure, not a false-verified re-point")
     }
 
     func testRepairFailedReRegisterSurfacesErrorAndHonestState() async {

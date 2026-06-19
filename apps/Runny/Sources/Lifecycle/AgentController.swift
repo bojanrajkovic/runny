@@ -482,13 +482,16 @@ final class AgentController {
     /// also gates the button on `canRepair` (a canonical-eligible bundle only;
     /// re-registering elsewhere would install ANOTHER non-canonical agent).
     ///
-    /// The replace waits for the unregister to actually take — an SMAppService call
-    /// returning means launchd ACCEPTED the request, not that it finished — so the
-    /// re-register can't race a still-converging removal into an already-registered
-    /// no-op. Bounded: an unconfirmed removal aborts loud rather than registering over
-    /// the old agent. The surface raises the same live-guest abandon confirmation
-    /// `uninstall()` uses before calling this, since `unregister()` can evict a
-    /// running job on some macOS versions.
+    /// The replace waits for BOTH steps to actually take — an SMAppService call
+    /// returning means launchd ACCEPTED the request, not that it finished. It waits for
+    /// the unregister so the re-register can't race a still-converging removal into an
+    /// already-registered no-op, AND for the re-register (`awaitRegistered`) so the
+    /// self-verifying reconcile doesn't read a still-converging registration as
+    /// `.notRegistered` (→ a false `.ok` that clears the warning before the re-point
+    /// lands). Bounded both ways: an unconfirmed removal OR an unconfirmed re-register
+    /// aborts loud rather than reporting a false-verified repair. The surface raises the
+    /// same live-guest abandon confirmation `uninstall()` uses before calling this, since
+    /// `unregister()` can evict a running job on some macOS versions.
     ///
     /// Failure is honest: if `register()` throws after the `unregister()` took, the
     /// agent is genuinely gone, so installState (derived from status) reflects that
@@ -502,15 +505,23 @@ final class AgentController {
             try self.registrar.unregister()
             try await self.awaitUnregistered(within: bound, poll: poll)
             try self.registrar.register()
+            // Wait for the re-register to actually take before declaring success — a
+            // register() that returned only means launchd ACCEPTED it. Without this, the
+            // post-repair reconcile can read the still-converging agent as .notRegistered
+            // → .ok and clear the warning while the re-point hasn't landed.
+            try await self.awaitRegistered(within: bound, poll: poll)
         }) {
         case .ran:
             refresh()
             await runReconcile()
         case .denied:
             // The gate blocked the replace before any unregister — installState and
-            // reconcileState are unchanged, so surface the refusal loudly rather than
-            // leaving the warning + button silently persisting.
+            // reconcileState are unchanged, so surface the refusal loudly. Publish the
+            // fresh foreign verdict the gate gathered (as the install/start denied paths
+            // do) so the observer banner replaces the Repair UI — otherwise the stale
+            // selfManaged verdict keeps a Repair button the gate re-denies on every press.
             repairError = spawnRefusal
+            await refreshOwnership()
         case let .failed(error):
             // unregister/register/the wait threw; installState derives from status
             // (gone if the unregister took and the register then failed), so the
@@ -541,6 +552,29 @@ final class AgentController {
             if ContinuousClock.now >= deadline {
                 throw LaunchctlFailure(
                     message: "the existing agent did not unregister in time; aborted to avoid re-registering over it"
+                )
+            }
+            try await Task.sleep(for: poll)
+        }
+    }
+
+    /// Poll the authoritative status until it confirms the re-registered agent has
+    /// appeared (`.enabled`/`.requiresApproval`), bounded — the symmetric partner of
+    /// `awaitUnregistered`. `register()` returning means launchd ACCEPTED the request,
+    /// not that it finished, so without this the post-repair reconcile can read the
+    /// still-absent agent as `.notRegistered` (→ `.ok`) and clear the warning while the
+    /// registration is still converging. Throws on expiry so repair aborts loud rather
+    /// than reporting a false-verified re-point off a call that only requested it.
+    private func awaitRegistered(within bound: Duration, poll: Duration) async throws {
+        let deadline = ContinuousClock.now.advanced(by: bound)
+        while true {
+            switch registrar.status() {
+            case .enabled, .requiresApproval: return
+            default: break
+            }
+            if ContinuousClock.now >= deadline {
+                throw LaunchctlFailure(
+                    message: "the re-registered agent did not appear in time; aborted rather than report a false re-point"
                 )
             }
             try await Task.sleep(for: poll)

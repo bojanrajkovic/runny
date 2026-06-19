@@ -409,12 +409,39 @@ final class AgentControllerTests: XCTestCase {
 
     func testStartGateDenyDoesNotKickstart() async {
         let mock = MockRegistrar()
-        let c = AgentController(registrar: mock, spawnGate: { .deny(reason: "deferred") })
+        let c = AgentController(
+            registrar: mock, spawnGate: { .deny(reason: "deferred") },
+            probe: { _ in .notRegistered }, socketAnswers: { false }, manualPlistPersisted: { false }
+        )
         await c.start(isConnected: { true })
         XCTAssertEqual(mock.kickstartCalls, 0, "a denied gate must NOT kickstart")
         guard case .refused = c.startOutcome else {
             return XCTFail("a denied start must be loud, got \(c.startOutcome)")
         }
+    }
+
+    func testDeniedStartPublishesFreshOwnershipForTheBanner() async {
+        // Round-8 B: like install()'s denied path, a denied Start must publish the fresh
+        // verdict the gate gathered — otherwise the stale .selfManaged keeps the Start row
+        // visible with a Try Again that the gate re-denies on every press until the next
+        // app activation. Publishing it lets the row give way to the observer banner.
+        let mock = MockRegistrar()
+        mock.nextStatus = .notRegistered
+        let c = AgentController(
+            registrar: mock,
+            spawnGate: { AgentController.gateFor(.foreignBrew) },
+            probe: { label in label == DaemonOwnership.brewLabel ? .registered : .notRegistered },
+            socketAnswers: { false }, manualPlistPersisted: { false }
+        )
+        await c.start(isConnected: { false })
+        XCTAssertEqual(mock.kickstartCalls, 0, "a denied gate must NOT kickstart")
+        guard case .refused = c.startOutcome else {
+            return XCTFail("a denied start must be loud, got \(c.startOutcome)")
+        }
+        XCTAssertEqual(
+            c.ownership, .foreignBrew,
+            "a denied start must publish the fresh verdict so the Start row gives way to the observer banner"
+        )
     }
 
     func testStartKickstartFailureIsRefusedNotInstalledStateChange() async {

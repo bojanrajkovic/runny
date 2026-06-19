@@ -399,6 +399,11 @@ final class AgentController {
         switch await attemptSpawn("start", { try await self.registrar.kickstart() }) {
         case .denied:
             startOutcome = .refused(spawnRefusal ?? "start was blocked")
+            // Publish the fresh foreign verdict the gate just gathered (as install()'s
+            // denied path does), so the Start row gives way to the observer banner —
+            // otherwise the stale .selfManaged keeps a Start button the gate re-denies on
+            // every Try Again until the next app activation.
+            await refreshOwnership()
             return
         case let .failed(error):
             startOutcome = .refused("could not start runnyd: \(error.localizedDescription)")

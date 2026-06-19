@@ -122,6 +122,99 @@ func TestTruncDisplayWidth(t *testing.T) {
 	}
 }
 
+// cellWidth and trunc must measure terminal DISPLAY columns, not rune count:
+// the JOB/NOTE columns carry GitHub-controlled job display names, which can hold
+// double-width CJK runes (issue #51) — a job named in the workflow's `name:`
+// field reaches runny verbatim via the runner's "Running job:" line. A rune-count
+// budget under-counts a wide cell and shifts every column to its right.
+func TestCellWidthCountsDisplayColumns(t *testing.T) {
+	cases := []struct {
+		s    string
+		want int
+	}{
+		{"build", 5},
+		{"ビル", 4},        // two wide (CJK) runes = 4 columns
+		{"ビルドとテスト", 14},  // 7 wide runes
+		{"测试-linux", 10}, // 2 wide + 6 ascii
+		{"deploy", 6},
+		{"café", 4},     // precomposed é is one column, not ambiguous-wide
+		{"❤️", 2},       // emoji-presentation (VS16): two columns, not one
+		{"⚠️ tests", 8}, // VS16 emoji (2) + " tests" (6)
+	}
+	for _, tc := range cases {
+		if got := cellWidth(tc.s); got != tc.want {
+			t.Errorf("cellWidth(%q) = %d, want %d", tc.s, got, tc.want)
+		}
+	}
+}
+
+// trunc must clamp by display width: the result occupies at most n columns (the
+// property pad depends on), even when the input mixes wide and narrow runes.
+func TestTruncClampsByDisplayWidth(t *testing.T) {
+	cases := []struct {
+		s string
+		n int
+	}{
+		{"ビルドとテスト macos", 10},
+		{"测试测试测试测试", 7},
+		{"plain-ascii-string", 8},
+		{"ビル", 4},     // exactly fits — no clamp
+		{"ビルド", 4},    // 6 cols into 4 — clamps on a wide-rune boundary
+		{"❤️❤️❤️", 4}, // VS16 emoji clusters must not be split mid-cluster
+	}
+	for _, tc := range cases {
+		got := trunc(tc.s, tc.n)
+		if w := cellWidth(got); w > tc.n {
+			t.Errorf("trunc(%q, %d) = %q has display width %d > %d", tc.s, tc.n, got, w, tc.n)
+		}
+	}
+}
+
+// The real #51 scenario end to end: a slot running a CJK-named job must not
+// shift the NOTE column relative to an ASCII-named one. The JOB cell is padded
+// to a fixed DISPLAY width, so the wide runes can't push everything right.
+func TestRenderStatusWideJobAligns(t *testing.T) {
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	now := timestamppb.New(time.Now())
+	c.renderStatus(&runnyv1.GetStatusResponse{
+		DaemonStarted: now,
+		Slots: []*runnyv1.SlotStatus{
+			{
+				Slot: "mac-1", State: runnyv1.SlotState_SLOT_STATE_JOB, StateEntered: now,
+				Job: &runnyv1.JobInfo{Name: "build", Started: now}, LastFailure: "NOTEMARK",
+			},
+			{
+				Slot: "mac-2", State: runnyv1.SlotState_SLOT_STATE_JOB, StateEntered: now,
+				Job: &runnyv1.JobInfo{Name: "ビルドとテスト", Started: now}, LastFailure: "NOTEMARK",
+			},
+		},
+	})
+	// Offsets are DISPLAY columns (cellWidth of the prefix), not byte/rune index.
+	displayOffset := func(line, sub string) int {
+		i := strings.Index(line, sub)
+		if i < 0 {
+			return -1
+		}
+		return cellWidth(line[:i])
+	}
+	off1, off2 := -1, -1
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(line, "mac-1") {
+			off1 = displayOffset(line, "NOTEMARK")
+		}
+		if strings.Contains(line, "mac-2") {
+			off2 = displayOffset(line, "NOTEMARK")
+		}
+	}
+	if off1 < 0 || off2 < 0 {
+		t.Fatalf("NOTE not rendered in both rows:\n%s", buf.String())
+	}
+	if off1 != off2 {
+		t.Errorf("NOTE display offset differs: ascii-job row %d, wide-job row %d\n%s", off1, off2, buf.String())
+	}
+}
+
 // pad must align a clamped cell (multi-byte ellipsis) with an unclamped one:
 // both render at the same display width.
 func TestPadAlignsClampedCells(t *testing.T) {

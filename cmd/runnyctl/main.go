@@ -13,8 +13,8 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
+	"github.com/rivo/uniseg"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
@@ -905,11 +905,30 @@ func durString(d time.Duration) string {
 	}
 }
 
+// trunc clamps s to at most n display columns, appending a one-column ellipsis
+// when it shortens. It budgets by display width (not rune count) over whole
+// grapheme clusters, so a wide-rune job name can't over-run its cell and shift
+// the columns to its right (issue #51), and a multi-rune cluster (a VS16/ZWJ
+// emoji, or a base plus combining mark) is never split mid-cluster.
 func trunc(s string, n int) string {
-	if utf8.RuneCountInString(s) <= n {
+	if cellWidth(s) <= n {
 		return s
 	}
-	return string([]rune(s)[:n-1]) + "…"
+	budget := n - 1 // reserve one column for the ellipsis
+	var b strings.Builder
+	w := 0
+	rest, state := s, -1
+	for len(rest) > 0 {
+		var cluster string
+		var cw int
+		cluster, rest, cw, state = uniseg.FirstGraphemeClusterInString(rest, state)
+		if w+cw > budget {
+			break
+		}
+		b.WriteString(cluster)
+		w += cw
+	}
+	return b.String() + "…"
 }
 
 // imageCell renders the IMAGE column: the configured ref's last path
@@ -972,9 +991,22 @@ func shortHex(h string) string {
 	return h
 }
 
-// cellWidth is a cell's display width. All table content is ASCII except
-// trunc's ellipsis (one column), so rune count is the display width.
-func cellWidth(s string) int { return utf8.RuneCountInString(s) }
+// cellWidth is a cell's terminal display width. Rune count is wrong for the JOB
+// and NOTE columns, which carry GitHub-controlled job display names that can hold
+// double-width (CJK), zero-width, or emoji-presentation runes (issue #51): a
+// workflow `name:` reaches runny verbatim via the runner's "Running job:" line.
+// uniseg measures monospace width per grapheme cluster — wide CJK and VS16/ZWJ
+// emoji count as two columns, ambiguous-width runes (accented Latin, the
+// ellipsis) as one — with a fixed policy independent of the operator's locale.
+//
+// Emoji width has no universal answer: terminals disagree, so no library is right
+// for every one. uniseg follows the Unicode rules and matches the common cases,
+// but a few presentation stragglers it sizes as one column — notably keycap
+// sequences like "1️⃣" (digit + VS16 + U+20E3) — render as two on some terminals
+// and can nudge a row's alignment. That residual is accepted: chasing each
+// cluster class would mean hand-coding against a single terminal's rendering, and
+// `runnyctl -json` is exact when precise output matters.
+func cellWidth(s string) int { return uniseg.StringWidth(s) }
 
 // pad right-pads s with spaces to display width w.
 func pad(s string, w int) string {

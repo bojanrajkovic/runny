@@ -209,11 +209,11 @@ final class AgentController {
         return AgentController(
             registrar: registrar,
             spawnGate: {
-                await gateFor(gatherOwnership(
+                await gateFor(DaemonOwnership.classify(gatherInputs(
                     registrar: registrar, probe: probe, socketAnswers: socketAnswers,
                     homeIsCanonical: homeIsCanonical, bundledAgentPresent: bundledAgentPresent,
                     manualPlistPersisted: manualPlistPersisted
-                ))
+                )))
             },
             bundledAgentPresent: bundledAgentPresent,
             probe: probe,
@@ -298,15 +298,22 @@ final class AgentController {
     /// have run.
     private(set) var ownershipChecked = false
 
+    /// Every competing daemon registration the host carries beyond the one `ownership`
+    /// names — for the UI's per-owner cleanup affordances, which must reach EVERY
+    /// contender, not just the verdict's. Refreshed from the same gather as the
+    /// verdict, so the two never disagree. Empty until the first gather runs.
+    private(set) var collisions = DaemonOwnershipCollisions()
+
     private var ownershipInFlight = false
     private var ownershipPending = false
 
-    /// Gather the ownership inputs and publish the verdict (for the banner). The
-    /// gate's pre-act recheck calls `gatherOwnership` directly for a fresh verdict.
-    /// Coalesces overlapping triggers — the activation observer and a surface's
-    /// `.task` can both fire on one foreground — so a trigger arriving mid-gather
-    /// loops the active run once more against the latest state rather than spawning a
-    /// second concurrent probe pair and racing last-writer-wins to publish.
+    /// Gather the ownership inputs and publish the verdict + collisions (for the
+    /// banner and the cleanup affordances). The gate's pre-act recheck calls
+    /// `gatherInputs` directly and classifies for a fresh verdict. Coalesces
+    /// overlapping triggers — the activation observer and a surface's `.task` can both
+    /// fire on one foreground — so a trigger arriving mid-gather loops the active run
+    /// once more against the latest state rather than spawning a second concurrent
+    /// probe pair and racing last-writer-wins to publish.
     func refreshOwnership() async {
         if ownershipInFlight {
             ownershipPending = true
@@ -316,11 +323,13 @@ final class AgentController {
         defer { ownershipInFlight = false }
         repeat {
             ownershipPending = false
-            ownership = await Self.gatherOwnership(
+            let inputs = await Self.gatherInputs(
                 registrar: registrar, probe: probeProvider, socketAnswers: socketAnswersProvider,
                 homeIsCanonical: homeIsCanonicalProvider, bundledAgentPresent: bundledAgentPresentProvider,
                 manualPlistPersisted: manualPlistPersistedProvider
             )
+            ownership = DaemonOwnership.classify(inputs)
+            collisions = DaemonOwnership.collisions(inputs)
             ownershipChecked = true
         } while ownershipPending
     }
@@ -337,20 +346,21 @@ final class AgentController {
         return ownership == expected
     }
 
-    /// Gather the orthogonal facts and `classify` them. The two label probes and the
+    /// Gather the orthogonal facts into the raw inputs `classify` (the verdict) and
+    /// `collisions` (the hidden owners) both reduce. The two label probes and the
     /// socket connect-probe run concurrently (independent, each bounded) so the install
     /// tap waits at most one probe bound, not three; the self-status read and the
     /// home/plist axes are cheap. Static so both `refreshOwnership` and the production
     /// gate share one gather without a self-reference cycle.
     @MainActor
-    static func gatherOwnership(
+    static func gatherInputs(
         registrar: ServiceRegistrar,
         probe: @Sendable (String) async -> LaunchdProbeResult,
         socketAnswers: () async -> Bool,
         homeIsCanonical: () -> Bool,
         bundledAgentPresent: () -> Bool,
         manualPlistPersisted: () -> Bool
-    ) async -> DaemonOwnership {
+    ) async -> DaemonOwnershipInputs {
         async let brew = probe(DaemonOwnership.brewLabel)
         async let canonical = probe(DaemonOwnership.canonicalLabel)
         // The label probes are already in flight; awaiting the (global-queue-hopping)
@@ -360,14 +370,14 @@ final class AgentController {
         let selfState = LaunchAgentStatus.state(
             from: registrar.status(), bundledAgentPresent: bundledAgentPresent()
         )
-        return await DaemonOwnership.classify(DaemonOwnershipInputs(
+        return await DaemonOwnershipInputs(
             homeIsCanonical: homeIsCanonical(),
             selfState: selfState,
             brewProbe: brew,
             canonicalProbe: canonical,
             socketAnswers: socketOccupied,
             manualPlistPersisted: manualPlistPersisted()
-        ))
+        )
     }
 
     // MARK: - Spawn-triggering actions (every one funnels through attemptSpawn)

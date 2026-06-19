@@ -280,6 +280,37 @@ final class AgentControllerTests: XCTestCase {
         XCTAssertEqual(c.ownership, .foreignManual, "a persisted manual plist is a dormant owner, never unmanaged")
     }
 
+    func testRefreshOwnershipPublishesCollisionsAlongsideTheVerdict() async {
+        // The collision wiring end-to-end: one gather feeds both classify (verdict) and
+        // collisions (hidden owners). Brew registered while OUR agent is enabled → the
+        // verdict names brew, but collisions must also surface our competing agent so
+        // the UI can offer to remove it.
+        let mock = MockRegistrar()
+        mock.nextStatus = .enabled
+        let c = AgentController(
+            registrar: mock,
+            probe: { label in label == DaemonOwnership.brewLabel ? .registered : .notRegistered },
+            socketAnswers: { false }, homeIsCanonical: { true }, manualPlistPersisted: { false }
+        )
+        await c.refreshOwnership()
+        XCTAssertEqual(c.ownership, .foreignBrew, "brew overrides self in the verdict")
+        XCTAssertTrue(c.collisions.brew)
+        XCTAssertTrue(c.collisions.ownAgent, "our enabled agent is a hidden competitor the verdict didn't name")
+
+        // selfManaged hiding a dormant manual plist: the verdict is selfManaged, but the
+        // collision must surface the leftover manual owner so the UI warns about it.
+        let mock2 = MockRegistrar()
+        mock2.nextStatus = .enabled
+        let c2 = AgentController(
+            registrar: mock2, probe: { _ in .notRegistered }, socketAnswers: { false },
+            homeIsCanonical: { true }, manualPlistPersisted: { true }
+        )
+        await c2.refreshOwnership()
+        XCTAssertEqual(c2.ownership, .selfManaged)
+        XCTAssertTrue(c2.collisions.manual, "a dormant manual plist is a hidden owner under selfManaged")
+        XCTAssertFalse(c2.collisions.manualLoaded, "ours holds the live label, so it's a plist (rm), not a loaded job")
+    }
+
     func testForeignOwnershipGateBlocksInstallWithoutRegistering() async {
         // The production wiring end-to-end: a foreign verdict → gateFor → .deny →
         // attemptSpawn refuses without ever calling register (no stomp).

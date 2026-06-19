@@ -83,14 +83,17 @@ func vmnetInterfaceUp() bool {
 // is no fourth "definitely never granted" state: macOS exposes no API to read a
 // process's own grant, so until a vmnet interface exists the honest answer is
 // UNKNOWN, which the app treats as "prompt may be pending".
-//
-// The orphaned (self-daemonized) launch context is deliberately NOT mapped here:
-// the generic DENIED grant makes runnyctl and the app render a "grant Local
-// Network in System Settings" remediation, a dead end for a daemon launchd did
-// not start. That cause is surfaced via the local-network doctor check
-// (orphanedDenyDetail) and the startup log; a distinct client-side remediation
-// is app-track work (#112).
 func localNetworkGrant() runnyv1.LocalNetworkGrant {
+	// A self-daemonized / orphaned daemon would read DENIED from the live probe
+	// once a vmnet interface is up, but DENIED makes runnyctl and the app render a
+	// "grant Local Network in System Settings" remediation that cannot fix a daemon
+	// launchd did not start. Report the neutral UNKNOWN instead — unconditionally,
+	// since the probe would otherwise return DENIED post-vmnet — and leave the
+	// orphaned cause to the local-network doctor check (orphanedDenyDetail) and the
+	// startup log; a distinct client-side grant state is app-track work (#112).
+	if launchContextNow() == launchOrphaned {
+		return runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNKNOWN
+	}
 	if !vmnetInterfaceUp() {
 		return runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNKNOWN
 	}

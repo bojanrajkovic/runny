@@ -98,9 +98,18 @@ func TestGeneratedSchemaShape(t *testing.T) {
 		t.Errorf("GitHubConfig.required = %v", got)
 	}
 
-	// Target is org XOR owner/repo.
-	if oneOf, ok := obj(t, defs, "TargetConfig")["oneOf"].([]any); !ok || len(oneOf) != 2 {
-		t.Errorf("TargetConfig.oneOf = %v, want two branches (org | owner+repo)", obj(t, defs, "TargetConfig")["oneOf"])
+	// Target is org XOR owner/repo, and the branches are mutually exclusive: a
+	// bare oneOf on the required keys would still accept {org, owner} (which
+	// validate() rejects), so each branch must forbid the other's keys via not.
+	oneOf, ok := obj(t, defs, "TargetConfig")["oneOf"].([]any)
+	if !ok || len(oneOf) != 2 {
+		t.Fatalf("TargetConfig.oneOf = %v, want two branches (org | owner+repo)", obj(t, defs, "TargetConfig")["oneOf"])
+	}
+	for i, branch := range oneOf {
+		b, _ := branch.(map[string]any)
+		if b["not"] == nil {
+			t.Errorf("TargetConfig.oneOf[%d] missing a `not` — mixed targets (e.g. {org, owner}) would be wrongly accepted", i)
+		}
 	}
 }
 

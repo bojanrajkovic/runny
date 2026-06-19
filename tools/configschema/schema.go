@@ -93,10 +93,23 @@ func enrich(s *jsonschema.Schema) {
 		gh.Required = []string{"app_id", "private_key_path"}
 	}
 	if tc := def(s, "TargetConfig"); tc != nil {
-		// Exactly one of: an org, or an owner/repo pair.
+		// Exactly one of: an org alone, or an owner/repo pair — mirroring
+		// validate(), which rejects org mixed with any owner/repo (and a lone
+		// owner or repo). A bare oneOf on the required keys is not enough: it
+		// would still accept {org, owner} via the org branch, so each branch
+		// must also forbid the other target's keys.
 		tc.OneOf = []*jsonschema.Schema{
-			{Required: []string{"org"}},
-			{Required: []string{"owner", "repo"}},
+			{
+				Required: []string{"org"},
+				Not: &jsonschema.Schema{AnyOf: []*jsonschema.Schema{
+					{Required: []string{"owner"}},
+					{Required: []string{"repo"}},
+				}},
+			},
+			{
+				Required: []string{"owner", "repo"},
+				Not:      &jsonschema.Schema{Required: []string{"org"}},
+			},
 		}
 	}
 }

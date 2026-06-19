@@ -253,11 +253,30 @@
     "TargetConfig": {
       "oneOf": [
         {
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "owner"
+                ]
+              },
+              {
+                "required": [
+                  "repo"
+                ]
+              }
+            ]
+          },
           "required": [
             "org"
           ]
         },
         {
+          "not": {
+            "required": [
+              "org"
+            ]
+          },
           "required": [
             "owner",
             "repo"

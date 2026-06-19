@@ -34,7 +34,7 @@ Go 1.26 (mise-managed) for daemon + CLI; cgo to Virtualization.framework via `Co
 - `internal/socket` — the gRPC server over the unix socket.
 - `proto/runny/v1` — the contract `runnyctl` and Runny both consume.
 - `apps/Runny` — SwiftUI app: MenuBarExtra popover + main window (ADR-0016; ADR-0007: no .xcodeproj, ever).
-- `tools/` — format runner, nogo, platforms.
+- `tools/` — format runner, nogo, platforms, the `config.yaml` JSON Schema generator (`configschema`).
 
 For per-directory detail, read that directory's `CLAUDE.md` if present. For current counts and inventories (states, RPCs, config keys), read the source (the FSM table, the proto file, the config schema); this index does not enumerate them.
 

@@ -413,8 +413,9 @@ final class DaemonStore {
     }
 
     /// Manual re-dial: tear down the supervisor and socket watch, then start()
-    /// fresh against the same daemon at the fixed ~/.runny (the daemon-card
-    /// Reconnect). That affordance is disabled while `reloadPending`, so this
+    /// fresh against the daemon at the resolved home (the daemon-card Reconnect);
+    /// start() re-resolves, so a home that appeared since launch is picked up.
+    /// That affordance is disabled while `reloadPending`, so this
     /// never runs mid-drain; its full state wipe — including pendingReload and the
     /// reloadGeneration bump — is reachable only when no reload verdict is live.
     func restart() {
@@ -454,16 +455,17 @@ final class DaemonStore {
     /// Watches the home directory so socket-file appearance retries
     /// immediately instead of waiting out a 30s backoff.
     private func watchHomeDirectory() {
-        // On a fresh install the home doesn't exist until the first daemon run,
-        // so O_EVTONLY would fail and the socket-appearance fast-retry would
-        // never arm — the app would wait out a full reconnect backoff. Create
-        // the top-level home (0700, matching the daemon) so the watch arms even
-        // on a clean machine.
+        // On a fresh per-user install the home doesn't exist until the first
+        // daemon run, so O_EVTONLY would fail and the socket-appearance fast-retry
+        // would never arm — the app would wait out a full reconnect backoff.
+        // Create the per-user home (0700, matching the daemon) so the watch arms
+        // on a clean machine; the system home is the installer's to create and
+        // already exists whenever it resolves, so this never touches it.
         RunnyHome.ensureDirectory()
-        // Watch the directory of the RESOLVED socket — the shared dir for a system
-        // daemon, else the per-user ~/.runny (just ensured). A per-user→system-daemon
-        // transition appearing after the watch arms is caught by the reconnect
-        // backoff's re-resolve; this watch is a fast-retry optimization, not the only path.
+        // Watch the resolved home (the system dir for a system daemon, else the
+        // per-user ~/.runny). A per-user→system-daemon transition appearing after
+        // the watch arms is caught by the reconnect backoff's re-resolve; this
+        // watch is a fast-retry optimization, not the only path.
         let fd = open(RunnyHome.socketDirectory.path, O_EVTONLY)
         guard fd >= 0 else { return }
         let source = DispatchSource.makeFileSystemObjectSource(

@@ -155,6 +155,23 @@ struct AgentInstallRow: View {
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        // A Homebrew agent co-present under a system-daemon verdict. Only reachable
+        // here: a registered brew label is otherwise the verdict itself (foreignBrew),
+        // but a system daemon now outranks it, so the foreignSystem banner names the
+        // system daemon and this surfaces the leftover brew the verdict hides — else a
+        // migration host follows the banner, removes the system daemon, and Homebrew
+        // still owns runnyd unmentioned.
+        if collisions.brew, agent.ownership == .foreignSystem {
+            Text("A Homebrew-managed runnyd agent is also registered and will contend for the "
+                + "daemon. Stop it with:")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("brew services stop runny")
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     /// The install/toggle affordance — shown only when the daemon is the app's to

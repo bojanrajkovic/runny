@@ -63,21 +63,47 @@ final class AgentControllerTests: XCTestCase {
 
     struct StubError: Error {}
 
+    /// install() re-gathers ownership on success, so these install tests inject the
+    /// ownership providers (probe/socket/plist) to stay hermetic — otherwise the
+    /// post-install refresh would shell out to the real `launchctl`.
+    private func hermeticInstall(_ mock: MockRegistrar, eligible: Bool = false) -> AgentController {
+        AgentController(
+            registrar: mock,
+            eligibility: { eligible ? .eligible : .notInApplications(path: "/x") },
+            probe: { _ in .notRegistered }, socketAnswers: { false }, manualPlistPersisted: { false }
+        )
+    }
+
     func testInstallDerivesInstalledFromStatusNotCallReturn() async {
         let mock = MockRegistrar()
         mock.nextStatus = .enabled // what status() reports after a successful register
-        let c = AgentController(registrar: mock)
+        let c = hermeticInstall(mock)
         await c.install()
         XCTAssertEqual(mock.registerCalls, 1)
         XCTAssertEqual(c.installState, .installed)
     }
 
+    func testInstallRefreshesOwnershipToSelfManaged() async {
+        // Finding 4: the affordances gate on `ownership` (Start/Update need selfManaged,
+        // the approval CTA awaitingApproval). install() must re-gather it on success, or
+        // the just-installed agent stays the pre-install `.unmanaged` verdict until the
+        // next app activation — suppressing the controls the install just enabled.
+        let mock = MockRegistrar()
+        mock.nextStatus = .enabled
+        let c = hermeticInstall(mock)
+        XCTAssertEqual(c.ownership, .indeterminate, "starts unchecked")
+        await c.install()
+        XCTAssertEqual(c.ownership, .selfManaged, "a successful install must publish the self-managed verdict immediately")
+    }
+
     func testInstallSurfacesRequiresApprovalNotInstalled() async {
         let mock = MockRegistrar()
         mock.nextStatus = .requiresApproval
-        let c = AgentController(registrar: mock)
+        let c = hermeticInstall(mock)
         await c.install()
         XCTAssertEqual(c.installState, .requiresApproval)
+        // And the verdict follows to awaitingApproval, so the approval CTA shows at once.
+        XCTAssertEqual(c.ownership, .awaitingApproval)
     }
 
     // Re-approval-after-reinstall: uninstalling then reinstalling re-derives the
@@ -89,7 +115,7 @@ final class AgentControllerTests: XCTestCase {
     func testReinstallReSurfacesRequiresApproval() async {
         let mock = MockRegistrar()
         mock.nextStatus = .enabled
-        let c = AgentController(registrar: mock, eligibility: { .eligible })
+        let c = hermeticInstall(mock, eligible: true)
         await c.install()
         XCTAssertEqual(c.installState, .installed)
 
@@ -272,8 +298,11 @@ final class AgentControllerTests: XCTestCase {
         XCTAssertEqual(manual?.message.contains("launchctl bootout"), true)
         XCTAssertEqual(manual?.message.contains("uninstall.sh"), false)
         // Must also remove the persisted plist (install.sh writes it to
-        // ~/Library/LaunchAgents); bootout alone leaves it to reload at next login.
-        XCTAssertEqual(manual?.message.contains("rm ~/Library/LaunchAgents/"), true)
+        // ~/Library/LaunchAgents); bootout alone leaves it to reload at next login. The
+        // separator is `;` + `rm -f`, NOT `&&`: a dormant-plist owner has nothing to boot
+        // out (bootout exits nonzero), so `&&` would skip the rm that is the whole point.
+        XCTAssertEqual(manual?.message.contains("rm -f ~/Library/LaunchAgents/"), true)
+        XCTAssertEqual(manual?.message.contains("&& rm"), false)
 
         XCTAssertEqual(AgentController.observerMessage(for: .foreground)?.kind, .foregroundDaemon)
         XCTAssertEqual(AgentController.observerMessage(for: .indeterminate)?.kind, .indeterminate)

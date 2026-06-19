@@ -353,6 +353,12 @@ final class AgentController {
         case .ran:
             refresh()
             reconcileState = .notChecked // the registration changed — re-check on next appear
+            // Re-gather ownership too: the affordances gate on the verdict (Start needs
+            // selfManaged, the approval CTA awaitingApproval, Update selfManaged), so
+            // without this the just-installed agent stays the pre-install `.unmanaged`
+            // verdict until the next app activation — suppressing the very controls the
+            // install just enabled.
+            await refreshOwnership()
         case .denied:
             // A foreign manager appeared since the last refresh, so the fresh pre-act
             // gate denied. Publish the new verdict so the observer banner replaces the
@@ -688,16 +694,19 @@ extension AgentController {
                     + "first. Runny won't install a competing agent."
             )
         case .foreignManual:
-            // bootout removes the LOADED job; the manual installer also persists the
-            // plist to ~/Library/LaunchAgents, which launchd reloads at next login —
-            // so the command must rm it too, or the same-label conflict comes back. Like
-            // the brew case, bootout is immediate (no drain), so warn before recommending it.
+            // Two states share this verdict: a LOADED manual job, and a DORMANT plist whose
+            // job was already booted out. bootout removes a loaded job; the persisted plist
+            // (~/Library/LaunchAgents, which launchd reloads at next login) is what actually
+            // makes a dormant owner. The separator is `;` not `&&`, and `rm -f`, BECAUSE the
+            // dormant case has nothing to boot out — bootout exits nonzero there, and an `&&`
+            // would skip the rm that is the whole point of clearing it.
             ObserverHint(
                 kind: .managedManually,
                 message: "A manually-installed LaunchAgent manages runnyd. To let Runny manage it "
-                    + "instead — once no job is running, since this stops it immediately — remove that "
-                    + "agent with `launchctl bootout gui/$(id -u)/\(DaemonOwnership.canonicalLabel) && "
-                    + "rm ~/Library/LaunchAgents/\(DaemonOwnership.canonicalLabel).plist`, then reopen Runny."
+                    + "instead — once no job is running, since this stops a loaded one immediately — "
+                    + "remove that agent with `launchctl bootout gui/$(id -u)/\(DaemonOwnership.canonicalLabel) "
+                    + "2>/dev/null; rm -f ~/Library/LaunchAgents/\(DaemonOwnership.canonicalLabel).plist`, "
+                    + "then reopen Runny."
             )
         case .foreground:
             ObserverHint(

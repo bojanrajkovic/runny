@@ -400,16 +400,40 @@ func (fakeLogsClient) StreamLogs(_ context.Context, _ *runnyv1.StreamLogsRequest
 	return fakeLogStream{}, nil
 }
 
+// Issue #47, flag-first ordering: a trailing -json after `-flag SLOT` must still
+// be honored, not rejected as a second positional. Go's flag package stops at
+// the first positional, so slotArg must parse flags and positionals interspersed
+// (the case Codex flagged on PR #106).
+func TestSlotArgHonorsTrailingFlagAfterSlot(t *testing.T) {
+	c := &ctl{out: &bytes.Buffer{}}
+	fs, j := subFlags("recycle")
+	force := fs.Bool("force", false, "")
+	slot, err := c.slotArg(fs, j, []string{"-force", "mac-1", "-json"})
+	if err != nil {
+		t.Fatalf("recycle -force mac-1 -json: %v", err)
+	}
+	if slot != "mac-1" {
+		t.Errorf("slot = %q, want mac-1", slot)
+	}
+	if !*force {
+		t.Error("-force before the slot was not parsed")
+	}
+	if !c.json {
+		t.Error("trailing -json after a flag-first slot was not folded")
+	}
+}
+
 // logs' optional SLOT does not route through slotArg, yet a flag written AFTER
 // the slot — the documented `logs [SLOT] [-daemon] [-replay N] [-follow=false]`
 // form — must parse, not be rejected as a second positional (issue #47).
 func TestDispatchLogsAcceptsFlagAfterSlot(t *testing.T) {
 	for _, args := range [][]string{
-		{"logs", "mac-1", "-replay", "10"}, // slot then flag (the broken form)
-		{"logs", "mac-1", "-json"},
-		{"logs", "-replay", "10", "mac-1"}, // flag then slot
-		{"logs", "mac-1"},                  // bare slot
-		{"logs"},                           // no slot
+		{"logs", "mac-1", "-replay", "10"},          // slot then flag (the broken form)
+		{"logs", "mac-1", "-json"},                  // slot then -json
+		{"logs", "-replay", "10", "mac-1"},          // flag then slot
+		{"logs", "-replay", "10", "mac-1", "-json"}, // flag, slot, trailing -json (Codex's case)
+		{"logs", "mac-1"},                           // bare slot
+		{"logs"},                                    // no slot
 	} {
 		c := &ctl{client: fakeLogsClient{}, out: &bytes.Buffer{}, err: &bytes.Buffer{}}
 		if err := c.dispatch(context.Background(), args); err != nil {

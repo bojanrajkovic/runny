@@ -162,18 +162,18 @@ func (c *ctl) dispatch(ctx context.Context, args []string) error {
 		follow := fs.Bool("follow", true, "keep following after the replay")
 		daemon := fs.Bool("daemon", false, "stream the daemon's own log instead of runner output")
 		// SLOT is optional here, so logs can't use slotArg (which requires
-		// exactly one); peel it the same way so a flag after the slot parses.
-		slot, rest := peelSlot(rest)
-		if err := fs.Parse(rest); err != nil {
+		// exactly one); validate the at-most-one rule over the same parser.
+		positional, err := c.parseArgs(fs, j, rest)
+		if err != nil {
 			return err
 		}
-		switch {
-		case slot == "" && fs.NArg() == 1: // slot after the flags
-			slot = fs.Arg(0)
-		case slot != "" && fs.NArg() > 0, slot == "" && fs.NArg() > 1:
+		if len(positional) > 1 {
 			return fmt.Errorf("logs takes at most one SLOT argument")
 		}
-		c.useJSON(j)
+		slot := ""
+		if len(positional) == 1 {
+			slot = positional[0]
+		}
 		if *daemon && slot != "" {
 			return fmt.Errorf("-daemon and a slot filter are mutually exclusive")
 		}
@@ -221,13 +221,9 @@ func (c *ctl) dispatch(ctx context.Context, args []string) error {
 		wait := fs.Bool("wait", false, "follow the drain and confirm the respawn came up on this config")
 		respawnTimeout := fs.Duration("respawn-timeout", 90*time.Second, "max wait for the respawn after the daemon exits")
 		timeout := fs.Duration("timeout", 0, "optional hard cap on the entire wait (0 = none)")
-		if err := fs.Parse(rest); err != nil {
+		if err := c.parseNoArgs(fs, j, rest); err != nil {
 			return err
 		}
-		if fs.NArg() != 0 {
-			return fmt.Errorf("reload takes no positional arguments")
-		}
-		c.useJSON(j)
 		if *wait {
 			return c.reloadWait(ctx, *reason, defaultFollowOpts(*respawnTimeout, *timeout))
 		}
@@ -271,16 +267,15 @@ func subFlags(name string) (*flag.FlagSet, *bool) {
 func (c *ctl) useJSON(local *bool) { c.json = c.json || *local }
 
 // parseNoArgs parses fs for a subcommand that takes no positional arguments,
-// folding -json. A stray positional errors rather than being silently ignored
-// — the same anti-swallow guard reload applies to its own arguments.
-func (c *ctl) parseNoArgs(fs *flag.FlagSet, j *bool, rest []string) error {
-	if err := fs.Parse(rest); err != nil {
+// folding -json. A stray positional errors rather than being silently ignored.
+func (c *ctl) parseNoArgs(fs *flag.FlagSet, j *bool, args []string) error {
+	positional, err := c.parseArgs(fs, j, args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() != 0 {
-		return fmt.Errorf("%s takes no arguments (got %q)", fs.Name(), fs.Arg(0))
+	if len(positional) != 0 {
+		return fmt.Errorf("%s takes no arguments (got %q)", fs.Name(), positional[0])
 	}
-	c.useJSON(j)
 	return nil
 }
 
@@ -320,35 +315,39 @@ func socketFileExists(path string) bool {
 	return err == nil
 }
 
-// peelSlot pulls an optional leading non-flag token (the SLOT) off rest so a
-// "cmd SLOT -flag" invocation parses: Go's flag package stops at the first
-// non-flag arg, so without this the slot would shadow every flag after it
-// (issue #47). Returns "" when rest is empty or starts with a flag, plus the
-// remaining args to hand to fs.Parse.
-func peelSlot(rest []string) (slot string, remaining []string) {
-	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
-		return rest[0], rest[1:]
-	}
-	return "", rest
-}
-
-// slotArg parses a command that requires exactly one SLOT, given before or after
-// the flags, and folds a trailing -json on success (so callers can't forget the
-// fold — the same ownership parseNoArgs has for no-arg commands).
-func (c *ctl) slotArg(fs *flag.FlagSet, j *bool, rest []string) (string, error) {
-	slot, rest := peelSlot(rest)
-	if err := fs.Parse(rest); err != nil {
-		return "", err
-	}
-	switch {
-	case slot != "" && fs.NArg() == 0: // slot before the flags
-	case slot == "" && fs.NArg() == 1: // slot after the flags
-		slot = fs.Arg(0)
-	default:
-		return "", fmt.Errorf("exactly one SLOT argument is required")
+// parseArgs parses fs allowing flags and positional arguments to interleave in
+// any order. Go's flag package stops at the first positional, so a flag written
+// after a SLOT (`recycle -force mac-1 -json`) would otherwise be lost; this
+// re-parses past each positional, collecting them, so the trailing -json (and
+// any other global flag) is honored wherever it sits (issue #47). It folds a
+// trailing -json on success, so callers can't forget the fold.
+func (c *ctl) parseArgs(fs *flag.FlagSet, j *bool, args []string) ([]string, error) {
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		if fs.NArg() == 0 {
+			break
+		}
+		positional = append(positional, fs.Arg(0))
+		args = fs.Args()[1:]
 	}
 	c.useJSON(j)
-	return slot, nil
+	return positional, nil
+}
+
+// slotArg parses a command that requires exactly one SLOT — in any position
+// relative to the flags — and folds a trailing -json.
+func (c *ctl) slotArg(fs *flag.FlagSet, j *bool, args []string) (string, error) {
+	positional, err := c.parseArgs(fs, j, args)
+	if err != nil {
+		return "", err
+	}
+	if len(positional) != 1 {
+		return "", fmt.Errorf("exactly one SLOT argument is required")
+	}
+	return positional[0], nil
 }
 
 type ctl struct {

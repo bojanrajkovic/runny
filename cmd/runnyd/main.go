@@ -421,9 +421,10 @@ func run() error {
 	for _, s := range slots {
 		wg.Go(func() { s.Run(ctx) })
 	}
-	logger.Info("slots running", "count", len(slots), "socket", dir.SocketPath())
+	socketPath := home.ServerSocketPath(dir)
+	logger.Info("slots running", "count", len(slots), "socket", socketPath)
 
-	err = srv.Serve(ctx, dir.SocketPath())
+	err = srv.Serve(ctx, socketPath)
 	wg.Wait()
 	logger.Info("runnyd stopped")
 	if d.Exited() && err == nil {

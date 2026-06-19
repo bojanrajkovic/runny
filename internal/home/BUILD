@@ -6,10 +6,14 @@ go_library(
         "config.go",
         "home.go",
         "instance.go",
+        "socket.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/home",
     visibility = ["//:__subpackages__"],
-    deps = ["@com_github_goccy_go_yaml//:go-yaml"],
+    deps = [
+        "@com_github_goccy_go_yaml//:go-yaml",
+        "@org_golang_x_sys//unix",
+    ],
 )
 
 go_test(
@@ -17,6 +21,7 @@ go_test(
     srcs = [
         "config_test.go",
         "instance_test.go",
+        "socket_test.go",
     ],
     embed = [":home"],
 )

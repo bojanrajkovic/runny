@@ -177,7 +177,7 @@ final class CLIInstallModelTests: XCTestCase {
         XCTAssertFalse(s.contains("*/Runny.app/Contents/MacOS/runnyctl)"), "must not use the loose Runny.app glob")
     }
 
-    // MARK: - Orphan reconcile + cleanup (#89)
+    // MARK: - Orphan reconcile + cleanup
 
     private static let bundle = "/Applications/Runny.app/Contents/MacOS/runnyctl"
 
@@ -243,28 +243,41 @@ final class CLIInstallModelTests: XCTestCase {
         )
     }
 
-    func testRemoveOrphanScriptClearsAnyRunnyLinkAndRefusesForeign() {
+    func testRemoveOrphanScriptRemovesOnlyADeadRunnyLink() {
         let s = CLIInstallModel.removeOrphanScript()
         XCTAssertTrue(s.contains("with administrator privileges"))
-        // Removes ANY Runny.app link (the orphan points into a missing OTHER bundle),
-        // unlike removeScript's exact this-bundle compare — then refuses (exit 3)
-        // anything else still present (a foreign file that raced in). No create.
-        XCTAssertTrue(s.contains("*/Runny.app/Contents/MacOS/runnyctl) rm -f /usr/local/bin/runnyctl"))
+        // Removes a Runny.app link ONLY when its target is gone (`[ -e "$existing" ]`
+        // re-check at write time): a reappeared target → exit 0, leave the now-live
+        // link; a foreign file still present → exit 3. No create. This is deliberately
+        // NOT installScript's unconditional remove-any-Runny-link.
+        XCTAssertTrue(s.contains("*/Runny.app/Contents/MacOS/runnyctl)"))
+        XCTAssertTrue(s.contains("if [ -e \\\"$existing\\\" ]; then exit 0; else rm -f /usr/local/bin/runnyctl; fi"))
         XCTAssertTrue(s.contains("if [ -e /usr/local/bin/runnyctl ] || [ -L /usr/local/bin/runnyctl ]; then exit 3"))
         XCTAssertFalse(s.contains("ln -s"), "orphan cleanup removes, never creates")
     }
 
-    func testRemoveOrphanUnprivilegedRemovesRunnyLinkButRefusesForeign() throws {
+    func testRemoveOrphanUnprivilegedRemovesDeadLinkButLeavesLiveAndForeign() throws {
         let fm = FileManager.default
         let dir = fm.temporaryDirectory.appendingPathComponent("runny-orphan-\(UUID().uuidString)")
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: dir) }
 
-        // A dangling Runny-owned link → removed.
-        let link = dir.appendingPathComponent("runnyctl").path
-        try fm.createSymbolicLink(atPath: link, withDestinationPath: dir.appendingPathComponent("Runny.app/Contents/MacOS/runnyctl").path)
-        XCTAssertNil(CLIInstallModel.removeOrphanUnprivileged(link))
-        XCTAssertFalse(fm.fileExists(atPath: link) || (try? fm.destinationOfSymbolicLink(atPath: link)) != nil)
+        // A dangling Runny-owned link (target bundle missing, never created) → removed.
+        let dead = dir.appendingPathComponent("dead-runnyctl").path
+        try fm.createSymbolicLink(atPath: dead, withDestinationPath: dir.appendingPathComponent("missing/Runny.app/Contents/MacOS/runnyctl").path)
+        XCTAssertNil(CLIInstallModel.removeOrphanUnprivileged(dead))
+        XCTAssertNil(try? fm.destinationOfSymbolicLink(atPath: dead), "a dead orphan link must be removed")
+
+        // A Runny-owned link whose target REAPPEARED (live again) → left in place, nil
+        // returned so the read-back re-derives — never delete a working other-copy link.
+        let liveTargetDir = dir.appendingPathComponent("here/Runny.app/Contents/MacOS")
+        try fm.createDirectory(at: liveTargetDir, withIntermediateDirectories: true)
+        let liveTarget = liveTargetDir.appendingPathComponent("runnyctl").path
+        fm.createFile(atPath: liveTarget, contents: Data("bin".utf8))
+        let live = dir.appendingPathComponent("live-runnyctl").path
+        try fm.createSymbolicLink(atPath: live, withDestinationPath: liveTarget)
+        XCTAssertNil(CLIInstallModel.removeOrphanUnprivileged(live))
+        XCTAssertNotNil(try? fm.destinationOfSymbolicLink(atPath: live), "a link to a live bundle must be left untouched")
 
         // A foreign symlink → refused, left in place.
         let foreign = dir.appendingPathComponent("foreign").path

@@ -145,7 +145,7 @@ final class CLIInstallPlanTests: XCTestCase {
         XCTAssertFalse(CLIInstall.isRunnyBundleCLI("/Apps/FooRunny.app/Contents/MacOS/runnyctl"))
     }
 
-    // MARK: - Foreign-channel classification (#88)
+    // MARK: - Foreign-channel classification
 
     private static let link = "/usr/local/bin/runnyctl"
 
@@ -175,7 +175,7 @@ final class CLIInstallPlanTests: XCTestCase {
 
     func testConflictGuidanceNamesTheChannel() {
         // The guidance must name the MANAGING CHANNEL and its remediation, not just
-        // the path — the whole point of #88.
+        // the path — the whole point of the channel classification.
         let brew = CLIInstall.conflictGuidance(
             channel: .homebrew, owner: "/usr/local/Cellar/runny/0.6.0/bin/runnyctl", linkPath: Self.link
         )

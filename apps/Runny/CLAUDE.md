@@ -116,10 +116,12 @@ bounds) and ADR-0016 (decisions). Sharp edges below.
   drag-to-trash leaves the link dangling (macOS has no uninstall hook); a later
   launch surfaces it as `.orphaned` (a Runny-owned link whose target bundle is gone —
   the pure `restingClassification` keys this on `targetExists`) with a Remove action
-  (`removeOrphan` → `removeOrphanScript`, the `*/Runny.app/…` glob removal that
-  install already uses, minus the create). It SURFACES, never auto-rewrites on launch
-  (that would re-raise the admin prompt every restart — Docker's mistake) and never
-  clobbers a foreign owner.
+  (`removeOrphan` → `removeOrphanScript` / `removeOrphanUnprivileged`). Those remove a
+  Runny-owned link ONLY when its target is still gone at write time — a reappeared
+  target (remounted volume, relaunched second copy) is left live and the state
+  re-derived, deliberately UNLIKE `installScript` (which removes any Runny link to
+  re-point). It SURFACES, never auto-rewrites on launch (that would re-raise the admin
+  prompt every restart — Docker's mistake) and never clobbers a foreign owner.
 - **Daemon lifecycle lives in `Sources/Lifecycle/` — read its `CLAUDE.md` for the
   sharp edges, don't duplicate them here.** The load-bearing ones a broad change
   must respect: `SMAppService` success means *requested*, so `installState` is

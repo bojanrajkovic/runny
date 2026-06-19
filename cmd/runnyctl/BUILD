@@ -16,7 +16,7 @@ go_library(
     deps = [
         "//internal/home",
         "//proto/runny/v1:runny",
-        "@com_github_mattn_go_runewidth//:go-runewidth",
+        "@com_github_rivo_uniseg//:uniseg",
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//codes",
         "@org_golang_google_grpc//connectivity",

@@ -137,6 +137,9 @@ func TestCellWidthCountsDisplayColumns(t *testing.T) {
 		{"ビルドとテスト", 14},  // 7 wide runes
 		{"测试-linux", 10}, // 2 wide + 6 ascii
 		{"deploy", 6},
+		{"café", 4},     // precomposed é is one column, not ambiguous-wide
+		{"❤️", 2},       // emoji-presentation (VS16): two columns, not one
+		{"⚠️ tests", 8}, // VS16 emoji (2) + " tests" (6)
 	}
 	for _, tc := range cases {
 		if got := cellWidth(tc.s); got != tc.want {
@@ -155,8 +158,9 @@ func TestTruncClampsByDisplayWidth(t *testing.T) {
 		{"ビルドとテスト macos", 10},
 		{"测试测试测试测试", 7},
 		{"plain-ascii-string", 8},
-		{"ビル", 4},  // exactly fits — no clamp
-		{"ビルド", 4}, // 6 cols into 4 — clamps on a wide-rune boundary
+		{"ビル", 4},     // exactly fits — no clamp
+		{"ビルド", 4},    // 6 cols into 4 — clamps on a wide-rune boundary
+		{"❤️❤️❤️", 4}, // VS16 emoji clusters must not be split mid-cluster
 	}
 	for _, tc := range cases {
 		got := trunc(tc.s, tc.n)

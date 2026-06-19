@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mattn/go-runewidth"
+	"github.com/rivo/uniseg"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
@@ -906,12 +906,29 @@ func durString(d time.Duration) string {
 }
 
 // trunc clamps s to at most n display columns, appending a one-column ellipsis
-// when it shortens. runewidth.Truncate budgets by display width (not rune count)
-// and reserves the ellipsis's own width, so a wide-rune job name can't over-run
-// its cell and shift the columns to its right (issue #51); it is grapheme-cluster
-// aware, so it won't split a combining-mark or ZWJ-emoji sequence mid-cluster.
+// when it shortens. It budgets by display width (not rune count) over whole
+// grapheme clusters, so a wide-rune job name can't over-run its cell and shift
+// the columns to its right (issue #51), and a multi-rune cluster (a VS16/ZWJ
+// emoji, or a base plus combining mark) is never split mid-cluster.
 func trunc(s string, n int) string {
-	return widthCond.Truncate(s, n, "…")
+	if cellWidth(s) <= n {
+		return s
+	}
+	budget := n - 1 // reserve one column for the ellipsis
+	var b strings.Builder
+	w := 0
+	rest, state := s, -1
+	for len(rest) > 0 {
+		var cluster string
+		var cw int
+		cluster, rest, cw, state = uniseg.FirstGraphemeClusterInString(rest, state)
+		if w+cw > budget {
+			break
+		}
+		b.WriteString(cluster)
+		w += cw
+	}
+	return b.String() + "…"
 }
 
 // imageCell renders the IMAGE column: the configured ref's last path
@@ -974,19 +991,14 @@ func shortHex(h string) string {
 	return h
 }
 
-// widthCond measures terminal display width with East-Asian-ambiguous runes
-// pinned to one column (and emoji left neutral), so cell widths are deterministic
-// regardless of the operator's locale env — runewidth otherwise derives the
-// ambiguous-width setting from LANG/LC_*, which would make the same status table
-// align differently on different hosts.
-var widthCond = &runewidth.Condition{EastAsianWidth: false, StrictEmojiNeutral: false}
-
 // cellWidth is a cell's terminal display width. Rune count is wrong for the JOB
 // and NOTE columns, which carry GitHub-controlled job display names that can hold
-// double-width (CJK) or zero-width runes (issue #51): a workflow `name:` reaches
-// runny verbatim via the runner's "Running job:" line. runewidth maps each rune
-// to its column count (0/1/2).
-func cellWidth(s string) int { return widthCond.StringWidth(s) }
+// double-width (CJK), zero-width, or emoji-presentation runes (issue #51): a
+// workflow `name:` reaches runny verbatim via the runner's "Running job:" line.
+// uniseg measures monospace width per grapheme cluster — wide CJK and VS16/ZWJ
+// emoji count as two columns, ambiguous-width runes (accented Latin, the
+// ellipsis) as one — with a fixed policy independent of the operator's locale.
+func cellWidth(s string) int { return uniseg.StringWidth(s) }
 
 // pad right-pads s with spaces to display width w.
 func pad(s string, w int) string {

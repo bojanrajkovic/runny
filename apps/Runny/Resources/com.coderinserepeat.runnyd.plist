@@ -32,11 +32,11 @@
     <string>com.coderinserepeat.runny</string>
   </array>
 
-  <!-- A LaunchAgent (registered into the user's GUI login session via
-       SMAppService), NOT a system LaunchDaemon: it runs inside that session,
-       which is what lets the one-time macOS "Local Network" (TCC) prompt appear
-       and the grant persist. A LaunchDaemon or a background-reparented runnyd is
-       silently denied vmnet access — guest dials fail "no route to host". See
+  <!-- A per-user LaunchAgent (registered into the user's GUI login session via
+       SMAppService): it runs inside that session, which is what surfaces the
+       one-time macOS "Local Network" (TCC) prompt and lets the grant persist. A
+       runnyd that background-reparents off launchd loses that and is silently
+       denied vmnet access — guest dials fail "no route to host". See
        docs/deploy.md. -->
   <key>RunAtLoad</key>
   <true/>

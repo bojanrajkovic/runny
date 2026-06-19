@@ -2,6 +2,24 @@
 
 **Status:** Accepted (2026-06-16)
 
+**Amended (2026-06-19):** the networking premise below was overturned by a
+spike. This ADR states that "a system daemon of any uid is silently denied"
+local network access, and that only a future userspace network stack could
+admit a headless daemon. That is backwards. Per Apple's TN3179 and a spike on a
+pristine, never-logged-in host, **any daemon started by launchd is auto-allowed
+local network access regardless of uid**; the *gated* path is the per-user
+**LaunchAgent**, because macOS keeps local-network privacy state per user
+account (hence its one-time prompt). The genuinely denied case is a process
+that self-daemonizes / reparents away from launchd. The per-user-agent decision
+recorded below still describes runny's current shipping shape and stands — but
+its *rationale* does not: a headless, non-root **system LaunchDaemon** is viable
+today with **no** change to the networking substrate (vmnet stays), and the
+userspace network stack is demoted to optional hardening. That headless path is
+tracked in [#76](https://github.com/bojanrajkovic/runny/issues/76), which will
+carry the ADR that supersedes the contingency framing here; the userspace-stack
+hedge moved to [#84](https://github.com/bojanrajkovic/runny/issues/84). The body
+below is preserved as the decision-time record — read it through this banner.
+
 ## Context
 
 A release stamps all three artifacts — `Runny.app`, `runnyd`, `runnyctl` — at

@@ -236,16 +236,24 @@ reconnected; lines may be missing or duplicated —"): the stream is
 best-effort by contract, log lines carry no sequence key, and pretending to
 a gapless tail would be a silent lie. No deduplication is attempted.
 
-## Socket path resolution
+## Home and socket path resolution
 
-The socket is always `~/.runny/runnyd.sock`, derived from the current user —
-the same fixed home the daemon derives from its run-user's `$HOME`. There is no
-override: no environment variable (a Finder-launched app inherits launchd's
-environment, not the shell's, so an exported variable would never reach it) and
-no Settings field. The app and daemon therefore can't disagree about where the
-socket lives. The app reads nothing else from the runny home — files under
-`~/.runny` belong to the daemon (ADR-0006 symmetry: the app knows only the
-contract).
+The home is deployment-resolved, not fixed: `/Library/Application Support/runny`
+when that directory exists (a headless system daemon's home), else the per-user
+`~/.runny` — mirroring the daemon's `home.ResolveClient`. Selection is by
+existence, not a liveness probe. There is no override: no environment variable (a
+Finder-launched app inherits launchd's environment, not the shell's, so an
+exported variable would never reach it) and no Settings field. The app and daemon
+resolve the same home, so they can't disagree about where the socket lives.
+
+The socket is `<home>/runnyd.sock`, and retained-artifact reads (`cycles/`) come
+from the same resolved home — one axis, so the app can't dial one home while
+reading artifacts from another. On a host carrying a system install the app
+targets the system daemon even when it is down (reporting "down" rather than
+silently falling back to a per-user socket); the install gate separately probes
+both literal sockets so a stale socket at one path can't mask a live daemon at
+the other. The app reads nothing else from the runny home — files under it belong
+to the daemon (ADR-0006 symmetry: the app knows only the contract).
 
 ## Command-line tool vending
 

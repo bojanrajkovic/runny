@@ -2,21 +2,21 @@ import XCTest
 
 @testable import Runny
 
-/// The app home is fixed at ~/.runny with no override. The Settings key that
+/// The app home is deployment-resolved with no override. The Settings key that
 /// used to steer it ("runnyHomeOverride") is gone — setting it must no longer
 /// move the home, so the socket still resolves under ~/.runny. The Swift
-/// analogue of the daemon's env-ignored `Resolve` test: a stale override left in
-/// a user's defaults plist is inert, not a path that splits the app from the
+/// analogue of the daemon's env-ignored resolve test: a stale override left in a
+/// user's defaults plist is inert, not a path that splits the app from the
 /// daemon.
 final class RunnyHomeTests: XCTestCase {
     func testRemovedOverrideKeyNoLongerSteersTheHome() throws {
-        // socketPath now resolves shared-then-per-user; this test's invariant — the
+        // `directory` resolves system-then-per-user; this test's invariant — the
         // override key is inert — concerns the per-user branch, so it only holds when
-        // no system daemon's shared socket is present on the test host (it isn't on CI
-        // or a dev box; it would be on a machine actually running the headless daemon).
+        // no system daemon's home is present on the test host (it isn't on CI or a
+        // dev box; it would be on a machine actually running the headless daemon).
         try XCTSkipIf(
-            FileManager.default.fileExists(atPath: RunnyHome.sharedSocketPath),
-            "a system daemon's shared socket is present; socketPath resolves to it, not ~/.runny"
+            FileManager.default.fileExists(atPath: RunnyHome.systemHomeDir),
+            "a system daemon's home is present; the home resolves to it, not ~/.runny"
         )
         let key = "runnyHomeOverride"
         UserDefaults.standard.set("/tmp/junk-home", forKey: key)
@@ -30,36 +30,51 @@ final class RunnyHomeTests: XCTestCase {
     }
 }
 
-/// The app's socket resolution mirrors Go's `home.ClientSocketPath`: prefer the
-/// shared system socket when it exists, else the per-user one — so the app
-/// reaches a system daemon with no configuration (selection by existence;
-/// liveness stays `SocketProbe`'s job). The literal shared path is pinned here as
-/// the cross-language drift guard against Go's `home.SharedSocketDir`.
-final class RunnyHomeSocketResolutionTests: XCTestCase {
-    func testPrefersSharedSocketWhenPresent() {
+/// The app's home resolution mirrors Go's `home.ResolveClient`: prefer the system
+/// home when it EXISTS, else the per-user one — so the app reaches a system daemon
+/// (and reads its artifacts) with no configuration (selection by existence;
+/// liveness stays `SocketProbe`'s job). The literal system path is pinned here as
+/// the cross-language drift guard against Go's `home.SystemHomeDir`.
+final class RunnyHomeResolutionTests: XCTestCase {
+    func testPrefersSystemHomeWhenPresent() {
         XCTAssertEqual(
-            RunnyHome.resolveSocketPath(sharedExists: true), RunnyHome.sharedSocketPath,
-            "a present shared socket must win so the app reaches a system daemon"
+            RunnyHome.resolveDirectory(systemDirExists: true), RunnyHome.systemDirectory,
+            "a present system home must win so the app reaches a system daemon"
         )
         XCTAssertEqual(
-            RunnyHome.sharedSocketPath, "/Library/Application Support/runny/runnyd.sock",
-            "must match Go's home.SharedSocketDir + runnyd.sock"
+            RunnyHome.systemDirectory.path, "/Library/Application Support/runny",
+            "must match Go's home.SystemHomeDir"
+        )
+        XCTAssertEqual(
+            RunnyHome.systemSocketPath, "/Library/Application Support/runny/runnyd.sock",
+            "must match Go's home.SystemHomeDir + runnyd.sock"
         )
     }
 
-    func testFallsBackToPerUserWhenSharedAbsent() {
-        let resolved = RunnyHome.resolveSocketPath(sharedExists: false)
-        XCTAssertEqual(resolved, RunnyHome.perUserSocketPath)
-        XCTAssertTrue(resolved.hasSuffix("/.runny/runnyd.sock"), "got \(resolved)")
+    func testFallsBackToPerUserWhenSystemAbsent() {
+        let resolved = RunnyHome.resolveDirectory(systemDirExists: false)
+        XCTAssertEqual(resolved, RunnyHome.perUserDirectory)
+        XCTAssertTrue(resolved.path.hasSuffix("/.runny"), "got \(resolved.path)")
+    }
+
+    /// The dialed socket and the watched directory both derive from the resolved
+    /// home, so they can't diverge (dial one home while watching another).
+    func testPerUserSocketDerivesFromPerUserHome() {
+        XCTAssertEqual(
+            RunnyHome.perUserSocketPath,
+            RunnyHome.perUserDirectory.appendingPathComponent("runnyd.sock").path
+        )
+        XCTAssertTrue(RunnyHome.perUserSocketPath.hasSuffix("/.runny/runnyd.sock"))
     }
 }
 
 /// The socket-appearance watcher opens the home with O_EVTONLY for instant
-/// retry when the daemon's socket shows up. On a fresh install the home does
-/// not exist until the first daemon run, so the watch silently fails to arm and
-/// the app waits out its full reconnect backoff. `ensureDirectory` creates the
-/// top-level home (0700, matching the daemon) so the watch arms on a clean
-/// machine — without ever widening an existing home's permissions.
+/// retry when the daemon's socket shows up. On a fresh per-user install the home
+/// does not exist until the first daemon run, so the watch silently fails to arm
+/// and the app waits out its full reconnect backoff. `ensureDirectory` creates
+/// the per-user home (0700, matching the daemon) so the watch arms on a clean
+/// machine — without ever widening an existing home's permissions, and never
+/// creating the installer-owned system home.
 final class RunnyHomeEnsureDirectoryTests: XCTestCase {
     func testCreatesMissingDirectoryAsOwnerOnly() throws {
         let parent = FileManager.default.temporaryDirectory

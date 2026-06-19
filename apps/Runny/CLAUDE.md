@@ -72,6 +72,17 @@ bounds) and ADR-0016 (decisions). Sharp edges below.
   The daemon derives the same path from its run-user's `$HOME`, so the two can't
   disagree. `diagnose()`'s "different home?" hint stays — it's still useful for
   the upgrade window where an *old* daemon was launched with `RUNNY_HOME`.
+- **The socket path is resolved (shared-then-per-user); the home dir is not.**
+  `RunnyHome.directory` stays fixed at `~/.runny` (artifacts, the watcher's per-user
+  fallback), but `RunnyHome.socketPath` prefers the shared system socket
+  `/Library/Application Support/runny/runnyd.sock` when it EXISTS, else the per-user
+  `~/.runny/runnyd.sock` — mirroring Go's `home.ClientSocketPath` so the app reaches a
+  non-root system daemon with no config. **`RunnyHome.sharedSocketDir` MUST stay in sync
+  with Go's `home.SharedSocketDir`** (`internal/home/socket.go`): Swift can't import the
+  Go const, so both hardcode the path, and `RunnyHomeSocketResolutionTests` pins the
+  literal as the drift guard. Selection is by existence; LIVENESS stays `SocketProbe`'s
+  connect-based job (Go's stat-for-selection / connect-for-liveness split).
+  `socketDirectory` (the socket-appearance watcher's target) follows the resolved socket.
 - **The daemon-card Reconnect is disabled while `reloadPending`, never during
   validation.** `reloadPending` is `pendingReload != nil` (the drain window with
   a live convergence verdict to lose); the guard exists so a manual re-dial

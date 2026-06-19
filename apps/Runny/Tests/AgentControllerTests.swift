@@ -207,7 +207,7 @@ final class AgentControllerTests: XCTestCase {
     func testGateForAllowsOwnAndUnmanagedDeniesEveryForeign() {
         XCTAssertEqual(AgentController.gateFor(.unmanaged), .allow)
         XCTAssertEqual(AgentController.gateFor(.selfManaged), .allow)
-        for owner: DaemonOwnership in [.foreignBrew, .foreignManual, .foreground, .awaitingApproval, .indeterminate] {
+        for owner: DaemonOwnership in [.foreignBrew, .foreignManual, .foreignSystem, .foreground, .awaitingApproval, .indeterminate] {
             guard case .deny = AgentController.gateFor(owner) else {
                 return XCTFail("\(owner) must deny spawning")
             }
@@ -226,6 +226,24 @@ final class AgentControllerTests: XCTestCase {
         )
         await c.refreshOwnership()
         XCTAssertEqual(c.ownership, .foreignBrew, "a registered brew label with no self-agent is foreignBrew")
+    }
+
+    func testRefreshOwnershipForeignSystemWhenSystemDaemonRegistered() async {
+        // End-to-end wiring: the systemProbe provider feeds gatherInputs →
+        // DaemonOwnershipInputs.systemProbe → classify → foreignSystem (deferring the
+        // app to observer mode over the shared socket).
+        let mock = MockRegistrar()
+        mock.nextStatus = .notRegistered // not ours
+        let c = AgentController(
+            registrar: mock,
+            probe: { _ in .notRegistered },
+            systemProbe: { label in label == DaemonOwnership.canonicalLabel ? .registered : .notRegistered },
+            socketAnswers: { false },
+            homeIsCanonical: { true },
+            manualPlistPersisted: { false }
+        )
+        await c.refreshOwnership()
+        XCTAssertEqual(c.ownership, .foreignSystem, "a canonical label in the system/ domain is a foreign system daemon")
     }
 
     func testRefreshOwnershipSelfManagedWhenOurAgentEnabled() async {
@@ -371,6 +389,13 @@ final class AgentControllerTests: XCTestCase {
 
         XCTAssertEqual(AgentController.observerMessage(for: .foreground)?.kind, .foregroundDaemon)
         XCTAssertEqual(AgentController.observerMessage(for: .indeterminate)?.kind, .indeterminate)
+
+        let system = AgentController.observerMessage(for: .foreignSystem)
+        XCTAssertEqual(system?.kind, .managedBySystemDaemon)
+        // Names the system daemon and that Runny defers (observes, won't install over
+        // it) — removal is the headless uninstaller's job, not an in-app bootout.
+        XCTAssertEqual(system?.message.contains("system daemon"), true)
+        XCTAssertEqual(system?.message.contains("won't install a competing"), true)
     }
 
     // MARK: - Start affordance
@@ -414,7 +439,7 @@ final class AgentControllerTests: XCTestCase {
         // .foreignBrew. Start must hide — every kickstart would be rejected by the spawn
         // gate, so a rendered Start is a dead button that only loops "Try Again". The
         // observer banner carries the real guidance. Same for any non-selfManaged owner.
-        for owner: DaemonOwnership in [.foreignBrew, .foreignManual, .foreground, .indeterminate, .unmanaged] {
+        for owner: DaemonOwnership in [.foreignBrew, .foreignManual, .foreignSystem, .foreground, .indeterminate, .unmanaged] {
             XCTAssertEqual(
                 LaunchAgentStatus.startAffordance(
                     state: .installed, ownership: owner, daemonUnreachable: true, canonical: true
@@ -446,7 +471,7 @@ final class AgentControllerTests: XCTestCase {
         // (which itself defers whenever another owner is present). A .requiresApproval
         // self-status with a deferring verdict (a foreign owner, or an inconclusive probe)
         // suppresses the CTA — folding the round-3 view-level gate into the pure decision.
-        for owner: DaemonOwnership in [.indeterminate, .foreignBrew, .foreignManual, .foreground] {
+        for owner: DaemonOwnership in [.indeterminate, .foreignBrew, .foreignManual, .foreignSystem, .foreground] {
             XCTAssertEqual(
                 LaunchAgentStatus.startAffordance(
                     state: .requiresApproval, ownership: owner, daemonUnreachable: true, canonical: true

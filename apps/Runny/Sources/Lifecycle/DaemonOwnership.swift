@@ -17,6 +17,11 @@ enum DaemonOwnership: Equatable {
     /// The canonical `com.coderinserepeat.runnyd` label is registered, but not by
     /// us — a manual `launchctl` installer.
     case foreignManual
+    /// A runnyd is registered in the `system/` launchd domain — the headless
+    /// non-root system daemon (or a `sudo brew services` root daemon). The app
+    /// observes it over the shared socket and never installs a competing per-user
+    /// agent over it.
+    case foreignSystem
     /// A daemon answers the socket but no agent is registered — a hand-run runnyd.
     case foreground
     /// Our own agent is registered but awaiting Login Items approval.
@@ -51,6 +56,11 @@ struct DaemonOwnershipInputs: Equatable {
     var brewProbe: LaunchdProbeResult
     /// Whether `com.coderinserepeat.runnyd` is registered (ours OR a manual one).
     var canonicalProbe: LaunchdProbeResult
+    /// Whether the canonical label is registered in the `system/` domain — a
+    /// non-root system daemon (the headless deployment). Defaults `.notRegistered`
+    /// so a host with no system daemon — the common case, and every existing
+    /// caller/test — behaves exactly as before.
+    var systemProbe: LaunchdProbeResult = .notRegistered
     /// Whether a daemon answers the socket.
     var socketAnswers: Bool
     /// Whether the manual installer's plist persists at
@@ -112,6 +122,13 @@ extension DaemonOwnership {
         //    positive brew probe surfaces even when our own agent is also enabled —
         //    that is a real two-manager conflict, not a self-managed host.
         if inputs.brewProbe == .registered { return .foreignBrew }
+        // 2b. A runnyd registered in the system/ domain is a foreign system daemon
+        //     (the headless deployment). Like brew, it surfaces ahead of self — a
+        //     system daemon plus our own per-user agent is a real two-manager
+        //     conflict — and ahead of the foreground branch below, so a system daemon
+        //     that also answers the shared socket is named, not mislabeled a hand-run
+        //     daemon.
+        if inputs.systemProbe == .registered { return .foreignSystem }
         // 3-4. Authoritative self-identity. `.enabled` (`.installed`) means the
         //      canonical label is ours (the C1 spike: a foreign owner never reads
         //      `.enabled`), so a wedged probe can't flip us to `indeterminate` and

@@ -13,13 +13,14 @@ final class DaemonOwnershipTests: XCTestCase {
         selfState: LaunchAgentStatus.State = .notInstalled,
         brewProbe: LaunchdProbeResult = .notRegistered,
         canonicalProbe: LaunchdProbeResult = .notRegistered,
+        systemProbe: LaunchdProbeResult = .notRegistered,
         socketAnswers: Bool = false,
         manualPlistPersisted: Bool = false
     ) -> DaemonOwnershipInputs {
         DaemonOwnershipInputs(
             homeIsCanonical: homeIsCanonical, selfState: selfState,
-            brewProbe: brewProbe, canonicalProbe: canonicalProbe, socketAnswers: socketAnswers,
-            manualPlistPersisted: manualPlistPersisted
+            brewProbe: brewProbe, canonicalProbe: canonicalProbe, systemProbe: systemProbe,
+            socketAnswers: socketAnswers, manualPlistPersisted: manualPlistPersisted
         )
     }
 
@@ -54,6 +55,27 @@ final class DaemonOwnershipTests: XCTestCase {
 
     func testForegroundWhenSocketAnswersWithNoAgent() {
         XCTAssertEqual(DaemonOwnership.classify(inputs(socketAnswers: true)), .foreground)
+    }
+
+    func testForeignSystemWhenSystemLabelRegistered() {
+        // A runnyd in the system/ domain — the headless non-root daemon — is a foreign
+        // owner the app observes (over the shared socket) and never installs over.
+        XCTAssertEqual(DaemonOwnership.classify(inputs(systemProbe: .registered)), .foreignSystem)
+    }
+
+    func testForeignSystemSurfacesOverSelfAndForeground() {
+        // Like brew, a system daemon surfaces ahead of self (system daemon + our own
+        // agent is a real two-manager conflict)...
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .installed, systemProbe: .registered)),
+            .foreignSystem
+        )
+        // ...and ahead of the foreground branch, so a system daemon answering the
+        // shared socket is named, not mislabeled a hand-run daemon.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(systemProbe: .registered, socketAnswers: true)),
+            .foreignSystem
+        )
     }
 
     // MARK: - Indeterminate dominates (the regression guards)

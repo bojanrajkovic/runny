@@ -215,14 +215,14 @@ struct AgentInstallRow: View {
 
     private func bannerIcon(_ kind: ObserverHint.Kind) -> String {
         switch kind {
-        case .managedByHomebrew, .managedManually: "info.circle"
+        case .managedByHomebrew, .managedManually, .managedBySystemDaemon: "info.circle"
         case .foregroundDaemon, .indeterminate: "exclamationmark.triangle"
         }
     }
 
     private func bannerTint(_ kind: ObserverHint.Kind) -> Color {
         switch kind {
-        case .managedByHomebrew, .managedManually: .secondary
+        case .managedByHomebrew, .managedManually, .managedBySystemDaemon: .secondary
         case .foregroundDaemon, .indeterminate: .orange
         }
     }

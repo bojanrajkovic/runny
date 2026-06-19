@@ -98,6 +98,7 @@ struct ObserverHint: Equatable {
     enum Kind: Equatable {
         case managedByHomebrew
         case managedManually
+        case managedBySystemDaemon
         case foregroundDaemon
         case indeterminate
     }
@@ -148,6 +149,7 @@ final class AgentController {
     private let eligibilityProvider: () -> LaunchAgentStatus.Eligibility
     private let bundledAgentPresentProvider: () -> Bool
     private let probeProvider: @Sendable (String) async -> LaunchdProbeResult
+    private let systemProbeProvider: @Sendable (String) async -> LaunchdProbeResult
     private let socketAnswersProvider: () async -> Bool
     private let homeIsCanonicalProvider: () -> Bool
     private let manualPlistPersistedProvider: () -> Bool
@@ -160,6 +162,11 @@ final class AgentController {
         eligibility: @escaping () -> LaunchAgentStatus.Eligibility = { AgentController.bundleEligibility() },
         bundledAgentPresent: @escaping () -> Bool = { AgentController.bundledAgentPresent() },
         probe: @escaping @Sendable (String) async -> LaunchdProbeResult = { await LaunchdProbe.probe(label: $0) },
+        // Hermetic by default: existing tests construct AgentController without knowing
+        // about systemProbe, so its default must NOT shell out to `launchctl print
+        // system/…` — unlike `probe`, which every test already overrides. `live()`
+        // supplies the real probe.
+        systemProbe: @escaping @Sendable (String) async -> LaunchdProbeResult = { _ in .notRegistered },
         socketAnswers: @escaping () async -> Bool = { await AgentController.liveSocketOccupied() },
         homeIsCanonical: @escaping () -> Bool = { true },
         manualPlistPersisted: @escaping () -> Bool = { AgentController.manualPlistPersisted() }
@@ -169,6 +176,7 @@ final class AgentController {
         eligibilityProvider = eligibility
         bundledAgentPresentProvider = bundledAgentPresent
         probeProvider = probe
+        systemProbeProvider = systemProbe
         socketAnswersProvider = socketAnswers
         homeIsCanonicalProvider = homeIsCanonical
         manualPlistPersistedProvider = manualPlistPersisted
@@ -202,6 +210,9 @@ final class AgentController {
     static func live() -> AgentController {
         let registrar = SMAppServiceRegistrar()
         let probe: @Sendable (String) async -> LaunchdProbeResult = { await LaunchdProbe.probe(label: $0) }
+        let systemProbe: @Sendable (String) async -> LaunchdProbeResult = {
+            await LaunchdProbe.probe(label: $0, domain: .system)
+        }
         let socketAnswers = { await Self.liveSocketOccupied() }
         let homeIsCanonical = { true }
         let bundledAgentPresent = { AgentController.bundledAgentPresent() }
@@ -210,13 +221,15 @@ final class AgentController {
             registrar: registrar,
             spawnGate: {
                 await gateFor(DaemonOwnership.classify(gatherInputs(
-                    registrar: registrar, probe: probe, socketAnswers: socketAnswers,
+                    registrar: registrar, probe: probe, systemProbe: systemProbe,
+                    socketAnswers: socketAnswers,
                     homeIsCanonical: homeIsCanonical, bundledAgentPresent: bundledAgentPresent,
                     manualPlistPersisted: manualPlistPersisted
                 )))
             },
             bundledAgentPresent: bundledAgentPresent,
             probe: probe,
+            systemProbe: systemProbe,
             socketAnswers: socketAnswers,
             homeIsCanonical: homeIsCanonical,
             manualPlistPersisted: manualPlistPersisted
@@ -324,7 +337,8 @@ final class AgentController {
         repeat {
             ownershipPending = false
             let inputs = await Self.gatherInputs(
-                registrar: registrar, probe: probeProvider, socketAnswers: socketAnswersProvider,
+                registrar: registrar, probe: probeProvider, systemProbe: systemProbeProvider,
+                socketAnswers: socketAnswersProvider,
                 homeIsCanonical: homeIsCanonicalProvider, bundledAgentPresent: bundledAgentPresentProvider,
                 manualPlistPersisted: manualPlistPersistedProvider
             )
@@ -356,6 +370,9 @@ final class AgentController {
     static func gatherInputs(
         registrar: ServiceRegistrar,
         probe: @Sendable (String) async -> LaunchdProbeResult,
+        // No default: both callers pass it, and a defaulted "no system probe" would be
+        // exactly the silent-skip (install over a system daemon) this exists to prevent.
+        systemProbe: @Sendable (String) async -> LaunchdProbeResult,
         socketAnswers: () async -> Bool,
         homeIsCanonical: () -> Bool,
         bundledAgentPresent: () -> Bool,
@@ -363,6 +380,8 @@ final class AgentController {
     ) async -> DaemonOwnershipInputs {
         async let brew = probe(DaemonOwnership.brewLabel)
         async let canonical = probe(DaemonOwnership.canonicalLabel)
+        // The canonical label in the system/ domain — a non-root headless daemon.
+        async let system = systemProbe(DaemonOwnership.canonicalLabel)
         // The label probes are already in flight; awaiting the (global-queue-hopping)
         // socket dial here lets all three run concurrently without an async-let over a
         // non-Sendable closure.
@@ -375,6 +394,7 @@ final class AgentController {
             selfState: selfState,
             brewProbe: brew,
             canonicalProbe: canonical,
+            systemProbe: system,
             socketAnswers: socketOccupied,
             manualPlistPersisted: manualPlistPersisted()
         )
@@ -739,6 +759,8 @@ extension AgentController {
             .deny(reason: "Homebrew manages runnyd on this host")
         case .foreignManual:
             .deny(reason: "a manually-installed LaunchAgent manages runnyd")
+        case .foreignSystem:
+            .deny(reason: "a system daemon manages runnyd on this host")
         case .foreground:
             .deny(reason: "a runnyd is already running with no managing agent")
         case .awaitingApproval:
@@ -782,6 +804,17 @@ extension AgentController {
                     + "remove that agent with `launchctl bootout gui/$(id -u)/\(DaemonOwnership.canonicalLabel) "
                     + "2>/dev/null; rm -f ~/Library/LaunchAgents/\(DaemonOwnership.canonicalLabel).plist`, "
                     + "then reopen Runny."
+            )
+        case .foreignSystem:
+            // The system daemon isn't the app's to remove — it's a privileged,
+            // system-domain job. Runny observes it (status streams over the shared
+            // socket) and won't install a competing per-user agent; removal is the
+            // headless uninstaller's job (admin), not an in-app bootout.
+            ObserverHint(
+                kind: .managedBySystemDaemon,
+                message: "A system daemon manages runnyd on this host. Runny is observing it over the "
+                    + "shared socket and won't install a competing per-user agent. To manage it from "
+                    + "the app instead, remove the system daemon (requires admin), then reopen Runny."
             )
         case .foreground:
             ObserverHint(

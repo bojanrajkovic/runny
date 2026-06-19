@@ -75,14 +75,20 @@ never exercised live in tests.
   to `.enabled` (the registration databases are separate; see
   [ADR-0019](../../../../docs/architecture-decisions/0019-daemon-ownership-detection.md)).
   Do NOT "simplify" detection to a label comparison — that reintroduces the stomp.
-- **Two orthogonal axes, and indeterminate dominates.** "An agent is registered
-  under label X" (a `LaunchdProbe` of the brew + canonical labels) and "a daemon
-  answers the socket" (`RunnyHome.socketExists`) are separate facts, plus a
-  home-canonical flag. `classify`'s precedence tests `indeterminate` (a non-canonical
-  home, or any probe that wedged or errored) **second**, ahead of every positive
-  branch, so an inconclusive probe defers and can never read as
-  install-a-second-manager or stop-a-hand-run-daemon. `unmanaged` (install allowed)
-  is reached only after every positive and every indeterminate branch.
+- **Two orthogonal axes, and indeterminate dominates all but self-identity.** "An
+  agent is registered under label X" (a `LaunchdProbe` of the brew + canonical
+  labels) and "a daemon answers the socket" (`RunnyHome.socketExists`) are separate
+  facts, plus a home-canonical flag. A non-canonical home defers FIRST (ahead of
+  everything). The single signal that outranks a wedged/errored *probe* is
+  authoritative self-identity: an `.enabled` self-status (`.installed`) resolves to
+  `selfManaged` before the probe-indeterminate branch, so a transient probe wedge
+  never blocks managing our OWN daemon (`.requiresApproval` is NOT such a signal — a
+  pending agent can't attest to the loaded label, so it defers to any inconclusive
+  probe). Past self-identity and the affirmative foreign registrations, an
+  inconclusive probe defers ahead of the PERMISSIVE branches (foreground, unmanaged),
+  so it can never read as install-a-second-manager or stop-a-hand-run-daemon.
+  `unmanaged` (install allowed) is reached only after every positive and every
+  indeterminate branch.
 - **The probe is stdout-literal-match, bounded, and reaped.** `LaunchdProbe` runs
   `launchctl print gui/$(getuid())/<label>` and decides registration by the literal
   label appearing in byte-capped STDOUT — never exit code, never format parsing. A

@@ -17,27 +17,23 @@ struct DaemonStartAffordance: View {
         // affordance self-hides (the row disappears the instant the daemon is
         // reachable, which is exactly when we want to clear a terminal Start outcome).
         Group {
+            // Both the approval and start gates (ownership == awaitingApproval / ==
+            // selfManaged) live in the pure startAffordance now, so a foreign or
+            // indeterminate owner already resolves to .none here — the Settings observer
+            // banner carries the guidance instead of a dead CTA.
             switch LaunchAgentStatus.startAffordance(
-                state: agent.installState, daemonUnreachable: daemonUnreachable, canonical: agentCanonical
+                state: agent.installState, ownership: agent.ownership,
+                daemonUnreachable: daemonUnreachable, canonical: agentCanonical
             ) {
             case .none:
                 EmptyView()
             case .approval:
-                // Approving launches the RunAtLoad agent from System Settings — OUTSIDE
-                // the spawn gate — so only prompt when ownership is safely
-                // awaitingApproval. A foreign/indeterminate owner means approving would
-                // start a competing daemon; the Settings observer banner surfaces that,
-                // and this prompt suppresses itself rather than inviting the conflict.
-                if agent.ownership == .awaitingApproval {
-                    AffordanceRow(
-                        systemImage: icon,
-                        text: "runnyd is installed but needs approval in Login Items.",
-                        tint: .orange
-                    ) {
-                        Button("Approve…") { SMAppService.openSystemSettingsLoginItems() }
-                    }
-                } else {
-                    EmptyView()
+                AffordanceRow(
+                    systemImage: icon,
+                    text: "runnyd is installed but needs approval in Login Items.",
+                    tint: .orange
+                ) {
+                    Button("Approve…") { SMAppService.openSystemSettingsLoginItems() }
                 }
             case .start:
                 startRow

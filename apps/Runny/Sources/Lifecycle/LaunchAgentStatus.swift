@@ -117,17 +117,24 @@ enum LaunchAgentStatus {
         case approval
     }
 
-    /// The Start gate. Start is offered ONLY when the agent is installed, the
-    /// daemon is unreachable, AND reconcile affirms the agent is canonical — a
-    /// foreign/unverified agent would kickstart the wrong `BundleProgram`, so it is
-    /// hidden (the operator is routed to reinstall via the reconcile warning).
-    /// `requiresApproval` is its own approval CTA, so a dead Start button can never
-    /// no-op against a job launchd won't run.
-    nonisolated static func startAffordance(state: State, daemonUnreachable: Bool, canonical: Bool) -> StartAffordance {
+    /// The Start gate. Start is offered ONLY when the agent is installed, the daemon
+    /// is unreachable, reconcile affirms the agent is canonical, AND the daemon is
+    /// `selfManaged` — a foreign/unverified agent would kickstart the wrong
+    /// `BundleProgram`, and a non-`selfManaged` owner (a stopped Homebrew service that
+    /// left our agent registered too) would have every kickstart rejected by the spawn
+    /// gate, so a rendered Start is a dead button that only loops "Try Again". The
+    /// approval CTA is likewise gated on `awaitingApproval`: approving launches the
+    /// RunAtLoad agent from System Settings, OUTSIDE the spawn gate, so it is offered
+    /// only when no other owner is present (the verdict that defers otherwise). Both
+    /// ownership gates live HERE, in the tested pure decision, rather than scattered
+    /// across the view — so no surface independently re-derives spawn-eligibility.
+    nonisolated static func startAffordance(
+        state: State, ownership: DaemonOwnership, daemonUnreachable: Bool, canonical: Bool
+    ) -> StartAffordance {
         guard canonical else { return .none }
         return switch state {
-        case .requiresApproval: .approval
-        case .installed: daemonUnreachable ? .start : .none
+        case .requiresApproval: ownership == .awaitingApproval ? .approval : .none
+        case .installed: (daemonUnreachable && ownership == .selfManaged) ? .start : .none
         case .notInstalled, .notFound, .registrationFailed: .none
         }
     }

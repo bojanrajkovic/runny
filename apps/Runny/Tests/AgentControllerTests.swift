@@ -242,9 +242,14 @@ final class AgentControllerTests: XCTestCase {
         let brew = AgentController.observerMessage(for: .foreignBrew)
         XCTAssertEqual(brew?.kind, .managedByHomebrew)
         XCTAssertEqual(brew?.message.contains("brew services restart runny"), true)
+        // The recommended restart is destructive (no drain) — the guidance must say so,
+        // since Runny can't drain a daemon it doesn't manage.
+        XCTAssertEqual(brew?.message.contains("in-flight job"), true)
 
         let manual = AgentController.observerMessage(for: .foreignManual)
         XCTAssertEqual(manual?.kind, .managedManually)
+        // bootout is immediate too — warn before recommending it.
+        XCTAssertEqual(manual?.message.contains("no job is running"), true)
         // The checkout-free command, NOT tools/deploy/uninstall.sh — a host that
         // installed from a one-off .dmg no longer has the checkout. Red-tested by
         // swapping in the deploy-script string and confirming this fails.
@@ -261,29 +266,85 @@ final class AgentControllerTests: XCTestCase {
     // MARK: - Start affordance
 
     func testStartAffordanceOnlyWhenInstalledAndUnreachable() {
-        XCTAssertEqual(LaunchAgentStatus.startAffordance(state: .installed, daemonUnreachable: true, canonical: true), .start)
-        XCTAssertEqual(LaunchAgentStatus.startAffordance(state: .installed, daemonUnreachable: false, canonical: true), .none)
-        XCTAssertEqual(LaunchAgentStatus.startAffordance(state: .notInstalled, daemonUnreachable: true, canonical: true), .none)
+        XCTAssertEqual(
+            LaunchAgentStatus.startAffordance(
+                state: .installed, ownership: .selfManaged, daemonUnreachable: true, canonical: true
+            ), .start
+        )
+        XCTAssertEqual(
+            LaunchAgentStatus.startAffordance(
+                state: .installed, ownership: .selfManaged, daemonUnreachable: false, canonical: true
+            ), .none
+        )
+        XCTAssertEqual(
+            LaunchAgentStatus.startAffordance(
+                state: .notInstalled, ownership: .unmanaged, daemonUnreachable: true, canonical: true
+            ), .none
+        )
     }
 
     func testStartHiddenForNonCanonicalAgent() {
         // A foreign or unverified agent: don't offer Start — it would kickstart the
         // foreign BundleProgram. Hidden until reconcile affirms canonical.
         XCTAssertEqual(
-            LaunchAgentStatus.startAffordance(state: .installed, daemonUnreachable: true, canonical: false),
-            .none
+            LaunchAgentStatus.startAffordance(
+                state: .installed, ownership: .selfManaged, daemonUnreachable: true, canonical: false
+            ), .none
         )
         XCTAssertEqual(
-            LaunchAgentStatus.startAffordance(state: .installed, daemonUnreachable: true, canonical: true),
-            .start
+            LaunchAgentStatus.startAffordance(
+                state: .installed, ownership: .selfManaged, daemonUnreachable: true, canonical: true
+            ), .start
         )
+    }
+
+    func testStartHiddenWhenOwnershipIsNotSelfManaged() {
+        // The Finding-2 gap: a stopped Homebrew service leaves OUR agent registered too
+        // (installState .installed) while the daemon is unreachable, but ownership is
+        // .foreignBrew. Start must hide — every kickstart would be rejected by the spawn
+        // gate, so a rendered Start is a dead button that only loops "Try Again". The
+        // observer banner carries the real guidance. Same for any non-selfManaged owner.
+        for owner: DaemonOwnership in [.foreignBrew, .foreignManual, .foreground, .indeterminate, .unmanaged] {
+            XCTAssertEqual(
+                LaunchAgentStatus.startAffordance(
+                    state: .installed, ownership: owner, daemonUnreachable: true, canonical: true
+                ),
+                .none,
+                "Start must hide for \(owner) — only a selfManaged daemon is ours to kickstart"
+            )
+        }
     }
 
     func testRequiresApprovalIsApprovalNeverStart() {
         // The dead-Start-button failure mode: a registered-but-unapproved agent must
         // route to the approval CTA, never a Start that kickstarts a job launchd won't run.
-        XCTAssertEqual(LaunchAgentStatus.startAffordance(state: .requiresApproval, daemonUnreachable: true, canonical: true), .approval)
-        XCTAssertEqual(LaunchAgentStatus.startAffordance(state: .requiresApproval, daemonUnreachable: false, canonical: true), .approval)
+        XCTAssertEqual(
+            LaunchAgentStatus.startAffordance(
+                state: .requiresApproval, ownership: .awaitingApproval, daemonUnreachable: true, canonical: true
+            ), .approval
+        )
+        XCTAssertEqual(
+            LaunchAgentStatus.startAffordance(
+                state: .requiresApproval, ownership: .awaitingApproval, daemonUnreachable: false, canonical: true
+            ), .approval
+        )
+    }
+
+    func testApprovalHiddenWhenOwnershipNotAwaitingApproval() {
+        // Approving launches the RunAtLoad agent from System Settings, OUTSIDE the spawn
+        // gate, so the approval CTA is offered ONLY when ownership is awaitingApproval
+        // (which itself defers whenever another owner is present). A .requiresApproval
+        // self-status with a deferring verdict (a foreign owner, or an inconclusive probe)
+        // suppresses the CTA — folding the round-3 view-level gate into the pure decision.
+        for owner: DaemonOwnership in [.indeterminate, .foreignBrew, .foreignManual, .foreground] {
+            XCTAssertEqual(
+                LaunchAgentStatus.startAffordance(
+                    state: .requiresApproval, ownership: owner, daemonUnreachable: true, canonical: true
+                ),
+                .none,
+                "the approval CTA must hide for \(owner) — approving would create a competing manager"
+            )
+        }
     }
 
     func testStartConfirmsFromConnectionNotKickstartReturn() async {
@@ -497,6 +558,30 @@ final class AgentControllerTests: XCTestCase {
         XCTAssertEqual(mock.unregisterCalls, 1, "verified repair unregisters first")
         XCTAssertEqual(c.installState, .notInstalled, "a failed re-register after unregister leaves the agent gone — honestly")
         XCTAssertNotNil(c.repairError, "a failed repair must surface its error")
+    }
+
+    func testFailedRepairClearsStaleForeignReconcile() async {
+        // Finding 3: the repair's verified unregister→register replace. If the
+        // re-register throws AFTER the unregister took, the agent is genuinely gone — so
+        // the pre-repair .foreign reconcile verdict is now stale and must be re-resolved,
+        // not left claiming an agent is still registered at the old path (which would
+        // keep offering a Repair that just unregisters nothing).
+        let mock = MockRegistrar()
+        mock.programResult = .program("/foreign/Runny.app/Contents/MacOS/runnyd")
+        mock.nextStatus = .enabled
+        let c = AgentController(registrar: mock, eligibility: { .eligible })
+        await c.runReconcile()
+        XCTAssertEqual(c.reconcileState, .foreign(path: "/foreign/Runny.app/Contents/MacOS/runnyd"))
+        // The unregister takes, then the re-register fails; launchctl now finds no agent.
+        mock.registerError = StubError()
+        mock.programResult = .notRegistered
+        await c.repair()
+        XCTAssertNotNil(c.repairError, "a failed repair must surface its error")
+        XCTAssertEqual(c.installState, .notInstalled, "the agent is gone after a failed re-register")
+        XCTAssertEqual(
+            c.reconcileState, .ok,
+            "the stale .foreign verdict must be re-resolved once the agent is gone — not left offering Repair"
+        )
     }
 
     func testRepairAbortsIfUnregisterDoesNotConfirm() async {

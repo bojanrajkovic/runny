@@ -482,8 +482,12 @@ final class AgentController {
             // unregister/register/the wait threw; installState derives from status
             // (gone if the unregister took and the register then failed), so the
             // uninstall/reinstall path stays honest. Surface the error, never silently.
+            // Re-reconcile too: if the unregister took, the pre-repair .foreign verdict
+            // is stale — leaving it would keep the row claiming an agent is registered at
+            // the old path and offering a Repair that now just unregisters nothing.
             refresh()
             repairError = "repair failed: \(error.localizedDescription)"
+            await runReconcile()
         }
     }
 
@@ -652,20 +656,25 @@ extension AgentController {
         case .unmanaged, .selfManaged, .awaitingApproval:
             nil
         case .foreignBrew:
+            // Name the destructive nature of the restart: `brew services restart` does
+            // not drain — it stops the daemon, abandoning any in-flight job. Runny can't
+            // drain a daemon it doesn't manage, so the most it can do is warn.
             ObserverHint(
                 kind: .managedByHomebrew,
                 message: "Homebrew manages runnyd on this host. Upgrade or restart it with "
-                    + "`brew services restart runny`; Runny won't install a competing agent."
+                    + "`brew services restart runny` — note this stops any in-flight job, so idle it "
+                    + "first. Runny won't install a competing agent."
             )
         case .foreignManual:
             // bootout removes the LOADED job; the manual installer also persists the
             // plist to ~/Library/LaunchAgents, which launchd reloads at next login —
-            // so the command must rm it too, or the same-label conflict comes back.
+            // so the command must rm it too, or the same-label conflict comes back. Like
+            // the brew case, bootout is immediate (no drain), so warn before recommending it.
             ObserverHint(
                 kind: .managedManually,
                 message: "A manually-installed LaunchAgent manages runnyd. To let Runny manage it "
-                    + "instead, remove that agent with `launchctl bootout "
-                    + "gui/$(id -u)/\(DaemonOwnership.canonicalLabel) && "
+                    + "instead — once no job is running, since this stops it immediately — remove that "
+                    + "agent with `launchctl bootout gui/$(id -u)/\(DaemonOwnership.canonicalLabel) && "
                     + "rm ~/Library/LaunchAgents/\(DaemonOwnership.canonicalLabel).plist`, then reopen Runny."
             )
         case .foreground:

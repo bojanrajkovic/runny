@@ -51,9 +51,18 @@ for foreign detection.** Two sources, each authoritative about a different thing
   launch failure, or any other error is `indeterminate`, never a false absence.
 
 The verdict is a pure function over these inputs with **`indeterminate`-dominant
-precedence**: a non-canonical home or any inconclusive probe defers ahead of
-every positive branch, so "not sure who owns this" can never read as
-install-a-second-manager or stop-your-daemon. The probe is bounded in wall-clock
+precedence over all but one signal**: a non-canonical home or any inconclusive
+probe defers ahead of naming a foreign owner, stopping a hand-run daemon, or
+installing — so "not sure who owns this" can never read as
+install-a-second-manager or stop-your-daemon. The single exception is
+authoritative self-identity: an `.enabled` `SMAppService` status means the app
+owns the canonical label (a foreign `launchctl bootstrap` never sets it, as
+above), so a wedged foreign-label probe never makes the app defer managing *its
+own* daemon. `.requiresApproval` is deliberately **not** such an exception — a
+pending agent is not yet running and so cannot attest to the loaded label; it
+defers to any inconclusive probe like every other non-`.enabled` state, and only
+becomes the approval CTA once both probes confirm `.notRegistered` and the socket
+is silent. The probe is bounded in wall-clock
 and reaped (SIGTERM, then SIGKILL after a grace, with a detached reaper and
 explicit pipe-FD close), so a wedged `launchctl` yields `indeterminate` without
 leaking a process or FDs — the no-unbounded-operations invariant applied to the

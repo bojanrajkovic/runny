@@ -118,17 +118,18 @@ extension DaemonOwnership {
         //    homes. Defense-in-depth — the home is fixed now, but a re-introduced
         //    override must never let the app install over a daemon at the real home.
         if !inputs.homeIsCanonical { return .indeterminate }
-        // 2. A registered Homebrew service is a foreign daemon on its OWN label, so a
+        // 2. A system daemon owns the SHARED socket the app dials first (clients resolve
+        //    shared-then-per-user), so it surfaces ahead of every per-user owner —
+        //    INCLUDING brew — so the verdict (and its banner) names the daemon the app
+        //    actually reaches, not a co-registered (leftover-migration) brew label it
+        //    doesn't. Also ahead of self (system + our own agent is a real two-manager
+        //    conflict) and the foreground branch (a system daemon answering the shared
+        //    socket must be named, not mislabeled a hand-run daemon).
+        if inputs.systemProbe == .registered { return .foreignSystem }
+        // 3. A registered Homebrew service is a foreign daemon on its OWN label, so a
         //    positive brew probe surfaces even when our own agent is also enabled —
         //    that is a real two-manager conflict, not a self-managed host.
         if inputs.brewProbe == .registered { return .foreignBrew }
-        // 2b. A runnyd registered in the system/ domain is a foreign system daemon
-        //     (the headless deployment). Like brew, it surfaces ahead of self — a
-        //     system daemon plus our own per-user agent is a real two-manager
-        //     conflict — and ahead of the foreground branch below, so a system daemon
-        //     that also answers the shared socket is named, not mislabeled a hand-run
-        //     daemon.
-        if inputs.systemProbe == .registered { return .foreignSystem }
         // 3-4. Authoritative self-identity. `.enabled` (`.installed`) means the
         //      canonical label is ours (the C1 spike: a foreign owner never reads
         //      `.enabled`), so a wedged probe can't flip us to `indeterminate` and

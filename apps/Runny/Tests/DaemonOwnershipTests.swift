@@ -63,6 +63,16 @@ final class DaemonOwnershipTests: XCTestCase {
         XCTAssertEqual(DaemonOwnership.classify(inputs(systemProbe: .registered)), .foreignSystem)
     }
 
+    func testForeignSystemSurfacesOverBrew() {
+        // The app dials the shared socket first, so a system daemon must outrank a
+        // co-registered (leftover-migration) brew label — the verdict/banner names the
+        // daemon the app actually reaches, not the brew service it doesn't.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(brewProbe: .registered, systemProbe: .registered)),
+            .foreignSystem
+        )
+    }
+
     func testForeignSystemSurfacesOverSelfAndForeground() {
         // Like brew, a system daemon surfaces ahead of self (system daemon + our own
         // agent is a real two-manager conflict)...

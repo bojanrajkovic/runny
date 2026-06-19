@@ -286,7 +286,12 @@ final class AgentController {
     /// crashed hand-run daemon's leftover inode no longer blocks install. Replaces the
     /// old `RunnyHome.socketExists` file stat, which couldn't tell stale from wedged.
     static func liveSocketOccupied() async -> Bool {
-        await SocketProbe.occupied(SocketProbe.probe())
+        // Check BOTH sockets, not just the resolved (shared-first) one: the install gate
+        // must see a live daemon at EITHER path, so a stale shared socket can't mask a
+        // live per-user daemon (or vice versa) into a `.unmanaged` stomp. Status DIALING
+        // still uses the resolved path; this is the broader "is anything live here".
+        if await SocketProbe.occupied(SocketProbe.probe(path: RunnyHome.sharedSocketPath)) { return true }
+        return await SocketProbe.occupied(SocketProbe.probe(path: RunnyHome.perUserSocketPath))
     }
 
     /// Recompute `installState` from the registrar's status. Called on appear and

@@ -124,11 +124,12 @@ struct AgentInstallRow: View {
     /// label, bootout+rm when the manual job is the loaded foreign one).
     @ViewBuilder private var collisionWarnings: some View {
         let collisions = agent.collisions
-        // Our own agent competing under Homebrew: remove it through the SAME
-        // live-guest-aware teardown the toggle uses — disabling it in Login Items
-        // instead would stop a possibly-job-running agent with no abandon warning.
-        if collisions.ownAgent, agent.ownership == .foreignBrew {
-            Text("Runny's own agent is also registered and competing — remove it to leave Homebrew in charge.")
+        // Our own agent competing under a foreign owner (Homebrew or a system daemon):
+        // remove it through the SAME live-guest-aware teardown the toggle uses —
+        // disabling it in Login Items instead would stop a possibly-job-running agent
+        // with no abandon warning.
+        if collisions.ownAgent, agent.ownership == .foreignBrew || agent.ownership == .foreignSystem {
+            Text("Runny's own agent is also registered and competing — remove it to leave the other manager in charge.")
                 .font(.caption)
                 .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
@@ -136,9 +137,12 @@ struct AgentInstallRow: View {
                 .controlSize(.small)
         }
         // A foreign manual registration the verdict didn't name: a dormant plist under
-        // selfManaged, or a co-present manual install under foreignBrew. foreignManual's
-        // own observer banner already carries this command, so it is NOT doubled there.
-        if collisions.manual, agent.ownership == .selfManaged || agent.ownership == .foreignBrew,
+        // selfManaged, or a co-present manual install under foreignBrew/foreignSystem.
+        // foreignManual's own observer banner already carries this command, so it is NOT
+        // doubled there.
+        if collisions.manual,
+           agent.ownership == .selfManaged || agent.ownership == .foreignBrew
+           || agent.ownership == .foreignSystem,
            let command = AgentController.manualCleanupCommand(collisions)
         {
             Text("A manually-installed runnyd agent is also present and will contend for the daemon "

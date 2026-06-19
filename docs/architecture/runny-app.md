@@ -344,7 +344,12 @@ seam, so every decision is unit-tested without launchd. The invariants:
   "Checking…" until the first gather runs, so a pristine launch never flashes the
   indeterminate diagnostic. The shared canonical label is disambiguated by
   self-status, never a label match — a foreign `launchctl bootstrap` never reads
-  `.enabled` (ADR-0019).
+  `.enabled` (ADR-0019). The verdict names ONE owner, but the same gather also
+  publishes a **collision set** of every detected registration, so the row can
+  surface cleanup for the contenders the verdict hides (a co-present Homebrew +
+  manual install, a dormant manual plist alongside our own enabled agent) — our own
+  competing agent via an in-app removal, a foreign manual one via a safety-built
+  `launchctl bootout`/`rm` command (rm-only when our agent holds the live label).
 - **Install refuses outside `/Applications`, recoverably.** A translocated bundle
   is refused with "re-launch from Applications" — recoverable, so a first-launch
   quarantine of a correctly-installed app is never permanently locked out. Install

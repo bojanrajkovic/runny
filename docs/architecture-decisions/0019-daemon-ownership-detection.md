@@ -136,6 +136,18 @@ GUI.
   succeeds into the backlog), so the safe direction is preserved while the papercut is
   gone. The daemon-not-yet-listening startup window above is unchanged — that socket
   is genuinely refused, the same accepted sub-second edge as before.
+- The verdict names exactly ONE owner, but a host can carry several competing
+  registrations — Homebrew plus a manual install, or our own enabled agent plus a
+  dormant manual plist. The single verdict (which the gate needs as one allow/deny)
+  hides the others, so remediation that follows only the verdict clears just the first
+  the precedence surfaces and leaves the rest to contend at the next login. A sibling
+  pure `collisions` over the same inputs represents the full set, so the UI can offer
+  cleanup for every contender: our own competing agent via an in-app `unregister()`
+  (which withdraws even a `.requiresApproval` registration), and a foreign manual one
+  via a command that boots out the loaded foreign job and/or removes the dormant
+  plist. The bootout is emitted ONLY when the canonical label is loaded by a foreign
+  job — never when our own enabled agent holds that label, where the command is `rm`
+  of the plist alone, since a bootout would evict our own agent off the shared label.
 - Detection covers only the `gui/<uid>` domain. A `system/`-domain LaunchDaemon —
   a `sudo brew services` root daemon today, or the dedicated non-root headless
   daemon planned for fleet hosts (#76) — is NOT detected, yet it is fully

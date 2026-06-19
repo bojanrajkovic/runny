@@ -184,11 +184,15 @@ that can hold a guest services it (ADR-0015):
   armed` status drops at once (no lingering lie), an Error/Warn line is logged,
   and a `disarmed` audit entry is written. The recovery is resume + re-inject
   next cycle. This is what lets the wedge drain never stall behind a hold.
-- **macOS Local Network privacy (TCC)**: a background-reparented ad-hoc
-  runnyd gets silently denied vmnet access — every guest dial fails with
-  `connect: no route to host` while the host shell reaches the same port.
-  Foreground children of sshd inherit its exemption. The deployment owns the
-  grant story via a per-user LaunchAgent; symptoms and the fix live in
+- **macOS Local Network privacy (TCC)**: a self-daemonized / reparented runnyd
+  (one launchd did not start) gets silently denied vmnet access — every guest
+  dial fails with `connect: no route to host` while the host shell reaches the
+  same port. A launchd-started daemon of any uid, and foreground children of
+  sshd, are auto-allowed. runnyd reads its launch context at startup (via the
+  `XPC_SERVICE_NAME` launchd sets) and makes the orphaned case loud — a red
+  `local-network` check plus an Error log, before the first guest dial — without
+  refusing to boot, since foreground and launchd starts are fine. The deployment
+  owns the grant story via a per-user LaunchAgent; symptoms and the fix live in
   `docs/deploy.md` "Troubleshooting: Local Network permission".
 - **Never trust the image's bundled runner**: cirruslabs images preinstall
   `~/actions-runner`, which rots into broker-rejected versions ("deprecated

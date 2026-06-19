@@ -8,6 +8,9 @@ go_library(
     name = "runnyd_lib",
     srcs = [
         "drain.go",
+        "launchcontext.go",
+        "launchcontext_darwin.go",
+        "launchcontext_other.go",
         "localnet.go",
         "lock.go",
         "main.go",
@@ -109,6 +112,7 @@ go_test(
     name = "runnyd_test",
     srcs = [
         "drain_test.go",
+        "launchcontext_test.go",
         "localnet_test.go",
         "reload_test.go",
         "rotate_test.go",

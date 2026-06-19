@@ -250,9 +250,9 @@ If `local-network` is not ok:
    `sudo brew services stop runny`, then start it without sudo from the GUI
    session.
 4. To isolate the permission from other network problems: run `runnyd` in the
-   foreground of an interactive SSH session. That context is exempt — if
-   guests provision there but not under the LaunchAgent, the permission is
-   the problem.
+   foreground of an interactive SSH session (it prints its log to the terminal
+   there, in addition to the log file). That context is exempt — if guests
+   provision there but not under the LaunchAgent, the permission is the problem.
 
 ## Troubleshooting: SSH into a guest
 

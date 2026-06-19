@@ -13,8 +13,8 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
+	"github.com/mattn/go-runewidth"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
@@ -905,11 +905,13 @@ func durString(d time.Duration) string {
 	}
 }
 
+// trunc clamps s to at most n display columns, appending a one-column ellipsis
+// when it shortens. runewidth.Truncate budgets by display width (not rune count)
+// and reserves the ellipsis's own width, so a wide-rune job name can't over-run
+// its cell and shift the columns to its right (issue #51); it is grapheme-cluster
+// aware, so it won't split a combining-mark or ZWJ-emoji sequence mid-cluster.
 func trunc(s string, n int) string {
-	if utf8.RuneCountInString(s) <= n {
-		return s
-	}
-	return string([]rune(s)[:n-1]) + "…"
+	return widthCond.Truncate(s, n, "…")
 }
 
 // imageCell renders the IMAGE column: the configured ref's last path
@@ -972,9 +974,19 @@ func shortHex(h string) string {
 	return h
 }
 
-// cellWidth is a cell's display width. All table content is ASCII except
-// trunc's ellipsis (one column), so rune count is the display width.
-func cellWidth(s string) int { return utf8.RuneCountInString(s) }
+// widthCond measures terminal display width with East-Asian-ambiguous runes
+// pinned to one column (and emoji left neutral), so cell widths are deterministic
+// regardless of the operator's locale env — runewidth otherwise derives the
+// ambiguous-width setting from LANG/LC_*, which would make the same status table
+// align differently on different hosts.
+var widthCond = &runewidth.Condition{EastAsianWidth: false, StrictEmojiNeutral: false}
+
+// cellWidth is a cell's terminal display width. Rune count is wrong for the JOB
+// and NOTE columns, which carry GitHub-controlled job display names that can hold
+// double-width (CJK) or zero-width runes (issue #51): a workflow `name:` reaches
+// runny verbatim via the runner's "Running job:" line. runewidth maps each rune
+// to its column count (0/1/2).
+func cellWidth(s string) int { return widthCond.StringWidth(s) }
 
 // pad right-pads s with spaces to display width w.
 func pad(s string, w int) string {

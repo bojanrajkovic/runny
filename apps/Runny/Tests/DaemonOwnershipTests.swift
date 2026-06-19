@@ -78,6 +78,33 @@ final class DaemonOwnershipTests: XCTestCase {
         )
     }
 
+    func testIndeterminateSystemProbeDefersNotUnmanaged() {
+        // P1 (Codex #114): a wedged/ambiguous system/ probe must fail CLOSED — it might be
+        // a live system daemon — so it defers, never falls through to unmanaged (which
+        // would install a competing per-user agent over it). Mirrors the brew/canonical
+        // indeterminate guard.
+        XCTAssertEqual(DaemonOwnership.classify(inputs(systemProbe: .indeterminate)), .indeterminate)
+    }
+
+    func testIndeterminateSystemProbeDefersApproval() {
+        // The same wedge must block the approval all-clear: approving our agent over a
+        // possibly-present system daemon would create a competing manager.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .requiresApproval, systemProbe: .indeterminate)),
+            .indeterminate
+        )
+    }
+
+    func testSystemProbeIndeterminateWithSelfInstalledStaysSelfManaged() {
+        // The boundary: a wedged system probe does NOT override authoritative self-identity
+        // (an .installed agent is ours), exactly as for the brew/canonical probes — we never
+        // defer managing our OWN daemon over an inconclusive probe.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .installed, systemProbe: .indeterminate)),
+            .selfManaged
+        )
+    }
+
     // MARK: - Indeterminate dominates (the regression guards)
 
     func testNonCanonicalHomeIsIndeterminateRegardlessOfEverythingElse() {

@@ -145,6 +145,7 @@ extension DaemonOwnership {
             // say), OR a persisted manual plist (which launchd reloads at next login)
             // means a competing owner might be present — defer.
             if inputs.brewProbe == .notRegistered, inputs.canonicalProbe == .notRegistered,
+               inputs.systemProbe == .notRegistered,
                !inputs.socketAnswers, !inputs.manualPlistPersisted
             {
                 return .awaitingApproval
@@ -169,7 +170,9 @@ extension DaemonOwnership {
         //    stop-a-hand-run-daemon (foreground). Determinate foreign owners already
         //    surfaced above; both they and indeterminate deny, so naming the known
         //    owner is strictly better than deferring.
-        if inputs.brewProbe == .indeterminate || inputs.canonicalProbe == .indeterminate {
+        if inputs.brewProbe == .indeterminate || inputs.canonicalProbe == .indeterminate
+            || inputs.systemProbe == .indeterminate
+        {
             return .indeterminate
         }
         // 7. A daemon answers but no agent is registered — a hand-run runnyd.

@@ -62,6 +62,31 @@ struct DaemonOwnershipInputs: Equatable {
     var manualPlistPersisted: Bool
 }
 
+/// Every competing daemon registration the host carries, beyond the single owner
+/// `DaemonOwnership.classify`'s verdict names. The spawn gate needs only the verdict
+/// (one allow/deny); the UI needs the full set so remediation clears ALL contenders,
+/// not just the first the precedence surfaces. A host can carry more than one — brew
+/// + a manual plist, our own agent + a dormant manual plist — the latent split-brain
+/// a single verdict can't express. Pure over the same inputs as `classify`.
+struct DaemonOwnershipCollisions: Equatable {
+    /// Homebrew's `homebrew.mxcl.runny` is registered.
+    var brew = false
+    /// Our own `SMAppService` agent is registered (enabled OR awaiting approval) — a
+    /// competitor the app can withdraw in-process via `unregister()`, with no bootout
+    /// of the shared canonical label.
+    var ownAgent = false
+    /// The canonical label is loaded by a NON-self installer (a foreign manual job
+    /// running now — bootout is needed to stop it, and is safe because it isn't ours).
+    var manualLoaded = false
+    /// A dormant manual plist persists at `~/Library/LaunchAgents` — launchd reloads
+    /// it at next login. `rm` clears it; a bootout must NOT be issued for this alone,
+    /// since when our own agent is enabled it holds the very label a bootout targets.
+    var manualPlist = false
+
+    /// A foreign manual registration is present in either form (loaded or dormant).
+    var manual: Bool { manualLoaded || manualPlist }
+}
+
 extension DaemonOwnership {
     /// The launchd labels runny cares about. The brew label is synthesized by
     /// Homebrew as `homebrew.mxcl.<formula>`; verified against a real `brew
@@ -134,5 +159,26 @@ extension DaemonOwnership {
         if inputs.socketAnswers { return .foreground }
         // 8. Nothing owns it — install allowed.
         return .unmanaged
+    }
+
+    /// Every competing registration the host carries, independent of which one
+    /// `classify`'s verdict names. The verdict drives the gate (one owner); this
+    /// drives the UI's cleanup affordances, which must reach EVERY contender. The
+    /// shared canonical label is disambiguated by self-status exactly as `classify`
+    /// does: a registered canonical label is OURS when self is `.installed`, so it
+    /// counts as a foreign *manual* load only when self is not `.installed` (a pending
+    /// agent isn't running and so can't be holding the loaded label). This `!= .installed`
+    /// rule MUST move in lockstep with `classify`'s self-identity ordering above; if that
+    /// ever changes which self-state holds the live label, change `manualLoaded` with it.
+    /// The safety direction is structural regardless: under a `selfManaged` verdict self
+    /// is necessarily `.installed`, so `manualLoaded` is false and `manualCleanupCommand`
+    /// can never bootout the label our own agent holds.
+    nonisolated static func collisions(_ inputs: DaemonOwnershipInputs) -> DaemonOwnershipCollisions {
+        DaemonOwnershipCollisions(
+            brew: inputs.brewProbe == .registered,
+            ownAgent: inputs.selfState == .installed || inputs.selfState == .requiresApproval,
+            manualLoaded: inputs.canonicalProbe == .registered && inputs.selfState != .installed,
+            manualPlist: inputs.manualPlistPersisted
+        )
     }
 }

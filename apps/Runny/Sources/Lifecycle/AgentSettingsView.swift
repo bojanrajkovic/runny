@@ -103,23 +103,53 @@ struct AgentInstallRow: View {
             Label("Checking who manages runnyd…", systemImage: "hourglass")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-        } else if let hint = AgentController.observerMessage(for: agent.ownership) {
-            observerBanner(hint)
-            if agent.ownership == .foreignBrew, agent.installState == .installed {
-                // Two-manager collision: Homebrew AND our own agent are both installed,
-                // so the banner's "restart brew" alone leaves the competing RunAtLoad app
-                // agent racing the same instance lock. Remove it through the SAME
-                // live-guest-aware teardown the toggle uses — disabling it in Login Items
-                // instead would stop a possibly-job-running agent with no abandon warning.
-                Text("Runny's own agent is also installed and competing — remove it to leave Homebrew in charge.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-                Button("Remove Runny's agent") { requestUninstall() }
-                    .controlSize(.small)
-            }
         } else {
-            installSection
+            if let hint = AgentController.observerMessage(for: agent.ownership) {
+                observerBanner(hint)
+            } else {
+                installSection
+            }
+            // Beneath the verdict's own UI: cleanup for the competing owners the single
+            // verdict doesn't name (the latent split-brain `agent.collisions` surfaces).
+            collisionWarnings
+        }
+    }
+
+    /// Per-owner cleanup for the contenders the verdict hides. Our own agent is
+    /// removable in-app under a foreign owner — `collisions.ownAgent` is true for an
+    /// enabled OR a pending agent, so a `.requiresApproval` registration (which has no
+    /// toggle of its own under a foreign banner) still gets an in-app withdrawal. A
+    /// foreign manual registration the verdict didn't name gets a copy-paste command,
+    /// safety-built by `manualCleanupCommand` (rm-only when our agent holds the live
+    /// label, bootout+rm when the manual job is the loaded foreign one).
+    @ViewBuilder private var collisionWarnings: some View {
+        let collisions = agent.collisions
+        // Our own agent competing under Homebrew: remove it through the SAME
+        // live-guest-aware teardown the toggle uses — disabling it in Login Items
+        // instead would stop a possibly-job-running agent with no abandon warning.
+        if collisions.ownAgent, agent.ownership == .foreignBrew {
+            Text("Runny's own agent is also registered and competing — remove it to leave Homebrew in charge.")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Remove Runny's agent") { requestUninstall() }
+                .controlSize(.small)
+        }
+        // A foreign manual registration the verdict didn't name: a dormant plist under
+        // selfManaged, or a co-present manual install under foreignBrew. foreignManual's
+        // own observer banner already carries this command, so it is NOT doubled there.
+        if collisions.manual, agent.ownership == .selfManaged || agent.ownership == .foreignBrew,
+           let command = AgentController.manualCleanupCommand(collisions)
+        {
+            Text("A manually-installed runnyd agent is also present and will contend for the daemon "
+                + "at the next login. Once no job is running, remove it with:")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(command)
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -221,9 +251,17 @@ struct AgentInstallRow: View {
     /// prove otherwise), else uninstall directly. Shared by the toggle and the
     /// brew-collision removal so neither route bypasses the warning.
     private func requestUninstall() {
-        if DaemonStore.uninstallNeedsConfirmation(
-            connected: store.connection == .connected, liveGuestSlots: store.liveGuestSlots
-        ) {
+        // A pending (`.requiresApproval`) agent is registered but never started, so it
+        // can't be the daemon serving any job — removing it abandons nothing. Skip the
+        // abandon confirmation, whose text describes stopping a SERVING daemon: under a
+        // foreign owner the connected daemon (and its live slots) belongs to that owner,
+        // not our pending agent, so that warning would be false. An `.installed` agent
+        // could be the one holding the socket, so it still confirms conservatively.
+        if agent.installState != .requiresApproval,
+           DaemonStore.uninstallNeedsConfirmation(
+               connected: store.connection == .connected, liveGuestSlots: store.liveGuestSlots
+           )
+        {
             confirmingUninstall = true
         } else {
             Task { await agent.uninstall() }

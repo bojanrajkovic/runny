@@ -96,6 +96,19 @@ never exercised live in tests.
   so it can never read as install-a-second-manager or stop-a-hand-run-daemon.
   `unmanaged` (install allowed) is reached only after every positive and every
   indeterminate branch.
+- **The verdict names ONE owner; `collisions` names the rest.** A host can carry
+  several competing registrations (brew + a manual plist; our own agent + a dormant
+  manual plist), but `classify` reduces to a single verdict for the gate's one
+  allow/deny. `DaemonOwnership.collisions` is the sibling pure function over the SAME
+  inputs that reports EVERY registration, so the UI's cleanup reaches all contenders,
+  not just the precedence's first. Both are derived from one `gatherInputs` so they
+  can't disagree. **Cleanup safety is keyed on who holds the live canonical label:**
+  `manualCleanupCommand` emits `launchctl bootout` ONLY when the canonical label is
+  loaded by a foreign job (`manualLoaded`, true only when self is not `.installed`) —
+  when our own agent is enabled it holds that label, so the command degrades to `rm`
+  of the dormant plist alone; a bootout there would evict our OWN agent. Our own
+  competing agent is removed in-app via `requestUninstall` (`unregister()` withdraws
+  even a `.requiresApproval` registration), never by booting out the shared label.
 - **The probe is stdout-literal-match, bounded, and reaped.** `LaunchdProbe` runs
   `launchctl print gui/$(getuid())/<label>` and decides registration by the literal
   label appearing in byte-capped STDOUT — never exit code, never format parsing. A

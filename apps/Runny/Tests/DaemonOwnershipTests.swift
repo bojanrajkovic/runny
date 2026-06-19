@@ -208,4 +208,89 @@ final class DaemonOwnershipTests: XCTestCase {
             .foreignManual
         )
     }
+
+    // MARK: - Collisions (every competing owner the single verdict hides)
+
+    func testNoCollisionsOnAPristineHost() {
+        let c = DaemonOwnership.collisions(inputs())
+        XCTAssertEqual(c, DaemonOwnershipCollisions())
+        XCTAssertFalse(c.manual)
+    }
+
+    func testSelfManagedHidesADormantManualPlist() {
+        // #101a: our agent is enabled (verdict selfManaged), but a leftover manual
+        // plist persists. The verdict names only us; collisions must surface the
+        // dormant manual owner, and as a PLIST (rm), never a loaded job (bootout would
+        // evict our own agent on the shared label).
+        let c = DaemonOwnership.collisions(inputs(selfState: .installed, manualPlistPersisted: true))
+        XCTAssertTrue(c.ownAgent)
+        XCTAssertTrue(c.manual)
+        XCTAssertTrue(c.manualPlist)
+        XCTAssertFalse(c.manualLoaded)
+    }
+
+    func testForeignBrewHidesACoPresentLoadedManual() {
+        // #101b: brew is registered (verdict foreignBrew) AND a manual installer's
+        // canonical label is loaded with self NOT installed — so the manual job is
+        // foreign and loaded (bootout needed). The brew-only banner hides it.
+        let c = DaemonOwnership.collisions(
+            inputs(selfState: .notInstalled, brewProbe: .registered, canonicalProbe: .registered)
+        )
+        XCTAssertTrue(c.brew)
+        XCTAssertTrue(c.manual)
+        XCTAssertTrue(c.manualLoaded)
+        XCTAssertFalse(c.ownAgent)
+    }
+
+    func testForeignBrewHidesOurPendingAgent() {
+        // #102: brew registered (verdict foreignBrew) while OUR agent is registered but
+        // awaiting approval. ownAgent must be true for a pending agent too, so the UI
+        // offers the in-app withdrawal a .requiresApproval agent otherwise lacks.
+        let c = DaemonOwnership.collisions(inputs(selfState: .requiresApproval, brewProbe: .registered))
+        XCTAssertTrue(c.brew)
+        XCTAssertTrue(c.ownAgent)
+        XCTAssertFalse(c.manual)
+    }
+
+    func testLoadedCanonicalIsOursNotManualWhenSelfInstalled() {
+        // When self is .installed the loaded canonical label is OURS, so a registered
+        // canonical probe must NOT read as a foreign manual load — only a dormant plist
+        // would (and here there is none).
+        let c = DaemonOwnership.collisions(inputs(selfState: .installed, canonicalProbe: .registered))
+        XCTAssertTrue(c.ownAgent)
+        XCTAssertFalse(c.manual)
+        XCTAssertFalse(c.manualLoaded)
+    }
+
+    // MARK: - Manual-cleanup command (rm vs bootout, keyed on who owns the live label)
+
+    func testCleanupCommandIsRmOnlyWhenWeOwnTheLiveLabel() {
+        // selfManaged + dormant plist: we own the loaded canonical label, so the
+        // command must be `rm` of the plist ONLY — a bootout of the shared label would
+        // evict our own running agent.
+        let c = DaemonOwnership.collisions(inputs(selfState: .installed, manualPlistPersisted: true))
+        let cmd = AgentController.manualCleanupCommand(c)
+        XCTAssertNotNil(cmd)
+        XCTAssertFalse(cmd!.contains("bootout"), "must not bootout the label our own agent holds")
+        XCTAssertTrue(cmd!.contains("rm -f"))
+    }
+
+    func testCleanupCommandBootsOutAndRemovesAForeignLoadedManual() {
+        // Foreign manual loaded (self not installed) with a plist on disk: bootout the
+        // loaded foreign job AND rm the plist that would reload it at next login.
+        let c = DaemonOwnership.collisions(
+            inputs(selfState: .notInstalled, canonicalProbe: .registered, manualPlistPersisted: true)
+        )
+        let cmd = AgentController.manualCleanupCommand(c)
+        XCTAssertNotNil(cmd)
+        XCTAssertTrue(cmd!.contains("bootout"))
+        XCTAssertTrue(cmd!.contains("rm -f"))
+    }
+
+    func testCleanupCommandIsNilWithoutAManualOwner() {
+        XCTAssertNil(AgentController.manualCleanupCommand(DaemonOwnership.collisions(inputs())))
+        XCTAssertNil(AgentController.manualCleanupCommand(
+            DaemonOwnership.collisions(inputs(selfState: .installed))
+        ))
+    }
 }

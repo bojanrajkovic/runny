@@ -64,6 +64,20 @@ func TestFailedChecksExcludesConfigDrift(t *testing.T) {
 	}
 }
 
+// local-network is excluded from the startup gate too: a self-daemonized runnyd
+// fails it, but must keep running and surface the cause (loud log + red
+// doctor/status) rather than refuse to boot — foreground and launchd starts are
+// fine, and a denied daemon should report the cause, not crash-loop.
+func TestFailedChecksExcludesLocalNetwork(t *testing.T) {
+	got := failedChecks([]socket.DoctorCheck{
+		{Name: "local-network", OK: false, Detail: orphanedDenyDetail},
+		{Name: "macos-guest-cap", OK: false, Detail: "over cap"},
+	})
+	if len(got) != 1 || got[0].Name != "macos-guest-cap" {
+		t.Errorf("failedChecks = %+v, want only macos-guest-cap (local-network excluded)", got)
+	}
+}
+
 // The exit gate re-runs this local check, so a mid-drain edit that overflows
 // the darwin guest cap holds the drain instead of crash-looping the respawn.
 func TestCheckMacOSGuestCap(t *testing.T) {

@@ -110,7 +110,14 @@ func run() error {
 	// Runner output gets its own ring: guest run.sh lines, the primary
 	// `runnyctl logs` stream, kept apart from the daemon's structured log.
 	runnerRing := logring.NewRing(4096)
-	logger := slog.New(logring.NewHandler(logFile, slog.LevelDebug, ring))
+	// Read the launch context once, through the launchContextNow seam the rest of
+	// the daemon uses: it decides where the log goes (a foreground runnyd also
+	// tees to stderr so the operator sees it live; a launchd-started or orphaned
+	// one writes to the file + ring only — launchd captures its own
+	// stdout/stderr, an orphan has no terminal) and whether to raise the loud
+	// orphaned warning below.
+	launchCtx := launchContextNow()
+	logger := slog.New(logring.NewHandler(logSinkFor(launchCtx, logFile, os.Stderr), slog.LevelDebug, ring))
 	slog.SetDefault(logger)
 	// config_sha256 chains the audit trail across restarts: a reload logs
 	// the hash it validated, and the respawn logs the hash it loaded — same
@@ -148,6 +155,17 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Loud, early signal for the one launch context macOS silently denies: a
+	// self-daemonized / reparented runnyd (launchd did not start it, no live
+	// parent) cannot reach its guests. Not fatal — foreground and launchd starts
+	// are fine, and this also surfaces via the local-network doctor/status check
+	// — but logged at Error so a headless operator sees it before the first cycle
+	// dies at AWAIT_SSH. launchOrphaned is unreachable off darwin (the launch
+	// context is darwin-only in meaning), so no GOOS guard is needed.
+	if launchCtx == launchOrphaned {
+		logger.Error(orphanedDenyDetail)
+	}
 
 	// Startup validation: fail loudly now, not silently later.
 	if failed := failedChecks(doctor(ctx)); len(failed) > 0 {
@@ -513,16 +531,23 @@ func splitPreflightChecks(checks []socket.DoctorCheck) (failed, warnings []socke
 	return failed, warnings
 }
 
-// failedChecks filters to the failures that should block daemon startup.
-// config-drift is excluded: it is informational (the file on disk differs
-// from the running config), and the respawn re-reads the file AFTER the
-// vms-sweep window — a concurrent re-template (Ansible) would otherwise
-// crash-loop startup on a check that does not affect whether THIS config
-// runs. It stays visible via `runnyctl doctor`, just not as a startup gate.
+// failedChecks filters to the failures that should block daemon startup. Two
+// checks are excluded as informational-at-startup:
+//   - config-drift: the file on disk differs from the running config; the
+//     respawn re-reads the file AFTER the vms-sweep window, so a concurrent
+//     re-template (Ansible) must not crash-loop startup on a check that does not
+//     affect whether THIS config runs.
+//   - local-network: at cold start no vmnet interface is up, so it is green
+//     anyway; its one red-at-startup case — a self-daemonized runnyd macOS will
+//     deny — is surfaced loudly (an Error log + a red `runnyctl doctor`/status)
+//     but must not refuse boot, since foreground and launchd starts are fine and
+//     even a denied daemon should run and report the cause rather than crash-loop.
+//
+// Both stay visible via `runnyctl doctor`, just not as a startup gate.
 func failedChecks(checks []socket.DoctorCheck) []socket.DoctorCheck {
 	var out []socket.DoctorCheck
 	for _, c := range checks {
-		if !c.OK && c.Name != "config-drift" {
+		if !c.OK && c.Name != "config-drift" && c.Name != "local-network" {
 			out = append(out, c)
 		}
 	}
@@ -633,12 +658,13 @@ func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*gi
 		// are shared with the exit gate (pure-local, deterministic).
 		checks = append(checks, checkRunnerNamespace(dir, cfg), checkMacOSGuestCap(cfg))
 
-		// Local Network (TCC): a LaunchDaemon or background-reparented runnyd
-		// is silently denied vmnet access, so guest dials fail "no route to
-		// host". The probe only asserts once a vmnet interface is up, so at
-		// idle startup it is informational; run `runnyd -doctor` (or the
-		// Doctor RPC) while a guest is running to confirm the grant. Only
-		// meaningful on darwin (docs/deploy.md).
+		// Local Network (TCC): a self-daemonized / reparented runnyd (one launchd
+		// did not start) is silently denied vmnet access, so guest dials fail "no
+		// route to host"; a launchd-started daemon of any uid is auto-allowed. The
+		// orphaned context fails this check immediately; otherwise the probe only
+		// asserts once a vmnet interface is up, so at idle startup it is
+		// informational — run `runnyd -doctor` (or the Doctor RPC) while a guest is
+		// running to confirm the grant. Only meaningful on darwin (docs/deploy.md).
 		if runtime.GOOS == "darwin" {
 			ok, detail := localNetworkReach()
 			add("local-network", ok, detail)

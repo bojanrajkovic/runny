@@ -19,15 +19,20 @@ var vmnetSubnet = func() *net.IPNet {
 	return n
 }()
 
-// localNetworkReach probes whether THIS process can reach the guest subnet.
-// A LaunchDaemon-launched or background-reparented runnyd is silently denied
-// vmnet / Local-Network access by macOS TCC: guest dials fail "no route to
-// host" while the host shell reaches the same address (docs/deploy.md). The
-// probe only asserts when a vmnet interface is actually up — one appears on
-// the first guest boot — and otherwise reports that it could not verify yet,
-// so a fresh idle daemon never raises a false alarm. Only meaningful on
-// darwin; the caller gates on GOOS.
+// localNetworkReach probes whether THIS process can reach the guest subnet, and
+// short-circuits the one launch context macOS denies up front. A self-daemonized
+// / reparented runnyd (one launchd did not start) is silently denied vmnet /
+// Local-Network access by macOS TCC: guest dials fail "no route to host" while
+// the host shell reaches the same address (docs/deploy.md). A launchd-started
+// daemon of any uid, and a foreground sshd child, are auto-allowed. When the
+// context is orphaned the check fails immediately; otherwise the live probe only
+// asserts once a vmnet interface is up — one appears on the first guest boot —
+// and otherwise reports it could not verify yet, so a fresh idle daemon never
+// raises a false alarm. Only meaningful on darwin; the caller gates on GOOS.
 func localNetworkReach() (ok bool, detail string) {
+	if launchContextNow() == launchOrphaned {
+		return false, orphanedDenyDetail
+	}
 	if !vmnetInterfaceUp() {
 		return true, "no active vmnet yet — boot a guest, then re-run doctor to confirm the Local Network grant"
 	}
@@ -73,12 +78,16 @@ func vmnetInterfaceUp() bool {
 // localNetworkGrant classifies this process's Local Network (TCC) access into
 // the three states the daemon can actually distinguish — the tri-state published
 // in GetStatusResponse.local_network_grant. It is the same probe localNetworkReach
-// runs (no vmnet → can't tell; vmnet up → reachable or denied), shaped for the
-// app's proactive grant card rather than the doctor's (ok, detail) pair. There
-// is no fourth "definitely never granted" state: macOS exposes no API to read a
-// process's own grant, so until a vmnet interface exists the honest answer is
+// runs (self-daemonized → denied up front; else no vmnet → can't tell; vmnet up →
+// reachable or denied), shaped for the app's proactive grant card rather than the
+// doctor's (ok, detail) pair. There is no fourth "definitely never granted"
+// state: macOS exposes no API to read a process's own grant, so absent the
+// orphaned short-circuit and until a vmnet interface exists the honest answer is
 // UNKNOWN, which the app treats as "prompt may be pending".
 func localNetworkGrant() runnyv1.LocalNetworkGrant {
+	if launchContextNow() == launchOrphaned {
+		return runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_DENIED
+	}
 	if !vmnetInterfaceUp() {
 		return runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNKNOWN
 	}

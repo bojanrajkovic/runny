@@ -332,7 +332,9 @@ seam, so every decision is unit-tested without launchd. The invariants:
   `unmanaged`/`selfManaged`/`foreignBrew`/`foreignManual`/`foreground`/
   `awaitingApproval`/`indeterminate` — a pure `classify` over the app's
   `SMAppService` self-status, two bounded `launchctl` label probes (brew + canonical,
-  run concurrently), the socket axis, and a home-canonical flag, with
+  run concurrently), the socket axis (a bounded `connect()` probe that tells a stale
+  socket from a live/wedged one — a refused stale inode reads empty so it no longer
+  blocks install), and a home-canonical flag, with
   `indeterminate` dominant so an inconclusive probe defers ahead of every positive
   branch. It refreshes on app-foreground and freshly before each spawn (the pre-act
   recheck catches a brew daemon that appeared since). On a foreign/foreground/

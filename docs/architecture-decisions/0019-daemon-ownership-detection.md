@@ -62,6 +62,19 @@ for foreign detection.** Two sources, each authoritative about a different thing
   exists to prevent. It surfaces as `foreignManual`, equal in weight to a loaded
   canonical label.
 
+- **Socket occupancy — a bounded `connect()` probe, not a file stat.** "A daemon
+  answers the socket" is decided by an actual non-blocking, `poll()`-bounded
+  `connect()` to `~/.runny/runnyd.sock`, not by whether the file exists. A unix
+  socket file outlives the process that bound it, so a crashed hand-run daemon leaves
+  a *stale inode* a bare `fileExists` reads as occupied — wrongly blocking install. A
+  connect tells them apart: `ECONNREFUSED` means the path exists but no listener holds
+  it (affirmatively dead → empty, install allowed), while a live *or wedged* daemon
+  still holds the socket in `listen()` state so the connect succeeds into the kernel
+  backlog (occupied → install stays blocked). A timeout or any other error reads
+  occupied — the safe direction, since a false "empty" is the stomp. Non-blocking +
+  `poll()`-bounded so a saturated-backlog listener can't hang the gather, the
+  no-unbounded-operations invariant applied to the socket axis.
+
 The verdict is a pure function over these inputs with **`indeterminate`-dominant
 precedence over all but one signal**: a non-canonical home or any inconclusive
 probe defers ahead of naming a foreign owner, stopping a hand-run daemon, or
@@ -116,6 +129,13 @@ GUI.
   `unmanaged` for that sub-second startup window. Both require an actor — a second
   process running `launchctl`, or a human — to act faster than is realistic; tracked
   for an ownership-aware-teardown follow-up.
+- A *stale* socket — the inode a crashed hand-run daemon left bound but unlistened —
+  no longer blocks install: the `connect()` probe reads it `ECONNREFUSED` (empty),
+  where the former file stat read it occupied (`foreground`) and wrongly suppressed
+  the install toggle. A live or *wedged* daemon still reads occupied (the connect
+  succeeds into the backlog), so the safe direction is preserved while the papercut is
+  gone. The daemon-not-yet-listening startup window above is unchanged — that socket
+  is genuinely refused, the same accepted sub-second edge as before.
 - Detection covers only the `gui/<uid>` domain. A `system/`-domain LaunchDaemon —
   a `sudo brew services` root daemon today, or the dedicated non-root headless
   daemon planned for fleet hosts (#76) — is NOT detected, yet it is fully

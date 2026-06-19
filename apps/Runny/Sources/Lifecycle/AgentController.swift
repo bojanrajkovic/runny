@@ -148,7 +148,7 @@ final class AgentController {
     private let eligibilityProvider: () -> LaunchAgentStatus.Eligibility
     private let bundledAgentPresentProvider: () -> Bool
     private let probeProvider: @Sendable (String) async -> LaunchdProbeResult
-    private let socketAnswersProvider: () -> Bool
+    private let socketAnswersProvider: () async -> Bool
     private let homeIsCanonicalProvider: () -> Bool
     private let manualPlistPersistedProvider: () -> Bool
 
@@ -160,7 +160,7 @@ final class AgentController {
         eligibility: @escaping () -> LaunchAgentStatus.Eligibility = { AgentController.bundleEligibility() },
         bundledAgentPresent: @escaping () -> Bool = { AgentController.bundledAgentPresent() },
         probe: @escaping @Sendable (String) async -> LaunchdProbeResult = { await LaunchdProbe.probe(label: $0) },
-        socketAnswers: @escaping () -> Bool = { RunnyHome.socketExists },
+        socketAnswers: @escaping () async -> Bool = { await AgentController.liveSocketOccupied() },
         homeIsCanonical: @escaping () -> Bool = { true },
         manualPlistPersisted: @escaping () -> Bool = { AgentController.manualPlistPersisted() }
     ) {
@@ -194,14 +194,15 @@ final class AgentController {
     /// that gathers the live ownership verdict and denies install/repair/start for
     /// any foreign or indeterminate owner. The same gather feeds `refreshOwnership`
     /// (the observer banner), so the gate and the UI never disagree. The socket axis
-    /// is the conservative `RunnyHome.socketExists`: a present socket reads as
-    /// occupied (blocking install is safe), since a file stat can't distinguish a
-    /// stale inode from a wedged daemon — and a false "empty" would be the stomp.
+    /// is a bounded connect-probe (`liveSocketOccupied`): a live or wedged daemon
+    /// reads occupied (install blocked, the safe direction), but an affirmatively
+    /// dead (refused) stale socket reads empty, so a crashed hand-run daemon's
+    /// leftover inode no longer blocks install — what a file stat couldn't tell apart.
     @MainActor
     static func live() -> AgentController {
         let registrar = SMAppServiceRegistrar()
         let probe: @Sendable (String) async -> LaunchdProbeResult = { await LaunchdProbe.probe(label: $0) }
-        let socketAnswers = { RunnyHome.socketExists }
+        let socketAnswers = { await Self.liveSocketOccupied() }
         let homeIsCanonical = { true }
         let bundledAgentPresent = { AgentController.bundledAgentPresent() }
         let manualPlistPersisted = { AgentController.manualPlistPersisted() }
@@ -266,6 +267,15 @@ final class AgentController {
         return FileManager.default.fileExists(atPath: url.path)
     }
 
+    /// The production socket axis: a bounded connect-probe mapped to occupied/empty.
+    /// A live or wedged daemon reads occupied (blocks install, the safe direction);
+    /// only an affirmatively-dead (refused) stale socket or no file reads empty, so a
+    /// crashed hand-run daemon's leftover inode no longer blocks install. Replaces the
+    /// old `RunnyHome.socketExists` file stat, which couldn't tell stale from wedged.
+    static func liveSocketOccupied() async -> Bool {
+        await SocketProbe.occupied(SocketProbe.probe())
+    }
+
     /// Recompute `installState` from the registrar's status. Called on appear and
     /// after every op — the single place a status maps to state. Passes whether the
     /// plist is actually bundled so the overloaded `.notFound` resolves correctly:
@@ -327,22 +337,26 @@ final class AgentController {
         return ownership == expected
     }
 
-    /// Gather the four orthogonal facts and `classify` them. The two label probes
-    /// run concurrently (independent, each bounded) so the install tap waits at most
-    /// one probe bound, not two; the self-status read and the socket/home axes are
-    /// cheap. Static so both `refreshOwnership` and the production gate share one
-    /// gather without a self-reference cycle.
+    /// Gather the orthogonal facts and `classify` them. The two label probes and the
+    /// socket connect-probe run concurrently (independent, each bounded) so the install
+    /// tap waits at most one probe bound, not three; the self-status read and the
+    /// home/plist axes are cheap. Static so both `refreshOwnership` and the production
+    /// gate share one gather without a self-reference cycle.
     @MainActor
     static func gatherOwnership(
         registrar: ServiceRegistrar,
         probe: @Sendable (String) async -> LaunchdProbeResult,
-        socketAnswers: () -> Bool,
+        socketAnswers: () async -> Bool,
         homeIsCanonical: () -> Bool,
         bundledAgentPresent: () -> Bool,
         manualPlistPersisted: () -> Bool
     ) async -> DaemonOwnership {
         async let brew = probe(DaemonOwnership.brewLabel)
         async let canonical = probe(DaemonOwnership.canonicalLabel)
+        // The label probes are already in flight; awaiting the (global-queue-hopping)
+        // socket dial here lets all three run concurrently without an async-let over a
+        // non-Sendable closure.
+        let socketOccupied = await socketAnswers()
         let selfState = LaunchAgentStatus.state(
             from: registrar.status(), bundledAgentPresent: bundledAgentPresent()
         )
@@ -351,7 +365,7 @@ final class AgentController {
             selfState: selfState,
             brewProbe: brew,
             canonicalProbe: canonical,
-            socketAnswers: socketAnswers(),
+            socketAnswers: socketOccupied,
             manualPlistPersisted: manualPlistPersisted()
         ))
     }

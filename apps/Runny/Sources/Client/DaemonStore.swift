@@ -460,7 +460,11 @@ final class DaemonStore {
         // the top-level home (0700, matching the daemon) so the watch arms even
         // on a clean machine.
         RunnyHome.ensureDirectory()
-        let fd = open(RunnyHome.directory.path, O_EVTONLY)
+        // Watch the directory of the RESOLVED socket — the shared dir for a system
+        // daemon, else the per-user ~/.runny (just ensured). A per-user→system-daemon
+        // transition appearing after the watch arms is caught by the reconnect
+        // backoff's re-resolve; this watch is a fast-retry optimization, not the only path.
+        let fd = open(RunnyHome.socketDirectory.path, O_EVTONLY)
         guard fd >= 0 else { return }
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd, eventMask: .write, queue: .main

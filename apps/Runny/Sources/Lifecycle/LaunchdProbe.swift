@@ -13,6 +13,23 @@ import Foundation
 /// label yields empty stdout and echoes the label only in *stderr*
 /// (`Could not find service "<label>"…`), so searching the combined stream would
 /// false-positive on every absent label. The result feeds `DaemonOwnership`.
+/// The launchd domain a label is probed in. `gui/<uid>` is the per-user agent
+/// (Homebrew, the app's own, a manual install); `system` is a non-root system
+/// daemon — the headless deployment. A non-root user can `launchctl print
+/// system/<label>` and gets the same registered ("could not find" when absent)
+/// signal as `gui`, so `classify` is shared across both.
+enum LaunchdDomain: Sendable {
+    case gui
+    case system
+
+    func target(_ label: String) -> String {
+        switch self {
+        case .gui: "gui/\(getuid())/\(label)"
+        case .system: "system/\(label)"
+        }
+    }
+}
+
 enum LaunchdProbe {
     /// Hard wall-clock bound on one probe. A local `launchctl print` is sub-second;
     /// this is healthy-magnitude × margin, so a wedged launchctl yields
@@ -27,10 +44,11 @@ enum LaunchdProbe {
     /// Probe one label. `.registered` / `.notRegistered` / `.indeterminate`;
     /// the runner seam is injectable so the result mapping is unit-tested without
     /// shelling out.
-    static func probe(label: String, runner: CommandRunner = ProcessCommandRunner()) async -> LaunchdProbeResult {
-        let target = "gui/\(getuid())/\(label)"
+    static func probe(
+        label: String, domain: LaunchdDomain = .gui, runner: CommandRunner = ProcessCommandRunner()
+    ) async -> LaunchdProbeResult {
         let result = await runner.run(
-            "/bin/launchctl", ["print", target], timeout: timeout, stdoutByteCap: stdoutByteCap
+            "/bin/launchctl", ["print", domain.target(label)], timeout: timeout, stdoutByteCap: stdoutByteCap
         )
         return Self.classify(result: result, label: label)
     }

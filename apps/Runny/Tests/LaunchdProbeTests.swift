@@ -14,6 +14,29 @@ final class LaunchdProbeTests: XCTestCase {
         }
     }
 
+    /// Records the args so a test can pin the launchctl target string per domain.
+    private final class CapturingRunner: CommandRunner, @unchecked Sendable {
+        private(set) var args: [String] = []
+        let result: CommandResult
+        init(result: CommandResult) { self.result = result }
+        func run(_: String, _ args: [String], timeout _: Duration, stdoutByteCap _: Int) async -> CommandResult {
+            self.args = args
+            return result
+        }
+    }
+
+    // MARK: - Domain target (the system/ extension)
+
+    func testSystemDomainTargetsSystemSlashLabel() async {
+        // A non-root user CAN `launchctl print system/<label>` (verified): registered
+        // prints the label in stdout, so classify is shared — only the target differs.
+        let label = "com.coderinserepeat.runnyd"
+        let runner = CapturingRunner(result: .exited(code: 0, stdout: "system/\(label) = {\n}", stderr: ""))
+        let r = await LaunchdProbe.probe(label: label, domain: .system, runner: runner)
+        XCTAssertEqual(runner.args, ["print", "system/\(label)"])
+        XCTAssertEqual(r, .registered)
+    }
+
     // MARK: - Result mapping (the A1 table)
 
     func testRegisteredWhenLabelInStdout() async {

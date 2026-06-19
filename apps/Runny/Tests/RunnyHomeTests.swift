@@ -9,7 +9,15 @@ import XCTest
 /// a user's defaults plist is inert, not a path that splits the app from the
 /// daemon.
 final class RunnyHomeTests: XCTestCase {
-    func testRemovedOverrideKeyNoLongerSteersTheHome() {
+    func testRemovedOverrideKeyNoLongerSteersTheHome() throws {
+        // socketPath now resolves shared-then-per-user; this test's invariant — the
+        // override key is inert — concerns the per-user branch, so it only holds when
+        // no system daemon's shared socket is present on the test host (it isn't on CI
+        // or a dev box; it would be on a machine actually running the headless daemon).
+        try XCTSkipIf(
+            FileManager.default.fileExists(atPath: RunnyHome.sharedSocketPath),
+            "a system daemon's shared socket is present; socketPath resolves to it, not ~/.runny"
+        )
         let key = "runnyHomeOverride"
         UserDefaults.standard.set("/tmp/junk-home", forKey: key)
         defer { UserDefaults.standard.removeObject(forKey: key) }
@@ -19,6 +27,30 @@ final class RunnyHomeTests: XCTestCase {
             "a set override key must not steer the home; got \(RunnyHome.socketPath)"
         )
         XCTAssertEqual(RunnyHome.displaySocketPath, "~/.runny/runnyd.sock")
+    }
+}
+
+/// The app's socket resolution mirrors Go's `home.ClientSocketPath`: prefer the
+/// shared system socket when it exists, else the per-user one — so the app
+/// reaches a system daemon with no configuration (selection by existence;
+/// liveness stays `SocketProbe`'s job). The literal shared path is pinned here as
+/// the cross-language drift guard against Go's `home.SharedSocketDir`.
+final class RunnyHomeSocketResolutionTests: XCTestCase {
+    func testPrefersSharedSocketWhenPresent() {
+        XCTAssertEqual(
+            RunnyHome.resolveSocketPath(sharedExists: true), RunnyHome.sharedSocketPath,
+            "a present shared socket must win so the app reaches a system daemon"
+        )
+        XCTAssertEqual(
+            RunnyHome.sharedSocketPath, "/Library/Application Support/runny/runnyd.sock",
+            "must match Go's home.SharedSocketDir + runnyd.sock"
+        )
+    }
+
+    func testFallsBackToPerUserWhenSharedAbsent() {
+        let resolved = RunnyHome.resolveSocketPath(sharedExists: false)
+        XCTAssertEqual(resolved, RunnyHome.perUserSocketPath)
+        XCTAssertTrue(resolved.hasSuffix("/.runny/runnyd.sock"), "got \(resolved)")
     }
 }
 

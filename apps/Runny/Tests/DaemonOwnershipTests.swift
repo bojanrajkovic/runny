@@ -13,13 +13,14 @@ final class DaemonOwnershipTests: XCTestCase {
         selfState: LaunchAgentStatus.State = .notInstalled,
         brewProbe: LaunchdProbeResult = .notRegistered,
         canonicalProbe: LaunchdProbeResult = .notRegistered,
+        systemProbe: LaunchdProbeResult = .notRegistered,
         socketAnswers: Bool = false,
         manualPlistPersisted: Bool = false
     ) -> DaemonOwnershipInputs {
         DaemonOwnershipInputs(
             homeIsCanonical: homeIsCanonical, selfState: selfState,
-            brewProbe: brewProbe, canonicalProbe: canonicalProbe, socketAnswers: socketAnswers,
-            manualPlistPersisted: manualPlistPersisted
+            brewProbe: brewProbe, canonicalProbe: canonicalProbe, systemProbe: systemProbe,
+            socketAnswers: socketAnswers, manualPlistPersisted: manualPlistPersisted
         )
     }
 
@@ -54,6 +55,64 @@ final class DaemonOwnershipTests: XCTestCase {
 
     func testForegroundWhenSocketAnswersWithNoAgent() {
         XCTAssertEqual(DaemonOwnership.classify(inputs(socketAnswers: true)), .foreground)
+    }
+
+    func testForeignSystemWhenSystemLabelRegistered() {
+        // A runnyd in the system/ domain — the headless non-root daemon — is a foreign
+        // owner the app observes (over the shared socket) and never installs over.
+        XCTAssertEqual(DaemonOwnership.classify(inputs(systemProbe: .registered)), .foreignSystem)
+    }
+
+    func testForeignSystemSurfacesOverBrew() {
+        // The app dials the shared socket first, so a system daemon must outrank a
+        // co-registered (leftover-migration) brew label — the verdict/banner names the
+        // daemon the app actually reaches, not the brew service it doesn't.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(brewProbe: .registered, systemProbe: .registered)),
+            .foreignSystem
+        )
+    }
+
+    func testForeignSystemSurfacesOverSelfAndForeground() {
+        // Like brew, a system daemon surfaces ahead of self (system daemon + our own
+        // agent is a real two-manager conflict)...
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .installed, systemProbe: .registered)),
+            .foreignSystem
+        )
+        // ...and ahead of the foreground branch, so a system daemon answering the
+        // shared socket is named, not mislabeled a hand-run daemon.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(systemProbe: .registered, socketAnswers: true)),
+            .foreignSystem
+        )
+    }
+
+    func testIndeterminateSystemProbeDefersNotUnmanaged() {
+        // P1 (Codex #114): a wedged/ambiguous system/ probe must fail CLOSED — it might be
+        // a live system daemon — so it defers, never falls through to unmanaged (which
+        // would install a competing per-user agent over it). Mirrors the brew/canonical
+        // indeterminate guard.
+        XCTAssertEqual(DaemonOwnership.classify(inputs(systemProbe: .indeterminate)), .indeterminate)
+    }
+
+    func testIndeterminateSystemProbeDefersApproval() {
+        // The same wedge must block the approval all-clear: approving our agent over a
+        // possibly-present system daemon would create a competing manager.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .requiresApproval, systemProbe: .indeterminate)),
+            .indeterminate
+        )
+    }
+
+    func testSystemProbeIndeterminateWithSelfInstalledStaysSelfManaged() {
+        // The boundary: a wedged system probe does NOT override authoritative self-identity
+        // (an .installed agent is ours), exactly as for the brew/canonical probes — we never
+        // defer managing our OWN daemon over an inconclusive probe.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .installed, systemProbe: .indeterminate)),
+            .selfManaged
+        )
     }
 
     // MARK: - Indeterminate dominates (the regression guards)

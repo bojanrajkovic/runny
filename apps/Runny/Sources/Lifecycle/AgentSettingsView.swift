@@ -124,11 +124,12 @@ struct AgentInstallRow: View {
     /// label, bootout+rm when the manual job is the loaded foreign one).
     @ViewBuilder private var collisionWarnings: some View {
         let collisions = agent.collisions
-        // Our own agent competing under Homebrew: remove it through the SAME
-        // live-guest-aware teardown the toggle uses — disabling it in Login Items
-        // instead would stop a possibly-job-running agent with no abandon warning.
-        if collisions.ownAgent, agent.ownership == .foreignBrew {
-            Text("Runny's own agent is also registered and competing — remove it to leave Homebrew in charge.")
+        // Our own agent competing under a foreign owner (Homebrew or a system daemon):
+        // remove it through the SAME live-guest-aware teardown the toggle uses —
+        // disabling it in Login Items instead would stop a possibly-job-running agent
+        // with no abandon warning.
+        if collisions.ownAgent, agent.ownership == .foreignBrew || agent.ownership == .foreignSystem {
+            Text("Runny's own agent is also registered and competing — remove it to leave the other manager in charge.")
                 .font(.caption)
                 .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
@@ -136,9 +137,12 @@ struct AgentInstallRow: View {
                 .controlSize(.small)
         }
         // A foreign manual registration the verdict didn't name: a dormant plist under
-        // selfManaged, or a co-present manual install under foreignBrew. foreignManual's
-        // own observer banner already carries this command, so it is NOT doubled there.
-        if collisions.manual, agent.ownership == .selfManaged || agent.ownership == .foreignBrew,
+        // selfManaged, or a co-present manual install under foreignBrew/foreignSystem.
+        // foreignManual's own observer banner already carries this command, so it is NOT
+        // doubled there.
+        if collisions.manual,
+           agent.ownership == .selfManaged || agent.ownership == .foreignBrew
+           || agent.ownership == .foreignSystem,
            let command = AgentController.manualCleanupCommand(collisions)
         {
             Text("A manually-installed runnyd agent is also present and will contend for the daemon "
@@ -147,6 +151,23 @@ struct AgentInstallRow: View {
                 .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
             Text(command)
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        // A Homebrew agent co-present under a system-daemon verdict. Only reachable
+        // here: a registered brew label is otherwise the verdict itself (foreignBrew),
+        // but a system daemon now outranks it, so the foreignSystem banner names the
+        // system daemon and this surfaces the leftover brew the verdict hides — else a
+        // migration host follows the banner, removes the system daemon, and Homebrew
+        // still owns runnyd unmentioned.
+        if collisions.brew, agent.ownership == .foreignSystem {
+            Text("A Homebrew-managed runnyd agent is also registered and will contend for the "
+                + "daemon. Stop it with:")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("brew services stop runny")
                 .font(.caption.monospaced())
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
@@ -215,14 +236,14 @@ struct AgentInstallRow: View {
 
     private func bannerIcon(_ kind: ObserverHint.Kind) -> String {
         switch kind {
-        case .managedByHomebrew, .managedManually: "info.circle"
+        case .managedByHomebrew, .managedManually, .managedBySystemDaemon: "info.circle"
         case .foregroundDaemon, .indeterminate: "exclamationmark.triangle"
         }
     }
 
     private func bannerTint(_ kind: ObserverHint.Kind) -> Color {
         switch kind {
-        case .managedByHomebrew, .managedManually: .secondary
+        case .managedByHomebrew, .managedManually, .managedBySystemDaemon: .secondary
         case .foregroundDaemon, .indeterminate: .orange
         }
     }

@@ -17,6 +17,11 @@ enum DaemonOwnership: Equatable {
     /// The canonical `com.coderinserepeat.runnyd` label is registered, but not by
     /// us — a manual `launchctl` installer.
     case foreignManual
+    /// A runnyd is registered in the `system/` launchd domain — the headless
+    /// non-root system daemon (or a `sudo brew services` root daemon). The app
+    /// observes it over the shared socket and never installs a competing per-user
+    /// agent over it.
+    case foreignSystem
     /// A daemon answers the socket but no agent is registered — a hand-run runnyd.
     case foreground
     /// Our own agent is registered but awaiting Login Items approval.
@@ -51,6 +56,11 @@ struct DaemonOwnershipInputs: Equatable {
     var brewProbe: LaunchdProbeResult
     /// Whether `com.coderinserepeat.runnyd` is registered (ours OR a manual one).
     var canonicalProbe: LaunchdProbeResult
+    /// Whether the canonical label is registered in the `system/` domain — a
+    /// non-root system daemon (the headless deployment). Defaults `.notRegistered`
+    /// so a host with no system daemon — the common case, and every existing
+    /// caller/test — behaves exactly as before.
+    var systemProbe: LaunchdProbeResult = .notRegistered
     /// Whether a daemon answers the socket.
     var socketAnswers: Bool
     /// Whether the manual installer's plist persists at
@@ -108,7 +118,15 @@ extension DaemonOwnership {
         //    homes. Defense-in-depth — the home is fixed now, but a re-introduced
         //    override must never let the app install over a daemon at the real home.
         if !inputs.homeIsCanonical { return .indeterminate }
-        // 2. A registered Homebrew service is a foreign daemon on its OWN label, so a
+        // 2. A system daemon owns the SHARED socket the app dials first (clients resolve
+        //    shared-then-per-user), so it surfaces ahead of every per-user owner —
+        //    INCLUDING brew — so the verdict (and its banner) names the daemon the app
+        //    actually reaches, not a co-registered (leftover-migration) brew label it
+        //    doesn't. Also ahead of self (system + our own agent is a real two-manager
+        //    conflict) and the foreground branch (a system daemon answering the shared
+        //    socket must be named, not mislabeled a hand-run daemon).
+        if inputs.systemProbe == .registered { return .foreignSystem }
+        // 3. A registered Homebrew service is a foreign daemon on its OWN label, so a
         //    positive brew probe surfaces even when our own agent is also enabled —
         //    that is a real two-manager conflict, not a self-managed host.
         if inputs.brewProbe == .registered { return .foreignBrew }
@@ -128,6 +146,7 @@ extension DaemonOwnership {
             // say), OR a persisted manual plist (which launchd reloads at next login)
             // means a competing owner might be present — defer.
             if inputs.brewProbe == .notRegistered, inputs.canonicalProbe == .notRegistered,
+               inputs.systemProbe == .notRegistered,
                !inputs.socketAnswers, !inputs.manualPlistPersisted
             {
                 return .awaitingApproval
@@ -152,7 +171,9 @@ extension DaemonOwnership {
         //    stop-a-hand-run-daemon (foreground). Determinate foreign owners already
         //    surfaced above; both they and indeterminate deny, so naming the known
         //    owner is strictly better than deferring.
-        if inputs.brewProbe == .indeterminate || inputs.canonicalProbe == .indeterminate {
+        if inputs.brewProbe == .indeterminate || inputs.canonicalProbe == .indeterminate
+            || inputs.systemProbe == .indeterminate
+        {
             return .indeterminate
         }
         // 7. A daemon answers but no agent is registered — a hand-run runnyd.

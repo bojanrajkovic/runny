@@ -12,12 +12,44 @@ enum RunnyHome {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".runny")
     }
 
-    static var socketPath: String {
+    /// The shared system-daemon control socket directory. MUST stay in sync with
+    /// Go's `home.SharedSocketDir` (internal/home/socket.go) — Swift can't import
+    /// the Go constant, so both sides hardcode it independently (see the sharp
+    /// edge in apps/Runny/CLAUDE.md). The privileged installer (the headless
+    /// path) creates this dir owned by the service account with an ACL granting
+    /// the operator; the per-user agent never uses it.
+    static let sharedSocketDir = "/Library/Application Support/runny"
+    static var sharedSocketPath: String {
+        (sharedSocketDir as NSString).appendingPathComponent("runnyd.sock")
+    }
+
+    static var perUserSocketPath: String {
         directory.appendingPathComponent("runnyd.sock").path
+    }
+
+    /// Where the app dials the daemon. Mirrors Go's `home.ClientSocketPath`:
+    /// prefer the shared system socket when it EXISTS (path selection, not
+    /// liveness — that stays `SocketProbe`'s job), else the per-user socket, so
+    /// the app reaches a system daemon with no configuration.
+    static var socketPath: String {
+        resolveSocketPath(sharedExists: FileManager.default.fileExists(atPath: sharedSocketPath))
+    }
+
+    /// Pure resolution, split out so tests can drive both branches without
+    /// touching /Library. `socketPath` supplies the live existence check.
+    static func resolveSocketPath(sharedExists: Bool) -> String {
+        sharedExists ? sharedSocketPath : perUserSocketPath
     }
 
     static var socketExists: Bool {
         FileManager.default.fileExists(atPath: socketPath)
+    }
+
+    /// The directory the socket-appearance watcher arms on — the directory of the
+    /// resolved socket (the shared dir for a system daemon, else the per-user
+    /// home).
+    static var socketDirectory: URL {
+        URL(fileURLWithPath: socketPath).deletingLastPathComponent()
     }
 
     /// Creates the home directory if it is absent, owner-only (0700) to match

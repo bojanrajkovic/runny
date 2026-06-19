@@ -54,7 +54,15 @@ struct DaemonUpdateAffordance: View {
     /// (otherwise the dialog has no presenter and the update silently no-ops).
     private func update() {
         activation.openMainWindow(openWindow)
-        store.requestDaemonUpdate()
+        Task {
+            // Re-gather before arming the drain-gated update: Update fires outside the
+            // spawn gate, so a foreign daemon that took over while the window stayed open
+            // must cancel it — draining a foreign fleet for an update that can't take is
+            // active harm, not a no-op. The render gate can be minutes stale by click.
+            if await agent.revalidate(.selfManaged), agent.installState == .installed {
+                store.requestDaemonUpdate()
+            }
+        }
     }
 
     /// Update requires AFFIRMATIVE canonical confirmation — `.ok`, not the

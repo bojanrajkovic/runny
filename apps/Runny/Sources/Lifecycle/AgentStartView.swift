@@ -33,7 +33,12 @@ struct DaemonStartAffordance: View {
                     text: "runnyd is installed but needs approval in Login Items.",
                     tint: .orange
                 ) {
-                    Button("Approve…") { SMAppService.openSystemSettingsLoginItems() }
+                    // Re-gather before opening Login Items: approving fires outside the
+                    // spawn gate, so a foreign owner that appeared since render must
+                    // suppress the CTA rather than direct a competing approval.
+                    Button("Approve…") {
+                        Task { if await agent.revalidate(.awaitingApproval) { SMAppService.openSystemSettingsLoginItems() } }
+                    }
                 }
             case .start:
                 startRow

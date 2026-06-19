@@ -136,8 +136,15 @@ struct AgentInstallRow: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         if agent.installState == .requiresApproval {
-            Button("Open Login Items…") { SMAppService.openSystemSettingsLoginItems() }
-                .controlSize(.small)
+            // Re-gather before sending the user to approve: approval launches the
+            // RunAtLoad agent OUTSIDE the spawn gate, so a foreign owner that appeared
+            // since render must suppress this rather than direct an approval that creates
+            // a competing manager. revalidate publishes the fresh verdict, flipping the
+            // surface to the observer banner when it no longer reads awaitingApproval.
+            Button("Open Login Items…") {
+                Task { if await agent.revalidate(.awaitingApproval) { SMAppService.openSystemSettingsLoginItems() } }
+            }
+            .controlSize(.small)
         }
         if let reconcile = reconcileWarning {
             Label(reconcile, systemImage: "exclamationmark.triangle")
@@ -148,12 +155,16 @@ struct AgentInstallRow: View {
                 Button("Repair…") { confirmingRepair = true }
                     .controlSize(.small)
             }
-            if let repairError = agent.repairError {
-                Text(repairError)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+        }
+        // Rendered INDEPENDENTLY of the reconcile warning: a repair that fails after the
+        // unregister took clears the warning (the agent is gone → reconcile .ok), so a
+        // repairError nested under it would vanish exactly when the repair failed — a
+        // silent failure in the recovery path. Keep it loud on its own.
+        if let repairError = agent.repairError {
+            Text(repairError)
+                .font(.caption)
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

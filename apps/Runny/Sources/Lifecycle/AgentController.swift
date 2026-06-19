@@ -315,6 +315,18 @@ final class AgentController {
         } while ownershipPending
     }
 
+    /// Re-gather ownership and report whether it still matches `expected` — for the
+    /// daemon-affecting actions that fire OUTSIDE the spawn gate (the approval CTA that
+    /// opens Login Items, the drain-gated Update) and so can't trust the render-time
+    /// verdict. The spawn gate re-gathers per attempt; these must too, or a foreign owner
+    /// that appeared while the window stayed open lets the stale CTA fire over it
+    /// (approving a competing agent, or draining a now-foreign fleet). Publishing the
+    /// fresh verdict also flips the surface to the observer banner when it returns false.
+    func revalidate(_ expected: DaemonOwnership) async -> Bool {
+        await refreshOwnership()
+        return ownership == expected
+    }
+
     /// Gather the four orthogonal facts and `classify` them. The two label probes
     /// run concurrently (independent, each bounded) so the install tap waits at most
     /// one probe bound, not two; the self-status read and the socket/home axes are

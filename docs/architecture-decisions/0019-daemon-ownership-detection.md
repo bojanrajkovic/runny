@@ -103,17 +103,19 @@ GUI.
 - The shared canonical label is safe to disambiguate by self-status — documented as
   a sharp edge in `apps/Runny/CLAUDE.md` so a future maintainer does not "simplify"
   detection to a label match and reintroduce the stomp.
-- The spawn chokepoint gates install/repair/start, but two daemon-affecting paths
-  sit outside it and consult the verdict directly instead: **approval** (the user
-  enabling the agent in System Settings) — its CTA is suppressed unless the verdict
-  is `awaitingApproval`, which itself defers whenever another owner is present — and
-  **uninstall** (teardown). Two narrow edges are accepted rather than closed:
-  `uninstall()` does not re-gather ownership at the instant of teardown, so a
-  concurrent external takeover of the shared label during the open Settings window
-  could bootout a foreign daemon; and a hand-run daemon that holds the instance lock
-  but has not yet opened its socket reads as `unmanaged` for that sub-second startup
-  window. Both require an actor — a second process running `launchctl`, or a human —
-  to act faster than is realistic; tracked for an ownership-aware-teardown follow-up.
+- The spawn chokepoint gates install/repair/start; three more daemon-affecting paths
+  sit outside it. The **approval** CTA (opening Login Items) and the drain-gated
+  **Update** re-gather the verdict at click time (`AgentController.revalidate`) and
+  act only if it still holds — so a foreign owner that appeared while the window
+  stayed open suppresses the approval, or cancels the update, rather than firing over
+  it (approving a competing RunAtLoad agent, or draining a now-foreign fleet). The
+  remaining accepted edges are narrower: **uninstall** (teardown) does not re-gather
+  at the instant of teardown, so a concurrent external takeover of the shared label
+  during the open Settings window could bootout a foreign daemon; and a hand-run
+  daemon that holds the instance lock but has not yet opened its socket reads as
+  `unmanaged` for that sub-second startup window. Both require an actor — a second
+  process running `launchctl`, or a human — to act faster than is realistic; tracked
+  for an ownership-aware-teardown follow-up.
 - Detection covers only the `gui/<uid>` domain. A `system/`-domain LaunchDaemon —
   a `sudo brew services` root daemon today, or the dedicated non-root headless
   daemon planned for fleet hosts (#76) — is NOT detected, yet it is fully

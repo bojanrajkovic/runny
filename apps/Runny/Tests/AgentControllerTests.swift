@@ -239,6 +239,33 @@ final class AgentControllerTests: XCTestCase {
         XCTAssertEqual(c.ownership, .selfManaged)
     }
 
+    func testRevalidateRefreshesAndComparesOwnership() async {
+        // The non-gated actions (approval CTA, Update) re-gather at click time via
+        // revalidate(), so a foreign owner that appeared since render can't let the stale
+        // CTA fire over it. revalidate publishes the fresh verdict (for the banner) and
+        // reports whether it still matches.
+        let mock = MockRegistrar()
+        mock.nextStatus = .enabled
+        let c = AgentController(
+            registrar: mock, probe: { _ in .notRegistered }, socketAnswers: { false }, manualPlistPersisted: { false }
+        )
+        let stillOurs = await c.revalidate(.selfManaged)
+        XCTAssertTrue(stillOurs, "an enabled self-agent revalidates as selfManaged")
+        XCTAssertEqual(c.ownership, .selfManaged, "revalidate publishes the fresh verdict for the banner too")
+
+        // A brew owner that appeared since render: revalidate sees it and reports false.
+        let mock2 = MockRegistrar()
+        mock2.nextStatus = .notRegistered
+        let c2 = AgentController(
+            registrar: mock2,
+            probe: { label in label == DaemonOwnership.brewLabel ? .registered : .notRegistered },
+            socketAnswers: { false }, manualPlistPersisted: { false }
+        )
+        let stillOursAfterTakeover = await c2.revalidate(.selfManaged)
+        XCTAssertFalse(stillOursAfterTakeover, "a brew owner that appeared since render must fail revalidation")
+        XCTAssertEqual(c2.ownership, .foreignBrew, "and the fresh foreign verdict is published so the banner appears")
+    }
+
     func testRefreshOwnershipForeignManualWhenDormantPlistPersists() async {
         // The round-6 wiring end-to-end: both probes silent, no socket, but the manual
         // installer's plist persists on disk — gatherOwnership must feed that signal to

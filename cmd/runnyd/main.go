@@ -61,7 +61,7 @@ func run() error {
 		return nil
 	}
 
-	dir, err := home.Resolve()
+	dir, err := home.ResolveServer()
 	if err != nil {
 		return err
 	}
@@ -421,7 +421,7 @@ func run() error {
 	for _, s := range slots {
 		wg.Go(func() { s.Run(ctx) })
 	}
-	socketPath := home.ServerSocketPath(dir)
+	socketPath := dir.SocketPath()
 	logger.Info("slots running", "count", len(slots), "socket", socketPath)
 
 	err = srv.Serve(ctx, socketPath)

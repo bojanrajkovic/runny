@@ -94,11 +94,11 @@ func run() error {
 		return fmt.Errorf("a command is required")
 	}
 
-	dir, err := home.Resolve()
+	dir, err := home.ResolveClient()
 	if err != nil {
 		return err
 	}
-	socketPath := home.ClientSocketPath(dir)
+	socketPath := dir.SocketPath()
 	conn, err := grpc.NewClient("unix://"+socketPath,
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {

@@ -174,12 +174,12 @@ func TestPaths(t *testing.T) {
 func TestResolveIgnoresEnvAndIsHomeRooted(t *testing.T) {
 	t.Setenv("HOME", "/tmp/fakehome")
 	t.Setenv("RUNNY_HOME", "/custom")
-	d, err := Resolve()
+	d, err := resolvePerUser()
 	if err != nil {
-		t.Fatalf("Resolve() error = %v", err)
+		t.Fatalf("resolvePerUser() error = %v", err)
 	}
 	if got, want := d.String(), filepath.Join("/tmp/fakehome", ".runny"); got != want {
-		t.Errorf("Resolve() = %q, want %q — RUNNY_HOME must be ignored, the home derived from $HOME", got, want)
+		t.Errorf("resolvePerUser() = %q, want %q — RUNNY_HOME must be ignored, the home derived from $HOME", got, want)
 	}
 }
 
@@ -191,8 +191,8 @@ func TestResolveRejectsDegenerateHome(t *testing.T) {
 	for _, h := range []string{"/", "//", "///", "relative/home", "."} {
 		t.Run(h, func(t *testing.T) {
 			t.Setenv("HOME", h)
-			if _, err := Resolve(); err == nil {
-				t.Fatalf("Resolve() with $HOME=%q must error, not derive a wrong home", h)
+			if _, err := resolvePerUser(); err == nil {
+				t.Fatalf("resolvePerUser() with $HOME=%q must error, not derive a wrong home", h)
 			}
 		})
 	}

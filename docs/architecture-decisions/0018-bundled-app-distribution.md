@@ -113,6 +113,17 @@ residual skew is **made loud**.
   surface and the `restart()`-on-home-change machinery go with it, and the `brew`
   and manual installs drop `RUNNY_HOME` from their service definitions.
 
+  **Amended (2026-06-19, #76):** "the daemon always derives `~/.runny`" is now
+  deployment-*resolved*, not fixed to one literal path. The home stays
+  non-configurable — still no env/flag override, nothing for a user to flip — but
+  a non-root system daemon resolves to a fixed `/Library/Application Support/runny`
+  it owns, while a per-user agent keeps `~/.runny`. The daemon selects by
+  ownership (it must own the tree it binds) and clients by existence (the operator
+  reaches the system home through an inheriting ACL granting dir-write, not
+  dir-ownership), so daemon and clients can never disagree about where the socket
+  and credentials live. This keeps the no-switchable-home invariant intact while
+  letting a headless service account run with no home directory of its own.
+
 - **Render residual skew; never assume it gone.** Bundling cannot close two
   gaps: the **upgrade window** (launchd runs the *old* daemon binary until the
   next recycle, so a freshly launched new app talks to an old daemon — exactly

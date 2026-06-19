@@ -75,11 +75,21 @@ struct CLIInstallRow: View {
         case .installing: "Installing…"
         case .installed: "Installed"
         case .installedButNotOnPath: "Installed — not on your PATH"
-        case .conflict: "A different runnyctl is in the way"
+        case let .conflict(owner): conflictGuidance(owner).headline
         case .translocated: "Move Runny to Applications first"
         case .failed: "Install failed"
         case .cancelled: "Cancelled"
         }
+    }
+
+    /// Channel-aware wording for a foreign-owner conflict: names the managing
+    /// channel (Homebrew, a hand-rolled link, a dropped file) and the remediation,
+    /// rather than only the raw path. See `CLIInstall.conflictGuidance`.
+    private func conflictGuidance(_ owner: String) -> (headline: String, detail: String) {
+        CLIInstall.conflictGuidance(
+            channel: CLIInstall.foreignChannel(owner: owner, linkPath: CLIInstallModel.linkPath),
+            owner: owner, linkPath: CLIInstallModel.linkPath
+        )
     }
 
     private var detail: String? {
@@ -93,7 +103,7 @@ struct CLIInstallRow: View {
         case .installedButNotOnPath:
             "/usr/local/bin isn't on your PATH — add it so runnyctl resolves."
         case let .conflict(owner):
-            "\(CLIInstallModel.linkPath) → \(owner). Runny won't replace a file it doesn't manage."
+            conflictGuidance(owner).detail
         case .translocated:
             "Run Runny from /Applications (or ~/Applications), then install — a link into a "
                 + "translocated copy breaks on the next launch."

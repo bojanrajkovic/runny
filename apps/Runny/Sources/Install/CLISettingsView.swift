@@ -75,11 +75,22 @@ struct CLIInstallRow: View {
         case .installing: "Installing…"
         case .installed: "Installed"
         case .installedButNotOnPath: "Installed — not on your PATH"
-        case .conflict: "A different runnyctl is in the way"
+        case .orphaned: "Leftover runnyctl link"
+        case let .conflict(owner): conflictGuidance(owner).headline
         case .translocated: "Move Runny to Applications first"
         case .failed: "Install failed"
         case .cancelled: "Cancelled"
         }
+    }
+
+    /// Channel-aware wording for a foreign-owner conflict: names the managing
+    /// channel (Homebrew, a hand-rolled link, a dropped file) and the remediation,
+    /// rather than only the raw path. See `CLIInstall.conflictGuidance`.
+    private func conflictGuidance(_ owner: String) -> (headline: String, detail: String) {
+        CLIInstall.conflictGuidance(
+            channel: CLIInstall.foreignChannel(owner: owner, linkPath: CLIInstallModel.linkPath),
+            owner: owner, linkPath: CLIInstallModel.linkPath
+        )
     }
 
     private var detail: String? {
@@ -92,8 +103,11 @@ struct CLIInstallRow: View {
             CLIInstallModel.linkPath
         case .installedButNotOnPath:
             "/usr/local/bin isn't on your PATH — add it so runnyctl resolves."
+        case let .orphaned(target):
+            "\(CLIInstallModel.linkPath) → \(target), a Runny that's no longer installed. "
+                + "Remove the leftover link, or Install to point it at this copy."
         case let .conflict(owner):
-            "\(CLIInstallModel.linkPath) → \(owner). Runny won't replace a file it doesn't manage."
+            conflictGuidance(owner).detail
         case .translocated:
             "Run Runny from /Applications (or ~/Applications), then install — a link into a "
                 + "translocated copy breaks on the next launch."
@@ -105,7 +119,7 @@ struct CLIInstallRow: View {
     private var tint: Color {
         switch cli.state {
         case .installed, .notInstalled, .installing, .cancelled: .secondary
-        case .installedButNotOnPath, .conflict, .translocated: .orange
+        case .installedButNotOnPath, .conflict, .translocated, .orphaned: .orange
         case .failed: .red
         }
     }
@@ -122,6 +136,12 @@ struct CLIInstallRow: View {
             }
         case .installed, .installedButNotOnPath:
             Button("Remove") { cli.uninstall() }
+        case .orphaned:
+            // Clean up the dangling leftover, or adopt the path onto this copy.
+            HStack(spacing: 8) {
+                Button("Remove") { cli.removeOrphan() }
+                Button("Install") { cli.install() }
+            }
         case .conflict, .translocated:
             Button("Re-check") { cli.refresh() }
         case .failed:

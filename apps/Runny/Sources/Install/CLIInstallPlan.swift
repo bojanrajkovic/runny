@@ -78,6 +78,65 @@ enum CLIInstall {
         path.hasSuffix("/Runny.app/Contents/MacOS/runnyctl")
     }
 
+    /// Which channel owns a foreign `runnyctl` we refuse to replace — so the UI can
+    /// name the managing channel and the operator's next step, mirroring the daemon
+    /// observer banner, instead of only printing the raw path.
+    enum ForeignChannel: Equatable {
+        /// A symlink resolving into a Homebrew prefix (`brew install <tap>/runny`).
+        case homebrew
+        /// A symlink to some other (non-Runny, non-Homebrew) target — a hand-rolled link.
+        case manualSymlink
+        /// A regular file at the path — a binary or script someone dropped there.
+        case regularFile
+    }
+
+    /// True when `path` lives under a Homebrew prefix. A brew-installed `runnyctl`
+    /// is a symlink resolving into the Cellar (`…/Cellar/runny/<ver>/bin/runnyctl`),
+    /// under `/usr/local` on Intel or `/opt/homebrew` on Apple Silicon. The `/Cellar/`
+    /// segment is the durable brew signal across both prefixes.
+    static func isHomebrewPath(_ path: String) -> Bool {
+        path.hasPrefix("/opt/homebrew/") || path.hasPrefix("/usr/local/Homebrew/") || path.contains("/Cellar/")
+    }
+
+    /// Classify the owner of a foreign `runnyctl`. `owner` is what
+    /// `CLIInstall.State.conflict` carries: the resolved symlink target for a foreign
+    /// link, or the link path itself for a regular file (which is how the imperative
+    /// shell records the regular-file case). So `owner == linkPath` is the regular-file
+    /// tell; otherwise it's a symlink target classified by where it resolves.
+    static func foreignChannel(owner: String, linkPath: String) -> ForeignChannel {
+        if owner == linkPath { return .regularFile }
+        if isHomebrewPath(owner) { return .homebrew }
+        return .manualSymlink
+    }
+
+    /// The conflict row's wording per channel: a headline and a remediation detail
+    /// naming the managing channel and the operator's next step, mirroring the daemon
+    /// observer banner. Pure → unit-tested wording. `owner` is the resolved foreign
+    /// target (or the link path for a regular file).
+    static func conflictGuidance(channel: ForeignChannel, owner: String, linkPath: String) -> (headline: String, detail: String) {
+        switch channel {
+        case .homebrew:
+            (
+                "Homebrew manages runnyctl",
+                "\(linkPath) → \(owner). Homebrew owns runnyctl here — remove it with "
+                    + "`brew unlink runny` (or `brew uninstall runny`), then re-check. "
+                    + "Runny won't replace a file another channel manages."
+            )
+        case .manualSymlink:
+            (
+                "A hand-installed runnyctl is in the way",
+                "\(linkPath) → \(owner). A link Runny didn't create points elsewhere — remove or "
+                    + "repoint it yourself, then re-check. Runny won't replace a link it doesn't manage."
+            )
+        case .regularFile:
+            (
+                "A file is in the way at runnyctl",
+                "A regular file at \(linkPath) isn't Runny's. Move it aside, then re-check. "
+                    + "Runny won't overwrite a file it doesn't manage."
+            )
+        }
+    }
+
     /// The install/uninstall decision. Pure: the caller supplies the resolved
     /// filesystem state and the two booleans it computed (is the bundle at a
     /// stable path, is `/usr/local/bin` writable without admin), and gets back

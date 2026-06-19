@@ -210,6 +210,19 @@ residual skew is **made loud**.
 - CLI vending targets `/usr/local/bin`, which on an Apple-Silicon host may not
   exist or be writable without an admin prompt; the create-and-symlink step is an
   implementation detail tracked in #62.
+- The CLI-symlink detect-and-defer is the counterpart of the daemon's (ADR-0019),
+  refined in two ways the reference apps get wrong. A refused foreign owner names its
+  *channel* (Homebrew, a hand-rolled link, a dropped file) with remediation, not just
+  the path. And the drag-to-trash orphan — `/usr/local/bin/runnyctl` left dangling
+  when the bundle is deleted, which macOS gives no hook to clean — is reconciled on a
+  later launch by *surfacing* it (a distinct `orphaned` state offering Remove or
+  re-point), never by silently re-writing the link on every launch. Docker Desktop
+  re-links on every launch, which both re-raises the admin prompt
+  ([for-mac#6634](https://github.com/docker/for-mac/issues/6634)) and clobbers a
+  Homebrew-managed CLI ([for-mac#455](https://github.com/docker/for-mac/issues/455));
+  Tailscale does no CLI reconcile at all. Surface-don't-rewrite and never-clobber
+  avoid both, at the cost that an orphan persists until a Runny runs again — the
+  unavoidable residue of having no uninstall hook.
 - The release still emits both the `brew` tarball (headless) and the `.dmg` (now
   carrying the binaries) — the same *source* binaries, but the `.app` re-signs its
   nested copies inside-out, so their CDHash differs from the tarball's separately

@@ -144,4 +144,48 @@ final class CLIInstallPlanTests: XCTestCase {
         // matched suffix begins at a path separator, so "FooRunny.app" fails.
         XCTAssertFalse(CLIInstall.isRunnyBundleCLI("/Apps/FooRunny.app/Contents/MacOS/runnyctl"))
     }
+
+    // MARK: - Foreign-channel classification
+
+    private static let link = "/usr/local/bin/runnyctl"
+
+    func testHomebrewPathRecognition() {
+        // Intel brew links into /usr/local/Cellar; Apple-Silicon brew into /opt/homebrew.
+        XCTAssertTrue(CLIInstall.isHomebrewPath("/usr/local/Cellar/runny/0.6.0/bin/runnyctl"))
+        XCTAssertTrue(CLIInstall.isHomebrewPath("/opt/homebrew/Cellar/runny/0.6.0/bin/runnyctl"))
+        XCTAssertTrue(CLIInstall.isHomebrewPath("/opt/homebrew/bin/runnyctl"))
+        XCTAssertFalse(CLIInstall.isHomebrewPath("/usr/local/bin/runnyctl"))
+        XCTAssertFalse(CLIInstall.isHomebrewPath("/Users/me/bin/runnyctl"))
+    }
+
+    func testForeignChannelClassification() {
+        // owner == linkPath is the regular-file tell (the shell records it that way).
+        XCTAssertEqual(CLIInstall.foreignChannel(owner: Self.link, linkPath: Self.link), .regularFile)
+        // A symlink resolving into the Cellar is Homebrew.
+        XCTAssertEqual(
+            CLIInstall.foreignChannel(owner: "/usr/local/Cellar/runny/0.6.0/bin/runnyctl", linkPath: Self.link),
+            .homebrew
+        )
+        // Any other symlink target is a hand-rolled link.
+        XCTAssertEqual(
+            CLIInstall.foreignChannel(owner: "/Users/me/bin/runnyctl", linkPath: Self.link),
+            .manualSymlink
+        )
+    }
+
+    func testConflictGuidanceNamesTheChannel() {
+        // The guidance must name the MANAGING CHANNEL and its remediation, not just
+        // the path — the whole point of the channel classification.
+        let brew = CLIInstall.conflictGuidance(
+            channel: .homebrew, owner: "/usr/local/Cellar/runny/0.6.0/bin/runnyctl", linkPath: Self.link
+        )
+        XCTAssertTrue(brew.headline.localizedCaseInsensitiveContains("homebrew"))
+        XCTAssertTrue(brew.detail.contains("brew unlink runny") || brew.detail.contains("brew uninstall runny"))
+
+        let manual = CLIInstall.conflictGuidance(channel: .manualSymlink, owner: "/Users/me/bin/runnyctl", linkPath: Self.link)
+        XCTAssertTrue(manual.detail.localizedCaseInsensitiveContains("link"))
+
+        let file = CLIInstall.conflictGuidance(channel: .regularFile, owner: Self.link, linkPath: Self.link)
+        XCTAssertTrue(file.detail.localizedCaseInsensitiveContains("file"))
+    }
 }

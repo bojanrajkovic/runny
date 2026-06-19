@@ -176,4 +176,116 @@ final class CLIInstallModelTests: XCTestCase {
         XCTAssertTrue(s.contains("exit 3"))
         XCTAssertFalse(s.contains("*/Runny.app/Contents/MacOS/runnyctl)"), "must not use the loose Runny.app glob")
     }
+
+    // MARK: - Orphan reconcile + cleanup
+
+    private static let bundle = "/Applications/Runny.app/Contents/MacOS/runnyctl"
+
+    func testRestingClassificationSurfacesADanglingRunnyLinkAsOrphan() {
+        // A link into a DIFFERENT Runny.app whose bundle is gone (targetExists=false):
+        // the orphan a drag-to-trash leaves. It must surface as .orphaned, not the
+        // silent .notInstalled the old code returned.
+        let dead = "/Volumes/Old/Runny.app/Contents/MacOS/runnyctl"
+        XCTAssertEqual(
+            CLIInstallModel.restingClassification(
+                existing: .symlink(resolvesTo: dead), bundle: Self.bundle, onPath: true, targetExists: false
+            ),
+            .orphaned(target: dead)
+        )
+    }
+
+    func testRestingClassificationKeepsLiveOtherRunnyLinkInstallable() {
+        // A link into another Runny.app that STILL exists (targetExists=true) is
+        // re-pointable on install — it stays .notInstalled, never an orphan.
+        let live = "/Users/me/Applications/Runny.app/Contents/MacOS/runnyctl"
+        XCTAssertEqual(
+            CLIInstallModel.restingClassification(
+                existing: .symlink(resolvesTo: live), bundle: Self.bundle, onPath: true, targetExists: true
+            ),
+            .notInstalled
+        )
+    }
+
+    func testRestingClassificationInstalledConflictAbsent() {
+        // This bundle → installed/installedButNotOnPath by PATH; a foreign symlink and
+        // a regular file → conflict; absent → notInstalled. targetExists is irrelevant
+        // once the link resolves to this bundle.
+        XCTAssertEqual(
+            CLIInstallModel.restingClassification(
+                existing: .symlink(resolvesTo: Self.bundle), bundle: Self.bundle, onPath: true, targetExists: true
+            ),
+            .installed
+        )
+        XCTAssertEqual(
+            CLIInstallModel.restingClassification(
+                existing: .symlink(resolvesTo: Self.bundle), bundle: Self.bundle, onPath: false, targetExists: true
+            ),
+            .installedButNotOnPath
+        )
+        XCTAssertEqual(
+            CLIInstallModel.restingClassification(
+                existing: .symlink(resolvesTo: "/opt/homebrew/bin/runnyctl"), bundle: Self.bundle,
+                onPath: true, targetExists: true
+            ),
+            .conflict(owner: "/opt/homebrew/bin/runnyctl")
+        )
+        XCTAssertEqual(
+            CLIInstallModel.restingClassification(
+                existing: .regularFile, bundle: Self.bundle, onPath: true, targetExists: false
+            ),
+            .conflict(owner: CLIInstallModel.linkPath)
+        )
+        XCTAssertEqual(
+            CLIInstallModel.restingClassification(
+                existing: .absent, bundle: Self.bundle, onPath: true, targetExists: false
+            ),
+            .notInstalled
+        )
+    }
+
+    func testRemoveOrphanScriptRemovesOnlyADeadRunnyLink() {
+        let s = CLIInstallModel.removeOrphanScript()
+        XCTAssertTrue(s.contains("with administrator privileges"))
+        // Removes a Runny.app link ONLY when its target is gone (`[ -e "$existing" ]`
+        // re-check at write time): a reappeared target → exit 0, leave the now-live
+        // link; a foreign file still present → exit 3. No create. This is deliberately
+        // NOT installScript's unconditional remove-any-Runny-link.
+        XCTAssertTrue(s.contains("*/Runny.app/Contents/MacOS/runnyctl)"))
+        XCTAssertTrue(s.contains("if [ -e \\\"$existing\\\" ]; then exit 0; else rm -f /usr/local/bin/runnyctl; fi"))
+        XCTAssertTrue(s.contains("if [ -e /usr/local/bin/runnyctl ] || [ -L /usr/local/bin/runnyctl ]; then exit 3"))
+        XCTAssertFalse(s.contains("ln -s"), "orphan cleanup removes, never creates")
+    }
+
+    func testRemoveOrphanUnprivilegedRemovesDeadLinkButLeavesLiveAndForeign() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("runny-orphan-\(UUID().uuidString)")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+
+        // A dangling Runny-owned link (target bundle missing, never created) → removed.
+        let dead = dir.appendingPathComponent("dead-runnyctl").path
+        try fm.createSymbolicLink(atPath: dead, withDestinationPath: dir.appendingPathComponent("missing/Runny.app/Contents/MacOS/runnyctl").path)
+        XCTAssertNil(CLIInstallModel.removeOrphanUnprivileged(dead))
+        XCTAssertNil(try? fm.destinationOfSymbolicLink(atPath: dead), "a dead orphan link must be removed")
+
+        // A Runny-owned link whose target REAPPEARED (live again) → left in place, nil
+        // returned so the read-back re-derives — never delete a working other-copy link.
+        let liveTargetDir = dir.appendingPathComponent("here/Runny.app/Contents/MacOS")
+        try fm.createDirectory(at: liveTargetDir, withIntermediateDirectories: true)
+        let liveTarget = liveTargetDir.appendingPathComponent("runnyctl").path
+        fm.createFile(atPath: liveTarget, contents: Data("bin".utf8))
+        let live = dir.appendingPathComponent("live-runnyctl").path
+        try fm.createSymbolicLink(atPath: live, withDestinationPath: liveTarget)
+        XCTAssertNil(CLIInstallModel.removeOrphanUnprivileged(live))
+        XCTAssertNotNil(try? fm.destinationOfSymbolicLink(atPath: live), "a link to a live bundle must be left untouched")
+
+        // A foreign symlink → refused, left in place.
+        let foreign = dir.appendingPathComponent("foreign").path
+        try fm.createSymbolicLink(atPath: foreign, withDestinationPath: "/opt/homebrew/bin/runnyctl")
+        XCTAssertNotNil(CLIInstallModel.removeOrphanUnprivileged(foreign))
+        XCTAssertNotNil(try? fm.destinationOfSymbolicLink(atPath: foreign), "a foreign link must be left untouched")
+
+        // Absent → no-op success.
+        XCTAssertNil(CLIInstallModel.removeOrphanUnprivileged(dir.appendingPathComponent("nothing").path))
+    }
 }

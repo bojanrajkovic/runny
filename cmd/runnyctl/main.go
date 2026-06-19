@@ -98,7 +98,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	conn, err := grpc.NewClient("unix://"+dir.SocketPath(),
+	socketPath := home.ClientSocketPath(dir)
+	conn, err := grpc.NewClient("unix://"+socketPath,
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return err
@@ -125,7 +126,7 @@ func run() error {
 	// mid-stream death) OR the connection is currently Ready (the one-shot
 	// app-level case, daemon alive). Otherwise the bare error stands.
 	if shouldHint(err, c.connected || conn.GetState() == connectivity.Ready) {
-		return connHint(err, dir.SocketPath(), socketFileExists(dir.SocketPath()))
+		return connHint(err, socketPath, socketFileExists(socketPath))
 	}
 	return err
 }

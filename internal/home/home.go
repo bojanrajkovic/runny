@@ -38,7 +38,7 @@ func Resolve() (Dir, error) {
 func (d Dir) String() string { return string(d) }
 
 func (d Dir) ConfigPath() string { return filepath.Join(string(d), "config.yaml") }
-func (d Dir) SocketPath() string { return filepath.Join(string(d), "runnyd.sock") }
+func (d Dir) SocketPath() string { return filepath.Join(string(d), socketName) }
 func (d Dir) LockPath() string   { return filepath.Join(string(d), "runnyd.lock") }
 func (d Dir) LogsDir() string    { return filepath.Join(string(d), "logs") }
 func (d Dir) LogFile() string    { return filepath.Join(d.LogsDir(), "runnyd.log") }

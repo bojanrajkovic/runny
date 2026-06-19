@@ -17,8 +17,13 @@ struct DaemonStartAffordance: View {
         // affordance self-hides (the row disappears the instant the daemon is
         // reachable, which is exactly when we want to clear a terminal Start outcome).
         Group {
+            // Both the approval and start gates (ownership == awaitingApproval / ==
+            // selfManaged) live in the pure startAffordance now, so a foreign or
+            // indeterminate owner already resolves to .none here — the Settings observer
+            // banner carries the guidance instead of a dead CTA.
             switch LaunchAgentStatus.startAffordance(
-                state: agent.installState, daemonUnreachable: daemonUnreachable, canonical: agentCanonical
+                state: agent.installState, ownership: agent.ownership,
+                daemonUnreachable: daemonUnreachable, canonical: agentCanonical
             ) {
             case .none:
                 EmptyView()
@@ -28,7 +33,12 @@ struct DaemonStartAffordance: View {
                     text: "runnyd is installed but needs approval in Login Items.",
                     tint: .orange
                 ) {
-                    Button("Approve…") { SMAppService.openSystemSettingsLoginItems() }
+                    // Re-gather before opening Login Items: approving fires outside the
+                    // spawn gate, so a foreign owner that appeared since render must
+                    // suppress the CTA rather than direct a competing approval.
+                    Button("Approve…") {
+                        Task { if await agent.revalidate(.awaitingApproval) { SMAppService.openSystemSettingsLoginItems() } }
+                    }
                 }
             case .start:
                 startRow

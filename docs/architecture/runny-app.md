@@ -320,15 +320,34 @@ seam, so every decision is unit-tested without launchd. The invariants:
   `registrationFailed(reason:)` for a register/unregister throw. `requiresApproval`
   (Login Items pending) is a first-class CTA, never a silent `notInstalled`. "The
   daemon is actually up" is a separate, later `.connected` snapshot.
-- **One spawn chokepoint.** Every spawn-triggering action (install, start-at-login
-  enable, Start) funnels through a single `attemptSpawn` that consults an
-  injectable `spawnGate` (the seam the Homebrew-reconciliation gate fills) and
-  aborts loud on deny — no view action calls `SMAppService`/`launchctl` directly.
+- **One spawn chokepoint, gated on ownership.** Every spawn-triggering action
+  (install, repair, start-at-login enable, Start) funnels through a single
+  `attemptSpawn` that consults the `spawnGate` — now the daemon-ownership verdict
+  ([ADR-0019](../architecture-decisions/0019-daemon-ownership-detection.md)): it
+  allows only an unowned or app-owned daemon and denies every foreign or
+  indeterminate owner, aborting loud. No view action calls
+  `SMAppService`/`launchctl` directly.
+- **The ownership axis is orthogonal to install state.** Beside `installState` (the
+  app's own registration) the controller publishes an ownership verdict —
+  `unmanaged`/`selfManaged`/`foreignBrew`/`foreignManual`/`foreground`/
+  `awaitingApproval`/`indeterminate` — a pure `classify` over the app's
+  `SMAppService` self-status, two bounded `launchctl` label probes (brew + canonical,
+  run concurrently), the socket axis, and a home-canonical flag, with
+  `indeterminate` dominant so an inconclusive probe defers ahead of every positive
+  branch. It refreshes on app-foreground and freshly before each spawn (the pre-act
+  recheck catches a brew daemon that appeared since). On a foreign/foreground/
+  indeterminate verdict the Daemon row **replaces the install toggle with an
+  observer banner** naming the managing channel and the operator's next step (a
+  checkout-free `launchctl bootout`, never `tools/deploy/uninstall.sh`); it shows
+  "Checking…" until the first gather runs, so a pristine launch never flashes the
+  indeterminate diagnostic. The shared canonical label is disambiguated by
+  self-status, never a label match — a foreign `launchctl bootstrap` never reads
+  `.enabled` (ADR-0019).
 - **Install refuses outside `/Applications`, recoverably.** A translocated bundle
   is refused with "re-launch from Applications" — recoverable, so a first-launch
   quarantine of a correctly-installed app is never permanently locked out. Install
-  is behind an explicit click with a label-naming confirmation (a brew daemon is
-  never silently displaced).
+  is behind an explicit click with a label-naming confirmation; the ownership gate
+  above is the structural guard that a brew/manual daemon is never displaced.
 - **Start affordance** (menu bar + main window) shows only when the agent is
   installed and the daemon is unreachable; `requiresApproval` routes to the Login
   Items CTA, never a dead Start. It `kickstart`s (no `-k`) and confirms recovery
@@ -350,16 +369,17 @@ seam, so every decision is unit-tested without launchd. The invariants:
   naming the abandoned slot. **Reconcile-on-launch** compares the registered
   agent's program path (bounded `launchctl` introspection) against the canonical
   `/Applications/Runny.app` — never the running bundle's path — and surfaces a
-  foreign/stale-path agent, or "couldn't determine" on a timeout. A foreign agent
-  is repairable in place from a canonical bundle: **Repair** raises a
-  confirmation (the same foreign-manager guard as install — re-registering
-  displaces whatever holds the label, and the spawn gate is `.allow` until
-  detect-and-defer lands), re-registers through the spawn chokepoint to re-point
-  the job, then re-reconciles to self-verify (the reconcile coalesces a
-  concurrent trigger so the verification is never dropped; a re-point that
-  doesn't take keeps showing foreign, never a false all-clear). A failed or
-  denied repair surfaces loudly and leaves the install state intact, so the
-  uninstall path survives.
+  foreign/stale-path agent, or "couldn't determine" on a timeout. A stale-path
+  self-managed agent is repairable in place from a canonical bundle: **Repair**
+  does a verified `unregister`→`register` replace (a bare re-register is not a
+  reliable re-point) through the spawn chokepoint, then re-reconciles to self-verify
+  (the reconcile coalesces a concurrent trigger so the verification is never
+  dropped; a re-point that doesn't take keeps showing foreign, never a false
+  all-clear). It is reached only for the app's own agent — the ownership gate denies
+  a foreign owner and the observer banner replaces the section hosting the button —
+  so a brew/manual daemon is never unregistered. A failed re-register after the
+  unregister took leaves the agent honestly gone (the toggle offers reinstall); a
+  denied gate never unregisters, so a foreign agent stays intact.
 
 ## Build shape
 

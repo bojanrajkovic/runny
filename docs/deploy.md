@@ -104,11 +104,25 @@ From a copy of Runny in `/Applications`:
   abandoned.
 
 Install requires Runny in `/Applications` (a translocated or `~/Downloads` launch
-is refused, recoverably). The app manages only the per-user agent — not the brew
-service or the manual LaunchAgent; running both for the same daemon is the
-operator's call until reconciliation lands. A bundled `runnyctl` on PATH can lag a
-`brew`-managed `runnyd`; when it does, `runnyctl` prints a one-line version-skew
-warning to stderr before its output (warn, never refuse).
+is refused, recoverably). **The two channels split by audience:** the app is the
+**desktop-GUI** install path (a per-user agent in your login session); the
+Homebrew service (or the manual LaunchAgent) is the **headless-fleet** path. The
+app installs its agent **only when no other manager owns the daemon**: it probes
+the launchd domain, and on detecting a Homebrew-managed (`homebrew.mxcl.runny`) or
+manually-installed (`com.coderinserepeat.runnyd`) daemon it does **not** install —
+it drops to an observer (status streams normally as a sibling client over the same
+socket), replaces the install toggle with a banner naming the managing channel
+("Managed by Homebrew — `brew services restart runny`"), and never displaces the
+other manager. To switch a host from brew/manual to the app, remove the foreign
+agent first — `brew services stop runny`, or for a manual install
+`launchctl bootout gui/$(id -u)/com.coderinserepeat.runnyd 2>/dev/null; rm -f ~/Library/LaunchAgents/com.coderinserepeat.runnyd.plist`
+(the `rm` is load-bearing, and separated by `;` not `&&`: `bootout` only unloads a
+running job and exits nonzero when the job is already gone, but launchd reloads a
+leftover plist at next login, and the app treats a persisted plist as a dormant
+owner it will not install over) — then reopen Runny. A
+bundled `runnyctl` on PATH can lag a `brew`-managed `runnyd`; when it does,
+`runnyctl` prints a one-line version-skew warning to stderr before its output
+(warn, never refuse).
 
 ## Applying config changes
 

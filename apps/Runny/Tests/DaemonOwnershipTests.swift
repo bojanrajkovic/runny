@@ -1,0 +1,211 @@
+import XCTest
+
+@testable import Runny
+
+/// The pure ownership verdict: `classify` over launchd-probe + SMAppService-self
+/// inputs, with indeterminate-dominant precedence so "not sure who owns this"
+/// can never read as "install a second manager" or "kill a hand-run daemon".
+/// Pure → every branch is pinned without launchd or a live SMAppService.
+final class DaemonOwnershipTests: XCTestCase {
+    /// A clear, install-allowed baseline; each test overrides only what it exercises.
+    private func inputs(
+        homeIsCanonical: Bool = true,
+        selfState: LaunchAgentStatus.State = .notInstalled,
+        brewProbe: LaunchdProbeResult = .notRegistered,
+        canonicalProbe: LaunchdProbeResult = .notRegistered,
+        socketAnswers: Bool = false,
+        manualPlistPersisted: Bool = false
+    ) -> DaemonOwnershipInputs {
+        DaemonOwnershipInputs(
+            homeIsCanonical: homeIsCanonical, selfState: selfState,
+            brewProbe: brewProbe, canonicalProbe: canonicalProbe, socketAnswers: socketAnswers,
+            manualPlistPersisted: manualPlistPersisted
+        )
+    }
+
+    func testUnmanagedWhenNothingOwnsItAndSocketSilent() {
+        XCTAssertEqual(DaemonOwnership.classify(inputs()), .unmanaged)
+    }
+
+    func testSelfManagedWhenOurAgentEnabled() {
+        // .installed == SMAppService .enabled == ours (C1). selfManaged even though
+        // OUR agent makes the canonical label read registered.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .installed, canonicalProbe: .registered)),
+            .selfManaged
+        )
+    }
+
+    func testAwaitingApprovalWhenOurAgentUnapproved() {
+        XCTAssertEqual(DaemonOwnership.classify(inputs(selfState: .requiresApproval)), .awaitingApproval)
+    }
+
+    func testForeignBrewWhenBrewLabelRegistered() {
+        XCTAssertEqual(DaemonOwnership.classify(inputs(brewProbe: .registered)), .foreignBrew)
+    }
+
+    func testForeignManualWhenCanonicalRegisteredButNotOurs() {
+        // canonical label registered + self NOT enabled ⇒ a manual installer owns it.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .notInstalled, canonicalProbe: .registered)),
+            .foreignManual
+        )
+    }
+
+    func testForegroundWhenSocketAnswersWithNoAgent() {
+        XCTAssertEqual(DaemonOwnership.classify(inputs(socketAnswers: true)), .foreground)
+    }
+
+    // MARK: - Indeterminate dominates (the regression guards)
+
+    func testNonCanonicalHomeIsIndeterminateRegardlessOfEverythingElse() {
+        // B5 guard (defense-in-depth): even with a positive registration, a
+        // non-canonical home means socket and label axes describe different homes.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(homeIsCanonical: false, brewProbe: .registered)),
+            .indeterminate
+        )
+    }
+
+    func testDeterminateForeignSurfacesOverAnInconclusiveProbe() {
+        // A *registered* foreign owner is strictly more informative than
+        // "indeterminate" (both deny), so a positive registration surfaces even when
+        // the OTHER probe wedged — it must not be hidden behind a defer.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(brewProbe: .registered, canonicalProbe: .indeterminate)),
+            .foreignBrew
+        )
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(brewProbe: .indeterminate, canonicalProbe: .registered)),
+            .foreignManual
+        )
+    }
+
+    func testInconclusiveProbeDominatesThePermissiveVerdicts() {
+        // The real invariant: an inconclusive probe with NO determinate owner must
+        // never fall through to unmanaged (install) or foreground (stop the daemon).
+        XCTAssertEqual(DaemonOwnership.classify(inputs(brewProbe: .indeterminate)), .indeterminate)
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(canonicalProbe: .indeterminate, socketAnswers: true)),
+            .indeterminate
+        )
+    }
+
+    func testRequiresApprovalDefersWhenAnythingElseOwnsTheDaemon() {
+        // Approving launches the RunAtLoad agent OUTSIDE the spawn gate (a System
+        // Settings action), so awaitingApproval is safe only when nothing else owns
+        // the daemon. A registered canonical label (ambiguous: ours-pending vs a
+        // foreign manual one) OR an occupied socket (a foreground daemon) means
+        // approving would create a competing manager — defer.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .requiresApproval, canonicalProbe: .registered)),
+            .indeterminate
+        )
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .requiresApproval, socketAnswers: true)),
+            .indeterminate
+        )
+        // An INCONCLUSIVE brew/canonical probe also defers — approval is safe only when
+        // a foreign owner is definitively ruled out, not merely unprobed.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .requiresApproval, brewProbe: .indeterminate)),
+            .indeterminate
+        )
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .requiresApproval, canonicalProbe: .indeterminate)),
+            .indeterminate
+        )
+        // Only definitively all-clear stays the approval CTA.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .requiresApproval)),
+            .awaitingApproval
+        )
+    }
+
+    func testUnknownSelfStatusFailsClosed() {
+        // An unrecognized future SMAppService status maps to .registrationFailed — a
+        // determination FAILURE, not a confirmed not-installed. Defer (never install)
+        // rather than treat unknown registration state as install permission.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .registrationFailed(reason: "x"))),
+            .indeterminate
+        )
+    }
+
+    func testPositiveBrewOverridesSelfOwnership() {
+        // When our agent is enabled AND a brew service is registered, that is a real
+        // two-manager conflict — surface the brew daemon, never hide it as selfManaged.
+        // (Self identity overrides an inconclusive probe, but not an affirmative
+        // foreign registration.)
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .installed, brewProbe: .registered)),
+            .foreignBrew
+        )
+    }
+
+    func testSelfIdentityDominatesAWedgedProbe() {
+        // A transient launchctl probe wedge must NOT override the authoritative
+        // SMAppService self-status: an installed (.enabled) agent is ours even if a
+        // foreign-label probe times out, so we never defer managing our own daemon.
+        // Note this is .installed ONLY: .enabled is authoritative enough to override a
+        // wedge, but .requiresApproval is NOT (the pending agent isn't running, so it
+        // can't attest to the loaded label) — that case defers, asserted in
+        // testRequiresApprovalDefersWhenAnythingElseOwnsTheDaemon.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .installed, brewProbe: .indeterminate)),
+            .selfManaged
+        )
+    }
+
+    func testErroredProbeNeverReadsAsForeground() {
+        // The A3 guard: a socket answering + a probe error must be indeterminate,
+        // NEVER foreground — the app must never tell an operator to kill their
+        // hand-run daemon because a probe wedged.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(brewProbe: .indeterminate, socketAnswers: true)),
+            .indeterminate
+        )
+    }
+
+    // MARK: - Persisted manual plist (the dormant-installer blind spot)
+
+    func testPersistedManualPlistIsForeignNotUnmanaged() {
+        // A manual install that was `bootout`'d but whose plist still sits in
+        // ~/Library/LaunchAgents reads as notRegistered on both probes and a silent
+        // socket — but launchd auto-loads that plist at next login, so installing the app
+        // agent now would create a same-label conflict. The on-disk plist is an ownership
+        // signal: it must surface as foreignManual, never unmanaged (the install verdict).
+        XCTAssertEqual(DaemonOwnership.classify(inputs(manualPlistPersisted: true)), .foreignManual)
+    }
+
+    func testPersistedManualPlistDefersApproval() {
+        // The same dormant plist must also block the approval all-clear — approving our
+        // agent would contend with the plist launchd reloads at next login.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .requiresApproval, manualPlistPersisted: true)),
+            .indeterminate
+        )
+    }
+
+    func testSelfIdentityStillWinsOverADormantManualPlist() {
+        // If our agent is enabled, WE manage the daemon now; a dormant manual plist is a
+        // separate latent cleanup, not a reason to call our own daemon foreign. Install
+        // isn't gated when selfManaged anyway, so self-identity still resolves first.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .installed, manualPlistPersisted: true)),
+            .selfManaged
+        )
+    }
+
+    func testSharedLabelDisambiguatedBySelfStatus() {
+        // The crux: the same canonical label, ours vs. theirs, split by self-status.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .installed, canonicalProbe: .registered)),
+            .selfManaged
+        )
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .notInstalled, canonicalProbe: .registered)),
+            .foreignManual
+        )
+    }
+}

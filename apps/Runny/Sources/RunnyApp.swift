@@ -6,7 +6,7 @@ struct RunnyApp: App {
     @State private var store = DaemonStore()
     @State private var activation = ActivationCoordinator()
     @State private var cliInstall = CLIInstallModel()
-    @State private var agent = AgentController(registrar: SMAppServiceRegistrar())
+    @State private var agent = AgentController.live()
 
     var body: some Scene {
         MenuBarExtra("Runny", image: "MenuBarIcon") {

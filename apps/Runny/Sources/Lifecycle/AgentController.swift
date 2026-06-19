@@ -89,6 +89,23 @@ enum StartOutcome: Equatable {
     case refused(String)
 }
 
+/// What the observer banner shows when the app is NOT the daemon's manager. The
+/// `kind` is read for styling/icon and so a surface can branch on the verdict
+/// without string-matching the prose; the `message` names the managing channel
+/// and the operator's next step. nil for `unmanaged`/`selfManaged`/`awaitingApproval`
+/// — those are the app's own install/approval UI, not an observer posture.
+struct ObserverHint: Equatable {
+    enum Kind: Equatable {
+        case managedByHomebrew
+        case managedManually
+        case foregroundDaemon
+        case indeterminate
+    }
+
+    let kind: Kind
+    let message: String
+}
+
 /// The thin side-effect wrapper over `SMAppService.agent`, exposing a published
 /// `installState` (the closed, loud `LaunchAgentStatus.State`) and the
 /// spawn-gated install/uninstall actions every surface drives. Decisions are the
@@ -129,30 +146,80 @@ final class AgentController {
     private let registrar: ServiceRegistrar
     private let spawnGate: () async -> SpawnGate
     private let eligibilityProvider: () -> LaunchAgentStatus.Eligibility
+    private let bundledAgentPresentProvider: () -> Bool
+    private let probeProvider: @Sendable (String) async -> LaunchdProbeResult
+    private let socketAnswersProvider: () -> Bool
+    private let homeIsCanonicalProvider: () -> Bool
+    private let manualPlistPersistedProvider: () -> Bool
 
     private var activationObserver: NSObjectProtocol?
 
     init(
         registrar: ServiceRegistrar,
         spawnGate: @escaping () async -> SpawnGate = { .allow },
-        eligibility: @escaping () -> LaunchAgentStatus.Eligibility = { AgentController.bundleEligibility() }
+        eligibility: @escaping () -> LaunchAgentStatus.Eligibility = { AgentController.bundleEligibility() },
+        bundledAgentPresent: @escaping () -> Bool = { AgentController.bundledAgentPresent() },
+        probe: @escaping @Sendable (String) async -> LaunchdProbeResult = { await LaunchdProbe.probe(label: $0) },
+        socketAnswers: @escaping () -> Bool = { RunnyHome.socketExists },
+        homeIsCanonical: @escaping () -> Bool = { true },
+        manualPlistPersisted: @escaping () -> Bool = { AgentController.manualPlistPersisted() }
     ) {
         self.registrar = registrar
         self.spawnGate = spawnGate
         eligibilityProvider = eligibility
-        // Re-read the install status when the app returns to the foreground — e.g.
-        // after the user enabled the agent in System Settings via the Login Items
-        // CTA — so an already-open window doesn't stay stale at .requiresApproval
-        // until it is reopened. Cheap (an SMAppService status read), so it's fine on
-        // every activation; reconcile is left to the per-surface appear.
+        bundledAgentPresentProvider = bundledAgentPresent
+        probeProvider = probe
+        socketAnswersProvider = socketAnswers
+        homeIsCanonicalProvider = homeIsCanonical
+        manualPlistPersistedProvider = manualPlistPersisted
+        // Re-read the install status AND the ownership verdict when the app returns
+        // to the foreground — e.g. after the user enabled the agent in System
+        // Settings via the Login Items CTA, or a brew daemon appeared while the app
+        // was idle — so an already-open window doesn't stay stale. The status read is
+        // cheap; the ownership refresh runs the bounded probes off the main actor.
         // [weak self] + app-lifetime AgentController: no explicit removal needed (a
         // nonisolated deinit can't touch the MainActor property anyway, and the
         // controller never deinits — it's a @State for the app's whole run).
         activationObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refresh() }
+            MainActor.assumeIsolated {
+                self?.refresh()
+                Task { await self?.refreshOwnership() }
+            }
         }
+    }
+
+    /// The production controller: a real `SMAppServiceRegistrar`, and a spawn gate
+    /// that gathers the live ownership verdict and denies install/repair/start for
+    /// any foreign or indeterminate owner. The same gather feeds `refreshOwnership`
+    /// (the observer banner), so the gate and the UI never disagree. The socket axis
+    /// is the conservative `RunnyHome.socketExists`: a present socket reads as
+    /// occupied (blocking install is safe), since a file stat can't distinguish a
+    /// stale inode from a wedged daemon — and a false "empty" would be the stomp.
+    @MainActor
+    static func live() -> AgentController {
+        let registrar = SMAppServiceRegistrar()
+        let probe: @Sendable (String) async -> LaunchdProbeResult = { await LaunchdProbe.probe(label: $0) }
+        let socketAnswers = { RunnyHome.socketExists }
+        let homeIsCanonical = { true }
+        let bundledAgentPresent = { AgentController.bundledAgentPresent() }
+        let manualPlistPersisted = { AgentController.manualPlistPersisted() }
+        return AgentController(
+            registrar: registrar,
+            spawnGate: {
+                await gateFor(gatherOwnership(
+                    registrar: registrar, probe: probe, socketAnswers: socketAnswers,
+                    homeIsCanonical: homeIsCanonical, bundledAgentPresent: bundledAgentPresent,
+                    manualPlistPersisted: manualPlistPersisted
+                ))
+            },
+            bundledAgentPresent: bundledAgentPresent,
+            probe: probe,
+            socketAnswers: socketAnswers,
+            homeIsCanonical: homeIsCanonical,
+            manualPlistPersisted: manualPlistPersisted
+        )
     }
 
     /// Whether this running bundle may install its agent — translocated, in
@@ -173,10 +240,120 @@ final class AgentController {
         )
     }
 
+    /// Whether the LaunchAgent plist is actually present in the running bundle at
+    /// the SMAppService-resolved `Contents/Library/LaunchAgents/<plistName>`. A
+    /// release carries it (injected before signing); a bare `bazel run` dev build
+    /// does not. This is the independent fact that disambiguates SMAppService's
+    /// overloaded `.notFound` — never-registered-but-bundled (installable) vs.
+    /// genuinely-no-agent (a dev build) — which the status alone cannot tell apart.
+    nonisolated static func bundledAgentPresent() -> Bool {
+        let url = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Library/LaunchAgents")
+            .appendingPathComponent(SMAppServiceRegistrar.plistName)
+        return FileManager.default.fileExists(atPath: url.path)
+    }
+
+    /// Whether the manual installer's plist persists at
+    /// `~/Library/LaunchAgents/com.coderinserepeat.runnyd.plist`. launchd auto-loads
+    /// that directory at login, so a manual agent `bootout`'d but not `rm`'d is a
+    /// dormant owner the loaded-label probe can't see. The app never writes here
+    /// (SMAppService registers the in-bundle plist), so a file at this path is
+    /// unambiguously foreign — feeds `classify` as the `manualPlistPersisted` signal.
+    nonisolated static func manualPlistPersisted() -> Bool {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents")
+            .appendingPathComponent("\(DaemonOwnership.canonicalLabel).plist")
+        return FileManager.default.fileExists(atPath: url.path)
+    }
+
     /// Recompute `installState` from the registrar's status. Called on appear and
-    /// after every op — the single place a status maps to state.
+    /// after every op — the single place a status maps to state. Passes whether the
+    /// plist is actually bundled so the overloaded `.notFound` resolves correctly:
+    /// a never-registered release agent is installable, a no-plist dev build is not.
     func refresh() {
-        installState = LaunchAgentStatus.state(from: registrar.status())
+        installState = LaunchAgentStatus.state(
+            from: registrar.status(), bundledAgentPresent: bundledAgentPresentProvider()
+        )
+    }
+
+    /// Who manages the daemon, refreshed on app-foreground and (freshly, by the
+    /// production spawn gate) before any spawn. Read by the observer banner to name
+    /// the managing channel. Starts `.indeterminate` (defer until a real gather
+    /// runs); the gate never trusts this stale value — it gathers fresh per attempt.
+    private(set) var ownership: DaemonOwnership = .indeterminate
+
+    /// Whether a real gather has run yet. The initial `.indeterminate` is "not
+    /// checked", not a verdict — the banner shows "Checking…" until this flips, so a
+    /// pristine launch never flashes the indeterminate diagnostic before the probes
+    /// have run.
+    private(set) var ownershipChecked = false
+
+    private var ownershipInFlight = false
+    private var ownershipPending = false
+
+    /// Gather the ownership inputs and publish the verdict (for the banner). The
+    /// gate's pre-act recheck calls `gatherOwnership` directly for a fresh verdict.
+    /// Coalesces overlapping triggers — the activation observer and a surface's
+    /// `.task` can both fire on one foreground — so a trigger arriving mid-gather
+    /// loops the active run once more against the latest state rather than spawning a
+    /// second concurrent probe pair and racing last-writer-wins to publish.
+    func refreshOwnership() async {
+        if ownershipInFlight {
+            ownershipPending = true
+            return
+        }
+        ownershipInFlight = true
+        defer { ownershipInFlight = false }
+        repeat {
+            ownershipPending = false
+            ownership = await Self.gatherOwnership(
+                registrar: registrar, probe: probeProvider, socketAnswers: socketAnswersProvider,
+                homeIsCanonical: homeIsCanonicalProvider, bundledAgentPresent: bundledAgentPresentProvider,
+                manualPlistPersisted: manualPlistPersistedProvider
+            )
+            ownershipChecked = true
+        } while ownershipPending
+    }
+
+    /// Re-gather ownership and report whether it still matches `expected` — for the
+    /// daemon-affecting actions that fire OUTSIDE the spawn gate (the approval CTA that
+    /// opens Login Items, the drain-gated Update) and so can't trust the render-time
+    /// verdict. The spawn gate re-gathers per attempt; these must too, or a foreign owner
+    /// that appeared while the window stayed open lets the stale CTA fire over it
+    /// (approving a competing agent, or draining a now-foreign fleet). Publishing the
+    /// fresh verdict also flips the surface to the observer banner when it returns false.
+    func revalidate(_ expected: DaemonOwnership) async -> Bool {
+        await refreshOwnership()
+        return ownership == expected
+    }
+
+    /// Gather the four orthogonal facts and `classify` them. The two label probes
+    /// run concurrently (independent, each bounded) so the install tap waits at most
+    /// one probe bound, not two; the self-status read and the socket/home axes are
+    /// cheap. Static so both `refreshOwnership` and the production gate share one
+    /// gather without a self-reference cycle.
+    @MainActor
+    static func gatherOwnership(
+        registrar: ServiceRegistrar,
+        probe: @Sendable (String) async -> LaunchdProbeResult,
+        socketAnswers: () -> Bool,
+        homeIsCanonical: () -> Bool,
+        bundledAgentPresent: () -> Bool,
+        manualPlistPersisted: () -> Bool
+    ) async -> DaemonOwnership {
+        async let brew = probe(DaemonOwnership.brewLabel)
+        async let canonical = probe(DaemonOwnership.canonicalLabel)
+        let selfState = LaunchAgentStatus.state(
+            from: registrar.status(), bundledAgentPresent: bundledAgentPresent()
+        )
+        return await DaemonOwnership.classify(DaemonOwnershipInputs(
+            homeIsCanonical: homeIsCanonical(),
+            selfState: selfState,
+            brewProbe: brew,
+            canonicalProbe: canonical,
+            socketAnswers: socketAnswers(),
+            manualPlistPersisted: manualPlistPersisted()
+        ))
     }
 
     // MARK: - Spawn-triggering actions (every one funnels through attemptSpawn)
@@ -188,7 +365,17 @@ final class AgentController {
         case .ran:
             refresh()
             reconcileState = .notChecked // the registration changed — re-check on next appear
-        case .denied: break // spawnRefusal already set; installState unchanged
+            // Re-gather ownership too: the affordances gate on the verdict (Start needs
+            // selfManaged, the approval CTA awaitingApproval, Update selfManaged), so
+            // without this the just-installed agent stays the pre-install `.unmanaged`
+            // verdict until the next app activation — suppressing the very controls the
+            // install just enabled.
+            await refreshOwnership()
+        case .denied:
+            // A foreign manager appeared since the last refresh, so the fresh pre-act
+            // gate denied. Publish the new verdict so the observer banner replaces the
+            // toggle — otherwise a dead Install button silently no-ops on every click.
+            await refreshOwnership()
         case let .failed(error):
             installState = .registrationFailed(reason: "install failed: \(error.localizedDescription)")
         }
@@ -224,6 +411,11 @@ final class AgentController {
         switch await attemptSpawn("start", { try await self.registrar.kickstart() }) {
         case .denied:
             startOutcome = .refused(spawnRefusal ?? "start was blocked")
+            // Publish the fresh foreign verdict the gate just gathered (as install()'s
+            // denied path does), so the Start row gives way to the observer banner —
+            // otherwise the stale .selfManaged keeps a Start button the gate re-denies on
+            // every Try Again until the next app activation.
+            await refreshOwnership()
             return
         case let .failed(error):
             startOutcome = .refused("could not start runnyd: \(error.localizedDescription)")
@@ -287,45 +479,117 @@ final class AgentController {
         } while reconcilePending
     }
 
-    /// Repair a foreign/stale-path agent by re-registering the canonical agent,
-    /// which re-points the SMAppService job's bundle-relative program to this
-    /// bundle, then re-reconciling to self-verify the re-point actually took.
-    /// Funnels through the spawn chokepoint exactly like `install()`. Only
-    /// meaningful from a canonical-eligible bundle — re-registering elsewhere would
-    /// install ANOTHER non-canonical agent — so the surface gates the action on
-    /// `canRepair`, the same way it gates install on `canToggle`, AND raises a
-    /// confirmation that warns about displacing a foreign manager (the spawn gate
-    /// is `.allow` until detect-and-defer lands, so the consent is the guard). If
-    /// the re-point does not take (a foreign MANAGER still owns the label), the
-    /// re-run reconcile honestly keeps showing foreign rather than a false
-    /// all-clear off the register return.
+    /// Repair a stale-path self-managed agent by a verified unregister→register
+    /// replace: `unregister()` clears the stale registration, then `register()`
+    /// re-adds it pointing at this (canonical) bundle. A bare `register()` on an
+    /// already-registered agent is NOT a reliable re-point — some macOS versions
+    /// return already-registered without updating the program path — so the replace
+    /// is what actually moves the program. Re-reconciles afterward to self-verify
+    /// the re-point took, rather than trusting the call's return.
     ///
-    /// Known limitation, deliberately accepted: `register()` on an
-    /// already-registered agent is NOT a verified re-point — on some macOS
-    /// versions it returns already-registered rather than updating the program
-    /// path, which surfaces here as a loud `repairError` (the `.failed` arm
-    /// preserves the install state). The robust path — a verified
-    /// `unregister`→`register` replace plus a real ownership verdict in the spawn
-    /// gate — lands with detect-and-defer, which replaces this method wholesale.
-    /// Shipping the best-effort version is safe because no release falls between
-    /// here and that work, and it fails loudly rather than silently.
-    func repair() async {
+    /// Only the daemon's own stale agent is reached: the spawn gate denies every
+    /// foreign/indeterminate verdict, and the observer banner replaces the install
+    /// section (which hosts the Repair button) for a foreign owner — so a
+    /// brew/manual daemon is never reached here, let alone unregistered. The surface
+    /// also gates the button on `canRepair` (a canonical-eligible bundle only;
+    /// re-registering elsewhere would install ANOTHER non-canonical agent).
+    ///
+    /// The replace waits for BOTH steps to actually take — an SMAppService call
+    /// returning means launchd ACCEPTED the request, not that it finished. It waits for
+    /// the unregister so the re-register can't race a still-converging removal into an
+    /// already-registered no-op, AND for the re-register (`awaitRegistered`) so the
+    /// self-verifying reconcile doesn't read a still-converging registration as
+    /// `.notRegistered` (→ a false `.ok` that clears the warning before the re-point
+    /// lands). Bounded both ways: an unconfirmed removal OR an unconfirmed re-register
+    /// aborts loud rather than reporting a false-verified repair. The surface raises the
+    /// same live-guest abandon confirmation `uninstall()` uses before calling this, since
+    /// `unregister()` can evict a running job on some macOS versions.
+    ///
+    /// Failure is honest: if `register()` throws after the `unregister()` took, the
+    /// agent is genuinely gone, so installState (derived from status) reflects that
+    /// and the toggle offers reinstall — recoverable and loud, never a silent stale
+    /// agent. A denied gate never unregisters, so the foreign agent stays intact.
+    func repair(
+        within bound: Duration = AgentController.unregisterConfirmBound, poll: Duration = .milliseconds(100)
+    ) async {
         repairError = nil
-        switch await attemptSpawn("repair", { try self.registrar.register() }) {
+        switch await attemptSpawn("repair", {
+            try self.registrar.unregister()
+            try await self.awaitUnregistered(within: bound, poll: poll)
+            try self.registrar.register()
+            // Wait for the re-register to actually take before declaring success — a
+            // register() that returned only means launchd ACCEPTED it. Without this, the
+            // post-repair reconcile can read the still-converging agent as .notRegistered
+            // → .ok and clear the warning while the re-point hasn't landed.
+            try await self.awaitRegistered(within: bound, poll: poll)
+        }) {
         case .ran:
             refresh()
             await runReconcile()
         case .denied:
-            // The gate blocked the re-register. installState/reconcileState are
-            // unchanged, so without surfacing this the warning + button would just
-            // silently persist — surface the refusal loudly in the row.
+            // The gate blocked the replace before any unregister — installState and
+            // reconcileState are unchanged, so surface the refusal loudly. Publish the
+            // fresh foreign verdict the gate gathered (as the install/start denied paths
+            // do) so the observer banner replaces the Repair UI — otherwise the stale
+            // selfManaged verdict keeps a Repair button the gate re-denies on every press.
             repairError = spawnRefusal
+            await refreshOwnership()
         case let .failed(error):
-            // A re-register throw does NOT unregister the existing (foreign) agent,
-            // so keep installState derived from status — the uninstall path must
-            // survive — and surface the repair error separately.
+            // unregister/register/the wait threw; installState derives from status
+            // (gone if the unregister took and the register then failed), so the
+            // uninstall/reinstall path stays honest. Surface the error, never silently.
+            // Re-reconcile too: if the unregister took, the pre-repair .foreign verdict
+            // is stale — leaving it would keep the row claiming an agent is registered at
+            // the old path and offering a Repair that now just unregisters nothing.
             refresh()
             repairError = "repair failed: \(error.localizedDescription)"
+            await runReconcile()
+        }
+    }
+
+    /// How long to wait for `unregister()` to be reflected in status before giving up
+    /// — a launchd removal is near-instant, so this is healthy-magnitude × margin.
+    static let unregisterConfirmBound: Duration = .seconds(5)
+
+    /// Poll the authoritative status until it confirms the agent is gone
+    /// (`.notRegistered`/`.notFound`), bounded. Throws on expiry so repair aborts loud
+    /// rather than re-registering over a still-registered agent.
+    private func awaitUnregistered(within bound: Duration, poll: Duration) async throws {
+        let deadline = ContinuousClock.now.advanced(by: bound)
+        while true {
+            switch registrar.status() {
+            case .notRegistered, .notFound: return
+            default: break
+            }
+            if ContinuousClock.now >= deadline {
+                throw LaunchctlFailure(
+                    message: "the existing agent did not unregister in time; aborted to avoid re-registering over it"
+                )
+            }
+            try await Task.sleep(for: poll)
+        }
+    }
+
+    /// Poll the authoritative status until it confirms the re-registered agent has
+    /// appeared (`.enabled`/`.requiresApproval`), bounded — the symmetric partner of
+    /// `awaitUnregistered`. `register()` returning means launchd ACCEPTED the request,
+    /// not that it finished, so without this the post-repair reconcile can read the
+    /// still-absent agent as `.notRegistered` (→ `.ok`) and clear the warning while the
+    /// registration is still converging. Throws on expiry so repair aborts loud rather
+    /// than reporting a false-verified re-point off a call that only requested it.
+    private func awaitRegistered(within bound: Duration, poll: Duration) async throws {
+        let deadline = ContinuousClock.now.advanced(by: bound)
+        while true {
+            switch registrar.status() {
+            case .enabled, .requiresApproval: return
+            default: break
+            }
+            if ContinuousClock.now >= deadline {
+                throw LaunchctlFailure(
+                    message: "the re-registered agent did not appear in time; aborted rather than report a false re-point"
+                )
+            }
+            try await Task.sleep(for: poll)
         }
     }
 
@@ -434,6 +698,81 @@ extension AgentController {
     nonisolated static func canRepair(reconcile: AgentReconcile, eligibility: LaunchAgentStatus.Eligibility) -> Bool {
         if case .foreign = reconcile, eligibility == .eligible { return true }
         return false
+    }
+
+    /// Map an ownership verdict to a spawn-gate decision. Install/repair/start
+    /// proceed only when the daemon is ours (`selfManaged`) or unowned
+    /// (`unmanaged`); every foreign or indeterminate verdict denies and routes the
+    /// surface to the observer banner — so the app never installs a second manager,
+    /// never kicks a hand-run daemon, and never acts on an inconclusive probe. Pure
+    /// → unit-tested. The `reason` is a short refusal; the banner carries the full
+    /// channel-specific guidance.
+    nonisolated static func gateFor(_ ownership: DaemonOwnership) -> SpawnGate {
+        switch ownership {
+        case .unmanaged, .selfManaged:
+            .allow
+        case .foreignBrew:
+            .deny(reason: "Homebrew manages runnyd on this host")
+        case .foreignManual:
+            .deny(reason: "a manually-installed LaunchAgent manages runnyd")
+        case .foreground:
+            .deny(reason: "a runnyd is already running with no managing agent")
+        case .awaitingApproval:
+            .deny(reason: "the runnyd agent is registered and awaiting Login Items approval")
+        case .indeterminate:
+            .deny(reason: "couldn't determine who manages runnyd")
+        }
+    }
+
+    /// The observer banner for a verdict that is not the app's to install over.
+    /// `nil` for `unmanaged`/`selfManaged` (the install/toggle UI applies) and for
+    /// `awaitingApproval` (the Login Items approval CTA, driven by `installState`,
+    /// already covers it). The `foreignManual` command is the **checkout-free**
+    /// `launchctl bootout` — never `tools/deploy/uninstall.sh`, which a host that
+    /// installed from a one-off `.dmg` no longer has. Pure → unit-tested wording.
+    nonisolated static func observerMessage(for ownership: DaemonOwnership) -> ObserverHint? {
+        switch ownership {
+        case .unmanaged, .selfManaged, .awaitingApproval:
+            nil
+        case .foreignBrew:
+            // Name the destructive nature of the restart: `brew services restart` does
+            // not drain — it stops the daemon, abandoning any in-flight job. Runny can't
+            // drain a daemon it doesn't manage, so the most it can do is warn.
+            ObserverHint(
+                kind: .managedByHomebrew,
+                message: "Homebrew manages runnyd on this host. Upgrade or restart it with "
+                    + "`brew services restart runny` — note this stops any in-flight job, so idle it "
+                    + "first. Runny won't install a competing agent."
+            )
+        case .foreignManual:
+            // Two states share this verdict: a LOADED manual job, and a DORMANT plist whose
+            // job was already booted out. bootout removes a loaded job; the persisted plist
+            // (~/Library/LaunchAgents, which launchd reloads at next login) is what actually
+            // makes a dormant owner. The separator is `;` not `&&`, and `rm -f`, BECAUSE the
+            // dormant case has nothing to boot out — bootout exits nonzero there, and an `&&`
+            // would skip the rm that is the whole point of clearing it.
+            ObserverHint(
+                kind: .managedManually,
+                message: "A manually-installed LaunchAgent manages runnyd. To let Runny manage it "
+                    + "instead — once no job is running, since this stops a loaded one immediately — "
+                    + "remove that agent with `launchctl bootout gui/$(id -u)/\(DaemonOwnership.canonicalLabel) "
+                    + "2>/dev/null; rm -f ~/Library/LaunchAgents/\(DaemonOwnership.canonicalLabel).plist`, "
+                    + "then reopen Runny."
+            )
+        case .foreground:
+            ObserverHint(
+                kind: .foregroundDaemon,
+                message: "A runnyd is already serving the socket with no managing agent. Stop it "
+                    + "before installing the login agent so two daemons don't race for the socket — "
+                    + "or, if nothing is running, remove a stale ~/.runny/runnyd.sock and reopen Runny."
+            )
+        case .indeterminate:
+            ObserverHint(
+                kind: .indeterminate,
+                message: "Couldn't determine who manages runnyd, so Runny isn't installing. Check "
+                    + "`launchctl print gui/$(id -u)/\(DaemonOwnership.canonicalLabel)` and reopen Runny."
+            )
+        }
     }
 
     /// Pure: pull the resolved program path out of `launchctl print` output, which

@@ -13,7 +13,15 @@ struct DaemonUpdateAffordance: View {
 
     var body: some View {
         switch store.daemonUpdate(
-            agentInstalled: agent.installState == .installed,
+            // Require BOTH ownership and installState — each guards a distinct way the
+            // other goes stale. ownership == .selfManaged rejects a Homebrew collision
+            // (our agent .installed but brew's, possibly older, daemon is what runs, so a
+            // drain-gated Update can't take). installState == .installed rejects a stale
+            // .selfManaged left behind by a teardown the verdict didn't re-gather (a
+            // partial uninstall/failed repair where the agent is gone but the daemon
+            // lingers connected) — Updating that would drain a daemon with no agent to
+            // respawn it. The AND can't be fooled by a single stale signal.
+            agentInstalled: agent.ownership == .selfManaged && agent.installState == .installed,
             agentCanonical: agentCanonical,
             runningBundleCanonical: agent.eligibility == .eligible
         ) {
@@ -46,7 +54,15 @@ struct DaemonUpdateAffordance: View {
     /// (otherwise the dialog has no presenter and the update silently no-ops).
     private func update() {
         activation.openMainWindow(openWindow)
-        store.requestDaemonUpdate()
+        Task {
+            // Re-gather before arming the drain-gated update: Update fires outside the
+            // spawn gate, so a foreign daemon that took over while the window stayed open
+            // must cancel it — draining a foreign fleet for an update that can't take is
+            // active harm, not a no-op. The render gate can be minutes stale by click.
+            if await agent.revalidate(.selfManaged), agent.installState == .installed {
+                store.requestDaemonUpdate()
+            }
+        }
     }
 
     /// Update requires AFFIRMATIVE canonical confirmation — `.ok`, not the

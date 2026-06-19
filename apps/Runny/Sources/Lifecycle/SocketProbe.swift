@@ -44,8 +44,9 @@ enum SocketDialResult: Equatable {
 enum SocketProbe {
     /// Hard wall-clock bound on one `connect()`. A local unix connect resolves in
     /// microseconds — success and `ECONNREFUSED` both return immediately — so this
-    /// bound only ever fires on a saturated-backlog listener where the non-blocking
-    /// connect went `EINPROGRESS`. Healthy-magnitude × margin, not a budget sum.
+    /// bound only ever fires on a saturated-backlog listener, where the non-blocking
+    /// connect goes `EINPROGRESS` (or, on Darwin, `EAGAIN`) and the `poll()` wait
+    /// engages. Healthy-magnitude × margin, not a budget sum.
     static let timeout: Duration = .seconds(2)
 
     /// Probe one socket path. The dialer seam is injectable so the result mapping is
@@ -133,7 +134,12 @@ struct POSIXSocketDialer: SocketDialer {
         }
         if rc == 0 { return .connected }
         switch errno {
-        case EINPROGRESS: return Self.awaitConnect(fd: fd, timeout: timeout)
+        // EINPROGRESS is the usual "completing asynchronously" code; on Darwin a
+        // non-blocking AF_UNIX connect to a saturated-backlog listener can instead
+        // return EAGAIN (== EWOULDBLOCK), which is *also* pollable for completion —
+        // route both through the bounded poll so a live-but-busy daemon resolves to
+        // `listening`/`timedOut` (occupied) rather than the `default` error path.
+        case EINPROGRESS, EAGAIN: return Self.awaitConnect(fd: fd, timeout: timeout)
         case ECONNREFUSED: return .refused
         case ENOENT: return .noEntry
         default: return .dialFailed("connect(): errno \(errno)")
@@ -142,30 +148,43 @@ struct POSIXSocketDialer: SocketDialer {
 
     /// Wait — bounded by `poll()` — for an in-progress non-blocking connect, then
     /// read `SO_ERROR` for the real outcome. `ECONNREFUSED` surfaced here is the same
-    /// stale-inode signal as a synchronous refusal.
+    /// stale-inode signal as a synchronous refusal. `EINTR` retries against the
+    /// REMAINING budget so a signal can't turn a still-resolving connect into a
+    /// failure, and can't extend the wall-clock bound either.
     private static func awaitConnect(fd: Int32, timeout: Duration) -> SocketDialResult {
-        var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-        switch poll(&pfd, 1, Self.milliseconds(timeout)) {
-        case 0: return .timedOut
-        case ..<0: return .dialFailed("poll(): errno \(errno)")
-        default: break
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while true {
+            let remaining = deadline - ContinuousClock.now
+            if remaining <= .zero { return .timedOut }
+            var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+            let n = poll(&pfd, 1, Self.milliseconds(remaining))
+            if n == 0 { return .timedOut }
+            if n < 0 {
+                if errno == EINTR { continue } // interrupted — re-poll with what's left
+                return .dialFailed("poll(): errno \(errno)")
+            }
+            break
         }
         var soerr: Int32 = 0
         var len = socklen_t(MemoryLayout<Int32>.size)
         guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len) >= 0 else {
             return .dialFailed("getsockopt(SO_ERROR): errno \(errno)")
         }
+        // SO_ERROR after an async unix connect carries only success or refusal; ENOENT
+        // is decided synchronously at connect() time, so it never arrives here.
         switch soerr {
         case 0: return .connected
         case ECONNREFUSED: return .refused
-        case ENOENT: return .noEntry
         default: return .dialFailed("connect: errno \(soerr)")
         }
     }
 
+    /// `Duration` → `poll()` milliseconds, clamped to at least 1 for a positive
+    /// duration so a sub-millisecond remainder never collapses to `poll(0)` (a
+    /// non-blocking immediate-return), and saturating rather than overflowing.
     private static func milliseconds(_ duration: Duration) -> Int32 {
         let c = duration.components
         let ms = c.seconds * 1000 + c.attoseconds / 1_000_000_000_000_000
-        return Int32(clamping: ms)
+        return Int32(clamping: Swift.max(1, ms))
     }
 }

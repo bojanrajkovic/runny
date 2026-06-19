@@ -167,7 +167,12 @@ extension DaemonOwnership {
     /// shared canonical label is disambiguated by self-status exactly as `classify`
     /// does: a registered canonical label is OURS when self is `.installed`, so it
     /// counts as a foreign *manual* load only when self is not `.installed` (a pending
-    /// agent isn't running and so can't be holding the loaded label).
+    /// agent isn't running and so can't be holding the loaded label). This `!= .installed`
+    /// rule MUST move in lockstep with `classify`'s self-identity ordering above; if that
+    /// ever changes which self-state holds the live label, change `manualLoaded` with it.
+    /// The safety direction is structural regardless: under a `selfManaged` verdict self
+    /// is necessarily `.installed`, so `manualLoaded` is false and `manualCleanupCommand`
+    /// can never bootout the label our own agent holds.
     nonisolated static func collisions(_ inputs: DaemonOwnershipInputs) -> DaemonOwnershipCollisions {
         DaemonOwnershipCollisions(
             brew: inputs.brewProbe == .registered,

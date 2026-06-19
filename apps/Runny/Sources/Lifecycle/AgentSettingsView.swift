@@ -251,9 +251,17 @@ struct AgentInstallRow: View {
     /// prove otherwise), else uninstall directly. Shared by the toggle and the
     /// brew-collision removal so neither route bypasses the warning.
     private func requestUninstall() {
-        if DaemonStore.uninstallNeedsConfirmation(
-            connected: store.connection == .connected, liveGuestSlots: store.liveGuestSlots
-        ) {
+        // A pending (`.requiresApproval`) agent is registered but never started, so it
+        // can't be the daemon serving any job — removing it abandons nothing. Skip the
+        // abandon confirmation, whose text describes stopping a SERVING daemon: under a
+        // foreign owner the connected daemon (and its live slots) belongs to that owner,
+        // not our pending agent, so that warning would be false. An `.installed` agent
+        // could be the one holding the socket, so it still confirms conservatively.
+        if agent.installState != .requiresApproval,
+           DaemonStore.uninstallNeedsConfirmation(
+               connected: store.connection == .connected, liveGuestSlots: store.liveGuestSlots
+           )
+        {
             confirmingUninstall = true
         } else {
             Task { await agent.uninstall() }

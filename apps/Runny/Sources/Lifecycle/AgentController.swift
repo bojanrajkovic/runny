@@ -789,6 +789,27 @@ extension AgentController {
         }
     }
 
+    /// The shell command to clear a foreign *manual* registration the verdict didn't
+    /// name — for the collision warnings (`selfManaged` hiding a dormant plist,
+    /// `foreignBrew` hiding a co-present manual install). nil when no manual
+    /// registration is present. The command is built from what's actually there:
+    /// `launchctl bootout` ONLY when the canonical label is loaded by a foreign job
+    /// (`manualLoaded` — true only when self isn't `.installed`, so the loaded label
+    /// is never ours), and `rm -f` ONLY when a dormant plist persists. This is the
+    /// safety crux: when our own agent is enabled it holds the canonical label, so a
+    /// bootout of that label would evict OUR agent — `manualLoaded` is false in that
+    /// case, so the command degrades to `rm` of the plist alone. Pure → unit-tested.
+    nonisolated static func manualCleanupCommand(_ collisions: DaemonOwnershipCollisions) -> String? {
+        guard collisions.manual else { return nil }
+        let label = DaemonOwnership.canonicalLabel
+        var parts: [String] = []
+        // `2>/dev/null` because a dormant-only case has nothing loaded to boot out;
+        // the parts are joined with `;` (not `&&`) so a no-op bootout never skips the rm.
+        if collisions.manualLoaded { parts.append("launchctl bootout gui/$(id -u)/\(label) 2>/dev/null") }
+        if collisions.manualPlist { parts.append("rm -f ~/Library/LaunchAgents/\(label).plist") }
+        return parts.joined(separator: "; ")
+    }
+
     /// Pure: pull the resolved program path out of `launchctl print` output, which
     /// prints a `program = /path` line for a loaded job. Defensive — returns nil if
     /// the line is absent (an unparseable/old format reconciles to undetermined,

@@ -13,11 +13,13 @@ final class DaemonOwnershipTests: XCTestCase {
         selfState: LaunchAgentStatus.State = .notInstalled,
         brewProbe: LaunchdProbeResult = .notRegistered,
         canonicalProbe: LaunchdProbeResult = .notRegistered,
-        socketAnswers: Bool = false
+        socketAnswers: Bool = false,
+        manualPlistPersisted: Bool = false
     ) -> DaemonOwnershipInputs {
         DaemonOwnershipInputs(
             homeIsCanonical: homeIsCanonical, selfState: selfState,
-            brewProbe: brewProbe, canonicalProbe: canonicalProbe, socketAnswers: socketAnswers
+            brewProbe: brewProbe, canonicalProbe: canonicalProbe, socketAnswers: socketAnswers,
+            manualPlistPersisted: manualPlistPersisted
         )
     }
 
@@ -162,6 +164,36 @@ final class DaemonOwnershipTests: XCTestCase {
         XCTAssertEqual(
             DaemonOwnership.classify(inputs(brewProbe: .indeterminate, socketAnswers: true)),
             .indeterminate
+        )
+    }
+
+    // MARK: - Persisted manual plist (the dormant-installer blind spot)
+
+    func testPersistedManualPlistIsForeignNotUnmanaged() {
+        // A manual install that was `bootout`'d but whose plist still sits in
+        // ~/Library/LaunchAgents reads as notRegistered on both probes and a silent
+        // socket — but launchd auto-loads that plist at next login, so installing the app
+        // agent now would create a same-label conflict. The on-disk plist is an ownership
+        // signal: it must surface as foreignManual, never unmanaged (the install verdict).
+        XCTAssertEqual(DaemonOwnership.classify(inputs(manualPlistPersisted: true)), .foreignManual)
+    }
+
+    func testPersistedManualPlistDefersApproval() {
+        // The same dormant plist must also block the approval all-clear — approving our
+        // agent would contend with the plist launchd reloads at next login.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .requiresApproval, manualPlistPersisted: true)),
+            .indeterminate
+        )
+    }
+
+    func testSelfIdentityStillWinsOverADormantManualPlist() {
+        // If our agent is enabled, WE manage the daemon now; a dormant manual plist is a
+        // separate latent cleanup, not a reason to call our own daemon foreign. Install
+        // isn't gated when selfManaged anyway, so self-identity still resolves first.
+        XCTAssertEqual(
+            DaemonOwnership.classify(inputs(selfState: .installed, manualPlistPersisted: true)),
+            .selfManaged
         )
     }
 

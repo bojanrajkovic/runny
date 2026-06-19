@@ -114,8 +114,11 @@ it drops to an observer (status streams normally as a sibling client over the sa
 socket), replaces the install toggle with a banner naming the managing channel
 ("Managed by Homebrew — `brew services restart runny`"), and never displaces the
 other manager. To switch a host from brew/manual to the app, remove the foreign
-agent first (`brew services stop runny`, or
-`launchctl bootout gui/$(id -u)/com.coderinserepeat.runnyd`), then reopen Runny. A
+agent first — `brew services stop runny`, or for a manual install
+`launchctl bootout gui/$(id -u)/com.coderinserepeat.runnyd && rm ~/Library/LaunchAgents/com.coderinserepeat.runnyd.plist`
+(the `rm` is load-bearing: `bootout` only unloads the running job, but launchd
+reloads a leftover plist at next login, and the app treats a persisted plist as a
+dormant owner it will not install over) — then reopen Runny. A
 bundled `runnyctl` on PATH can lag a `brew`-managed `runnyd`; when it does,
 `runnyctl` prints a one-line version-skew warning to stderr before its output
 (warn, never refuse).

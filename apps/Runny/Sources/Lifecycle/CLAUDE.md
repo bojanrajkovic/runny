@@ -78,7 +78,10 @@ never exercised live in tests.
 - **Two orthogonal axes, and indeterminate dominates all but self-identity.** "An
   agent is registered under label X" (a `LaunchdProbe` of the brew + canonical
   labels) and "a daemon answers the socket" (`RunnyHome.socketExists`) are separate
-  facts, plus a home-canonical flag. A non-canonical home defers FIRST (ahead of
+  facts, plus a home-canonical flag and whether the manual installer's plist persists
+  on disk (`AgentController.manualPlistPersisted` — a dormant owner the loaded-label
+  probe is blind to, since launchd auto-loads `~/Library/LaunchAgents` at login;
+  surfaces as `foreignManual`). A non-canonical home defers FIRST (ahead of
   everything). The single signal that outranks a wedged/errored *probe* is
   authoritative self-identity: an `.enabled` self-status (`.installed`) resolves to
   `selfManaged` before the probe-indeterminate branch, so a transient probe wedge

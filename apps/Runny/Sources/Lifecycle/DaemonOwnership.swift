@@ -1,8 +1,9 @@
 import Foundation
 
 /// Who manages the daemon, as a pure verdict over the facts the app gathers:
-/// SMAppService self-status, two launchd-label probes, the socket axis, and a
-/// home-canonical flag. No side effects — `classify` is a `nonisolated static`
+/// SMAppService self-status, two launchd-label probes, the socket axis, a
+/// home-canonical flag, and whether a dormant manual plist persists on disk. No
+/// side effects — `classify` is a `nonisolated static`
 /// function over value types, unit-tested without a live daemon or launchd.
 /// Mirrors `LaunchAgentStatus`'s pure-verdict shape; the impure probe that
 /// produces `LaunchdProbeResult` lives in `LaunchdProbe`.
@@ -52,6 +53,13 @@ struct DaemonOwnershipInputs: Equatable {
     var canonicalProbe: LaunchdProbeResult
     /// Whether a daemon answers the socket.
     var socketAnswers: Bool
+    /// Whether the manual installer's plist persists at
+    /// `~/Library/LaunchAgents/com.coderinserepeat.runnyd.plist`. The launchd probes
+    /// see only what is *loaded*; a manual agent that was `bootout`'d but not `rm`'d
+    /// leaves its plist on disk, which launchd auto-loads at next login. The app never
+    /// writes there (SMAppService uses the in-bundle plist), so a file at that path is
+    /// unambiguously a foreign manual install — a dormant owner the probes are blind to.
+    var manualPlistPersisted: Bool
 }
 
 extension DaemonOwnership {
@@ -89,11 +97,14 @@ extension DaemonOwnership {
         case .requiresApproval:
             // Approving launches the RunAtLoad agent OUTSIDE the spawn gate (a System
             // Settings action), so awaitingApproval is safe only once a foreign owner is
-            // DEFINITIVELY ruled out: both probes confirmed `.notRegistered` and no
-            // socket. A registered label, an occupied socket, OR an inconclusive probe
-            // (a stopped-but-registered brew service that timed out, say) means a
-            // competing owner might be present — defer.
-            if inputs.brewProbe == .notRegistered, inputs.canonicalProbe == .notRegistered, !inputs.socketAnswers {
+            // DEFINITIVELY ruled out: both probes confirmed `.notRegistered`, no socket,
+            // AND no dormant manual plist on disk. A registered label, an occupied socket,
+            // an inconclusive probe (a stopped-but-registered brew service that timed out,
+            // say), OR a persisted manual plist (which launchd reloads at next login)
+            // means a competing owner might be present — defer.
+            if inputs.brewProbe == .notRegistered, inputs.canonicalProbe == .notRegistered,
+               !inputs.socketAnswers, !inputs.manualPlistPersisted
+            {
                 return .awaitingApproval
             }
             return .indeterminate
@@ -105,8 +116,12 @@ extension DaemonOwnership {
         case .notInstalled, .notFound:
             break
         }
-        // 5. The canonical label is registered but not ours — a manual installer.
-        if inputs.canonicalProbe == .registered { return .foreignManual }
+        // 5. A manual installer owns it — either its canonical label is loaded now, OR
+        //    its plist persists on disk (dormant after a `bootout` without `rm`, which
+        //    launchd reloads at next login). Both are foreign manual installs the app
+        //    must not displace; the on-disk plist is the signal the loaded-label probe
+        //    is blind to, and the one that turns this from `.unmanaged` into a stomp.
+        if inputs.canonicalProbe == .registered || inputs.manualPlistPersisted { return .foreignManual }
         // 6. An inconclusive probe dominates the PERMISSIVE verdicts below: "not sure
         //    who owns this" must never read as install-a-second-manager (unmanaged) or
         //    stop-a-hand-run-daemon (foreground). Determinate foreign owners already

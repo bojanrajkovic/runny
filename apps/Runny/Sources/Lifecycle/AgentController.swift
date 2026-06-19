@@ -150,6 +150,7 @@ final class AgentController {
     private let probeProvider: @Sendable (String) async -> LaunchdProbeResult
     private let socketAnswersProvider: () -> Bool
     private let homeIsCanonicalProvider: () -> Bool
+    private let manualPlistPersistedProvider: () -> Bool
 
     private var activationObserver: NSObjectProtocol?
 
@@ -160,7 +161,8 @@ final class AgentController {
         bundledAgentPresent: @escaping () -> Bool = { AgentController.bundledAgentPresent() },
         probe: @escaping @Sendable (String) async -> LaunchdProbeResult = { await LaunchdProbe.probe(label: $0) },
         socketAnswers: @escaping () -> Bool = { RunnyHome.socketExists },
-        homeIsCanonical: @escaping () -> Bool = { true }
+        homeIsCanonical: @escaping () -> Bool = { true },
+        manualPlistPersisted: @escaping () -> Bool = { AgentController.manualPlistPersisted() }
     ) {
         self.registrar = registrar
         self.spawnGate = spawnGate
@@ -169,6 +171,7 @@ final class AgentController {
         probeProvider = probe
         socketAnswersProvider = socketAnswers
         homeIsCanonicalProvider = homeIsCanonical
+        manualPlistPersistedProvider = manualPlistPersisted
         // Re-read the install status AND the ownership verdict when the app returns
         // to the foreground — e.g. after the user enabled the agent in System
         // Settings via the Login Items CTA, or a brew daemon appeared while the app
@@ -201,18 +204,21 @@ final class AgentController {
         let socketAnswers = { RunnyHome.socketExists }
         let homeIsCanonical = { true }
         let bundledAgentPresent = { AgentController.bundledAgentPresent() }
+        let manualPlistPersisted = { AgentController.manualPlistPersisted() }
         return AgentController(
             registrar: registrar,
             spawnGate: {
                 await gateFor(gatherOwnership(
                     registrar: registrar, probe: probe, socketAnswers: socketAnswers,
-                    homeIsCanonical: homeIsCanonical, bundledAgentPresent: bundledAgentPresent
+                    homeIsCanonical: homeIsCanonical, bundledAgentPresent: bundledAgentPresent,
+                    manualPlistPersisted: manualPlistPersisted
                 ))
             },
             bundledAgentPresent: bundledAgentPresent,
             probe: probe,
             socketAnswers: socketAnswers,
-            homeIsCanonical: homeIsCanonical
+            homeIsCanonical: homeIsCanonical,
+            manualPlistPersisted: manualPlistPersisted
         )
     }
 
@@ -244,6 +250,19 @@ final class AgentController {
         let url = Bundle.main.bundleURL
             .appendingPathComponent("Contents/Library/LaunchAgents")
             .appendingPathComponent(SMAppServiceRegistrar.plistName)
+        return FileManager.default.fileExists(atPath: url.path)
+    }
+
+    /// Whether the manual installer's plist persists at
+    /// `~/Library/LaunchAgents/com.coderinserepeat.runnyd.plist`. launchd auto-loads
+    /// that directory at login, so a manual agent `bootout`'d but not `rm`'d is a
+    /// dormant owner the loaded-label probe can't see. The app never writes here
+    /// (SMAppService registers the in-bundle plist), so a file at this path is
+    /// unambiguously foreign — feeds `classify` as the `manualPlistPersisted` signal.
+    nonisolated static func manualPlistPersisted() -> Bool {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents")
+            .appendingPathComponent("\(DaemonOwnership.canonicalLabel).plist")
         return FileManager.default.fileExists(atPath: url.path)
     }
 
@@ -289,7 +308,8 @@ final class AgentController {
             ownershipPending = false
             ownership = await Self.gatherOwnership(
                 registrar: registrar, probe: probeProvider, socketAnswers: socketAnswersProvider,
-                homeIsCanonical: homeIsCanonicalProvider, bundledAgentPresent: bundledAgentPresentProvider
+                homeIsCanonical: homeIsCanonicalProvider, bundledAgentPresent: bundledAgentPresentProvider,
+                manualPlistPersisted: manualPlistPersistedProvider
             )
             ownershipChecked = true
         } while ownershipPending
@@ -306,7 +326,8 @@ final class AgentController {
         probe: @Sendable (String) async -> LaunchdProbeResult,
         socketAnswers: () -> Bool,
         homeIsCanonical: () -> Bool,
-        bundledAgentPresent: () -> Bool
+        bundledAgentPresent: () -> Bool,
+        manualPlistPersisted: () -> Bool
     ) async -> DaemonOwnership {
         async let brew = probe(DaemonOwnership.brewLabel)
         async let canonical = probe(DaemonOwnership.canonicalLabel)
@@ -318,7 +339,8 @@ final class AgentController {
             selfState: selfState,
             brewProbe: brew,
             canonicalProbe: canonical,
-            socketAnswers: socketAnswers()
+            socketAnswers: socketAnswers(),
+            manualPlistPersisted: manualPlistPersisted()
         ))
     }
 

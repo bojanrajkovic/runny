@@ -188,7 +188,8 @@ final class AgentControllerTests: XCTestCase {
             registrar: mock,
             probe: { label in label == DaemonOwnership.brewLabel ? .registered : .notRegistered },
             socketAnswers: { false },
-            homeIsCanonical: { true }
+            homeIsCanonical: { true },
+            manualPlistPersisted: { false }
         )
         await c.refreshOwnership()
         XCTAssertEqual(c.ownership, .foreignBrew, "a registered brew label with no self-agent is foreignBrew")
@@ -198,10 +199,25 @@ final class AgentControllerTests: XCTestCase {
         let mock = MockRegistrar()
         mock.nextStatus = .enabled // ours
         let c = AgentController(
-            registrar: mock, probe: { _ in .notRegistered }, socketAnswers: { true }, homeIsCanonical: { true }
+            registrar: mock, probe: { _ in .notRegistered }, socketAnswers: { true }, homeIsCanonical: { true },
+            manualPlistPersisted: { false }
         )
         await c.refreshOwnership()
         XCTAssertEqual(c.ownership, .selfManaged)
+    }
+
+    func testRefreshOwnershipForeignManualWhenDormantPlistPersists() async {
+        // The round-6 wiring end-to-end: both probes silent, no socket, but the manual
+        // installer's plist persists on disk — gatherOwnership must feed that signal to
+        // classify so the verdict is foreignManual (a dormant owner), not unmanaged.
+        let mock = MockRegistrar()
+        mock.nextStatus = .notRegistered
+        let c = AgentController(
+            registrar: mock, probe: { _ in .notRegistered }, socketAnswers: { false }, homeIsCanonical: { true },
+            manualPlistPersisted: { true }
+        )
+        await c.refreshOwnership()
+        XCTAssertEqual(c.ownership, .foreignManual, "a persisted manual plist is a dormant owner, never unmanaged")
     }
 
     func testForeignOwnershipGateBlocksInstallWithoutRegistering() async {

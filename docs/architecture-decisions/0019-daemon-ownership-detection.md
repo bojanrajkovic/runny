@@ -50,6 +50,18 @@ for foreign detection.** Two sources, each authoritative about a different thing
   every absent label. A clean "could not find" is `notRegistered`; a timeout,
   launch failure, or any other error is `indeterminate`, never a false absence.
 
+- **Dormant manual install — whether the manual installer's plist persists at
+  `~/Library/LaunchAgents/com.coderinserepeat.runnyd.plist`.** The loaded-label
+  probe sees only what launchd has *bootstrapped*, but launchd auto-loads that
+  directory at login — so a manual agent `bootout`'d but not `rm`'d is a *dormant*
+  owner the probe is blind to. The app never writes there (SMAppService registers
+  the in-bundle plist), so a file at that path is unambiguously a foreign manual
+  install. Without this signal the documented brew/manual→app migration (a `bootout`
+  with no `rm`) would read as `unmanaged` and install a competing agent that the
+  leftover plist then contends with at the next login — the exact stomp this phase
+  exists to prevent. It surfaces as `foreignManual`, equal in weight to a loaded
+  canonical label.
+
 The verdict is a pure function over these inputs with **`indeterminate`-dominant
 precedence over all but one signal**: a non-canonical home or any inconclusive
 probe defers ahead of naming a foreign owner, stopping a hand-run daemon, or

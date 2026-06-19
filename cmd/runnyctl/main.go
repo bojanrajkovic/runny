@@ -998,6 +998,14 @@ func shortHex(h string) string {
 // uniseg measures monospace width per grapheme cluster — wide CJK and VS16/ZWJ
 // emoji count as two columns, ambiguous-width runes (accented Latin, the
 // ellipsis) as one — with a fixed policy independent of the operator's locale.
+//
+// Emoji width has no universal answer: terminals disagree, so no library is right
+// for every one. uniseg follows the Unicode rules and matches the common cases,
+// but a few presentation stragglers it sizes as one column — notably keycap
+// sequences like "1️⃣" (digit + VS16 + U+20E3) — render as two on some terminals
+// and can nudge a row's alignment. That residual is accepted: chasing each
+// cluster class would mean hand-coding against a single terminal's rendering, and
+// `runnyctl -json` is exact when precise output matters.
 func cellWidth(s string) int { return uniseg.StringWidth(s) }
 
 // pad right-pads s with spaces to display width w.

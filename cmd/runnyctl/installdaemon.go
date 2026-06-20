@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"runtime"
 
+	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/sysdaemon"
 )
 
@@ -39,7 +41,17 @@ func installDaemon(args []string) error {
 	cfg := sysdaemon.DefaultConfig()
 	cfg.Operator = operator
 	cfg.RunnydPath = runnyd
-	return sysdaemon.New(cfg).Install(context.Background())
+	if err := sysdaemon.New(cfg).Install(context.Background()); err != nil {
+		return err
+	}
+	dir := home.Dir(cfg.HomeDir)
+	fmt.Printf("\nrunnyd is installed and started as %s. Until a valid config is in place it\n"+
+		"crash-loops (expected — not a hang; watch %s/launchd.err.log). Next:\n"+
+		"  1. write %s (your account has write access via the ACL)\n"+
+		"  2. place the GitHub App key where its private_key_path points\n"+
+		"  3. runnyctl doctor   — the daemon comes up on its next restart\n",
+		sysdaemon.ServiceUser, dir.LogsDir(), dir.ConfigPath())
+	return nil
 }
 
 // uninstallDaemon removes the system LaunchDaemon. It leaves the service account
@@ -77,12 +89,21 @@ func requireDarwinRoot(name string) error {
 }
 
 // operatorAccount is the human operator the inheriting ACL grants access to.
-// Since the command runs as root, it is the account that invoked sudo.
+// Since the command runs as root, it is the account that invoked sudo. The name
+// is validated (it is interpolated into a security-critical ACL ACE) and checked
+// to resolve to a real local user BEFORE any privileged step runs, so a bad
+// value fails clean rather than half-installing.
 func operatorAccount() (string, error) {
 	op := os.Getenv("SUDO_USER")
 	if op == "" || op == "root" {
 		return "", fmt.Errorf("cannot determine the operator account: run via `sudo runnyctl install-daemon` " +
 			"from your normal login so SUDO_USER is set (the home's ACL grants that account access)")
+	}
+	if err := sysdaemon.ValidateOperatorName(op); err != nil {
+		return "", err
+	}
+	if _, err := user.Lookup(op); err != nil {
+		return "", fmt.Errorf("operator account %q does not resolve to a local user: %w", op, err)
 	}
 	return op, nil
 }

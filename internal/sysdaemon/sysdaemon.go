@@ -11,6 +11,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -75,8 +76,9 @@ func (c Config) PlistPath() string {
 // TN3179). KeepAlive is load-bearing: crash-only teardown and config reload both
 // exit non-zero expecting launchd to cold-start the daemon.
 func Plist(cfg Config) string {
-	out := filepath.Join(cfg.HomeDir, "logs", "launchd.out.log")
-	errp := filepath.Join(cfg.HomeDir, "logs", "launchd.err.log")
+	logsDir := home.Dir(cfg.HomeDir).LogsDir()
+	out := filepath.Join(logsDir, "launchd.out.log")
+	errp := filepath.Join(logsDir, "launchd.err.log")
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -119,6 +121,23 @@ func Plist(cfg Config) string {
 </plist>
 `, xmlEscape(cfg.Label), xmlEscape(cfg.ServiceUser), xmlEscape(cfg.RunnydPath),
 		xmlEscape(out), xmlEscape(errp))
+}
+
+// operatorNameRe is the plain-username shape an operator account must match. The
+// name is interpolated into the ACL ACE handed to `chmod +a` as a single arg, so
+// a name with a space or comma would reshape the ACE into a different (possibly
+// broader) grant — reject anything that isn't a bare username.
+var operatorNameRe = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$`)
+
+// ValidateOperatorName guards the ACL boundary: the operator account is
+// attacker-influenceable only by someone who already holds sudo, but it defines
+// a security-critical ACL, so it is validated rather than trusted. The CLI
+// additionally checks the account resolves to a real local user.
+func ValidateOperatorName(name string) error {
+	if !operatorNameRe.MatchString(name) {
+		return fmt.Errorf("operator account %q is not a plain username; refusing to build an ACL from it", name)
+	}
+	return nil
 }
 
 // aclInherit makes an ACE apply to the home AND every file/dir created beneath it

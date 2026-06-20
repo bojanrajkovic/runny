@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bojanrajkovic/runny/internal/home"
 )
 
 // Runner runs a privileged command and returns its combined output. The default
@@ -58,6 +59,9 @@ func (i *Installer) Install(ctx context.Context) error {
 	if i.cfg.Operator == "" {
 		return fmt.Errorf("operator account is required (it receives the inheriting ACL)")
 	}
+	if err := ValidateOperatorName(i.cfg.Operator); err != nil {
+		return err
+	}
 	if i.cfg.RunnydPath == "" {
 		return fmt.Errorf("runnyd path is required")
 	}
@@ -89,7 +93,12 @@ func (i *Installer) Uninstall(ctx context.Context) error {
 }
 
 func (i *Installer) ensureAccount(ctx context.Context) error {
-	if _, err := i.run(ctx, "/usr/bin/dscl", ".", "-read", "/Users/"+i.cfg.ServiceUser); err == nil {
+	// Read UniqueID, not just the record: a half-created account (the bare record
+	// exists but attributes failed to land) must NOT count as "exists" — that
+	// would skip the rest of the creation and leave a uid-less account the daemon
+	// can't run as. Requiring UniqueID means a partial create is repaired, not
+	// reused.
+	if _, err := i.run(ctx, "/usr/bin/dscl", ".", "-read", "/Users/"+i.cfg.ServiceUser, "UniqueID"); err == nil {
 		i.log("service account %s already exists — reusing it", i.cfg.ServiceUser)
 		return nil
 	}
@@ -136,7 +145,7 @@ func (i *Installer) freeID(ctx context.Context, dsclPath, attr string) (int, err
 
 func (i *Installer) ensureHome(ctx context.Context) error {
 	owner := i.cfg.ServiceUser + ":" + i.cfg.ServiceGroup
-	logs := filepath.Join(i.cfg.HomeDir, "logs")
+	logs := home.Dir(i.cfg.HomeDir).LogsDir()
 	// Set the home's mode + dual inheriting ACL BEFORE creating logs/, so logs
 	// (and every dir the daemon's Ensure() later creates) inherits the ACEs. The
 	// ACL is reset (-N) then re-added so a reinstall doesn't stack duplicates.

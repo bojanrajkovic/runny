@@ -51,6 +51,20 @@ func TestACEsPinned(t *testing.T) {
 	}
 }
 
+func TestValidateOperatorName(t *testing.T) {
+	for _, ok := range []string{"brajkovic", "_runner", "ci.bot", "a-b_c"} {
+		if err := ValidateOperatorName(ok); err != nil {
+			t.Errorf("ValidateOperatorName(%q) = %v, want nil", ok, err)
+		}
+	}
+	// A name with spaces/commas would reshape the chmod ACE; reject it.
+	for _, bad := range []string{"", "bob allow write,writesecurity", "a,b", "a b", "-x", "a/b", "a\nb"} {
+		if err := ValidateOperatorName(bad); err == nil {
+			t.Errorf("ValidateOperatorName(%q) = nil, want error", bad)
+		}
+	}
+}
+
 func TestFirstFreeID(t *testing.T) {
 	if got, err := firstFreeID(map[int]bool{200: true, 201: true}); err != nil || got != 202 {
 		t.Errorf("firstFreeID({200,201}) = %d, %v; want 202", got, err)
@@ -262,5 +276,11 @@ func TestInstallValidatesInputs(t *testing.T) {
 	noRunnyd.cfg.Operator = "brajkovic" // runnyd path missing
 	if err := noRunnyd.Install(context.Background()); err == nil {
 		t.Error("Install without a runnyd path must error")
+	}
+	badOp := base()
+	badOp.cfg.Operator = "bob allow write,writesecurity" // not a plain username
+	badOp.cfg.RunnydPath = "/x/runnyd"
+	if err := badOp.Install(context.Background()); err == nil {
+		t.Error("Install with a non-username operator must error before any mutation")
 	}
 }

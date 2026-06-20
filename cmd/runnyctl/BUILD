@@ -46,6 +46,7 @@ go_test(
     name = "runnyctl_test",
     srcs = [
         "follow_test.go",
+        "installdaemon_test.go",
         "main_test.go",
         "skew_test.go",
     ],

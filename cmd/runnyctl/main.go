@@ -68,8 +68,11 @@ commands:
 SLOT accepts the bare slot name (mac-1) or a full runner name as shown
 by status and the GitHub runners page (<prefix>-mac-1-<cycle>).
   doctor              run the daemon's validation checks
-  install-daemon      install runnyd as a non-root system LaunchDaemon
-                      (requires sudo; macOS only)
+  install-daemon [-operator USER]
+                      install runnyd as a non-root system LaunchDaemon
+                      (requires root; macOS only). -operator is the account
+                      the home's ACL grants; it defaults to $SUDO_USER and is
+                      required when not run via sudo
   uninstall-daemon    remove the system LaunchDaemon AND its home (config,
                       key, artifacts — back up first); keeps the _runny account
 `

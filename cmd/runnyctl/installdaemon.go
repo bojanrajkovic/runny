@@ -17,15 +17,23 @@ import (
 // privileged local command (run via `sudo runnyctl install-daemon`), never a
 // daemon RPC — the daemon does not exist yet. The plist points at the runnyd
 // sibling of this runnyctl, and the inheriting ACL grants the operator account
-// (the human who ran sudo, from SUDO_USER).
+// (the --operator flag, else the human who ran sudo via SUDO_USER).
 func installDaemon(args []string) error {
-	if err := parseNoFlagArgs("install-daemon", args); err != nil {
+	fs := flag.NewFlagSet("install-daemon", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	operatorFlag := fs.String("operator", "",
+		"operator account the home's inheriting ACL grants (defaults to $SUDO_USER; required "+
+			"when not run via sudo — the app's brokered install runs as root with no SUDO_USER set)")
+	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("install-daemon takes no positional arguments (got %q)", fs.Arg(0))
 	}
 	if err := requireDarwinRoot("install-daemon"); err != nil {
 		return err
 	}
-	operator, err := operatorAccount()
+	operator, err := operatorAccount(*operatorFlag)
 	if err != nil {
 		return err
 	}
@@ -88,22 +96,43 @@ func requireDarwinRoot(name string) error {
 	return nil
 }
 
-// operatorAccount is the human operator the inheriting ACL grants access to.
-// Since the command runs as root, it is the account that invoked sudo. The name
-// is validated (it is interpolated into a security-critical ACL ACE) and checked
-// to resolve to a real local user BEFORE any privileged step runs, so a bad
-// value fails clean rather than half-installing.
-func operatorAccount() (string, error) {
-	op := os.Getenv("SUDO_USER")
-	if op == "" || op == "root" {
-		return "", fmt.Errorf("cannot determine the operator account: run via `sudo runnyctl install-daemon` " +
-			"from your normal login so SUDO_USER is set (the home's ACL grants that account access)")
-	}
-	if err := sysdaemon.ValidateOperatorName(op); err != nil {
+// operatorAccount is the human operator the home's inheriting ACL grants access
+// to. It is resolved from the --operator flag or $SUDO_USER (see resolveOperator)
+// and then checked to resolve to a real local user BEFORE any privileged step
+// runs, so a bad value fails clean rather than half-installing.
+func operatorAccount(flagOperator string) (string, error) {
+	op, err := resolveOperator(flagOperator, os.Getenv("SUDO_USER"))
+	if err != nil {
 		return "", err
 	}
 	if _, err := user.Lookup(op); err != nil {
 		return "", fmt.Errorf("operator account %q does not resolve to a local user: %w", op, err)
+	}
+	return op, nil
+}
+
+// resolveOperator selects the operator account and validates its NAME SHAPE — the
+// ACL-injection guard, since the name is interpolated into a `chmod` ACE. The
+// explicit --operator flag wins over $SUDO_USER: the app's brokered install runs
+// as root via osascript "with administrator privileges", which (unlike sudo)
+// leaves SUDO_USER unset, so the operator can only travel by flag there; the
+// headless `sudo runnyctl install-daemon` path passes no flag and resolves off
+// SUDO_USER. `root` is refused from either source — an ACL grant to root is
+// pointless and signals a non-login invocation. The local-user check is the
+// caller's (user.Lookup), kept out so source-selection + shape validation stays
+// pure and is unit-tested host-independently.
+func resolveOperator(flagOperator, sudoUser string) (string, error) {
+	op := flagOperator
+	if op == "" {
+		op = sudoUser
+	}
+	if op == "" || op == "root" {
+		return "", fmt.Errorf("cannot determine the operator account: pass `--operator <user>`, or run " +
+			"via `sudo runnyctl install-daemon` from your normal login so SUDO_USER is set (the home's " +
+			"ACL grants that account access)")
+	}
+	if err := sysdaemon.ValidateOperatorName(op); err != nil {
+		return "", err
 	}
 	return op, nil
 }

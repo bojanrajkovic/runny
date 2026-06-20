@@ -15,10 +15,11 @@ recorded below still describes runny's current shipping shape and stands — but
 its *rationale* does not: a headless, non-root **system LaunchDaemon** is viable
 today with **no** change to the networking substrate (vmnet stays), and the
 userspace network stack is demoted to optional hardening. That headless path is
-tracked in [#76](https://github.com/bojanrajkovic/runny/issues/76), which will
-carry the ADR that supersedes the contingency framing here; the userspace-stack
-hedge moved to [#84](https://github.com/bojanrajkovic/runny/issues/84). The body
-below is preserved as the decision-time record — read it through this banner.
+tracked in [#76](https://github.com/bojanrajkovic/runny/issues/76), and the ADR
+that supersedes the contingency framing here is
+[ADR-0020](0020-headless-system-daemon.md); the userspace-stack hedge moved to
+[#84](https://github.com/bojanrajkovic/runny/issues/84). The body below is
+preserved as the decision-time record — read it through this banner.
 
 ## Context
 

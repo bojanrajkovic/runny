@@ -213,3 +213,18 @@ inherited ACL. The installer's account creation, home ownership, and the two
 ACEs are therefore load-bearing: a group-writable home or an over-broad ACE
 would widen who can drive the daemon, and a missing `_runny` read ACE would
 leave the daemon unable to read its own config and key.
+
+The operator's grant is **write** (connecting to the control socket requires
+write on the socket file, and that same inherited ACE covers every file under the
+home), so the operator can also modify or delete the daemon-written audit records
+(`operator-access.json`, cycle records). This is consistent with the model above
+— the operator already holds the App key and can disable hardening, so the audit
+trail is **visibility, not a tamper-proof tier** held against the operator; it
+records actions for later review, it does not defend against the operator who
+controls the daemon. Narrowing it is not possible without breaking the operator's
+own socket access.
+
+Uninstall **purges the home** (keeping only the `_runny` account), so no App key
+is left at rest once the operator removes the daemon, and the verify-before-remove
+step means uninstall never reports success over a still-running daemon
+([deploy.md](deploy.md) "Headless system daemon").

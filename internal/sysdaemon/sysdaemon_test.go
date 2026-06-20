@@ -108,9 +108,10 @@ func TestResolveRunnydPath(t *testing.T) {
 // recordedRun is a fake Runner: it records every command and answers the few
 // reads the installer makes (account existence + the dscl id lists).
 type recordedRun struct {
-	calls   [][]string
-	readErr error             // result of `dscl -read /Users/<svc>`
-	listOut map[string]string // attr -> `dscl -list` output
+	calls       [][]string
+	readErr     error             // result of `dscl -read /Users/<svc>`
+	listOut     map[string]string // attr -> `dscl -list` output
+	printLoaded bool              // does `launchctl print system/<label>` find the job?
 }
 
 func (r *recordedRun) run(_ context.Context, name string, args ...string) (string, error) {
@@ -123,6 +124,12 @@ func (r *recordedRun) run(_ context.Context, name string, args ...string) (strin
 		return r.listOut["PrimaryGroupID"], nil
 	case name == "/usr/bin/dscl" && strings.Contains(joined, "-list /Users UniqueID"):
 		return r.listOut["UniqueID"], nil
+	case name == "/bin/launchctl" && len(args) > 0 && args[0] == "print":
+		if r.printLoaded {
+			return "com.coderinserepeat.runnyd = { ... }", nil
+		}
+		return "Could not find service \"com.coderinserepeat.runnyd\" in domain for system",
+			errors.New("launchctl print: exit 113")
 	}
 	return "", nil
 }
@@ -241,8 +248,8 @@ func TestInstallReusesExistingAccount(t *testing.T) {
 	}
 }
 
-func TestUninstallLeavesAccountAndHome(t *testing.T) {
-	r := &recordedRun{}
+func TestUninstallRemovesHomeKeepsAccount(t *testing.T) {
+	r := &recordedRun{} // printLoaded=false → the job is gone after bootout
 	inst := newTestInstaller(r, func(string, []byte, os.FileMode) error { return nil })
 	if err := inst.Uninstall(context.Background()); err != nil {
 		t.Fatalf("Uninstall: %v", err)
@@ -250,13 +257,35 @@ func TestUninstallLeavesAccountAndHome(t *testing.T) {
 	if !exactCall(r.calls, "/bin/launchctl", "bootout", "system/com.coderinserepeat.runnyd") {
 		t.Error("uninstall must bootout the system job")
 	}
+	if !exactCall(r.calls, "/bin/launchctl", "print", "system/com.coderinserepeat.runnyd") {
+		t.Error("uninstall must VERIFY the job is gone before removing anything")
+	}
 	if !exactCall(r.calls, "/bin/rm", "-f", inst.cfg.PlistPath()) {
 		t.Error("uninstall must remove the plist")
+	}
+	if !exactCall(r.calls, "/bin/rm", "-rf", inst.cfg.HomeDir) {
+		t.Error("uninstall must purge the home (else it poisons client resolution + leaves the key)")
 	}
 	if i := indexOfCall(r.calls, func(c []string) bool {
 		return len(c) >= 3 && c[0] == "/usr/bin/dscl" && c[2] == "-delete"
 	}); i >= 0 {
 		t.Error("uninstall must NOT delete the service account (uid stability for reinstall)")
+	}
+}
+
+// P2#2: a bootout that leaves the KeepAlive job loaded must NOT be reported as a
+// successful uninstall over a still-running daemon.
+func TestUninstallRefusesWhenJobStillLoaded(t *testing.T) {
+	r := &recordedRun{printLoaded: true} // bootout didn't actually unload it
+	inst := newTestInstaller(r, func(string, []byte, os.FileMode) error { return nil })
+	if err := inst.Uninstall(context.Background()); err == nil {
+		t.Fatal("Uninstall must refuse when the job is still loaded after bootout")
+	}
+	if exactCall(r.calls, "/bin/rm", "-f", inst.cfg.PlistPath()) {
+		t.Error("must NOT remove the plist while the daemon is still running")
+	}
+	if exactCall(r.calls, "/bin/rm", "-rf", inst.cfg.HomeDir) {
+		t.Error("must NOT purge the home while the daemon is still running")
 	}
 }
 

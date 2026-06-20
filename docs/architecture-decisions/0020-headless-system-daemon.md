@@ -128,3 +128,8 @@ account, privileged once at install, unprivileged at runtime.**
 - Existing `brew services start runny` users lose the auto-registered agent on
   their next formula upgrade and must register explicitly (system daemon, or the
   app's per-user agent). This is a deliberate migration, not a silent break.
+- Uninstall **purges the home** (keeping only the account): because clients
+  resolve the system home by existence, a preserved home would keep winning
+  resolution and make a later per-user agent unreachable, and it would leave the
+  App key at rest. Uninstall verifies the job is unloaded before removing
+  anything, so it never reports success over a still-running daemon.

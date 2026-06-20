@@ -77,19 +77,48 @@ func (i *Installer) Install(ctx context.Context) error {
 	return i.bootstrap(ctx)
 }
 
-// Uninstall removes the LaunchDaemon but LEAVES the service account and the home
-// intact: the home holds config, the App key, and artifacts (a destroy would be
-// a footgun), and keeping the account preserves its uid so a reinstall finds the
-// home it already owns. Purging account + home is a deliberate manual step.
+// Uninstall removes the LaunchDaemon AND the home, keeping only the service
+// account (so a reinstall reuses its uid and the recreated home's ownership stays
+// valid). The home is purged, not preserved: a left-behind home keeps winning
+// client resolution (clients pick the system home by existence), so a later
+// per-user agent would be unreachable, and it would leave the App key at rest
+// after the operator believes runny is gone. bootout is VERIFIED, not assumed —
+// its exit status can't distinguish "not loaded" from a real failure (or a hang),
+// so the plist and home are removed only after launchctl confirms the job is gone,
+// never over a still-running KeepAlive daemon.
 func (i *Installer) Uninstall(ctx context.Context) error {
-	// bootout returns nonzero when the job isn't loaded — not an error for us.
 	_, _ = i.run(ctx, "/bin/launchctl", "bootout", "system/"+i.cfg.Label)
+	switch loaded, err := i.jobLoaded(ctx); {
+	case err != nil:
+		return fmt.Errorf("could not confirm %s was unloaded after bootout: %w", i.cfg.Label, err)
+	case loaded:
+		return fmt.Errorf("%s is still loaded after bootout; refusing to remove the plist and home over a running daemon", i.cfg.Label)
+	}
 	if _, err := i.run(ctx, "/bin/rm", "-f", i.cfg.PlistPath()); err != nil {
 		return err
 	}
-	i.log("removed the system LaunchDaemon (%s); the %s account and %s are left intact",
-		i.cfg.Label, i.cfg.ServiceUser, i.cfg.HomeDir)
+	if _, err := i.run(ctx, "/bin/rm", "-rf", i.cfg.HomeDir); err != nil {
+		return err
+	}
+	i.log("removed the system LaunchDaemon (%s) and %s; the %s account is kept for reinstall",
+		i.cfg.Label, i.cfg.HomeDir, i.cfg.ServiceUser)
 	return nil
+}
+
+// jobLoaded reports whether the system job is still registered with launchd.
+// `launchctl print system/<label>` exits zero (and prints the job) when loaded,
+// and exits nonzero with "Could not find ... in domain" when gone — the success
+// case for uninstall. Any other error is inconclusive and surfaced to the caller
+// rather than swallowed.
+func (i *Installer) jobLoaded(ctx context.Context) (bool, error) {
+	out, err := i.run(ctx, "/bin/launchctl", "print", "system/"+i.cfg.Label)
+	if err == nil {
+		return true, nil
+	}
+	if strings.Contains(strings.ToLower(out), "could not find") {
+		return false, nil
+	}
+	return false, err
 }
 
 func (i *Installer) ensureAccount(ctx context.Context) error {

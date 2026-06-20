@@ -178,10 +178,13 @@ sudo RUNNYD=$(pwd)/bazel-bin/cmd/runnyd/runnyd_/runnyd \
 ```
 
 Remove it with `sudo runnyctl uninstall-daemon` (or
-`sudo ./tools/deploy/uninstall-system.sh`): it boots out the job and removes the
-plist but **leaves the service account and the home intact** — config, key, and
-artifacts are preserved, and a reinstall reuses the account so the home's
-ownership stays valid. Purging the account and home is a deliberate manual step.
+`sudo ./tools/deploy/uninstall-system.sh`): it verifies the job is actually
+unloaded (refusing to proceed over a still-running daemon), then removes the
+plist **and the home**. The home is purged on purpose — a left-behind home would
+keep winning client resolution (so a later per-user agent would be unreachable)
+and would leave the App key at rest after you believe runny is gone. The `_runny`
+account is kept, so a reinstall reuses its uid and the recreated home's ownership
+stays valid. **Back up `config.yaml` first if you want to keep it.**
 
 Stop the daemon with `sudo launchctl bootout system/com.coderinserepeat.runnyd`,
 never by killing it: KeepAlive respawns it, which is what the ADR-0012 wedge

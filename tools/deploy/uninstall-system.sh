@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Remove the non-root system LaunchDaemon (#76). Delegates to
-# `runnyctl uninstall-daemon`, which boots the job out and removes the plist but
-# LEAVES the _runny service account and /Library/Application Support/runny
-# (config, the App key, artifacts) intact — purging those is a deliberate manual
-# step. Prefers the staged runnyctl from install-system.sh, else PATH.
+# `runnyctl uninstall-daemon`, which verifies the job is unloaded, then removes
+# the plist AND the home /Library/Application Support/runny — config, the App
+# key, and artifacts go with it. BACK UP config.yaml first if you want to keep
+# it. Only the _runny service account is kept (so a reinstall reuses its uid).
+# Prefers the staged runnyctl from install-system.sh, else PATH.
 set -euo pipefail
 
 RUNNYCTL="${RUNNYCTL:-/usr/local/libexec/runny/runnyctl}"

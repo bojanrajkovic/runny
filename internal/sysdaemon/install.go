@@ -186,14 +186,20 @@ func (i *Installer) ensureHome(ctx context.Context) error {
 	logs := home.Dir(i.cfg.HomeDir).LogsDir()
 	// Set the home's mode + dual inheriting ACL BEFORE creating logs/, so logs
 	// (and every dir the daemon's Ensure() later creates) inherits the ACEs. The
-	// ACL is reset (-N) then re-added so a reinstall doesn't stack duplicates.
+	// ACL ops are RECURSIVE (-R): a changed parent ACL does NOT retroactively
+	// inherit onto files that already exist, so on a re-run (e.g. a different
+	// operator, or a partial install that lacked the _runny ACE) the existing
+	// config/key/artifacts must be re-stamped, not just the root — and a failure
+	// to re-stamp surfaces (the run seam returns the error) rather than reporting
+	// a success the operator/daemon can't actually use. -N first clears any stale
+	// ACL across the tree so the two ACEs don't stack on a reinstall.
 	steps := [][]string{
 		{"/bin/mkdir", "-p", i.cfg.HomeDir},
 		{"/usr/sbin/chown", owner, i.cfg.HomeDir},
 		{"/bin/chmod", "0700", i.cfg.HomeDir},
-		{"/bin/chmod", "-N", i.cfg.HomeDir},
-		{"/bin/chmod", "+a", operatorACE(i.cfg.Operator), i.cfg.HomeDir},
-		{"/bin/chmod", "+a", serviceACE(i.cfg.ServiceUser), i.cfg.HomeDir},
+		{"/bin/chmod", "-R", "-N", i.cfg.HomeDir},
+		{"/bin/chmod", "-R", "+a", operatorACE(i.cfg.Operator), i.cfg.HomeDir},
+		{"/bin/chmod", "-R", "+a", serviceACE(i.cfg.ServiceUser), i.cfg.HomeDir},
 		{"/bin/mkdir", "-p", logs},
 		{"/usr/sbin/chown", owner, logs},
 	}

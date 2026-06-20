@@ -195,17 +195,17 @@ func TestInstallPlan(t *testing.T) {
 	if !exactCall(r.calls, "/bin/chmod", "0700", home.SystemHomeDir) {
 		t.Error("missing chmod 0700 on the home")
 	}
-	if !exactCall(r.calls, "/bin/chmod", "+a", operatorACE("brajkovic"), home.SystemHomeDir) {
-		t.Error("missing operator ACE")
+	if !exactCall(r.calls, "/bin/chmod", "-R", "+a", operatorACE("brajkovic"), home.SystemHomeDir) {
+		t.Error("missing operator ACE (recursive)")
 	}
-	if !exactCall(r.calls, "/bin/chmod", "+a", serviceACE("_runny"), home.SystemHomeDir) {
-		t.Error("missing service ACE")
+	if !exactCall(r.calls, "/bin/chmod", "-R", "+a", serviceACE("_runny"), home.SystemHomeDir) {
+		t.Error("missing service ACE (recursive)")
 	}
 
 	// Ordering: logs/ must be created AFTER the home ACL so it inherits the ACEs.
 	lastACL := -1
 	for i, c := range r.calls {
-		if len(c) >= 2 && c[0] == "/bin/chmod" && c[1] == "+a" {
+		if len(c) >= 3 && c[0] == "/bin/chmod" && c[2] == "+a" {
 			lastACL = i
 		}
 	}

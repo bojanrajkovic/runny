@@ -8,6 +8,7 @@ go_library(
     name = "runnyctl_lib",
     srcs = [
         "follow.go",
+        "installdaemon.go",
         "main.go",
         "skew.go",
     ],
@@ -15,6 +16,7 @@ go_library(
     visibility = ["//visibility:private"],
     deps = [
         "//internal/home",
+        "//internal/sysdaemon",
         "//proto/runny/v1:runny",
         "@com_github_rivo_uniseg//:uniseg",
         "@org_golang_google_grpc//:grpc",

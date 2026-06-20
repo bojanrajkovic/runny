@@ -250,7 +250,7 @@ final class AgentController {
         if path.count > 1, path.hasSuffix("/") { path.removeLast() }
         return LaunchAgentStatus.eligibility(
             bundlePath: path,
-            translocated: CLIInstallModel.isTranslocated(path)
+            translocated: PrivilegedBroker.isTranslocated(path)
         )
     }
 

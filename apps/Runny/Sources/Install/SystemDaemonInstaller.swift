@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 import Observation
 
@@ -66,11 +65,11 @@ final class SystemDaemonInstaller {
     /// This bundle's nested `runnyd`/`runnyctl`. nil for an unbundled dev build (a
     /// bare `bazel run` carries no `Contents/MacOS/<bin>`), where install is simply
     /// unavailable rather than wrong.
-    static var bundleRunnydPath: String? { bundleBinary("runnyd") }
-    static var bundleRunnyctlPath: String? { bundleBinary("runnyctl") }
+    static var bundleRunnydPath: String? { bundleBinary("runnyd", in: Bundle.main.bundleURL) }
+    static var bundleRunnyctlPath: String? { bundleBinary("runnyctl", in: Bundle.main.bundleURL) }
 
-    private static func bundleBinary(_ name: String) -> String? {
-        let url = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/\(name)")
+    private static func bundleBinary(_ name: String, in bundleURL: URL) -> String? {
+        let url = bundleURL.appendingPathComponent("Contents/MacOS/\(name)")
         return FileManager.default.fileExists(atPath: url.path) ? url.path : nil
     }
 
@@ -115,13 +114,19 @@ final class SystemDaemonInstaller {
     // MARK: - Imperative shell (live-machine only)
 
     private func runInstall(gen: Int) async {
-        guard let runnyd = Self.bundleRunnydPath, let runnyctl = Self.bundleRunnyctlPath else {
+        // Read the bundle location ONCE and derive both the translocation guard and
+        // the staged source from it, so the "never stage from a bundle that
+        // evaporates" invariant can't be split across two independent reads.
+        let bundleURL = Bundle.main.bundleURL
+        guard let runnyd = Self.bundleBinary("runnyd", in: bundleURL),
+              let runnyctl = Self.bundleBinary("runnyctl", in: bundleURL)
+        else {
             apply(.failed("this build carries no bundled runnyd/runnyctl to install"), gen: gen)
             return
         }
         // Refuse a translocated / transient bundle: the staged copy would be of a
         // bundle that evaporates on next launch, and a system daemon must outlive it.
-        if PrivilegedBroker.isTranslocated(Bundle.main.bundleURL.path) {
+        if PrivilegedBroker.isTranslocated(bundleURL.path) {
             apply(.translocated, gen: gen)
             return
         }

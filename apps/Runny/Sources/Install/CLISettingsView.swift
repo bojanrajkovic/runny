@@ -30,7 +30,8 @@ struct SettingsView: View {
                 Text("Installs runnyd as a non-root system service that starts at boot and keeps "
                     + "running after you log out — no GUI session needed. One admin prompt creates a "
                     + "dedicated service account and the daemon; afterward write config to "
-                    + "/Library/Application Support/runny. Use this OR the login agent above, not both.")
+                    + "/Library/Application Support/runny. Installing it replaces the login agent "
+                    + "above — the system service is preferred.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -65,6 +66,7 @@ struct SettingsView: View {
 /// launchd `system/` probe), never an action's return.
 struct SystemDaemonInstallRow: View {
     @Environment(SystemDaemonInstaller.self) private var systemDaemon
+    @Environment(AgentController.self) private var agent
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 16) {
@@ -82,6 +84,24 @@ struct SystemDaemonInstallRow: View {
             actions
         }
         .padding(.vertical, 2)
+        .onChange(of: systemDaemon.state) { old, new in
+            // System preferred over self: once the system daemon is CONFIRMED
+            // registered, remove the now-redundant per-user login agent so the two
+            // never run at once (the silent split-home divergence the home-by-existence
+            // resolution would otherwise create). Ordered system-FIRST — the brokered
+            // install is the cancellable/failable step — so a cancelled or failed
+            // install leaves the login agent untouched, never "left with nothing". The
+            // reverse direction is already covered: the per-user install gate denies a
+            // foreignSystem owner.
+            guard old == .installing, new == .installed, hasLoginAgent else { return }
+            Task { await agent.uninstall() }
+        }
+    }
+
+    /// Whether our own per-user login agent is registered (enabled OR awaiting
+    /// approval) — a competitor the system install must supersede.
+    private var hasLoginAgent: Bool {
+        agent.installState == .installed || agent.installState == .requiresApproval
     }
 
     private var headline: String {
@@ -98,7 +118,10 @@ struct SystemDaemonInstallRow: View {
     private var detail: String? {
         switch systemDaemon.state {
         case .notInstalled:
-            "Run runnyd at boot, surviving logout — no GUI login needed."
+            hasLoginAgent
+                ? "Run runnyd at boot, surviving logout — no GUI login needed. Installing replaces "
+                + "your login agent (the system service is preferred)."
+                : "Run runnyd at boot, surviving logout — no GUI login needed."
         case .installing, .cancelled:
             nil
         case .installed:

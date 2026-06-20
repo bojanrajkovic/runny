@@ -47,7 +47,12 @@ final class PrivilegedBroker {
         proc.arguments = ["-e", script]
         let errPipe = Pipe()
         proc.standardError = errPipe
-        proc.standardOutput = Pipe()
+        // Discard stdout (the captured `do shell script` output, which the outcome
+        // mapping never reads) to /dev/null, NOT an undrained Pipe: an unread pipe
+        // whose buffer fills would block the process in write() and hang the op in
+        // flight — the unbounded stall this project refuses. stderr stays a pipe (it
+        // is small and we read it to EOF for the outcome).
+        proc.standardOutput = FileHandle.nullDevice
         // Publish `running` and launch with no suspension before `proc.run()`, so a
         // Cancel can only land once the process is live (where `running?.terminate()`
         // reaches it) — never on an unlaunched process that would orphan a prompt.

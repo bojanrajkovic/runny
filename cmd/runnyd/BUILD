@@ -112,6 +112,7 @@ go_test(
     name = "runnyd_test",
     srcs = [
         "drain_test.go",
+        "installassert_test.go",
         "launchcontext_test.go",
         "localnet_test.go",
         "reload_test.go",

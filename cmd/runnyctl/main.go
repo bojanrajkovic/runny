@@ -70,7 +70,8 @@ by status and the GitHub runners page (<prefix>-mac-1-<cycle>).
   doctor              run the daemon's validation checks
   install-daemon      install runnyd as a non-root system LaunchDaemon
                       (requires sudo; macOS only)
-  uninstall-daemon    remove the system LaunchDaemon (config + state kept)
+  uninstall-daemon    remove the system LaunchDaemon AND its home (config,
+                      key, artifacts — back up first); keeps the _runny account
 `
 
 func main() {

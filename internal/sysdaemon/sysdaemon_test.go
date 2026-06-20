@@ -110,6 +110,7 @@ func TestResolveRunnydPath(t *testing.T) {
 type recordedRun struct {
 	calls       [][]string
 	readErr     error             // result of `dscl -read /Users/<svc>`
+	readOut     string            // its stdout (the account's attributes), when readErr is nil
 	listOut     map[string]string // attr -> `dscl -list` output
 	printLoaded bool              // does `launchctl print system/<label>` find the job?
 }
@@ -119,7 +120,7 @@ func (r *recordedRun) run(_ context.Context, name string, args ...string) (strin
 	joined := strings.Join(args, " ")
 	switch {
 	case name == "/usr/bin/dscl" && strings.Contains(joined, "-read /Users/"):
-		return "", r.readErr
+		return r.readOut, r.readErr
 	case name == "/usr/bin/dscl" && strings.Contains(joined, "-list /Groups PrimaryGroupID"):
 		return r.listOut["PrimaryGroupID"], nil
 	case name == "/usr/bin/dscl" && strings.Contains(joined, "-list /Users UniqueID"):
@@ -235,8 +236,11 @@ func TestInstallPlan(t *testing.T) {
 	}
 }
 
+const validServiceAccountRead = "UniqueID: 250\nUserShell: /usr/bin/false\nNFSHomeDirectory: /var/empty\n"
+
 func TestInstallReusesExistingAccount(t *testing.T) {
-	r := &recordedRun{readErr: nil} // -read succeeds → account exists
+	// -read succeeds AND describes our dedicated service account → reuse it.
+	r := &recordedRun{readErr: nil, readOut: validServiceAccountRead}
 	inst := newTestInstaller(r, func(string, []byte, os.FileMode) error { return nil })
 	if err := inst.Install(context.Background()); err != nil {
 		t.Fatalf("Install: %v", err)
@@ -245,6 +249,39 @@ func TestInstallReusesExistingAccount(t *testing.T) {
 		return len(c) >= 4 && c[0] == "/usr/bin/dscl" && c[2] == "-create" && strings.HasPrefix(c[3], "/Users/")
 	}); i >= 0 {
 		t.Errorf("must not re-create an existing account, but did: %v", r.calls[i])
+	}
+}
+
+// A pre-existing _runny that is NOT our service account (a real login shell /
+// login uid) must be refused, not adopted — adopting it would hand the daemon's
+// home, key, and socket to the wrong principal.
+func TestInstallRefusesForeignAccount(t *testing.T) {
+	r := &recordedRun{readErr: nil, readOut: "UniqueID: 501\nUserShell: /bin/zsh\nNFSHomeDirectory: /Users/runny\n"}
+	inst := newTestInstaller(r, func(string, []byte, os.FileMode) error { return nil })
+	if err := inst.Install(context.Background()); err == nil {
+		t.Fatal("Install must refuse a pre-existing non-service _runny account")
+	}
+	if i := indexOfCall(r.calls, func(c []string) bool {
+		return len(c) >= 3 && c[0] == "/usr/bin/dscl" && c[2] == "-create"
+	}); i >= 0 {
+		t.Error("must not create/modify anything when refusing a foreign account")
+	}
+}
+
+func TestVerifyServiceAccount(t *testing.T) {
+	if err := verifyServiceAccount(validServiceAccountRead); err != nil {
+		t.Errorf("valid service account rejected: %v", err)
+	}
+	for _, bad := range []string{
+		"UniqueID: 250\nUserShell: /bin/zsh\nNFSHomeDirectory: /var/empty\n",       // login shell
+		"UniqueID: 250\nUserShell: /usr/bin/false\nNFSHomeDirectory: /Users/x\n",   // real home
+		"UniqueID: 501\nUserShell: /usr/bin/false\nNFSHomeDirectory: /var/empty\n", // login uid
+		"UniqueID: 0\nUserShell: /usr/bin/false\nNFSHomeDirectory: /var/empty\n",   // root
+		"UserShell: /usr/bin/false\nNFSHomeDirectory: /var/empty\n",                // no uid
+	} {
+		if err := verifyServiceAccount(bad); err == nil {
+			t.Errorf("verifyServiceAccount accepted a non-service account:\n%s", bad)
+		}
 	}
 }
 

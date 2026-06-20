@@ -122,12 +122,21 @@ func (i *Installer) jobLoaded(ctx context.Context) (bool, error) {
 }
 
 func (i *Installer) ensureAccount(ctx context.Context) error {
-	// Read UniqueID, not just the record: a half-created account (the bare record
-	// exists but attributes failed to land) must NOT count as "exists" — that
-	// would skip the rest of the creation and leave a uid-less account the daemon
-	// can't run as. Requiring UniqueID means a partial create is repaired, not
-	// reused.
-	if _, err := i.run(ctx, "/usr/bin/dscl", ".", "-read", "/Users/"+i.cfg.ServiceUser, "UniqueID"); err == nil {
+	// Read the identifying attributes, not just the record. Two reasons: a
+	// half-created account (the bare record exists but attributes failed to land)
+	// must not count as "exists" and skip the rest of creation; and an account
+	// that DOES exist must be verified to be OUR dedicated service account before
+	// reuse — a stale or manually-created _runny (a real login shell, a non-system
+	// uid, a real home) must never be silently adopted, because the installer
+	// would chown the system home and run the daemon as it, handing the App key
+	// and socket to the wrong principal.
+	out, err := i.run(ctx, "/usr/bin/dscl", ".", "-read", "/Users/"+i.cfg.ServiceUser,
+		"UniqueID", "UserShell", "NFSHomeDirectory")
+	if err == nil {
+		if verr := verifyServiceAccount(out); verr != nil {
+			return fmt.Errorf("an account %q already exists but is not the runny service account (%v); "+
+				"remove or rename it, then reinstall", i.cfg.ServiceUser, verr)
+		}
 		i.log("service account %s already exists — reusing it", i.cfg.ServiceUser)
 		return nil
 	}

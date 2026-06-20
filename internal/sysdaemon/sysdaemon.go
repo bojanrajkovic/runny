@@ -185,6 +185,34 @@ func firstFreeID(taken map[int]bool) (int, error) {
 	return 0, fmt.Errorf("no free uid/gid in the %d-%d service range", idRangeLo, idRangeHi)
 }
 
+// verifyServiceAccount checks a `dscl -read /Users/<svc> UniqueID UserShell
+// NFSHomeDirectory` dump describes OUR dedicated service account — a no-login
+// shell, the /var/empty home, and a system-range uid — so a pre-existing foreign
+// or login account under the same name is refused rather than silently adopted
+// (the installer would otherwise chown the system home and run the daemon as it).
+func verifyServiceAccount(dsclRead string) error {
+	attrs := map[string]string{}
+	for _, line := range strings.Split(dsclRead, "\n") {
+		if k, v, ok := strings.Cut(line, ":"); ok {
+			attrs[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+	}
+	if sh := attrs["UserShell"]; sh != "/usr/bin/false" {
+		return fmt.Errorf("UserShell is %q, not /usr/bin/false (a login account)", sh)
+	}
+	if h := attrs["NFSHomeDirectory"]; h != "/var/empty" {
+		return fmt.Errorf("home is %q, not /var/empty", h)
+	}
+	uid, err := strconv.Atoi(attrs["UniqueID"])
+	if err != nil {
+		return fmt.Errorf("unreadable UniqueID %q", attrs["UniqueID"])
+	}
+	if uid <= 0 || uid >= 500 {
+		return fmt.Errorf("UniqueID %d is not a system service uid (>=500 is a login user)", uid)
+	}
+	return nil
+}
+
 // parseTakenIDs reads the id column of `dscl . -list /<Users|Groups> <attr>`
 // output ("recordname   123") into a set, skipping unparseable lines.
 func parseTakenIDs(dsclList string) map[int]bool {

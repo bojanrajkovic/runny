@@ -21,36 +21,30 @@ class Runny < Formula
     bin.install "runnyctl"
   end
 
-  # `brew services start runny` (NO sudo) loads this as a per-user LaunchAgent
-  # in the GUI session — the context that surfaces the one-time macOS Local
-  # Network prompt runnyd needs to reach its guests. `sudo brew services` would
-  # instead run runnyd as a root LaunchDaemon — unnecessary privilege, not the
-  # per-user agent. KeepAlive is load-bearing for the wedge restart (ADR-0012).
-  # See docs/deploy.md.
-  service do
-    run [opt_bin/"runnyd"]
-    keep_alive true
-    run_type :immediate
-    log_path "#{Dir.home}/.runny/logs/launchd.out.log"
-    error_log_path "#{Dir.home}/.runny/logs/launchd.err.log"
-  end
+  # This formula is delivery-only: it installs the binaries, not a service. A
+  # `brew services` block can only create a per-user LaunchAgent (Homebrew's DSL
+  # has no run-as-user field), and the headless install is a non-root system
+  # LaunchDaemon — created by `runnyctl install-daemon`, which needs the
+  # privileged dscl/launchctl steps a formula can't perform. See docs/deploy.md.
 
   def caveats
     <<~TEXT
-      runnyd boots guests on Virtualization.framework and reaches them over the
-      local network. Two things gate a working install:
+      This installs the runnyd and runnyctl binaries only — it does not register
+      a service. The binary ships signed with com.apple.security.virtualization.
 
-        1. The binary ships signed with com.apple.security.virtualization.
-        2. macOS Local Network permission. Start runnyd from a GUI login
-           session without sudo, so it runs as a per-user LaunchAgent:
+      To run runnyd headless as a non-root system LaunchDaemon:
 
-               brew services start runny
+          sudo runnyctl install-daemon
 
-           then accept the one-time "Local Network" prompt. (sudo would run it
-           as a root LaunchDaemon — unnecessary privilege; a backgrounded
-           runnyd that reparents off launchd is silently denied vmnet access.)
+      One privileged step creates a dedicated service account and the system
+      LaunchDaemon; the daemon then runs unprivileged. Afterward write the config
+      at /Library/Application Support/runny/config.yaml (your account has
+      write access via an inheriting ACL) and the daemon comes up on its next
+      restart; verify with `runnyctl doctor`. A launchd-started daemon of any uid
+      is auto-allowed Local Network access — no GUI prompt.
 
-      Write ~/.runny/config.yaml first; verify with `runnyd -doctor`.
+      For a desktop, per-user install instead, use the Runny app. See
+      docs/deploy.md.
     TEXT
   end
 

@@ -68,6 +68,10 @@ commands:
 SLOT accepts the bare slot name (mac-1) or a full runner name as shown
 by status and the GitHub runners page (<prefix>-mac-1-<cycle>).
   doctor              run the daemon's validation checks
+  install-daemon      install runnyd as a non-root system LaunchDaemon
+                      (requires sudo; macOS only)
+  uninstall-daemon    remove the system LaunchDaemon AND its home (config,
+                      key, artifacts — back up first); keeps the _runny account
 `
 
 func main() {
@@ -92,6 +96,16 @@ func run() error {
 	if len(args) == 0 {
 		flag.Usage()
 		return fmt.Errorf("a command is required")
+	}
+
+	// Local privileged commands create/destroy the system daemon: they run as
+	// root (sudo), never dial a daemon, and must branch before the client home +
+	// gRPC setup below (which a not-yet-installed daemon has nothing to answer).
+	switch args[0] {
+	case "install-daemon":
+		return installDaemon(args[1:])
+	case "uninstall-daemon":
+		return uninstallDaemon(args[1:])
 	}
 
 	dir, err := home.ResolveClient()

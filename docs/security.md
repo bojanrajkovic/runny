@@ -110,11 +110,15 @@ sidecar is written *before any byte reaches the guest*, survives a daemon
 crash, and is surfaced in `runnyctl why` for the cycle's **retention window**
 (not indefinitely — retention still ages it).
 
-Authorization is the socket itself: the 0600 owner-only `runnyd.sock` is the
-sole gate, deliberately — the socket owner already transitively holds
-everything injection grants (the config that can set `ssh_hardening: off`, the
-App key, the daemon binary). The audit trail is the accountability layer, not a
-second authorization tier.
+Authorization is the socket itself: the `0600` `runnyd.sock` is the sole gate,
+deliberately — whoever can open it already transitively holds everything
+injection grants (the config that can set `ssh_hardening: off`, the App key, the
+daemon binary). For a per-user agent the socket is owner-only. For the headless
+system daemon (below) it is owned by the `_runny` service account and reachable
+by the operator account through the home's inheriting ACL — intentional: that
+operator is the trusted administrator who landed the App key and edits the
+config, so it already holds that same transitive power. The audit trail is the
+accountability layer, not a second authorization tier.
 
 ## Ephemeral guests
 
@@ -178,3 +182,49 @@ the only TCC-prompting surface — the bundled `runnyd` actually spawning — is
 reached only on the unowned/app-owned path, so an observer never provokes a Local
 Network prompt. Detection is local, `gui/<uid>`-scoped, and read-only: it spawns
 `launchctl print` under a hard bound but mutates nothing.
+
+## Headless system daemon
+
+On a headless host runnyd runs as a **non-root system LaunchDaemon** under a
+dedicated, hidden service account (`_runny`) — no login, no shell, no home
+directory ([ADR-0020](architecture-decisions/0020-headless-system-daemon.md),
+[deploy.md](deploy.md) "Headless system daemon"). The install is privileged
+**once** (`sudo runnyctl install-daemon` creates the account, the home, and the
+LaunchDaemon, then `launchctl bootstrap system`); the daemon then **runs
+unprivileged** as `_runny` — strictly less privilege than the `sudo brew
+services` alternative, which would run runnyd as root. A launchd-started daemon
+is auto-allowed Local Network access regardless of uid (Apple TN3179), so
+reaching guests needs neither a GUI prompt nor root.
+
+The daemon's entire state lives in `/Library/Application Support/runny`, owned by
+`_runny` at `0700`, nothing world- or group-accessible, with a **dual inheriting
+ACL** that is the access boundary:
+
+- the **operator** account gets directory write + read — edit `config.yaml`,
+  land the `private_key_path` App key, and read cycle artifacts without `sudo`,
+  and reach the control socket (above);
+- the **`_runny`** account gets read — so the daemon can read an operator-landed
+  `0600` config and key it does not own.
+
+The ACL overrides the `0700` POSIX mode for exactly those two principals (macOS
+evaluates an allow ACE ahead of the mode), and is inherited onto every file the
+daemon and operator create beneath the home; the socket stays `0600` plus that
+inherited ACL. The installer's account creation, home ownership, and the two
+ACEs are therefore load-bearing: a group-writable home or an over-broad ACE
+would widen who can drive the daemon, and a missing `_runny` read ACE would
+leave the daemon unable to read its own config and key.
+
+The operator's grant is **write** (connecting to the control socket requires
+write on the socket file, and that same inherited ACE covers every file under the
+home), so the operator can also modify or delete the daemon-written audit records
+(`operator-access.json`, cycle records). This is consistent with the model above
+— the operator already holds the App key and can disable hardening, so the audit
+trail is **visibility, not a tamper-proof tier** held against the operator; it
+records actions for later review, it does not defend against the operator who
+controls the daemon. Narrowing it is not possible without breaking the operator's
+own socket access.
+
+Uninstall **purges the home** (keeping only the `_runny` account), so no App key
+is left at rest once the operator removes the daemon, and the verify-before-remove
+step means uninstall never reports success over a still-running daemon
+([deploy.md](deploy.md) "Headless system daemon").

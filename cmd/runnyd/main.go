@@ -65,6 +65,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	_, systemHomeErr := os.Stat(home.SystemHomeDir)
+	if err := systemHomeOwnershipError(dir, os.Geteuid(), systemHomeErr == nil); err != nil {
+		return err
+	}
 	if err := dir.Ensure(); err != nil {
 		return err
 	}
@@ -435,6 +439,21 @@ func run() error {
 		err = fmt.Errorf("restarting after drain: %s", d.Reason())
 	}
 	return err
+}
+
+// systemHomeOwnershipError fails a botched system-daemon install loudly and
+// clearly. A non-root service account (uid below the 500 login-user floor) that
+// resolved to a per-user home because it does NOT own an existing SystemHomeDir
+// is a broken install — without this it would crash-loop on a cryptic
+// `mkdir /var/empty/.runny: permission denied`. A login user (uid >= 500) running
+// a per-user agent beside a system install legitimately falls back, so the check
+// is scoped to the service-uid range and to an existing system home.
+func systemHomeOwnershipError(dir home.Dir, euid int, systemHomeExists bool) error {
+	if euid <= 0 || euid >= 500 || string(dir) == home.SystemHomeDir || !systemHomeExists {
+		return nil
+	}
+	return fmt.Errorf("running as a system service account (uid %d) but %s is not owned by it; "+
+		"reinstall the system daemon with `sudo runnyctl install-daemon`", euid, home.SystemHomeDir)
 }
 
 // poolClientError attributes a GitHub client construction failure to its

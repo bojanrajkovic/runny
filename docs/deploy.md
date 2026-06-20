@@ -22,8 +22,12 @@ behaves:
   address. runnyd never backgrounds itself (crash-only KeepAlive keeps it a
   launchd child); don't wrap it in something that does.
 
-So runnyd installs as a **per-user LaunchAgent**, started by launchd in your GUI
-session so the one-time Local Network prompt can appear. If guests are
+So runnyd installs **started by launchd**, in one of two shapes: a **non-root
+system LaunchDaemon** for headless fleets (no GUI session and no prompt — a
+launchd-started daemon of any uid is auto-allowed; see "Headless system daemon")
+or a **per-user LaunchAgent** for a desktop, started in your GUI session so the
+one-time per-account Local Network prompt can appear. The one shape that does
+not work is a runnyd that backgrounds itself off launchd. If guests are
 unreachable, see "Troubleshooting: Local Network permission".
 
 ## Prerequisites
@@ -36,14 +40,15 @@ unreachable, see "Troubleshooting: Local Network permission".
 - `~/.runny/config.yaml` with at least one pool, valid GitHub App credentials,
   and the runner-administration permission (`runnyd -doctor` asserts it).
 
-The runny home is fixed at `~/.runny`, derived from the run-user's `$HOME`.
-There is no `RUNNY_HOME` environment variable and no `--home` flag — the
-LaunchAgent, the brew service, and the daemon all derive the home the same way.
-An operator who previously set `RUNNY_HOME=/custom` must **relocate**
-`config.yaml` and the file referenced by `private_key_path` into `~/.runny`
-(there is no automatic migration); a stale `RUNNY_HOME` left in the environment
-is ignored, and a daemon that finds no `config.yaml` under `~/.runny` fails
-loudly at startup.
+The runny home is **deployment-resolved, not configurable**: a non-root system
+daemon uses `/Library/Application Support/runny` (see "Headless system daemon"),
+and a per-user agent uses `~/.runny` derived from the run-user's `$HOME`. There
+is no `RUNNY_HOME` environment variable and no override — the daemon and its
+clients (`runnyctl`, the app) resolve the same home, so they can never disagree
+about where the socket and credentials live. A daemon that finds no
+`config.yaml` in its home fails loudly at startup. (This guide's per-user
+sections write `~/.runny`; for a system daemon read that as
+`/Library/Application Support/runny`.)
 
 ## Authoring `config.yaml`
 
@@ -108,16 +113,14 @@ work).
 
 ## Production install (via the tap)
 
-Install through the Homebrew tap (the formula installs both `runnyd` and
-`runnyctl`, and its `service` block is the LaunchAgent — same shape as
-`tools/deploy/`):
+Install through the Homebrew tap. The formula is **delivery-only** — it installs
+the `runnyd` and `runnyctl` binaries but registers no service (Homebrew's
+`service` DSL can only make a per-user LaunchAgent, while the headless install is
+a non-root system LaunchDaemon — see "Headless system daemon"):
 
 ```sh
 brew install bojanrajkovic/tap/runny
-# write ~/.runny/config.yaml, then from a GUI login session, WITHOUT sudo
-# (the per-user agent surfaces the one-time Local Network prompt; sudo would
-# instead run runnyd as a root LaunchDaemon — unnecessary privilege):
-brew services start runny
+sudo runnyctl install-daemon   # register the non-root system LaunchDaemon
 ```
 
 The release workflow regenerates the formula from `tools/deploy/runny.rb.tmpl`
@@ -126,7 +129,66 @@ bot App** (the `RELEASER_APP_ID` variable + `RELEASER_APP_PRIVATE_KEY` secret) w
 short-lived installation token scoped to `homebrew-tap`; it no-ops until those
 secrets exist. That App is deliberately *not* the runtime runner-registration
 App — release/CI and prod-host/runner-admin are separate blast radii.
-`tools/deploy/install.sh` remains the path for running a from-checkout build.
+`tools/deploy/install.sh` remains the path for running a from-checkout per-user
+agent.
+
+## Headless system daemon
+
+For a headless fleet host — no desktop login — runnyd runs as a **non-root
+system LaunchDaemon** under a dedicated service account. One privileged step
+installs it; the daemon then runs unprivileged.
+
+```sh
+brew install bojanrajkovic/tap/runny
+sudo runnyctl install-daemon
+# then land config + the App key in the system home — your account has write
+# access via an inheriting ACL, so no sudo is needed for edits:
+$EDITOR "/Library/Application Support/runny/config.yaml"
+cp runner-app.pem "/Library/Application Support/runny/"
+runnyctl doctor
+```
+
+`runnyctl install-daemon` (one `sudo`):
+
+- Creates a hidden, home-less service account (`_runny`): no login, no shell, no
+  home directory — its entire state lives in the system home.
+- Creates `/Library/Application Support/runny` owned by `_runny`, mode `0700`,
+  with a **dual inheriting ACL**: your operator account gets directory write
+  (edit config, land the key, read artifacts) and `_runny` gets read (so the
+  daemon can read your operator-owned `0600` config and key). The home holds
+  everything — config, the App key, logs, images, VM clones, cycle artifacts,
+  and the control socket.
+- Writes `/Library/LaunchDaemons/com.coderinserepeat.runnyd.plist`
+  (`UserName=_runny`, `KeepAlive`) and `launchctl bootstrap system`.
+
+The daemon starts immediately and **crash-loops loudly until a valid
+`config.yaml` is present** (visible in `logs/launchd.err.log` under the home, or
+via `runnyctl doctor`); it comes up on the next restart once the config lands.
+There is no GUI prompt — a launchd-started daemon of any uid is auto-allowed
+Local Network access.
+
+The plist points at the `runnyd` beside `runnyctl` (the brew opt symlink, kept
+current by `brew upgrade`). From a checkout, where the built binaries are not
+co-located, use the script — it stages them and delegates to `install-daemon`:
+
+```sh
+sudo RUNNYD=$(pwd)/bazel-bin/cmd/runnyd/runnyd_/runnyd \
+     RUNNYCTL=$(pwd)/bazel-bin/cmd/runnyctl/runnyctl_/runnyctl \
+     ./tools/deploy/install-system.sh
+```
+
+Remove it with `sudo runnyctl uninstall-daemon` (or
+`sudo ./tools/deploy/uninstall-system.sh`): it verifies the job is actually
+unloaded (refusing to proceed over a still-running daemon), then removes the
+plist **and the home**. The home is purged on purpose — a left-behind home would
+keep winning client resolution (so a later per-user agent would be unreachable)
+and would leave the App key at rest after you believe runny is gone. The `_runny`
+account is kept, so a reinstall reuses its uid and the recreated home's ownership
+stays valid. **Back up `config.yaml` first if you want to keep it.**
+
+Stop the daemon with `sudo launchctl bootout system/com.coderinserepeat.runnyd`,
+never by killing it: KeepAlive respawns it, which is what the ADR-0012 wedge
+restart and the ADR-0014 reload depend on.
 
 ## The Runny app and the command-line tool
 

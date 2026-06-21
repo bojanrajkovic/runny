@@ -40,6 +40,7 @@ func (f *fakeImages) Ensure(ctx context.Context, report func(string), onDigestRe
 	f.mu.Lock()
 	f.calls++
 	blocked := f.blockAll || (f.maxCalls > 0 && f.calls > f.maxCalls)
+	err := f.err
 	f.mu.Unlock()
 	if blocked {
 		<-ctx.Done()
@@ -48,10 +49,10 @@ func (f *fakeImages) Ensure(ctx context.Context, report func(string), onDigestRe
 	// Only fire the callback when Ensure will succeed: models the real
 	// Resolve-then-PullTo ordering where the callback fires iff the registry
 	// round-trip completed (a resolve failure leaves the digest unset).
-	if onDigestResolved != nil && f.err == nil {
+	if onDigestResolved != nil && err == nil {
 		onDigestResolved("sha256:fake")
 	}
-	return "sha256:fake", "actions-runner-osx-arm64-2.320.0.tar.gz", f.bundle, f.err
+	return "sha256:fake", "actions-runner-osx-arm64-2.320.0.tar.gz", f.bundle, err
 }
 
 type fakeMachine struct {
@@ -620,6 +621,43 @@ func TestHappyCycleThroughJob(t *testing.T) {
 	// Job ran → JIT runner self-removes → no explicit deletion.
 	if len(h.gh.deleted) != 0 {
 		t.Errorf("deleted %v, want none after a completed job", h.gh.deleted)
+	}
+}
+
+func TestLastFailureClearedOnListening(t *testing.T) {
+	// A slot that fails before boot (ENSURE_IMAGE error) accumulates a
+	// LastFailure. Once the next cycle boots successfully and reaches LISTENING,
+	// LastFailure must clear immediately — not wait for finishCycle — because
+	// LISTENING proves the pre-boot failure is resolved and the slot is healthy.
+	h := newHarness(t, nil)
+	h.images.err = errors.New("simulated pull failure") // first cycle fails at ENSURE_IMAGE
+	h.images.maxCalls = 2                               // second call succeeds after we clear err
+	cancel := h.start(t)
+	defer cancel()
+
+	h.waitState(t, StateEnsureImage)
+	st := h.waitState(t, StateBackoff)
+	if st.ConsecutiveFailures < 1 {
+		t.Fatalf("setup: want ≥1 failure after ENSURE_IMAGE error, got %d", st.ConsecutiveFailures)
+	}
+	if st.LastFailure == "" {
+		t.Fatal("setup: LastFailure empty after ENSURE_IMAGE error, want failure message")
+	}
+
+	// Second cycle: let image pull succeed and the slot reach LISTENING.
+	h.images.mu.Lock()
+	h.images.err = nil
+	h.images.mu.Unlock()
+
+	h.waitState(t, StateProvision)
+	h.proc.say(markerListening)
+	st = h.waitState(t, StateListening)
+
+	if st.LastFailure != "" {
+		t.Errorf("LastFailure = %q after LISTENING entry, want empty", st.LastFailure)
+	}
+	if st.ConsecutiveFailures != 0 {
+		t.Errorf("ConsecutiveFailures = %d after LISTENING entry, want 0", st.ConsecutiveFailures)
 	}
 }
 

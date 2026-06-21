@@ -35,7 +35,13 @@ struct MainWindowView: View {
                 }
                 .listStyle(.sidebar)
             }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 215)
+            // Widen the sidebar while the Local Network card shows — its 2–3 line
+            // message is cramped at the default width. It never shows for a system
+            // daemon (auto-allowed Local Network), so that case keeps the narrow sidebar.
+            .navigationSplitViewColumnWidth(
+                min: store.localNetworkCard == .hidden ? 180 : 240,
+                ideal: store.localNetworkCard == .hidden ? 215 : 300
+            )
         } detail: {
             switch selection {
             case .doctor:

@@ -42,6 +42,14 @@ enum RunnyHome {
         systemDirExists ? systemDirectory : perUserDirectory
     }
 
+    /// True when resolution selects the system-daemon home (it EXISTS). The app is
+    /// then talking to the non-root system LaunchDaemon, which a launchd start
+    /// auto-allows Local Network regardless of uid (Apple TN3179) — so its grant can
+    /// never be pending or denied, and the grant card must never show for it.
+    static var resolvesToSystemHome: Bool {
+        FileManager.default.fileExists(atPath: systemHomeDir)
+    }
+
     private static let socketName = "runnyd.sock"
 
     /// The socket inside a home — `<dir>/runnyd.sock`, the single join site

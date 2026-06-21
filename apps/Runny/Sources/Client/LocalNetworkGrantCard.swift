@@ -23,21 +23,29 @@ extension DaemonStore {
     /// Map the daemon's grant signal to a card. Pure → unit-tested. UNKNOWN is the
     /// "prompt may be pending" case the naive doctor verdict would miss (it reports
     /// ok with no vmnet); REACHABLE and UNSPECIFIED show nothing.
-    nonisolated static func localNetworkVerdict(grant: Runny_V1_LocalNetworkGrant) -> LocalNetworkCard {
+    nonisolated static func localNetworkVerdict(
+        grant: Runny_V1_LocalNetworkGrant, isSystemDaemon: Bool
+    ) -> LocalNetworkCard {
+        // A launchd-started system daemon is auto-allowed Local Network regardless of
+        // uid (Apple TN3179), so its grant can never be pending or denied — never
+        // surface the card, whose "open System Settings" CTA is a per-user-agent
+        // affordance and a structural dead end here.
+        if isSystemDaemon { return .hidden }
         switch grant {
-        case .unknown: .pendingOrUnknown
-        case .denied: .denied
-        case .reachable, .unspecified: .hidden
-        @unknown default: .hidden
+        case .unknown: return .pendingOrUnknown
+        case .denied: return .denied
+        case .reachable, .unspecified: return .hidden
+        @unknown default: return .hidden
         }
     }
 
     /// The card to show, gated on a live connection: a stale grant from a dropped
     /// daemon must not linger (the Start affordance owns "daemon down"). Mirrors
-    /// `visibleSkew`'s connection gate.
+    /// `visibleSkew`'s connection gate. Suppressed entirely for a system daemon
+    /// (auto-allowed Local Network — the card structurally cannot be true there).
     var localNetworkCard: LocalNetworkCard {
         guard case .connected = connection else { return .hidden }
-        return Self.localNetworkVerdict(grant: localNetworkGrant)
+        return Self.localNetworkVerdict(grant: localNetworkGrant, isSystemDaemon: RunnyHome.resolvesToSystemHome)
     }
 }
 

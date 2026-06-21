@@ -85,54 +85,36 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string), onDigestResol
 	}
 
 	e.log().Info("pulling image", "ref", e.Ref.String(), "digest", digest)
-	stall := bounded.NewStall()
-	prog := newProgress(report, e.log(), e.StallBudget)
-	client.Progress = func(n int64) {
-		stall.Feed(n)
-		prog.feed(n)
-	}
-	// A lock wait behind another slot's pull of this same image is progress,
-	// not silence: the winner's stall watch bounds the wait transitively, so
-	// keep this slot's own stall fed and annotate honestly — without this,
-	// the waiter reported STALLED and its watch killed the context it would
-	// need for a re-pull if the winner failed.
-	client.Waiting = func() func() {
-		start := time.Now()
-		stall.Feed(0)
-		prog.waiting(0)
-		done := make(chan struct{})
-		exited := make(chan struct{})
-		go func() {
-			defer close(exited)
-			t := time.NewTicker(2 * time.Second)
-			defer t.Stop()
-			for {
-				select {
-				case <-done:
-					return
-				case <-t.C:
-					stall.Feed(0)
-					prog.waiting(time.Since(start))
-				}
-			}
-		}()
-		// Join before returning: an un-joined ticker could stamp a stale
-		// "waiting" annotation over the pull progress that follows.
-		return func() { close(done); <-exited }
-	}
-	defer prog.stop()
-	wctx, cancel := stall.Watch(ctx, e.StallBudget)
-	defer cancel()
+	// Delegate the byte-pull to the shared per-dir puller: concurrent slots of a
+	// pool enter ENSURE_IMAGE together, and this lets them share one in-flight
+	// pull AND its outcome — including a bounded, shared wait when the pull is
+	// deterministically doomed (disk headroom), instead of each slot re-running
+	// the doomed pull and churning its own backoff (issue #125). Resolve and the
+	// cache check stay per-slot above; the puller is keyed by the content-
+	// addressed dir, so every subscriber necessarily wants this exact digest.
 	pinned := e.Ref
 	pinned.Digest = digest // pull exactly what we resolved
-	if _, err := client.PullTo(wctx, pinned, dir); err != nil {
-		return "", "", "", stallErr(wctx, err, fmt.Sprintf("pulling %s", e.Ref))
+	sub, release := acquireImagePull(dir, pinned, e.StallBudget, e.log(), report)
+	defer release()
+	// The subscriber has no stall watch of its own: its liveness is the puller's
+	// contract — the puller always reaches a terminal finish (a per-attempt stall
+	// watch bounds each pull, diskHoldBudget bounds the disk hold, and a panic is
+	// converted to a terminal error) — or this ctx is cancelled.
+	select {
+	case res := <-sub.done:
+		if res.err != nil {
+			return "", "", "", res.err
+		}
+		if err := res.bundle.Verify(); err != nil {
+			return "", "", "", fmt.Errorf("pulled image incomplete: %w", err)
+		}
+		e.log().Info("image cached", "digest", digest)
+		return digest, runnerVersion, res.bundle, nil
+	case <-ctx.Done():
+		// Operator recycle or daemon shutdown: leave the shared pull running for
+		// any sibling still waiting (release drops only this subscription).
+		return "", "", "", ctx.Err()
 	}
-	if err := bundle.Verify(); err != nil {
-		return "", "", "", fmt.Errorf("pulled image incomplete: %w", err)
-	}
-	e.log().Info("image cached", "digest", digest)
-	return digest, runnerVersion, bundle, nil
 }
 
 // progress turns raw byte deltas into operator-visible pull progress: a
@@ -226,21 +208,6 @@ func (p *progress) feed(n int64) {
 	if logIt {
 		p.log.Info("pull progress", "downloaded", oci.HumanBytes(total), "rate", oci.HumanBytes(int64(rate))+"/s")
 	}
-}
-
-// waiting annotates a lock wait behind another slot's pull of the same image
-// and counts as activity for the staleness watcher — the winner's progress is
-// this slot's progress.
-func (p *progress) waiting(since time.Duration) {
-	if p.report == nil {
-		return
-	}
-	detail := fmt.Sprintf("waiting for a concurrent pull of this image (%s)", since.Round(time.Second))
-	p.mu.Lock()
-	p.lastFeed = time.Now()
-	p.lastDetail = detail
-	p.mu.Unlock()
-	p.report(detail)
 }
 
 func (p *progress) stop() {

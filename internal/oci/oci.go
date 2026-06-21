@@ -35,6 +35,30 @@ import (
 // the same value so its verdict predicts the pull guard.
 const PullHeadroom = 2 << 30 // 2 GiB
 
+// DiskHeadroomError is returned by a pull refused at the pre-flight disk guard:
+// the uncompressed image plus PullHeadroom does not fit in the destination
+// filesystem. It is the one DETERMINISTIC pull failure — it fails identically
+// for every concurrent slot until host disk state changes — so a caller can
+// errors.As it, poll for headroom against NeedBytes, and re-attempt only once
+// there is room, instead of re-running a guaranteed-doomed pull.
+type DiskHeadroomError struct {
+	Ref        string
+	ImageBytes int64 // uncompressed image size (what the message reports)
+	FreeBytes  int64 // free space at refusal time
+}
+
+func (e *DiskHeadroomError) Error() string {
+	return fmt.Sprintf("image %s needs %s uncompressed but only %s is free — refusing to start a pull that cannot complete",
+		e.Ref, HumanBytes(e.ImageBytes), HumanBytes(e.FreeBytes))
+}
+
+// NeedBytes is the free-space threshold the pull requires: the uncompressed
+// image plus PullHeadroom. A headroom poll must compare available space against
+// this, not ImageBytes alone (the guard enforces the same sum).
+func (e *DiskHeadroomError) NeedBytes() uint64 {
+	return uint64(e.ImageBytes) + PullHeadroom
+}
+
 const (
 	mediaTypeConfig     = "application/vnd.cirruslabs.tart.config.v1"
 	mediaTypeDiskPrefix = "application/vnd.cirruslabs.tart.disk."
@@ -251,8 +275,7 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 		return "", fmt.Errorf("checking free space before pull: %w", err)
 	}
 	if uint64(total)+PullHeadroom > free {
-		return "", fmt.Errorf("image %s needs %s uncompressed but only %s is free — refusing to start a pull that cannot complete",
-			ref, HumanBytes(total), HumanBytes(int64(free)))
+		return "", &DiskHeadroomError{Ref: ref.String(), ImageBytes: total, FreeBytes: int64(free)}
 	}
 	if err := truncateFile(diskPath, total); err != nil {
 		return "", err

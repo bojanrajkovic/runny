@@ -359,12 +359,12 @@ final class DaemonStore {
     static let establishmentBound: TimeInterval = 5
     static let stalenessBound: TimeInterval = 90
     /// Confirmation window for pause/resume: confirmed by daemon ACK (near-instant).
-    static let confirmationBound: TimeInterval = 10
+    nonisolated static let confirmationBound: TimeInterval = 10
     /// Confirmation window for recycle: confirmed by a cycle-ID change, which
     /// requires a full teardown + new-cycle start — routinely > 10s on a real host.
-    static let recycleConfirmationBound: TimeInterval = 30
+    nonisolated static let recycleConfirmationBound: TimeInterval = 30
 
-    static func confirmBound(for kind: PendingCommand.Kind) -> TimeInterval {
+    nonisolated static func confirmBound(for kind: PendingCommand.Kind) -> TimeInterval {
         kind == .recycle ? recycleConfirmationBound : confirmationBound
     }
 

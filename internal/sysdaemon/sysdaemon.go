@@ -8,12 +8,13 @@
 package sysdaemon
 
 import (
-	"encoding/xml"
 	"fmt"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"howett.net/plist"
 
 	"github.com/bojanrajkovic/runny/internal/home"
 )
@@ -68,6 +69,27 @@ func (c Config) PlistPath() string {
 	return filepath.Join("/Library/LaunchDaemons", c.Label+".plist")
 }
 
+// launchDaemonPlist is the typed shape of the system LaunchDaemon plist.
+// Field order controls key order in the marshaled XML.
+type launchDaemonPlist struct {
+	Label string `plist:"Label"`
+	// Run as the dedicated non-root service account, not the installing root.
+	UserName         string   `plist:"UserName"`
+	ProgramArguments []string `plist:"ProgramArguments"`
+	RunAtLoad        bool     `plist:"RunAtLoad"`
+	// KeepAlive is load-bearing for crash-only teardown and config reload: runnyd
+	// exits non-zero expecting a launchd cold start. Stop it with
+	// "launchctl bootout system/", never by killing it.
+	KeepAlive         bool   `plist:"KeepAlive"`
+	ThrottleInterval  int    `plist:"ThrottleInterval"`
+	StandardOutPath   string `plist:"StandardOutPath"`
+	StandardErrorPath string `plist:"StandardErrorPath"`
+	// Standard, not the per-user agent's Interactive: a system daemon has no GUI
+	// session, and launchd-started daemons of any uid are auto-allowed local
+	// network (TN3179).
+	ProcessType string `plist:"ProcessType"`
+}
+
 // Plist renders the system LaunchDaemon. Unlike the per-user agent it carries a
 // UserName (run as the service account, not the installing root) and a Standard
 // ProcessType (a system daemon has no GUI session, so the per-user agent's
@@ -77,50 +99,23 @@ func (c Config) PlistPath() string {
 // exit non-zero expecting launchd to cold-start the daemon.
 func Plist(cfg Config) string {
 	logsDir := home.Dir(cfg.HomeDir).LogsDir()
-	out := filepath.Join(logsDir, "launchd.out.log")
-	errp := filepath.Join(logsDir, "launchd.err.log")
-	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>%s</string>
-
-  <!-- Run as the dedicated non-root service account, not the installing root. -->
-  <key>UserName</key>
-  <string>%s</string>
-
-  <key>ProgramArguments</key>
-  <array>
-    <string>%s</string>
-  </array>
-
-  <key>RunAtLoad</key>
-  <true/>
-
-  <!-- KeepAlive is load-bearing for the wedge restart (ADR-0012) and config
-       reload (ADR-0014): runnyd exits non-zero expecting a launchd cold start.
-       Stop it with "launchctl bootout system/", never by killing it. -->
-  <key>KeepAlive</key>
-  <true/>
-  <key>ThrottleInterval</key>
-  <integer>10</integer>
-
-  <!-- Pre-log crash output only; the daemon's structured log rotates under the
-       home's logs/runnyd.log. -->
-  <key>StandardOutPath</key>
-  <string>%s</string>
-  <key>StandardErrorPath</key>
-  <string>%s</string>
-
-  <!-- Standard, not the per-user agent's Interactive: a system daemon has no
-       GUI session, and local network is auto-allowed for launchd daemons. -->
-  <key>ProcessType</key>
-  <string>Standard</string>
-</dict>
-</plist>
-`, xmlEscape(cfg.Label), xmlEscape(cfg.ServiceUser), xmlEscape(cfg.RunnydPath),
-		xmlEscape(out), xmlEscape(errp))
+	p := launchDaemonPlist{
+		Label:             cfg.Label,
+		UserName:          cfg.ServiceUser,
+		ProgramArguments:  []string{cfg.RunnydPath},
+		RunAtLoad:         true,
+		KeepAlive:         true,
+		ThrottleInterval:  10,
+		StandardOutPath:   filepath.Join(logsDir, "launchd.out.log"),
+		StandardErrorPath: filepath.Join(logsDir, "launchd.err.log"),
+		ProcessType:       "Standard",
+	}
+	out, err := plist.Marshal(p, plist.XMLFormat)
+	if err != nil {
+		// Marshal of a well-typed struct with known-good types cannot fail.
+		panic(fmt.Sprintf("sysdaemon: plist.Marshal: %v", err))
+	}
+	return string(out)
 }
 
 // operatorNameRe is the plain-username shape an operator account must match. The
@@ -229,8 +224,3 @@ func parseTakenIDs(dsclList string) map[int]bool {
 	return taken
 }
 
-func xmlEscape(s string) string {
-	var b strings.Builder
-	_ = xml.EscapeText(&b, []byte(s))
-	return b.String()
-}

@@ -26,8 +26,14 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
+	"github.com/bojanrajkovic/runny/internal/diskfree"
 	"github.com/bojanrajkovic/runny/internal/tart"
 )
+
+// PullHeadroom is the free-space buffer required above the image's uncompressed
+// size before a pull is allowed to start. The doctor's disk-headroom check uses
+// the same value so its verdict predicts the pull guard.
+const PullHeadroom = 2 << 30 // 2 GiB
 
 const (
 	mediaTypeConfig     = "application/vnd.cirruslabs.tart.config.v1"
@@ -138,6 +144,38 @@ func (c *Client) Resolve(ctx bounded.Context, ref Ref) (string, error) {
 	return digest, err
 }
 
+// ResolveWithDiskBytes returns the manifest digest and the total declared
+// uncompressed disk size for ref. Fetches the manifest once; use this from
+// callers that need both rather than calling Resolve and re-fetching.
+func (c *Client) ResolveWithDiskBytes(ctx bounded.Context, ref Ref) (string, int64, error) {
+	m, _, digest, err := c.fetchManifest(ctx, ref)
+	if err != nil {
+		return "", 0, err
+	}
+	var total int64
+	for i := range m.Layers {
+		l := m.Layers[i]
+		if !strings.HasPrefix(l.MediaType, mediaTypeDiskPrefix) {
+			continue
+		}
+		if l.MediaType != mediaTypeDiskV2 {
+			return "", 0, fmt.Errorf("unsupported disk layer type %s (only disk.v2 supported)", l.MediaType)
+		}
+		n, err := l.uncompressedSize()
+		if err != nil {
+			return "", 0, err
+		}
+		if n <= 0 {
+			return "", 0, fmt.Errorf("disk layer %s declares non-positive uncompressed size %d", l.Digest, n)
+		}
+		if total > math.MaxInt64-n {
+			return "", 0, fmt.Errorf("disk layer sizes overflow the total image size")
+		}
+		total += n
+	}
+	return digest, total, nil
+}
+
 // Pull downloads the image into destDir as a tart bundle (config.json,
 // disk.img, nvram.bin + manifest.json) and returns the manifest digest.
 // destDir is created; a partial pull leaves it half-written, so callers pull
@@ -208,7 +246,11 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 	// Refuse a doomed pull up front: the decompressed image must fit. Hours
 	// of download ending in ENOSPC is the silent-failure shape this daemon
 	// exists to kill (and these images are large — 80GB+ uncompressed).
-	if free, err := freeBytes(filepath.Dir(destDir)); err == nil && uint64(total)+(2<<30) > free {
+	free, err := diskfree.AvailableBytes(filepath.Dir(destDir))
+	if err != nil {
+		return "", fmt.Errorf("checking free space before pull: %w", err)
+	}
+	if uint64(total)+PullHeadroom > free {
 		return "", fmt.Errorf("image %s needs %s uncompressed but only %s is free — refusing to start a pull that cannot complete",
 			ref, HumanBytes(total), HumanBytes(int64(free)))
 	}

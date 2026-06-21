@@ -5,30 +5,16 @@ go_library(
     srcs = [
         "applelz4.go",
         "oci.go",
-        "statfs.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/oci",
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/bounded",
+        "//internal/diskfree",
         "//internal/tart",
         "@com_github_pierrec_lz4_v4//:lz4",
         "@org_golang_x_sync//errgroup",
-    ] + select({
-        "@rules_go//go/platform:android": [
-            "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:darwin": [
-            "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:ios": [
-            "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:linux": [
-            "@org_golang_x_sys//unix",
-        ],
-        "//conditions:default": [],
-    }),
+    ],
 )
 
 go_test(

@@ -23,6 +23,7 @@ go_library(
     deps = [
         "//internal/bounded",
         "//internal/cycle",
+        "//internal/diskfree",
         "//internal/github",
         "//internal/guest",
         "//internal/home",

@@ -8,7 +8,10 @@ go_library(
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/sysdaemon",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/home"],
+    deps = [
+        "//internal/home",
+        "@net_howett_plist//:plist",
+    ],
 )
 
 go_test(

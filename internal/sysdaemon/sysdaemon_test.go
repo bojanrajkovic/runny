@@ -15,12 +15,18 @@ func TestPlist(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.RunnydPath = "/opt/homebrew/bin/runnyd"
 	p := Plist(cfg)
+	// Check keys and values independently — format-agnostic so the test doesn't
+	// pin howett.net/plist's internal whitespace.
 	for _, want := range []string{
-		"<key>Label</key>\n  <string>com.coderinserepeat.runnyd</string>",
-		"<key>UserName</key>\n  <string>_runny</string>",
+		"<key>Label</key>",
+		"<string>com.coderinserepeat.runnyd</string>",
+		"<key>UserName</key>",
+		"<string>_runny</string>",
 		"<string>/opt/homebrew/bin/runnyd</string>",
-		"<key>KeepAlive</key>\n  <true/>",
-		"<key>ProcessType</key>\n  <string>Standard</string>",
+		"<key>KeepAlive</key>",
+		"<true/>",
+		"<key>ProcessType</key>",
+		"<string>Standard</string>",
 		"<string>/Library/Application Support/runny/logs/launchd.out.log</string>",
 		"<string>/Library/Application Support/runny/logs/launchd.err.log</string>",
 	} {

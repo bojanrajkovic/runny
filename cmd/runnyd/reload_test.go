@@ -133,6 +133,41 @@ func TestSplitPreflightChecks(t *testing.T) {
 	}
 }
 
+// checkDiskHeadroom must match the pull guard: a host with enough for the
+// fixed 30 GiB floor but not for the configured image's uncompressed size
+// must FAIL, not pass — the class of silent-failure greenlight the project
+// exists to prevent. A host with enough for the image must pass.
+func TestCheckDiskHeadroomImageAware(t *testing.T) {
+	const GB = uint64(1)
+	const imageGB = uint64(100) // 100 GiB image, compressed to something smaller on-disk
+
+	// Host has 48 GB free — passes the old 30 GiB floor, fails for a 100 GiB image.
+	// (pull guard needs 100 + 2 = 102 GiB, host has 48 → doomed pull)
+	ok, detail := checkDiskHeadroom(48*GB, int64(imageGB<<30))
+	if ok {
+		t.Errorf("checkDiskHeadroom(%dGB, %dGB image) = ok, want fail: host can't pull the image", 48, imageGB)
+	}
+	if !strings.Contains(detail, "100") {
+		t.Errorf("detail %q should reference image size", detail)
+	}
+
+	// Host has 110 GB free — enough for 100 GiB image + 2 GiB headroom.
+	ok, detail = checkDiskHeadroom(110*GB, int64(imageGB<<30))
+	if !ok {
+		t.Errorf("checkDiskHeadroom(%dGB, %dGB image) = fail %q, want ok", 110, imageGB, detail)
+	}
+
+	// No image size (maxImageBytes = 0): falls back to 30 GiB floor.
+	ok, _ = checkDiskHeadroom(29*GB, 0)
+	if ok {
+		t.Error("checkDiskHeadroom(29GB, no image) = ok, want fail: below 30 GiB fallback floor")
+	}
+	ok, _ = checkDiskHeadroom(31*GB, 0)
+	if !ok {
+		t.Error("checkDiskHeadroom(31GB, no image) = fail, want ok: above 30 GiB fallback floor")
+	}
+}
+
 // A config that does not parse refuses at config-parse, before any client
 // construction or network check.
 func TestPreflightReloadRefusesUnparseableConfig(t *testing.T) {

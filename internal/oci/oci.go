@@ -138,6 +138,32 @@ func (c *Client) Resolve(ctx bounded.Context, ref Ref) (string, error) {
 	return digest, err
 }
 
+// ResolveWithDiskBytes returns the manifest digest and the total declared
+// uncompressed disk size for ref. Fetches the manifest once; use this from
+// callers that need both rather than calling Resolve and re-fetching.
+func (c *Client) ResolveWithDiskBytes(ctx bounded.Context, ref Ref) (string, int64, error) {
+	m, _, digest, err := c.fetchManifest(ctx, ref)
+	if err != nil {
+		return "", 0, err
+	}
+	var total int64
+	for i := range m.Layers {
+		l := m.Layers[i]
+		if !strings.HasPrefix(l.MediaType, mediaTypeDiskPrefix) {
+			continue
+		}
+		n, err := l.uncompressedSize()
+		if err != nil {
+			return digest, 0, err
+		}
+		if n <= 0 {
+			return digest, 0, fmt.Errorf("disk layer %s declares non-positive uncompressed size %d", l.Digest, n)
+		}
+		total += n
+	}
+	return digest, total, nil
+}
+
 // Pull downloads the image into destDir as a tart bundle (config.json,
 // disk.img, nvram.bin + manifest.json) and returns the manifest digest.
 // destDir is created; a partial pull leaves it half-written, so callers pull

@@ -702,6 +702,7 @@ func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*gi
 			}
 		}
 
+		var maxImageBytes int64
 		for _, p := range cfg.Pools {
 			name := "image-resolve:" + p.Name
 			ref, err := oci.ParseRef(p.Image)
@@ -710,24 +711,25 @@ func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*gi
 				continue
 			}
 			rctx, cancel := bounded.WithTimeout(ctx, checkBudget)
-			digest, err := oci.NewClient().Resolve(rctx, ref)
+			digest, diskBytes, err := oci.NewClient().ResolveWithDiskBytes(rctx, ref)
 			cancel()
 			if err != nil {
 				add(name, false, err.Error())
 			} else {
-				add(name, true, fmt.Sprintf("%s → %s", ref, short(digest)))
+				add(name, true, fmt.Sprintf("%s → %s (%s uncompressed)", ref, short(digest), oci.HumanBytes(diskBytes)))
+				if diskBytes > maxImageBytes {
+					maxImageBytes = diskBytes
+				}
 			}
 		}
 
 		free, err := freeDiskGB(dir.String())
-		switch {
-		case err != nil:
+		if err != nil {
 			add("disk-headroom", false, err.Error())
-		case free < 30:
+		} else {
 			// Judged by df, never du — CoW clones lie to du (image economics).
-			add("disk-headroom", false, fmt.Sprintf("%dGB free; <30GB risks mid-job disk exhaustion", free))
-		default:
-			add("disk-headroom", true, fmt.Sprintf("%dGB free", free))
+			ok, detail := checkDiskHeadroom(free, maxImageBytes)
+			add("disk-headroom", ok, detail)
 		}
 
 		return checks
@@ -773,4 +775,31 @@ func freeDiskGB(path string) (uint64, error) {
 		return 0, err
 	}
 	return st.Bavail * uint64(st.Bsize) / (1 << 30), nil
+}
+
+// checkDiskHeadroom returns the disk-headroom DoctorCheck. It is image-aware:
+// the floor is max(configured image's uncompressed size + 2 GiB, 30 GiB) so
+// the verdict matches the pull guard in internal/oci/oci.go, which refuses a
+// pull when free space < uncompressed + 2 GiB. 30 GiB is the fallback when no
+// image size is available (parse failure, no pools configured).
+// freeGB is the result of freeDiskGB; maxImageBytes is the largest declared
+// uncompressed image size across all successfully resolved pool images (0 when
+// none resolved successfully).
+func checkDiskHeadroom(freeGB uint64, maxImageBytes int64) (bool, string) {
+	const (
+		headroom = 2 << 30  // 2 GiB — matches the pull guard
+		minFloor = 30 << 30 // 30 GiB — the pre-image-awareness floor
+	)
+	floor := maxImageBytes + headroom
+	if floor < minFloor {
+		floor = minFloor
+	}
+	floorGB := uint64(floor) >> 30
+	if freeGB < floorGB {
+		if maxImageBytes > 0 {
+			return false, fmt.Sprintf("%dGB free; need ≥%dGB to pull the largest configured image (%s uncompressed)", freeGB, floorGB, oci.HumanBytes(maxImageBytes))
+		}
+		return false, fmt.Sprintf("%dGB free; <%dGB risks mid-job disk exhaustion", freeGB, floorGB)
+	}
+	return true, fmt.Sprintf("%dGB free", freeGB)
 }

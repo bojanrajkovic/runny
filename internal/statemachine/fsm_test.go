@@ -623,6 +623,43 @@ func TestHappyCycleThroughJob(t *testing.T) {
 	}
 }
 
+func TestLastFailureClearedOnListening(t *testing.T) {
+	// A slot that fails before boot (ENSURE_IMAGE error) accumulates a
+	// LastFailure. Once the next cycle boots successfully and reaches LISTENING,
+	// LastFailure must clear immediately — not wait for finishCycle — because
+	// LISTENING proves the pre-boot failure is resolved and the slot is healthy.
+	h := newHarness(t, nil)
+	h.images.err = errors.New("simulated pull failure") // first cycle fails at ENSURE_IMAGE
+	h.images.maxCalls = 2                               // second call succeeds after we clear err
+	cancel := h.start(t)
+	defer cancel()
+
+	h.waitState(t, StateEnsureImage)
+	st := h.waitState(t, StateBackoff)
+	if st.ConsecutiveFailures < 1 {
+		t.Fatalf("setup: want ≥1 failure after ENSURE_IMAGE error, got %d", st.ConsecutiveFailures)
+	}
+	if st.LastFailure == "" {
+		t.Fatal("setup: LastFailure empty after ENSURE_IMAGE error, want failure message")
+	}
+
+	// Second cycle: let image pull succeed and the slot reach LISTENING.
+	h.images.mu.Lock()
+	h.images.err = nil
+	h.images.mu.Unlock()
+
+	h.waitState(t, StateProvision)
+	h.proc.say(markerListening)
+	st = h.waitState(t, StateListening)
+
+	if st.LastFailure != "" {
+		t.Errorf("LastFailure = %q after LISTENING entry, want empty", st.LastFailure)
+	}
+	if st.ConsecutiveFailures != 0 {
+		t.Errorf("ConsecutiveFailures = %d after LISTENING entry, want 0", st.ConsecutiveFailures)
+	}
+}
+
 func TestDeadlineFailureTearsDownAndBacksOff(t *testing.T) {
 	h := newHarness(t, nil)
 	h.images.maxCalls = 2

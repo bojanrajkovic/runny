@@ -182,6 +182,30 @@ final class RecentlyConfirmedTests: XCTestCase {
     }
 }
 
+/// The per-kind confirmation bounds: recycle confirms on a cycle-ID change
+/// (inherently slower than a daemon ACK) so it gets a wider window than
+/// pause/resume.
+final class ConfirmBoundTests: XCTestCase {
+    func testRecycleGetsBroaderBound() {
+        XCTAssertGreaterThan(
+            DaemonStore.confirmBound(for: .recycle),
+            DaemonStore.confirmBound(for: .pause),
+            "recycle confirms on cycle change (slow); pause/resume confirm on daemon ACK (fast)"
+        )
+    }
+
+    func testPauseAndResumeShareBound() {
+        XCTAssertEqual(
+            DaemonStore.confirmBound(for: .pause),
+            DaemonStore.confirmBound(for: .resume)
+        )
+    }
+
+    func testRecycleBoundIs30s() {
+        XCTAssertEqual(DaemonStore.recycleConfirmationBound, 30)
+    }
+}
+
 /// The error classification that decides whether a failed command clears its
 /// pending and surfaces at once (a definitive rejection) or holds the pending
 /// for the confirmation watchdog (an ambiguous error). Getting this split wrong

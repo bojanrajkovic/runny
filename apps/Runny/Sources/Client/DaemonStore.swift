@@ -358,7 +358,16 @@ final class DaemonStore {
 
     static let establishmentBound: TimeInterval = 5
     static let stalenessBound: TimeInterval = 90
-    static let confirmationBound: TimeInterval = 10
+    /// Confirmation window for pause/resume: confirmed by daemon ACK (near-instant).
+    nonisolated static let confirmationBound: TimeInterval = 10
+    /// Confirmation window for recycle: confirmed by a cycle-ID change, which
+    /// requires a full teardown + new-cycle start — routinely > 10s on a real host.
+    nonisolated static let recycleConfirmationBound: TimeInterval = 30
+
+    nonisolated static func confirmBound(for kind: PendingCommand.Kind) -> TimeInterval {
+        kind == .recycle ? recycleConfirmationBound : confirmationBound
+    }
+
     /// After a reload drains the fleet, how long the app tolerates SILENCE — no
     /// fresh snapshot — before declaring the respawn failed. Anchored on the
     /// last snapshot (`lastUpdate`), not the reload time: a long healthy drain
@@ -682,7 +691,7 @@ final class DaemonStore {
                 if Self.bannerBelongs(to: commandErrorID, confirmedID: command.id) {
                     commandError = nil
                 }
-            } else if now.timeIntervalSince(command.requestedAt) > Self.confirmationBound {
+            } else if now.timeIntervalSince(command.requestedAt) > Self.confirmBound(for: command.kind) {
                 // Expiry happens here only — even for slots the daemon no
                 // longer reports — so the entry can't outlive its meaning.
                 pending.removeValue(forKey: slotName)
@@ -690,7 +699,7 @@ final class DaemonStore {
                 // is a benign disappearance, not a command that failed.
                 if slot != nil {
                     setCommandError(
-                        "\(command.kind.rawValue) of \(slotName) not confirmed after \(Int(Self.confirmationBound))s — the daemon accepted it but the slot hasn't reflected it",
+                        "\(command.kind.rawValue) of \(slotName) not confirmed after \(Int(Self.confirmBound(for: command.kind)))s — the daemon accepted it but the slot hasn't reflected it",
                         id: command.id
                     )
                 }
@@ -703,7 +712,7 @@ final class DaemonStore {
     /// bound read as absent; confirmPending owns the actual removal.
     func pendingCommand(for slot: String) -> PendingCommand? {
         guard let command = pending[slot],
-              Date().timeIntervalSince(command.requestedAt) <= Self.confirmationBound
+              Date().timeIntervalSince(command.requestedAt) <= Self.confirmBound(for: command.kind)
         else { return nil }
         return command
     }
@@ -726,8 +735,9 @@ final class DaemonStore {
         }
         // Sweep confirmed/expired pendings to ground truth before the guard
         // reads them. pendingCommand(for:) treats an entry as absent the instant
-        // it passes the 10s bound, but confirmPending only *removes* it half a
-        // second later (or on the next snapshot); a retry in that window would
+        // it passes the kind-specific bound (10s for pause/resume, 30s for
+        // recycle), but confirmPending only *removes* it half a second later
+        // (or on the next snapshot); a retry in that window would
         // see "no pending", install a fresh entry over the stale one, and lose
         // the original's not-confirmed watchdog. Sweeping first closes the gap,
         // then the guard reads the raw map rather than the time-windowed view.
@@ -736,7 +746,8 @@ final class DaemonStore {
         // is keyed by slot, so a second command — including a recycle over a
         // pending pause/resume, or vice versa — would install a fresh entry
         // under the same key and lose the first's not-confirmed watchdog. Reject
-        // it; the operator retries once the in-flight command resolves (≤10s).
+        // it; the operator retries once the in-flight command resolves (≤30s for
+        // recycle, ≤10s for pause/resume).
         if pending[slot.slot] != nil {
             Diag.command.error("run(\(kind.rawValue, privacy: .public) \(slot.slot, privacy: .public)) ignored: command already pending")
             commandError =
@@ -792,7 +803,7 @@ final class DaemonStore {
                     return
                 }
                 // Otherwise an ambiguous error keeps the pending: the ack may
-                // still arrive, and the 10s confirmation watchdog is the honest
+                // still arrive, and the confirmation watchdog is the honest
                 // backstop. Surface the error either way, tagged with this
                 // command's id so a later confirmation can retract it.
                 setCommandError(Self.describe(error, kind: kind, slot: slot.slot), id: id)
@@ -800,12 +811,13 @@ final class DaemonStore {
         }
         // Drive the confirmation timeout off a timer, not just snapshots: if
         // WatchStatus drops or wedges after the command, confirmPending() would
-        // otherwise never run again and the 10s not-confirmed promise would
-        // fail silently exactly when supervision is unhealthy. The check is
+        // otherwise never run again and the not-confirmed promise would fail
+        // silently exactly when supervision is unhealthy. The check is
         // idempotent — a snapshot that already confirmed/expired it is a no-op.
         if confirmable {
+            let bound = Self.confirmBound(for: kind)
             Task { @MainActor in
-                try? await Task.sleep(for: .seconds(Self.confirmationBound + 0.5))
+                try? await Task.sleep(for: .seconds(bound + 0.5))
                 confirmPending()
             }
         }

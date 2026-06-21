@@ -553,6 +553,9 @@ final class DaemonStore {
                     for try await snapshot in stream {
                         guard let self else { return }
                         attemptLastMessage = Date()
+                        if client !== attemptClient {
+                            Diag.command.notice("stream bound to RunnyClient[\(attemptClient.id)] (commands now use this client)")
+                        }
                         client = attemptClient
                         apply(snapshot)
                     }
@@ -711,7 +714,13 @@ final class DaemonStore {
     private func run(_ kind: PendingCommand.Kind, slot: Runny_V1_SlotStatus,
                      _ operation: @escaping (RunnyClient, String) async throws -> String?)
     {
+        let clientState = client == nil ? "nil" : "set"
+        let conn = String(describing: connection)
+        Diag.command.notice(
+            "run(\(kind.rawValue, privacy: .public) \(slot.slot, privacy: .public)) client=\(clientState, privacy: .public) connection=\(conn, privacy: .public)"
+        )
         guard let client else {
+            Diag.command.error("run(\(kind.rawValue, privacy: .public)) aborted: client nil")
             commandError = "daemon unreachable — \(kind.rawValue) not sent"
             return
         }
@@ -729,6 +738,7 @@ final class DaemonStore {
         // under the same key and lose the first's not-confirmed watchdog. Reject
         // it; the operator retries once the in-flight command resolves (≤10s).
         if pending[slot.slot] != nil {
+            Diag.command.error("run(\(kind.rawValue, privacy: .public) \(slot.slot, privacy: .public)) ignored: command already pending")
             commandError =
                 "\(kind.rawValue) of \(slot.slot) ignored — a command is already pending for it"
             return
@@ -744,9 +754,11 @@ final class DaemonStore {
                 id: id, kind: kind, requestedAt: Date(), cycleID: slot.cycleID
             )
         }
+        Diag.command.notice("run(\(kind.rawValue, privacy: .public) \(slot.slot, privacy: .public)) dispatching on RunnyClient[\(client.id)] confirmable=\(confirmable)")
         Task { @MainActor in
             do {
                 let note = try await operation(client, id)
+                Diag.command.notice("run(\(kind.rawValue, privacy: .public) \(slot.slot, privacy: .public)) operation returned")
                 // A drain warning and the unconfirmable-daemon hint can both
                 // apply at once (an old daemon that is also draining): combine
                 // them so the upgrade hint isn't hidden behind the drain note.
@@ -761,6 +773,7 @@ final class DaemonStore {
                 }
                 if !parts.isEmpty { commandNote = parts.joined(separator: " — ") }
             } catch {
+                Diag.command.error("run(\(kind.rawValue, privacy: .public) \(slot.slot, privacy: .public)) threw: definitive=\(error.isDefinitiveRejection) code=\(error.grpcCode.map { "\($0)" } ?? "—", privacy: .public) msg=\(error.grpcMessage ?? error.localizedDescription, privacy: .public)")
                 if error.isDefinitiveRejection {
                     // The daemon proved the command did not apply (full buffer,
                     // no such slot, refused mid-drain). Clear our pending — only
@@ -876,14 +889,26 @@ final class DaemonStore {
     }
 
     func runDoctor() {
-        guard let client, !doctorRunning else { return }
+        guard let client, !doctorRunning else {
+            let clientState = client == nil ? "nil" : "set"
+            let running = doctorRunning
+            Diag.command.notice(
+                "runDoctor ignored: client=\(clientState, privacy: .public) doctorRunning=\(running)"
+            )
+            return
+        }
         doctorRunning = true
+        let conn = String(describing: connection)
+        Diag.command.notice("runDoctor start on RunnyClient[\(client.id)] connection=\(conn, privacy: .public)")
         Task { @MainActor in
             defer { doctorRunning = false }
             do {
                 doctorChecks = try await client.doctor()
                 doctorRanAt = Date()
+                let count = doctorChecks?.count ?? 0
+                Diag.command.notice("runDoctor applied \(count) checks")
             } catch {
+                Diag.command.error("runDoctor failed: \(error.localizedDescription, privacy: .public)")
                 commandError = "doctor failed: \(error.localizedDescription)"
             }
         }

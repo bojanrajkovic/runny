@@ -2,7 +2,18 @@ import Foundation
 import GRPC
 import NIOCore
 import NIOPosix
+import os
 import RunnyV1
+
+/// Command-path observability. The app otherwise logs nothing, so a command that
+/// silently no-ops leaves no trace — exactly the failure this subsystem exists to
+/// make visible. Breadcrumbs are `.notice` (persisted), failures `.error`, so a
+/// host can capture them after the fact:
+///   log show --last 5m --predicate 'subsystem == "com.coderinserepeat.runny"'
+/// or live: log stream --predicate 'subsystem == "com.coderinserepeat.runny"'
+enum Diag {
+    static let command = Logger(subsystem: "com.coderinserepeat.runny", category: "command")
+}
 
 /// Thin grpc-swift (v1) client over the daemon's unix socket.
 ///
@@ -27,7 +38,13 @@ final class RunnyClient: @unchecked Sendable {
     /// thread every ≤30s for as long as the daemon is down.
     private static let group = PlatformSupport.makeEventLoopGroup(loopCount: 1)
 
+    /// A short stable id for this client instance, so logs can tell whether the
+    /// client a command runs on is the same one that owns the live stream.
+    let id = UInt16.random(in: 0 ... .max)
+
     init(socketPath: String) {
+        let cid = id
+        Diag.command.notice("RunnyClient[\(cid)] init target=\(socketPath, privacy: .public)")
         var configuration = ClientConnection.Configuration.default(
             target: .unixDomainSocket(socketPath),
             eventLoopGroup: Self.group
@@ -43,6 +60,27 @@ final class RunnyClient: @unchecked Sendable {
 
     private static func options(_ timeout: TimeAmount) -> CallOptions {
         CallOptions(timeLimit: .timeout(timeout))
+    }
+
+    /// Time and log one unary RPC's full lifecycle — send, return, or throw — so a
+    /// command that never lands leaves a trace instead of silence.
+    private func logged<T>(_ name: String, _ op: () async throws -> T) async throws -> T {
+        let cid = id
+        let start = DispatchTime.now().uptimeNanoseconds
+        Diag.command.notice("RunnyClient[\(cid)] → \(name, privacy: .public) sending")
+        do {
+            let result = try await op()
+            let ms = (DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+            Diag.command.notice("RunnyClient[\(cid)] ← \(name, privacy: .public) ok in \(ms)ms")
+            return result
+        } catch {
+            let ms = (DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+            let code = error.grpcCode.map { "\($0)" } ?? "—"
+            Diag.command.error(
+                "RunnyClient[\(cid)] ✗ \(name, privacy: .public) threw code=\(code, privacy: .public) msg=\(error.grpcMessage ?? error.localizedDescription, privacy: .public) in \(ms)ms"
+            )
+            throw error
+        }
     }
 
     /// The long-lived status stream. No time limit here by design: the
@@ -76,7 +114,9 @@ final class RunnyClient: @unchecked Sendable {
         request.slot = slot
         request.reason = reason
         request.cancelRunningJob = cancelRunningJob
-        _ = try await stub.recycle(request, callOptions: Self.options(Self.commandTimeout))
+        _ = try await logged("recycle(\(slot))") {
+            try await stub.recycle(request, callOptions: Self.options(Self.commandTimeout))
+        }
     }
 
     /// Returns the daemon's note (non-empty only while draining: pause is
@@ -88,7 +128,9 @@ final class RunnyClient: @unchecked Sendable {
         var request = Runny_V1_PauseRequest()
         request.slot = slot
         request.commandID = commandID
-        let response = try await stub.pause(request, callOptions: Self.options(Self.commandTimeout))
+        let response = try await logged("pause(\(slot))") {
+            try await stub.pause(request, callOptions: Self.options(Self.commandTimeout))
+        }
         return response.note
     }
 
@@ -96,7 +138,9 @@ final class RunnyClient: @unchecked Sendable {
         var request = Runny_V1_ResumeRequest()
         request.slot = slot
         request.commandID = commandID
-        _ = try await stub.resume(request, callOptions: Self.options(Self.commandTimeout))
+        _ = try await logged("resume(\(slot))") {
+            try await stub.resume(request, callOptions: Self.options(Self.commandTimeout))
+        }
     }
 
     /// Validate the on-disk config and, if it passes, drain the fleet toward a
@@ -107,21 +151,25 @@ final class RunnyClient: @unchecked Sendable {
     func reload(reason: String) async throws -> Runny_V1_ReloadResponse {
         var request = Runny_V1_ReloadRequest()
         request.reason = reason
-        return try await stub.reload(request, callOptions: Self.options(Self.reloadTimeout))
+        return try await logged("reload") {
+            try await stub.reload(request, callOptions: Self.options(Self.reloadTimeout))
+        }
     }
 
     func why(slot: String, cycles: UInt32) async throws -> [Runny_V1_CycleRecord] {
         var request = Runny_V1_WhyRequest()
         request.slot = slot
         request.cycles = cycles
-        let response = try await stub.why(request, callOptions: Self.options(Self.queryTimeout))
+        let response = try await logged("why(\(slot))") {
+            try await stub.why(request, callOptions: Self.options(Self.queryTimeout))
+        }
         return response.cycles
     }
 
     func doctor() async throws -> [Runny_V1_DoctorCheck] {
-        let response = try await stub.doctor(
-            .init(), callOptions: Self.options(Self.queryTimeout)
-        )
+        let response = try await logged("doctor") {
+            try await stub.doctor(.init(), callOptions: Self.options(Self.queryTimeout))
+        }
         return response.checks
     }
 

@@ -152,12 +152,18 @@ func (c *Client) ResolveWithDiskBytes(ctx bounded.Context, ref Ref) (string, int
 		if !strings.HasPrefix(l.MediaType, mediaTypeDiskPrefix) {
 			continue
 		}
+		if l.MediaType != mediaTypeDiskV2 {
+			return digest, 0, fmt.Errorf("unsupported disk layer type %s (only disk.v2 supported)", l.MediaType)
+		}
 		n, err := l.uncompressedSize()
 		if err != nil {
 			return digest, 0, err
 		}
 		if n <= 0 {
 			return digest, 0, fmt.Errorf("disk layer %s declares non-positive uncompressed size %d", l.Digest, n)
+		}
+		if total > math.MaxInt64-n {
+			return digest, 0, fmt.Errorf("disk layer sizes overflow the total image size")
 		}
 		total += n
 	}

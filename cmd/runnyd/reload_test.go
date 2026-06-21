@@ -166,6 +166,19 @@ func TestCheckDiskHeadroomImageAware(t *testing.T) {
 	if !ok {
 		t.Error("checkDiskHeadroom(31GB, no image) = fail, want ok: above 30 GiB fallback floor")
 	}
+
+	// Non-GiB-aligned image size: truncation without ceiling division would let
+	// the doctor say OK on a host the pull guard rejects. floor = 100.5+2 = 102.5 GiB;
+	// ceiling → floorGB=103. A host reporting 102 GiB free must fail.
+	nonAligned := int64(imageGB<<30) + int64(512<<20) // 100.5 GiB
+	ok, _ = checkDiskHeadroom(102*GB, nonAligned)
+	if ok {
+		t.Error("checkDiskHeadroom(102GB, 100.5GiB image) = ok, want fail: floor is 102.5GiB+2GiB, ceiling=105GB")
+	}
+	ok, _ = checkDiskHeadroom(103*GB, nonAligned)
+	if !ok {
+		t.Error("checkDiskHeadroom(103GB, 100.5GiB image) = fail, want ok")
+	}
 }
 
 // A config that does not parse refuses at config-parse, before any client

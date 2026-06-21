@@ -512,6 +512,41 @@ func TestPullToWaitingCallback(t *testing.T) {
 // The lock wait must be interruptible: a cancelled context (operator recycle,
 // daemon shutdown) frees the waiter instead of leaving it blocked until the
 // holder finishes a multi-GiB pull.
+func TestResolveWithDiskBytes(t *testing.T) {
+	disk := bytes.Repeat([]byte("D"), 8192)
+	f := newFakeRegistry(t, []byte(`{"os":"darwin"}`), []byte("nvram"), disk)
+	_, ref := f.start()
+
+	digest, total, err := NewClient().ResolveWithDiskBytes(testCtx(t), ref)
+	if err != nil {
+		t.Fatalf("ResolveWithDiskBytes: %v", err)
+	}
+	if digest == "" {
+		t.Error("ResolveWithDiskBytes returned empty digest")
+	}
+	if total != int64(len(disk)) {
+		t.Errorf("total disk bytes = %d, want %d (len(disk))", total, len(disk))
+	}
+
+	// A disk.v1 layer must be rejected — ResolveWithDiskBytes must match pull()'s
+	// unsupported-format rejection so the doctor doesn't report a size for images
+	// that can't be pulled.
+	f2 := newFakeRegistry(t, []byte("{}"), []byte("n"), disk)
+	f2.tamperManifest(t, func(m *manifest) {
+		for i := range m.Layers {
+			if m.Layers[i].MediaType == mediaTypeDiskV2 {
+				m.Layers[i].MediaType = "application/vnd.cirruslabs.tart.disk.v1"
+				return
+			}
+		}
+	})
+	_, ref2 := f2.start()
+	_, _, err = NewClient().ResolveWithDiskBytes(testCtx(t), ref2)
+	if err == nil || !strings.Contains(err.Error(), "unsupported disk layer type") {
+		t.Fatalf("disk.v1 layer: want unsupported-disk-layer-type error, got %v", err)
+	}
+}
+
 func TestPullToWaitInterruptible(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "bundle")
 	semAny, _ := pullLocks.LoadOrStore(dest, make(chan struct{}, 1))

@@ -794,7 +794,9 @@ func checkDiskHeadroom(freeGB uint64, maxImageBytes int64) (bool, string) {
 	if floor < minFloor {
 		floor = minFloor
 	}
-	floorGB := uint64(floor) >> 30
+	// Ceiling division: freeDiskGB truncates, so we round the floor up to
+	// ensure the doctor never says OK on a host the pull guard would reject.
+	floorGB := (uint64(floor) + (1<<30) - 1) >> 30
 	if freeGB < floorGB {
 		if maxImageBytes > 0 {
 			return false, fmt.Sprintf("%dGB free; need ≥%dGB to pull the largest configured image (%s uncompressed)", freeGB, floorGB, oci.HumanBytes(maxImageBytes))

@@ -223,4 +223,3 @@ func parseTakenIDs(dsclList string) map[int]bool {
 	}
 	return taken
 }
-

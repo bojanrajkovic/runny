@@ -144,12 +144,6 @@ type Client struct {
 	// the production consumer in internal/images feeds a mutex-guarded
 	// progress aggregator and a bounded.Stall, both safe under concurrency.
 	Progress func(bytes int64)
-	// Waiting, when set, is called by PullTo when another pull into the same
-	// destination holds the lock: the wait is progress (the winner is moving
-	// this caller's image), not silence, and without this signal the caller's
-	// stall detector reads the lock wait as a stalled transfer. It returns a
-	// stop func PullTo calls when the wait ends (lock acquired or ctx done).
-	Waiting func() (stop func())
 
 	mu     sync.Mutex
 	tokens map[string]string // host -> bearer token
@@ -324,17 +318,11 @@ func (c *Client) PullTo(ctx bounded.Context, ref Ref, destDir string) (string, e
 	select {
 	case sem <- struct{}{}:
 	default:
-		// Contended: another slot is pulling this destination right now. Tell
-		// the caller it is waiting (not stalled) and block interruptibly.
-		stop := func() {}
-		if c.Waiting != nil {
-			stop = c.Waiting()
-		}
+		// Contended: another pull into this destination is in flight. Block
+		// interruptibly until it finishes (then take the cache hit) or ctx ends.
 		select {
 		case sem <- struct{}{}:
-			stop()
 		case <-ctx.Done():
-			stop()
 			return "", fmt.Errorf("waiting for a concurrent pull into %s: %w", destDir, context.Cause(ctx))
 		}
 	}

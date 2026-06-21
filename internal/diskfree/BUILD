@@ -11,9 +11,6 @@ go_library(
         "@rules_go//go/platform:darwin": [
             "-framework CoreFoundation",
         ],
-        "@rules_go//go/platform:ios": [
-            "-framework CoreFoundation",
-        ],
         "//conditions:default": [],
     }),
     importpath = "github.com/bojanrajkovic/runny/internal/diskfree",

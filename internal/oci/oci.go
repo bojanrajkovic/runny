@@ -30,6 +30,11 @@ import (
 	"github.com/bojanrajkovic/runny/internal/tart"
 )
 
+// PullHeadroom is the free-space buffer required above the image's uncompressed
+// size before a pull is allowed to start. The doctor's disk-headroom check uses
+// the same value so its verdict predicts the pull guard.
+const PullHeadroom = 2 << 30 // 2 GiB
+
 const (
 	mediaTypeConfig     = "application/vnd.cirruslabs.tart.config.v1"
 	mediaTypeDiskPrefix = "application/vnd.cirruslabs.tart.disk."
@@ -154,17 +159,17 @@ func (c *Client) ResolveWithDiskBytes(ctx bounded.Context, ref Ref) (string, int
 			continue
 		}
 		if l.MediaType != mediaTypeDiskV2 {
-			return digest, 0, fmt.Errorf("unsupported disk layer type %s (only disk.v2 supported)", l.MediaType)
+			return "", 0, fmt.Errorf("unsupported disk layer type %s (only disk.v2 supported)", l.MediaType)
 		}
 		n, err := l.uncompressedSize()
 		if err != nil {
-			return digest, 0, err
+			return "", 0, err
 		}
 		if n <= 0 {
-			return digest, 0, fmt.Errorf("disk layer %s declares non-positive uncompressed size %d", l.Digest, n)
+			return "", 0, fmt.Errorf("disk layer %s declares non-positive uncompressed size %d", l.Digest, n)
 		}
 		if total > math.MaxInt64-n {
-			return digest, 0, fmt.Errorf("disk layer sizes overflow the total image size")
+			return "", 0, fmt.Errorf("disk layer sizes overflow the total image size")
 		}
 		total += n
 	}
@@ -241,7 +246,11 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 	// Refuse a doomed pull up front: the decompressed image must fit. Hours
 	// of download ending in ENOSPC is the silent-failure shape this daemon
 	// exists to kill (and these images are large — 80GB+ uncompressed).
-	if free, err := diskfree.AvailableBytes(filepath.Dir(destDir)); err == nil && uint64(total)+(2<<30) > free {
+	free, err := diskfree.AvailableBytes(filepath.Dir(destDir))
+	if err != nil {
+		return "", fmt.Errorf("checking free space before pull: %w", err)
+	}
+	if uint64(total)+PullHeadroom > free {
 		return "", fmt.Errorf("image %s needs %s uncompressed but only %s is free — refusing to start a pull that cannot complete",
 			ref, HumanBytes(total), HumanBytes(int64(free)))
 	}

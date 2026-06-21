@@ -777,17 +777,14 @@ func short(digest string) string {
 // largest declared uncompressed image size across all successfully resolved
 // pool images (0 when none resolved successfully).
 func checkDiskHeadroom(freeBytes uint64, maxImageBytes int64) (bool, string) {
-	const (
-		headroom = 2 << 30  // 2 GiB — matches the pull guard
-		minFloor = 30 << 30 // 30 GiB — the pre-image-awareness floor
-	)
-	floor := uint64(maxImageBytes) + headroom
+	const minFloor = 30 << 30 // 30 GiB — the pre-image-awareness floor
+	floor := uint64(maxImageBytes) + oci.PullHeadroom
 	if floor < minFloor {
 		floor = minFloor
 	}
 	freeGB := freeBytes >> 30 // for display only
 	if freeBytes < floor {
-		floorGB := (floor + (1<<30) - 1) >> 30 // ceiling for display
+		floorGB := (floor + (1 << 30) - 1) >> 30 // ceiling for display
 		if maxImageBytes > 0 {
 			return false, fmt.Sprintf("%dGB free; need ≥%dGB to pull the largest configured image (%s uncompressed)", freeGB, floorGB, oci.HumanBytes(maxImageBytes))
 		}

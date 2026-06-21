@@ -367,6 +367,7 @@ final class DaemonStore {
     static func confirmBound(for kind: PendingCommand.Kind) -> TimeInterval {
         kind == .recycle ? recycleConfirmationBound : confirmationBound
     }
+
     /// After a reload drains the fleet, how long the app tolerates SILENCE — no
     /// fresh snapshot — before declaring the respawn failed. Anchored on the
     /// last snapshot (`lastUpdate`), not the reload time: a long healthy drain

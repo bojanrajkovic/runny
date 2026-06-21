@@ -138,46 +138,46 @@ func TestSplitPreflightChecks(t *testing.T) {
 // must FAIL, not pass — the class of silent-failure greenlight the project
 // exists to prevent. A host with enough for the image must pass.
 func TestCheckDiskHeadroomImageAware(t *testing.T) {
-	const GB = uint64(1)
-	const imageGB = uint64(100) // 100 GiB image, compressed to something smaller on-disk
+	const GiB = uint64(1 << 30)
+	const imageSize = int64(100 << 30) // 100 GiB image, compressed to something smaller on-disk
 
-	// Host has 48 GB free — passes the old 30 GiB floor, fails for a 100 GiB image.
+	// Host has 48 GiB free — passes the old 30 GiB floor, fails for a 100 GiB image.
 	// (pull guard needs 100 + 2 = 102 GiB, host has 48 → doomed pull)
-	ok, detail := checkDiskHeadroom(48*GB, int64(imageGB<<30))
+	ok, detail := checkDiskHeadroom(48*GiB, imageSize)
 	if ok {
-		t.Errorf("checkDiskHeadroom(%dGB, %dGB image) = ok, want fail: host can't pull the image", 48, imageGB)
+		t.Errorf("checkDiskHeadroom(48GiB, 100GiB image) = ok, want fail: host can't pull the image")
 	}
 	if !strings.Contains(detail, "100") {
 		t.Errorf("detail %q should reference image size", detail)
 	}
 
-	// Host has 110 GB free — enough for 100 GiB image + 2 GiB headroom.
-	ok, detail = checkDiskHeadroom(110*GB, int64(imageGB<<30))
+	// Host has 110 GiB free — enough for 100 GiB image + 2 GiB headroom.
+	ok, detail = checkDiskHeadroom(110*GiB, imageSize)
 	if !ok {
-		t.Errorf("checkDiskHeadroom(%dGB, %dGB image) = fail %q, want ok", 110, imageGB, detail)
+		t.Errorf("checkDiskHeadroom(110GiB, 100GiB image) = fail %q, want ok", detail)
 	}
 
 	// No image size (maxImageBytes = 0): falls back to 30 GiB floor.
-	ok, _ = checkDiskHeadroom(29*GB, 0)
+	ok, _ = checkDiskHeadroom(29*GiB, 0)
 	if ok {
-		t.Error("checkDiskHeadroom(29GB, no image) = ok, want fail: below 30 GiB fallback floor")
+		t.Error("checkDiskHeadroom(29GiB, no image) = ok, want fail: below 30 GiB fallback floor")
 	}
-	ok, _ = checkDiskHeadroom(31*GB, 0)
+	ok, _ = checkDiskHeadroom(31*GiB, 0)
 	if !ok {
-		t.Error("checkDiskHeadroom(31GB, no image) = fail, want ok: above 30 GiB fallback floor")
+		t.Error("checkDiskHeadroom(31GiB, no image) = fail, want ok: above 30 GiB fallback floor")
 	}
 
-	// Non-GiB-aligned image size: truncation without ceiling division would let
-	// the doctor say OK on a host the pull guard rejects. floor = 100.5+2 = 102.5 GiB;
-	// ceiling → floorGB=103. A host reporting 102 GiB free must fail.
-	nonAligned := int64(imageGB<<30) + int64(512<<20) // 100.5 GiB
-	ok, _ = checkDiskHeadroom(102*GB, nonAligned)
+	// Non-GiB-aligned image size: exact byte comparison catches this without
+	// ceiling division. floor = 100.5 GiB + 2 GiB = 102.5 GiB exactly;
+	// 102 GiB of free space is less than the floor, so it must fail.
+	nonAligned := int64(100<<30) + int64(512<<20) // 100.5 GiB
+	ok, _ = checkDiskHeadroom(102*GiB, nonAligned)
 	if ok {
-		t.Error("checkDiskHeadroom(102GB, 100.5GiB image) = ok, want fail: floor is 102.5GiB+2GiB, ceiling=105GB")
+		t.Error("checkDiskHeadroom(102GiB, 100.5GiB image) = ok, want fail: exact floor is 102.5GiB")
 	}
-	ok, _ = checkDiskHeadroom(103*GB, nonAligned)
+	ok, _ = checkDiskHeadroom(103*GiB, nonAligned)
 	if !ok {
-		t.Error("checkDiskHeadroom(103GB, 100.5GiB image) = fail, want ok")
+		t.Error("checkDiskHeadroom(103GiB, 100.5GiB image) = fail, want ok")
 	}
 }
 

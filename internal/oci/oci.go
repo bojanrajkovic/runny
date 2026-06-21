@@ -26,6 +26,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
+	"github.com/bojanrajkovic/runny/internal/diskfree"
 	"github.com/bojanrajkovic/runny/internal/tart"
 )
 
@@ -240,7 +241,7 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 	// Refuse a doomed pull up front: the decompressed image must fit. Hours
 	// of download ending in ENOSPC is the silent-failure shape this daemon
 	// exists to kill (and these images are large — 80GB+ uncompressed).
-	if free, err := freeBytes(filepath.Dir(destDir)); err == nil && uint64(total)+(2<<30) > free {
+	if free, err := diskfree.AvailableBytes(filepath.Dir(destDir)); err == nil && uint64(total)+(2<<30) > free {
 		return "", fmt.Errorf("image %s needs %s uncompressed but only %s is free — refusing to start a pull that cannot complete",
 			ref, HumanBytes(total), HumanBytes(int64(free)))
 	}

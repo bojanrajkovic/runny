@@ -734,8 +734,9 @@ final class DaemonStore {
         }
         // Sweep confirmed/expired pendings to ground truth before the guard
         // reads them. pendingCommand(for:) treats an entry as absent the instant
-        // it passes the 10s bound, but confirmPending only *removes* it half a
-        // second later (or on the next snapshot); a retry in that window would
+        // it passes the kind-specific bound (10s for pause/resume, 30s for
+        // recycle), but confirmPending only *removes* it half a second later
+        // (or on the next snapshot); a retry in that window would
         // see "no pending", install a fresh entry over the stale one, and lose
         // the original's not-confirmed watchdog. Sweeping first closes the gap,
         // then the guard reads the raw map rather than the time-windowed view.

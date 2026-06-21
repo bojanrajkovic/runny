@@ -727,7 +727,7 @@ func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*gi
 		if err != nil {
 			add("disk-headroom", false, err.Error())
 		} else {
-			// Judged by df, never du — CoW clones lie to du (image economics).
+			// Judged by statfs(2), never du — CoW clones lie to du (image economics).
 			ok, detail := checkDiskHeadroom(free, maxImageBytes)
 			add("disk-headroom", ok, detail)
 		}
@@ -768,7 +768,7 @@ func short(digest string) string {
 	return digest
 }
 
-// freeDiskGB: judged by statfs, never du — CoW clones lie to du.
+// freeDiskGB: judged by statfs(2), never du — CoW clones lie to du.
 func freeDiskGB(path string) (uint64, error) {
 	var st unix.Statfs_t
 	if err := unix.Statfs(path, &st); err != nil {

@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 import Observation
 
@@ -38,7 +37,9 @@ final class CLIInstallModel {
     /// captured generation is stale is ignored, so a cancelled op can never
     /// overwrite the loud `.cancelled` state with a result the operator dismissed.
     private var generation = 0
-    private var running: Process?
+    /// The shared admin-prompt runner. Each privileged installer owns one; it holds
+    /// the live process so `cancel()` can terminate a standing prompt.
+    private let broker = PrivilegedBroker()
 
     static let linkPath = "/usr/local/bin/runnyctl"
     private static let binDir = "/usr/local/bin"
@@ -126,8 +127,7 @@ final class CLIInstallModel {
     func cancel() {
         guard state == .installing else { return }
         generation += 1
-        running?.terminate()
-        running = nil
+        broker.cancel()
         state = .cancelled
     }
 
@@ -143,7 +143,7 @@ final class CLIInstallModel {
             bundleCLIPath: bundle,
             existing: Self.readExisting(Self.linkPath),
             dirWritable: Self.dirWritable(Self.binDir),
-            translocated: Self.isTranslocated(Bundle.main.bundleURL.path)
+            translocated: PrivilegedBroker.isTranslocated(Bundle.main.bundleURL.path)
         )
         switch verdict {
         case .refuseTranslocated:
@@ -260,51 +260,22 @@ final class CLIInstallModel {
         await runOsascript(CLIInstallModel.removeScript(target: target), gen: gen)
     }
 
-    /// Raise the admin prompt and wait. The app is `LSUIElement`/accessory, so the
-    /// prompt is brought forward by activating; the process handle is held so
-    /// `cancel()` can terminate it, and a system-dismissed prompt comes back as
-    /// `.cancelled`.
+    /// Raise the admin prompt via the shared `PrivilegedBroker` and map its result
+    /// to a CLI outcome. The generation guards stay HERE (the broker is stateless
+    /// about ops): a cancel before the call drops the prompt entirely; a cancel
+    /// during it already bumped the generation and set `.cancelled`, so a late
+    /// result is reported `.cancelled` regardless of how the terminated osascript
+    /// exited.
     private func runOsascript(_ script: String, gen: Int) async -> PrivilegedOutcome {
-        // Bring the app forward so the system admin prompt has focus. Do NOT flip
-        // and restore the activation policy here: the install surface is Settings
-        // (already .regular), and blindly restoring a saved policy would strand the
-        // app .regular if its window closed during the prompt (the LSUIElement bug
-        // ActivationCoordinator's remaining-window check exists to avoid).
-        NSApp.activate(ignoringOtherApps: true)
-        // A Cancel that landed before we got here already bumped the generation —
-        // don't raise the prompt at all.
         guard gen == generation else { return .cancelled }
-
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        proc.arguments = ["-e", script]
-        let errPipe = Pipe()
-        proc.standardError = errPipe
-        proc.standardOutput = Pipe()
-        // Publish `running` and launch synchronously ON the main actor: from here to
-        // proc.run() there is no suspension, so a Cancel can only land once the
-        // process is live (where running?.terminate() reaches it) — never on an
-        // unlaunched process that would then orphan a prompt after .cancelled.
-        running = proc
-        do {
-            try proc.run()
-        } catch {
-            if running === proc { running = nil }
-            return .failed("could not launch osascript: \(error.localizedDescription)")
-        }
-        // Only the blocking wait goes to a background queue.
-        let (status, stderr): (Int32, String) = await withCheckedContinuation { cont in
-            DispatchQueue.global().async {
-                proc.waitUntilExit()
-                let data = errPipe.fileHandleForReading.readDataToEndOfFile()
-                cont.resume(returning: (proc.terminationStatus, String(data: data, encoding: .utf8) ?? ""))
-            }
-        }
-        if running === proc { running = nil }
-        // A cancel between launch and return already set .cancelled and bumped the
-        // generation; report cancelled regardless of how the terminated osascript exited.
+        let result = await broker.run(script)
         if gen != generation { return .cancelled }
-        return Self.outcomeForOsascript(exitCode: status, stderr: stderr)
+        switch result {
+        case let .launchFailed(message):
+            return .failed(message)
+        case let .completed(exitCode, stderr):
+            return Self.outcomeForOsascript(exitCode: exitCode, stderr: stderr)
+        }
     }
 }
 
@@ -356,40 +327,17 @@ extension CLIInstallModel {
         }
     }
 
-    /// Map osascript's exit + stderr to an outcome. `do shell script` surfaces the
-    /// inner shell exit code in parentheses (our foreign guard exits 3), and a
-    /// user-dismissed auth prompt is AppleScript error -128.
+    /// Map osascript's exit + stderr to a CLI outcome — the DOMAIN interpretation
+    /// the broker leaves to each installer. `do shell script` surfaces the inner
+    /// shell exit code as the trailing parenthesized number; our foreign guard exits
+    /// 3, and a user-dismissed prompt is AppleScript error -128 (recovered by the
+    /// broker). Matching the trailing token, not a bare substring, keeps a path or
+    /// message containing "(3)" earlier from misclassifying a genuine failure.
     nonisolated static func outcomeForOsascript(exitCode: Int32, stderr: String) -> PrivilegedOutcome {
         if exitCode == 0 { return .ok }
-        // `do shell script` renders the inner shell exit (or AppleScript's own
-        // error) as the FINAL parenthesized number: (-128) for a user-dismissed
-        // prompt, (3) for our foreign-guard exit. Match the trailing token, not a
-        // bare substring, so a path or message containing "(3)" earlier can't
-        // misclassify a genuine failure as a benign foreign-refusal.
-        let code = trailingParenCode(stderr)
-        if code == -128 || stderr.localizedCaseInsensitiveContains("User canceled") {
-            return .cancelled
-        }
-        if code == 3 { return .refusedForeign }
+        if PrivilegedBroker.isUserCancelled(exitCode: exitCode, stderr: stderr) { return .cancelled }
+        if PrivilegedBroker.trailingParenCode(stderr) == 3 { return .refusedForeign }
         return .failed(stderr.isEmpty ? "the privileged step failed (exit \(exitCode))" : stderr.trimmingCharacters(in: .whitespacesAndNewlines))
-    }
-
-    /// The final parenthesized integer in an osascript error string (e.g. "… (3)"
-    /// → 3, "… (-128)" → -128), or nil if the message doesn't end in one.
-    nonisolated static func trailingParenCode(_ s: String) -> Int? {
-        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard t.hasSuffix(")"), let open = t.lastIndex(of: "(") else { return nil }
-        return Int(t[t.index(after: open) ..< t.index(before: t.endIndex)])
-    }
-
-    /// True when the bundle is translocated or at a transient path — a link into
-    /// it would dangle on next launch. The Security SPI that answers this
-    /// authoritatively isn't in the Swift import surface, so this matches the
-    /// App Translocation mount root, which Gatekeeper always uses (no false
-    /// negatives for the actual hazard) and fails closed for any /private/var
-    /// transient path.
-    nonisolated static func isTranslocated(_ bundlePath: String) -> Bool {
-        bundlePath.contains("/AppTranslocation/") || bundlePath.hasPrefix("/private/var/folders/")
     }
 
     /// The install one-liner: create `/usr/local/bin` if missing, remove only a
@@ -406,8 +354,8 @@ extension CLIInstallModel {
             + "if [ -e /usr/local/bin/runnyctl ] || [ -L /usr/local/bin/runnyctl ]; then exit 3; fi; "
             // Non-forcing (no -f): a file racing in between the check and here makes
             // ln fail loudly rather than force-clobber a foreign runnyctl.
-            + "ln -s \(shellSingleQuote(target)) /usr/local/bin/runnyctl"
-        return appleScript(doShell: sh)
+            + "ln -s \(PrivilegedBroker.shellSingleQuote(target)) /usr/local/bin/runnyctl"
+        return PrivilegedBroker.appleScript(doShell: sh)
     }
 
     /// The uninstall one-liner: remove the link only when it points at THIS bundle
@@ -416,9 +364,9 @@ extension CLIInstallModel {
     /// remove at write time, refusing (exit 3) anything else still present.
     nonisolated static func removeScript(target: String) -> String {
         let sh = "existing=\"$(readlink /usr/local/bin/runnyctl 2>/dev/null)\"; "
-            + "if [ \"$existing\" = \(shellSingleQuote(target)) ]; then rm -f /usr/local/bin/runnyctl; "
+            + "if [ \"$existing\" = \(PrivilegedBroker.shellSingleQuote(target)) ]; then rm -f /usr/local/bin/runnyctl; "
             + "elif [ -e /usr/local/bin/runnyctl ] || [ -L /usr/local/bin/runnyctl ]; then exit 3; fi"
-        return appleScript(doShell: sh)
+        return PrivilegedBroker.appleScript(doShell: sh)
     }
 
     /// The orphan-cleanup one-liner: remove ONLY a Runny-owned link whose target is
@@ -435,23 +383,7 @@ extension CLIInstallModel {
             + "case \"$existing\" in */Runny.app/Contents/MacOS/runnyctl) "
             + "if [ -e \"$existing\" ]; then exit 0; else rm -f /usr/local/bin/runnyctl; fi ;; esac; "
             + "if [ -e /usr/local/bin/runnyctl ] || [ -L /usr/local/bin/runnyctl ]; then exit 3; fi"
-        return appleScript(doShell: sh)
-    }
-
-    /// Wrap a shell command as `do shell script "…" with administrator privileges`,
-    /// escaping for the AppleScript string layer (backslash then double-quote).
-    nonisolated static func appleScript(doShell sh: String) -> String {
-        let escaped = sh
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        return "do shell script \"\(escaped)\" with administrator privileges"
-    }
-
-    /// Single-quote a path for `/bin/sh`, escaping embedded single quotes the
-    /// standard `'\''` way — so a path with spaces (or a quote) can't break out
-    /// of the privileged command.
-    nonisolated static func shellSingleQuote(_ s: String) -> String {
-        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        return PrivilegedBroker.appleScript(doShell: sh)
     }
 }
 

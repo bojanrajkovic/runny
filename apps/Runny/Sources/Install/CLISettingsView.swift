@@ -6,6 +6,7 @@ import SwiftUI
 /// never an action's return — so the row always reflects what is on disk.
 struct SettingsView: View {
     @Environment(CLIInstallModel.self) private var cli
+    @Environment(SystemDaemonInstaller.self) private var systemDaemon
     @Environment(AgentController.self) private var agent
     @Environment(ActivationCoordinator.self) private var activation
 
@@ -18,6 +19,19 @@ struct SettingsView: View {
             } footer: {
                 Text("Installs runnyd as a login agent so it starts with your session and survives "
                     + "upgrades. Requires Runny in your Applications folder.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section {
+                SystemDaemonInstallRow()
+            } header: {
+                Text("System Service (advanced)")
+            } footer: {
+                Text("Installs runnyd as a non-root system service that starts at boot and keeps "
+                    + "running after you log out — no GUI session needed. One admin prompt creates a "
+                    + "dedicated service account and the daemon; afterward write config to "
+                    + "/Library/Application Support/runny. Installing it replaces the login agent "
+                    + "above — the system service is preferred.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -41,6 +55,110 @@ struct SettingsView: View {
             cli.refresh()
             agent.refresh()
             Task { await agent.runReconcile() }
+            Task { await systemDaemon.refresh() }
+        }
+    }
+}
+
+/// One row that renders every `SystemDaemonInstaller.State` — install or remove the
+/// non-root system LaunchDaemon via a single admin prompt, with a loud status line
+/// for the translocated and failed states. State is read from the installer (the
+/// launchd `system/` probe), never an action's return.
+struct SystemDaemonInstallRow: View {
+    @Environment(SystemDaemonInstaller.self) private var systemDaemon
+    @Environment(AgentController.self) private var agent
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(headline).font(.body)
+                if let detail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(tint)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+            actions
+        }
+        .padding(.vertical, 2)
+        .onChange(of: systemDaemon.state) { old, new in
+            // System preferred over self: once the system daemon is CONFIRMED
+            // registered, remove the now-redundant per-user login agent so the two
+            // never run at once (the silent split-home divergence the home-by-existence
+            // resolution would otherwise create). Ordered system-FIRST — the brokered
+            // install is the cancellable/failable step — so a cancelled or failed
+            // install leaves the login agent untouched, never "left with nothing". The
+            // reverse direction is already covered: the per-user install gate denies a
+            // foreignSystem owner.
+            guard old == .installing, new == .installed, hasLoginAgent else { return }
+            Task { await agent.uninstall() }
+        }
+    }
+
+    /// Whether our own per-user login agent is registered (enabled OR awaiting
+    /// approval) — a competitor the system install must supersede.
+    private var hasLoginAgent: Bool {
+        agent.installState == .installed || agent.installState == .requiresApproval
+    }
+
+    private var headline: String {
+        switch systemDaemon.state {
+        case .notInstalled: "Not installed"
+        case .installing: "Installing…"
+        case .installed: "Installed"
+        case .translocated: "Move Runny to Applications first"
+        case .failed: "Install failed"
+        case .cancelled: "Cancelled"
+        }
+    }
+
+    private var detail: String? {
+        switch systemDaemon.state {
+        case .notInstalled:
+            hasLoginAgent
+                ? "Run runnyd at boot, surviving logout — no GUI login needed. Installing replaces "
+                + "your login agent (the system service is preferred)."
+                : "Run runnyd at boot, surviving logout — no GUI login needed."
+        case .installing, .cancelled:
+            nil
+        case .installed:
+            "Runs as the _runny service account. Write config to "
+                + "/Library/Application Support/runny/config.yaml to start it."
+        case .translocated:
+            "Run Runny from /Applications (or ~/Applications), then install — a daemon staged "
+                + "from a translocated copy breaks on the next launch."
+        case let .failed(message):
+            message
+        }
+    }
+
+    private var tint: Color {
+        switch systemDaemon.state {
+        case .installed, .notInstalled, .installing, .cancelled: .secondary
+        case .translocated: .orange
+        case .failed: .red
+        }
+    }
+
+    @ViewBuilder
+    private var actions: some View {
+        switch systemDaemon.state {
+        case .notInstalled, .cancelled:
+            Button("Install…") { systemDaemon.install() }
+        case .installing:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Button("Cancel") { systemDaemon.cancel() }
+            }
+        case .installed:
+            Button("Remove…") { systemDaemon.uninstall() }
+        case .translocated:
+            Button("Re-check") { Task { await systemDaemon.refresh() } }
+        case .failed:
+            Button("Try Again") { systemDaemon.install() }
         }
     }
 }

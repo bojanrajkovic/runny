@@ -48,7 +48,7 @@ never exercised live in tests.
   transiently translocate even a correctly-installed `/Applications` app on its
   first launch, so the translocated verdict is "re-launch and retry", distinct
   from a non-translocated wrong location ("move to /Applications"). Translocation
-  detection reuses the one safety heuristic in `Install/CLIInstaller.swift`
+  detection reuses the one safety heuristic in `Install/PrivilegedBroker.swift`
   (`isTranslocated` — the `…/AppTranslocation/…` / `/private/var/folders/` path
   match); both surfaces share that single definition rather than drifting copies.
 - **Any `launchctl`/introspection carries a timeout.** There is no

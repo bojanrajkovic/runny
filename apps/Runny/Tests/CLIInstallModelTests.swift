@@ -60,15 +60,6 @@ final class CLIInstallModelTests: XCTestCase {
         }
     }
 
-    func testTrailingParenCode() {
-        XCTAssertEqual(CLIInstallModel.trailingParenCode("execution error: ... (3)"), 3)
-        XCTAssertEqual(CLIInstallModel.trailingParenCode("User canceled. (-128)"), -128)
-        // The LAST parenthesized code wins; an earlier "(3)" is ignored.
-        XCTAssertEqual(CLIInstallModel.trailingParenCode("path (3)/x failed (1)"), 1)
-        XCTAssertNil(CLIInstallModel.trailingParenCode("no trailing code here"))
-        XCTAssertNil(CLIInstallModel.trailingParenCode(""))
-    }
-
     func testReachableUnionsProcessAndSystemPath() {
         // The fix case: a Finder-launched app's process PATH omits /usr/local/bin,
         // but the system source (/etc/paths) has it → reachable, no false warning.
@@ -95,41 +86,6 @@ final class CLIInstallModelTests: XCTestCase {
         XCTAssertTrue(CLIInstallModel.pathContains("/usr/bin:/usr/local/bin:/bin", dir: "/usr/local/bin/"))
         XCTAssertFalse(CLIInstallModel.pathContains("/usr/bin:/opt/homebrew/bin", dir: "/usr/local/bin"))
         XCTAssertFalse(CLIInstallModel.pathContains("", dir: "/usr/local/bin"))
-    }
-
-    // MARK: - translocation
-
-    func testIsTranslocated() {
-        XCTAssertTrue(CLIInstallModel.isTranslocated("/private/var/folders/ab/cd/T/AppTranslocation/UUID/d/Runny.app"))
-        XCTAssertTrue(CLIInstallModel.isTranslocated("/private/var/folders/xy/z/Runny.app"))
-        XCTAssertFalse(CLIInstallModel.isTranslocated("/Applications/Runny.app"))
-        XCTAssertFalse(CLIInstallModel.isTranslocated("/Users/me/Applications/Runny.app"))
-    }
-
-    // MARK: - shell + AppleScript escaping (security-sensitive)
-
-    func testShellSingleQuotePlain() {
-        XCTAssertEqual(CLIInstallModel.shellSingleQuote("/Applications/Runny.app"), "'/Applications/Runny.app'")
-    }
-
-    func testShellSingleQuoteWithSpace() {
-        XCTAssertEqual(
-            CLIInstallModel.shellSingleQuote("/Users/me/My Apps/Runny.app/Contents/MacOS/runnyctl"),
-            "'/Users/me/My Apps/Runny.app/Contents/MacOS/runnyctl'"
-        )
-    }
-
-    func testShellSingleQuoteEscapesQuote() {
-        // A single quote in the path must close-escape-reopen, never break out.
-        XCTAssertEqual(CLIInstallModel.shellSingleQuote("/a'b"), "'/a'\\''b'")
-    }
-
-    func testAppleScriptEscaping() {
-        // Backslashes and double-quotes are escaped for the AppleScript string layer.
-        XCTAssertEqual(
-            CLIInstallModel.appleScript(doShell: "echo \"hi\" \\ there"),
-            "do shell script \"echo \\\"hi\\\" \\\\ there\" with administrator privileges"
-        )
     }
 
     func testInstallScriptStructure() {

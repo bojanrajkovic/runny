@@ -32,10 +32,11 @@ struct RunnyApp: App {
                 }
         }
         .defaultSize(width: 920, height: 600)
-        // Drop the "Runny" titlebar text: above the big in-content runner name
-        // it reads as a stranded second title. The toolbar (traffic lights,
-        // sidebar toggle) stays; the content header is the sole title.
-        .windowStyle(.hiddenTitleBar)
+        // Standard title bar: each detail pane sets its own `navigationTitle`
+        // (the runner name / "Doctor" / "Daemon log"), so the bar shows the pane
+        // title, never a stranded "Runny". The title bar must stay visible —
+        // `.hiddenTitleBar` suppresses `navigationTitle`, which forced the title
+        // into a glass-capsuled principal toolbar item that read as a button.
 
         // The install surface. It earns Settings back after the home-override
         // form was removed — its onAppear registers the same accessory↔regular

@@ -205,81 +205,47 @@ struct SidebarSlotRow: View {
     }
 }
 
-/// The shared detail-pane header band: a title with an optional inline
-/// subtitle and trailing accessory, the standard top-of-pane paddings, and the
-/// divider. One place owns the band so the panes can't drift.
-struct PaneHeader<Subtitle: View, Trailing: View>: View {
-    let title: String
-    @ViewBuilder var subtitle: () -> Subtitle
-    @ViewBuilder var trailing: () -> Trailing
-
-    init(
-        _ title: String,
-        @ViewBuilder subtitle: @escaping () -> Subtitle = { EmptyView() },
-        @ViewBuilder trailing: @escaping () -> Trailing = { EmptyView() }
-    ) {
-        self.title = title
-        self.subtitle = subtitle
-        self.trailing = trailing
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Text(title)
-                    .font(.title2)
-                    .fontWeight(.semibold)
-                subtitle()
-                Spacer()
-                trailing()
-            }
-            .padding(.horizontal)
-            .padding(.top, 14)
-            .padding(.bottom, 6)
-            Divider()
-        }
-    }
-}
-
 struct DoctorPane: View {
     @Environment(DaemonStore.self) private var store
 
     var body: some View {
-        VStack(spacing: 0) {
-            PaneHeader("Doctor") {
-                if let ranAt = store.doctorRanAt {
-                    TickingText { now in
-                        "last run \(SlotPresentation.duration(now.timeIntervalSince(ranAt))) ago"
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        Group {
+            if let checks = store.doctorChecks {
+                List(checks, id: \.name) { check in
+                    DoctorRow(check: check)
+                        .listRowSeparator(.hidden)
                 }
-            } trailing: {
+                .listStyle(.inset)
+                .scrollContentBackground(.hidden)
+            } else {
+                ContentUnavailableView(
+                    "No results yet", systemImage: "stethoscope",
+                    description: Text("Run the daemon's validation checks — image cache, GitHub credentials, network.")
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Title + action live in the native window toolbar (OrbStack's pattern):
+        // toolbar items stay clickable in the title-bar band and the gaps between
+        // them drag the window, so the action sits right of the title without the
+        // header rising under the title bar (where macOS 26.0.x eats the click).
+        .navigationTitle("Doctor")
+        .navigationSubtitle(doctorSubtitle)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
                 Button(store.doctorRunning ? "Running…" : "Run Checks") {
                     store.runDoctor()
                 }
                 .disabled(store.doctorRunning || store.client == nil)
             }
-            Group {
-                if let checks = store.doctorChecks {
-                    List(checks, id: \.name) { check in
-                        DoctorRow(check: check)
-                            .listRowSeparator(.hidden)
-                    }
-                    .listStyle(.inset)
-                    .scrollContentBackground(.hidden)
-                } else {
-                    ContentUnavailableView(
-                        "No results yet", systemImage: "stethoscope",
-                        description: Text("Run the daemon's validation checks — image cache, GitHub credentials, network.")
-                    )
-                }
-            }
-            // Fill below the header so the empty state centers h/v and the
-            // list fills — the header stays pinned at the top either way.
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .ignoresSafeArea(.container, edges: .top)
+    }
+
+    /// "last run … ago", coarse (no per-second tick — a toolbar subtitle is not a
+    /// live surface); empty before the first run so no subtitle shows.
+    private var doctorSubtitle: String {
+        guard let ranAt = store.doctorRanAt else { return "" }
+        return "last run \(SlotPresentation.duration(Date().timeIntervalSince(ranAt))) ago"
     }
 }
 

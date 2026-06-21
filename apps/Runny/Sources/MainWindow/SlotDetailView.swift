@@ -40,37 +40,28 @@ struct SlotDetailView: View {
             case .logs: LogsTab(slotName: slot.slot)
             }
         }
-        // The title is hidden, so the toolbar band over the detail is empty —
-        // let the content header rise into it. Traffic lights live over the
-        // sidebar (left), so the right-hand detail is clear to extend up.
-        .ignoresSafeArea(.container, edges: .top)
+        // Title + Recycle live in the native window toolbar (OrbStack's pattern):
+        // toolbar items stay clickable in the title-bar band and the gaps between
+        // them drag the window, so Recycle sits right of the runner name without
+        // the header rising under the title bar (where macOS 26.0.x eats the
+        // click). Recycle is a daemon no-op in BACKOFF (no guest), disabled there.
+        .navigationTitle(SlotPresentation.displayName(slot))
+        // GUI voice (statePhrase), not the CLI token (stateLabel) — the subtitle
+        // sits beside the human runner name, so "Wedged"/"Listening", never
+        // "WEDGED!"/"LISTENING".
+        .navigationSubtitle(SlotPresentation.statePhrase(slot))
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button("Recycle") {
+                    store.requestRecycle(slot)
+                }
+                .disabled(slot.state == .backoff)
+            }
+        }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(SlotPresentation.displayName(slot))
-                    .font(.title2)
-                    .fontWeight(.bold)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer()
-                if let pending = store.pendingCommand(for: slot.slot) {
-                    Text(pending.displayText)
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-                // Pause now lives as a toggle on the Info card's Paused row;
-                // the header keeps the one non-toggle action. Recycle is a
-                // daemon no-op in BACKOFF (no guest to recycle), so disable it
-                // there rather than offer a button that does nothing.
-                Button("Recycle") {
-                    store.requestRecycle(slot)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(slot.state == .backoff)
-            }
             HStack(spacing: 8) {
                 StateBadge(slot: slot)
                 if slot.paused, !slot.wedged {
@@ -105,6 +96,14 @@ struct SlotDetailView: View {
                 }
                 DebugHoldChip(slot: slot)
                 Spacer()
+                // The in-flight command indicator moved here when the title row
+                // became the toolbar; it stays visible on the detail, not only
+                // the sidebar.
+                if let pending = store.pendingCommand(for: slot.slot) {
+                    Text(pending.displayText)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
             if !SlotPresentation.note(slot, now: Date()).isEmpty {
                 TickingText { now in

@@ -5,10 +5,7 @@ import SwiftUI
 /// what the runner views already show.
 struct FleetLogsPane: View {
     var body: some View {
-        VStack(spacing: 0) {
-            PaneHeader("Daemon log")
-            LogsTab(slotName: nil, daemon: true)
-        }
-        .ignoresSafeArea(.container, edges: .top)
+        LogsTab(slotName: nil, daemon: true)
+            .navigationTitle("Daemon log")
     }
 }

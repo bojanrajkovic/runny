@@ -888,12 +888,12 @@ func (s *Slot) listenAndRunJob(ctx context.Context, rec *cycle.Record, proc Proc
 		// Reaching LISTENING proves the pre-boot failure (e.g. a doomed image
 		// pull) is resolved. Clear the stale NOTE now rather than waiting for
 		// finishCycle, so the status reflects "healthy" while the slot is healthy.
+		// Both the published fields and the internal counter are reset under the
+		// same lock acquisition so observers never see an inconsistent pair.
 		st.LastFailure = ""
 		st.ConsecutiveFailures = 0
+		s.failures = 0
 	})
-	s.mu.Lock()
-	s.failures = 0 // reset the internal counter so finishCycle starts the streak from zero
-	s.mu.Unlock()
 	lrec := cycle.StateRecord{State: string(StateListening), Entered: time.Now()}
 
 	reconcile := time.NewTicker(cfg.Limits.ReconcileInterval.D())

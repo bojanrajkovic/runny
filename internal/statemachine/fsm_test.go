@@ -40,6 +40,7 @@ func (f *fakeImages) Ensure(ctx context.Context, report func(string), onDigestRe
 	f.mu.Lock()
 	f.calls++
 	blocked := f.blockAll || (f.maxCalls > 0 && f.calls > f.maxCalls)
+	err := f.err
 	f.mu.Unlock()
 	if blocked {
 		<-ctx.Done()
@@ -48,10 +49,10 @@ func (f *fakeImages) Ensure(ctx context.Context, report func(string), onDigestRe
 	// Only fire the callback when Ensure will succeed: models the real
 	// Resolve-then-PullTo ordering where the callback fires iff the registry
 	// round-trip completed (a resolve failure leaves the digest unset).
-	if onDigestResolved != nil && f.err == nil {
+	if onDigestResolved != nil && err == nil {
 		onDigestResolved("sha256:fake")
 	}
-	return "sha256:fake", "actions-runner-osx-arm64-2.320.0.tar.gz", f.bundle, f.err
+	return "sha256:fake", "actions-runner-osx-arm64-2.320.0.tar.gz", f.bundle, err
 }
 
 type fakeMachine struct {

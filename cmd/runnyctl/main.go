@@ -9,10 +9,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
+
+	"golang.org/x/term"
 
 	"github.com/rivo/uniseg"
 	"google.golang.org/grpc"
@@ -46,7 +50,7 @@ commands:
                       destroy SLOT's current cycle and start fresh;
                       -force is required to recycle a DEBUG hold or to
                       cancel a RUNNING job
-  debug SLOT [-pubkey FILE] [-hold DUR] [-reason TEXT]
+  debug SLOT [-pubkey FILE] [-hold DUR] [-reason TEXT] [-no-exec]
                       inject FILE's public key (default ~/.ssh/id_ed25519.pub)
                       into SLOT's live guest. Idle (LISTENING): the slot
                       freezes in DEBUG — runner killed (verified), no jobs,
@@ -55,7 +59,9 @@ commands:
                       slot holds in DEBUG when the job ends. Rerun with the
                       same key to extend; a new key to add. Release with
                       'runnyctl recycle SLOT -force' (auto-releases after
-                      -hold; default/cap limits.max_debug_hold).
+                      -hold; default/cap limits.max_debug_hold). When stdin
+                      is a TTY, execs directly into ssh after printing connect
+                      info; -no-exec prints only.
   pause SLOT          hold SLOT after its current cycle drains
   resume SLOT         release a paused SLOT
   reload [-reason WHY]
@@ -210,11 +216,12 @@ func (c *ctl) dispatch(ctx context.Context, args []string) error {
 		pubkey := fs.String("pubkey", "", "public key file (default ~/.ssh/id_ed25519.pub)")
 		hold := fs.Duration("hold", 0, "auto-release after this long (0 = limits.max_debug_hold)")
 		reason := fs.String("reason", "", "audit note")
+		noExec := fs.Bool("no-exec", false, "print connect info without exec'ing into ssh")
 		slot, err := c.slotArg(fs, j, rest)
 		if err != nil {
 			return err
 		}
-		return c.debug(ctx, slot, *pubkey, *hold, *reason)
+		return c.debug(ctx, slot, *pubkey, *hold, *reason, *noExec)
 	case "pause":
 		fs, j := subFlags("pause")
 		slot, err := c.slotArg(fs, j, rest)
@@ -641,7 +648,7 @@ func findSlotStatus(resp *runnyv1.GetStatusResponse, name string) *runnyv1.SlotS
 	return nil
 }
 
-func (c *ctl) debug(ctx context.Context, slot, pubkeyFile string, hold time.Duration, reason string) error {
+func (c *ctl) debug(ctx context.Context, slot, pubkeyFile string, hold time.Duration, reason string, noExec bool) error {
 	if pubkeyFile == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -682,7 +689,7 @@ func (c *ctl) debug(ctx context.Context, slot, pubkeyFile string, hold time.Dura
 		return c.emit(resp)
 	}
 	c.renderDebug(slot, resp)
-	return nil
+	return c.execSSH(resp, noExec)
 }
 
 func (c *ctl) renderDebug(slot string, resp *runnyv1.InjectDebugKeyResponse) {
@@ -714,6 +721,40 @@ func (c *ctl) renderHostKeys(keys []string) {
 	for _, k := range keys {
 		fmt.Fprintf(c.out, "    %s\n", k)
 	}
+}
+
+// execSSH replaces the current process with the system ssh binary, dropping
+// the operator directly into the guest. It only fires on an interactive TTY;
+// piped/scripted invocations keep the print-only behavior. When host keys are
+// present in the response, they are written to a temp file and passed via
+// -o UserKnownHostsFile + StrictHostKeyChecking=yes so the first connect is
+// verified rather than TOFU. The temp file is not cleaned up — syscall.Exec
+// replaces the process, so no deferred cleanup runs, and the OS sweeps /tmp.
+func (c *ctl) execSSH(resp *runnyv1.InjectDebugKeyResponse, noExec bool) error {
+	if noExec {
+		return nil
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return nil // not an interactive TTY; print-only fallback
+	}
+	sshPath, err := exec.LookPath("ssh")
+	if err != nil {
+		return nil // no ssh binary on PATH; print-only fallback
+	}
+	argv := []string{"ssh"}
+	if keys := resp.GetHostKeys(); len(keys) > 0 {
+		f, err := os.CreateTemp("", "runny-knownhosts-*")
+		if err != nil {
+			return fmt.Errorf("writing known_hosts for verified connect: %w", err)
+		}
+		for _, k := range keys {
+			fmt.Fprintln(f, k)
+		}
+		f.Close()
+		argv = append(argv, "-o", "UserKnownHostsFile="+f.Name(), "-o", "StrictHostKeyChecking=yes")
+	}
+	argv = append(argv, fmt.Sprintf("%s@%s", resp.GetUser(), resp.GetIp()))
+	return syscall.Exec(sshPath, argv, os.Environ())
 }
 
 func (c *ctl) why(ctx context.Context, slot string, cycles int) error {

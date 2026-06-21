@@ -1027,3 +1027,26 @@ func TestRenderStatusQuietWhenLocalNetworkReachable(t *testing.T) {
 		t.Errorf("a reachable grant should add no line; got:\n%s", buf.String())
 	}
 }
+
+// execSSH with noExec=true must return nil immediately — the operator opted out
+// of the auto-exec and wants print-only behavior.
+func TestExecSSHNoExecReturnsNil(t *testing.T) {
+	c := &ctl{out: &bytes.Buffer{}}
+	resp := &runnyv1.InjectDebugKeyResponse{
+		User: "admin", Ip: "192.168.64.2",
+		HostKeys: []string{"192.168.64.2 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItest"},
+	}
+	if err := c.execSSH(resp, true); err != nil {
+		t.Errorf("execSSH with noExec=true should return nil, got: %v", err)
+	}
+}
+
+// execSSH on a non-TTY stdin (always the case in test context) must return nil
+// without attempting to exec — piped/scripted callers keep the print-only path.
+func TestExecSSHNonTTYSkips(t *testing.T) {
+	c := &ctl{out: &bytes.Buffer{}}
+	resp := &runnyv1.InjectDebugKeyResponse{User: "admin", Ip: "192.168.64.2"}
+	if err := c.execSSH(resp, false); err != nil {
+		t.Errorf("execSSH on non-TTY stdin should return nil, got: %v", err)
+	}
+}

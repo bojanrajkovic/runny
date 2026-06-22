@@ -35,6 +35,30 @@ import (
 // the same value so its verdict predicts the pull guard.
 const PullHeadroom = 2 << 30 // 2 GiB
 
+// DiskHeadroomError is returned by a pull refused at the pre-flight disk guard:
+// the uncompressed image plus PullHeadroom does not fit in the destination
+// filesystem. It is the one DETERMINISTIC pull failure — it fails identically
+// for every concurrent slot until host disk state changes — so a caller can
+// errors.As it, poll for headroom against NeedBytes, and re-attempt only once
+// there is room, instead of re-running a guaranteed-doomed pull.
+type DiskHeadroomError struct {
+	Ref        string
+	ImageBytes int64 // uncompressed image size (what the message reports)
+	FreeBytes  int64 // free space at refusal time
+}
+
+func (e *DiskHeadroomError) Error() string {
+	return fmt.Sprintf("image %s needs %s uncompressed but only %s is free — refusing to start a pull that cannot complete",
+		e.Ref, HumanBytes(e.ImageBytes), HumanBytes(e.FreeBytes))
+}
+
+// NeedBytes is the free-space threshold the pull requires: the uncompressed
+// image plus PullHeadroom. A headroom poll must compare available space against
+// this, not ImageBytes alone (the guard enforces the same sum).
+func (e *DiskHeadroomError) NeedBytes() uint64 {
+	return uint64(e.ImageBytes) + PullHeadroom
+}
+
 const (
 	mediaTypeConfig     = "application/vnd.cirruslabs.tart.config.v1"
 	mediaTypeDiskPrefix = "application/vnd.cirruslabs.tart.disk."
@@ -120,12 +144,6 @@ type Client struct {
 	// the production consumer in internal/images feeds a mutex-guarded
 	// progress aggregator and a bounded.Stall, both safe under concurrency.
 	Progress func(bytes int64)
-	// Waiting, when set, is called by PullTo when another pull into the same
-	// destination holds the lock: the wait is progress (the winner is moving
-	// this caller's image), not silence, and without this signal the caller's
-	// stall detector reads the lock wait as a stalled transfer. It returns a
-	// stop func PullTo calls when the wait ends (lock acquired or ctx done).
-	Waiting func() (stop func())
 
 	mu     sync.Mutex
 	tokens map[string]string // host -> bearer token
@@ -251,8 +269,7 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 		return "", fmt.Errorf("checking free space before pull: %w", err)
 	}
 	if uint64(total)+PullHeadroom > free {
-		return "", fmt.Errorf("image %s needs %s uncompressed but only %s is free — refusing to start a pull that cannot complete",
-			ref, HumanBytes(total), HumanBytes(int64(free)))
+		return "", &DiskHeadroomError{Ref: ref.String(), ImageBytes: total, FreeBytes: int64(free)}
 	}
 	if err := truncateFile(diskPath, total); err != nil {
 		return "", err
@@ -301,17 +318,11 @@ func (c *Client) PullTo(ctx bounded.Context, ref Ref, destDir string) (string, e
 	select {
 	case sem <- struct{}{}:
 	default:
-		// Contended: another slot is pulling this destination right now. Tell
-		// the caller it is waiting (not stalled) and block interruptibly.
-		stop := func() {}
-		if c.Waiting != nil {
-			stop = c.Waiting()
-		}
+		// Contended: another pull into this destination is in flight. Block
+		// interruptibly until it finishes (then take the cache hit) or ctx ends.
 		select {
 		case sem <- struct{}{}:
-			stop()
 		case <-ctx.Done():
-			stop()
 			return "", fmt.Errorf("waiting for a concurrent pull into %s: %w", destDir, context.Cause(ctx))
 		}
 	}

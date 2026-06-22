@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -459,56 +460,6 @@ func TestPullRejectsNegativeUncompressedSize(t *testing.T) {
 // Silence unused-import lint in case of build-tag pruning.
 var _ = url.Values{}
 
-// A waiter behind another slot's pull of the same destination must (a) signal
-// Waiting so its stall detector treats the wait as progress, not silence, and
-// (b) proceed normally once the holder releases. Regression: a second slot in
-// ENSURE_IMAGE showed STALLED while the first pulled their shared image.
-func TestPullToWaitingCallback(t *testing.T) {
-	config := []byte(`{"os":"darwin"}`)
-	f := newFakeRegistry(t, config, []byte("nvram"), []byte("disk"))
-	_, ref := f.start()
-	dest := filepath.Join(t.TempDir(), "bundle")
-
-	// Occupy the per-dest semaphore, simulating a pull in flight.
-	semAny, _ := pullLocks.LoadOrStore(dest, make(chan struct{}, 1))
-	sem := semAny.(chan struct{})
-	sem <- struct{}{}
-
-	waited := make(chan struct{})
-	stopped := make(chan struct{})
-	c := NewClient()
-	c.Waiting = func() func() {
-		close(waited)
-		return func() { close(stopped) }
-	}
-
-	got := make(chan error, 1)
-	go func() {
-		_, err := c.PullTo(testCtx(t), ref, dest)
-		got <- err
-	}()
-
-	select {
-	case <-waited:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Waiting callback never fired for a contended pull")
-	}
-	<-sem // release the "holder"
-	select {
-	case err := <-got:
-		if err != nil {
-			t.Fatalf("PullTo after wait: %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("PullTo did not complete after the holder released")
-	}
-	select {
-	case <-stopped:
-	default:
-		t.Error("Waiting's stop func was not called after the wait ended")
-	}
-}
-
 // The lock wait must be interruptible: a cancelled context (operator recycle,
 // daemon shutdown) frees the waiter instead of leaving it blocked until the
 // holder finishes a multi-GiB pull.
@@ -544,6 +495,68 @@ func TestResolveWithDiskBytes(t *testing.T) {
 	_, _, err = NewClient().ResolveWithDiskBytes(testCtx(t), ref2)
 	if err == nil || !strings.Contains(err.Error(), "unsupported disk layer type") {
 		t.Fatalf("disk.v1 layer: want unsupported-disk-layer-type error, got %v", err)
+	}
+}
+
+// inflateDeclaredDiskSize rewrites the disk layers' uncompressed-size
+// annotation to force the pre-flight disk guard without changing the (small)
+// blob bytes: the first disk layer declares `total`, the rest declare 1.
+func (f *fakeRegistry) inflateDeclaredDiskSize(t *testing.T, total int64) {
+	t.Helper()
+	var m manifest
+	if err := json.Unmarshal(f.manifest, &m); err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+	first := true
+	for i := range m.Layers {
+		if m.Layers[i].MediaType != mediaTypeDiskV2 {
+			continue
+		}
+		if first {
+			m.Layers[i].Annotations[annotationUncompressedSize] = fmt.Sprint(total)
+			first = false
+		} else {
+			m.Layers[i].Annotations[annotationUncompressedSize] = "1"
+		}
+	}
+	f.manifest, _ = json.Marshal(m)
+	sum := sha256.Sum256(f.manifest)
+	f.digest = "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// The pre-flight disk guard must surface a typed *DiskHeadroomError so the
+// shared image puller can errors.As it, classify the failure as deterministic,
+// and poll for headroom against NeedBytes rather than re-running a doomed pull.
+func TestDiskGuardReturnsTypedError(t *testing.T) {
+	f := newFakeRegistry(t, []byte(`{"os":"darwin"}`), []byte("nvram"), bytes.Repeat([]byte("D"), 4096))
+	const exabyte = 1 << 60 // far exceeds any test host's free space
+	f.inflateDeclaredDiskSize(t, exabyte)
+	_, ref := f.start()
+
+	_, err := NewClient().PullTo(testCtx(t), ref, filepath.Join(t.TempDir(), "bundle"))
+	var dh *DiskHeadroomError
+	if !errors.As(err, &dh) {
+		t.Fatalf("want *DiskHeadroomError, got %T: %v", err, err)
+	}
+	if dh.ImageBytes < exabyte {
+		t.Errorf("ImageBytes = %d, want >= %d", dh.ImageBytes, int64(exabyte))
+	}
+	if dh.NeedBytes() != uint64(dh.ImageBytes)+PullHeadroom {
+		t.Errorf("NeedBytes() = %d, want ImageBytes+PullHeadroom = %d", dh.NeedBytes(), uint64(dh.ImageBytes)+PullHeadroom)
+	}
+}
+
+// The puller reads the disk error after it crosses Ensure's stallErr wrapping
+// (fmt.Errorf("...: %w", err)); errors.As must still recover the typed error.
+func TestDiskHeadroomErrorSurvivesWrapping(t *testing.T) {
+	base := &DiskHeadroomError{Ref: "ghcr.io/x/y:1", ImageBytes: 100 << 30, FreeBytes: 1 << 30}
+	wrapped := fmt.Errorf("pulling ghcr.io/x/y:1: %w", base)
+	var dh *DiskHeadroomError
+	if !errors.As(wrapped, &dh) {
+		t.Fatalf("errors.As did not recover *DiskHeadroomError through %%w wrapping")
+	}
+	if dh.NeedBytes() != uint64(100<<30)+PullHeadroom {
+		t.Errorf("NeedBytes() = %d after unwrap, want %d", dh.NeedBytes(), uint64(100<<30)+PullHeadroom)
 	}
 }
 

@@ -75,6 +75,15 @@ Per-state work is delegated through interfaces (`ImageEnsurer`, `Cloner`,
 `vm.Manager`, `Dialer`, `GitHub`), which is what lets the FSM's guarantees be
 tested with fakes on any OS while the darwin-only implementations stay thin.
 
+The pool's slots enter ENSURE_IMAGE together on a cold start and share one image
+pull through a per-destination actor: one pull runs, the rest subscribe to its
+outcome. A deterministic disk-headroom refusal holds and polls for free space —
+all subscribers wait together rather than each re-running the doomed pull — for a
+bounded window, then hands the failure back to each FSM's backoff; a transient
+failure broadcasts immediately so each slot retries on its own. The decision and
+its rejected alternatives are
+[ADR-0021](../architecture-decisions/0021-shared-image-pull.md).
+
 ## Package map
 
 | Package | Owns |

@@ -1,5 +1,5 @@
 // Package tart implements runny's compatibility with tart's VM bundle format
-// (ADR-0008): a directory of config.json + disk.img + nvram.bin. runny never
+// a directory of config.json + disk.img + nvram.bin. runny never
 // invokes the tart binary; this package and internal/oci together replace it.
 // Cilicon (MIT) is the reference implementation for the format.
 package tart
@@ -14,7 +14,7 @@ import (
 )
 
 // BundleFiles are the three files that constitute a tart VM bundle. A clone
-// is a copy-on-write clone of exactly these (ADR-0008).
+// is a copy-on-write clone of exactly these.
 var BundleFiles = []string{"config.json", "disk.img", "nvram.bin"}
 
 var (
@@ -76,7 +76,7 @@ func (c *Config) ECID() ([]byte, error) {
 }
 
 // LoadConfig reads and validates a bundle's config.json. darwin and linux
-// arm64 guests are supported (ADR-0009); the VZ data representations
+// arm64 guests are supported; the VZ data representations
 // (hardwareModel/ecid) exist only on darwin bundles — linux boots via EFI
 // with the nvram.bin file as its variable store.
 func (b Bundle) LoadConfig() (*Config, error) {

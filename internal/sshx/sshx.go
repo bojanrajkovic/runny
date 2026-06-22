@@ -1,5 +1,5 @@
-// Package sshx is the only package allowed to construct SSH clients
-// (ADR-0002). Its single load-bearing idea: ssh.ClientConfig.Timeout covers
+// Package sshx is the only package allowed to construct SSH clients.
+// Its single load-bearing idea: ssh.ClientConfig.Timeout covers
 // TCP dial only — bounding the banner exchange, key exchange, and auth
 // requires an explicit socket deadline. Plain ssh.Dial silently reintroduces
 // the unbounded-hang failure mode runny exists to kill.
@@ -104,7 +104,8 @@ type Client struct {
 	timeout time.Duration
 }
 
-// Dial performs one bounded connection attempt (the ADR-0002 recipe).
+// Dial performs one bounded connection attempt: TCP connect under a dial
+// timeout, then an explicit socket deadline over banner + key exchange + auth.
 func Dial(ctx bounded.Context, addr string, cfg Config) (*Client, error) {
 	d := net.Dialer{Timeout: cfg.Timeout}
 	conn, err := d.DialContext(ctx, "tcp", addr) // bounds TCP connect
@@ -188,8 +189,8 @@ func (c *Client) Close() error {
 }
 
 // newSession opens a session channel under a socket deadline: channel open
-// awaits a server reply, the same blind spot as the banner exchange
-// (ADR-0002). A wedged guest fails here within timeout instead of hanging
+// awaits a server reply, the same blind spot as the banner exchange.
+// A wedged guest fails here within timeout instead of hanging
 // the caller forever.
 func (c *Client) newSession() (*ssh.Session, error) {
 	_ = c.conn.SetDeadline(time.Now().Add(c.timeout))
@@ -269,7 +270,7 @@ func (p *Proc) end() {
 // Start deliberately takes a plain context (not bounded.Context): the ctx is
 // the proc's LIFETIME — run.sh must outlive the caller's state deadline —
 // not an operation bound. Establishment is bounded internally by the socket
-// deadline below (ADR-0011).
+// deadline below.
 func (c *Client) Start(ctx context.Context, cmd string) (*Proc, error) {
 	// One deadline bracket covers the whole establishment — channel open,
 	// pipes, exec request, and the error-path closes, which are writes a

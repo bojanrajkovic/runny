@@ -21,7 +21,7 @@ import Foundation
 ///
 /// The connect is non-blocking and bounded by `poll()`, so a listener whose
 /// backlog is saturated can't hang the probe — the no-unbounded-operations
-/// invariant (ADR-0011) applied to the GUI's ownership gather, like `LaunchdProbe`.
+/// invariant applied to the GUI's ownership gather, like `LaunchdProbe`.
 enum SocketProbeResult: Equatable {
     case absent
     case refused

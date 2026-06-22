@@ -35,7 +35,17 @@ Counts and lists drift the instant code changes. This rule is about counts and k
 - **The config schema** (`internal/home`) — the authority on config keys and defaults. No doc reproduces a key table.
 - **`go.mod` / `MODULE.bazel`** — the authority on dependencies.
 
-## 4. Freshness is git's job, and there is deliberately no staleness gate
+## 4. Code comments state the reason, not the ADR number
+
+A comment in source code explains the technical reason inline — the comment must
+stand on its own. It does **not** cite an `ADR-NNNN`: a point-in-time decision
+number bakes into long-lived code, drifts as ADRs are superseded, and forces a
+reader to leave the file to learn what the comment already knows. ADR
+cross-links belong in the `docs/` tree and in directory `CLAUDE.md` pointers,
+where they are maintained alongside the decisions they name — not in `.go` or
+`.swift` comments. (Settled 2026-06-21; the codebase was swept to match.)
+
+## 5. Freshness is git's job, and there is deliberately no staleness gate
 
 No doc carries a `Last verified` stamp — git's last-commit date answers "how fresh" more honestly than a hand-maintained line.
 

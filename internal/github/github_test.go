@@ -22,7 +22,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// testCtx satisfies the bounded.Context the client API demands (ADR-0011).
+// testCtx satisfies the bounded.Context the client API demands.
 func testCtx(t *testing.T) bounded.Context {
 	t.Helper()
 	ctx, cancel := bounded.WithTimeout(t.Context(), time.Minute)

@@ -1,5 +1,5 @@
 // runnyctl is the control CLI for runnyd, speaking runny.v1 over the daemon's
-// unix socket. It is a deliberately equal peer of RunnyBar (ADR-0006).
+// unix socket. It is a deliberately equal peer of RunnyBar.
 package main
 
 import (
@@ -32,7 +32,7 @@ import (
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
-// version is stamped by Bazel under --config=release (ADR-0010).
+// version is stamped by Bazel under --config=release.
 var version = "dev"
 
 const usage = `runnyctl — control surface for runnyd

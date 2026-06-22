@@ -94,7 +94,7 @@ func TestCheckMacOSGuestCap(t *testing.T) {
 	}
 }
 
-// The preflight post-filter (ADR-0014 decision 7): a failing local-network
+// The preflight post-filter: a failing local-network
 // becomes a warning (the respawn's cold start cannot fail it and no config
 // edit affects it); a failing disk-headroom keeps its refusal slot with the
 // measured-with-guests-running annotation; everything else refuses as-is;

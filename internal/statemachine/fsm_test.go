@@ -2018,7 +2018,7 @@ func TestPostJobDrainTimeoutForceClosesNoWait(t *testing.T) {
 	// within its bound (an orphaned job descendant holds the inherited stdout
 	// fd), enterPostJobDebug force-closes the channel and enters DEBUG — and it
 	// must NOT call proc.Wait(), which would block the FSM goroutine up to
-	// max_debug_hold on exactly that pathology (an ADR-0011 violation).
+	// max_debug_hold on exactly that pathology (an unbounded-operation violation).
 	h := newHarness(t, func(c *home.Config) {
 		c.Limits.MaxJobDuration = home.Duration(10 * time.Second)
 	})

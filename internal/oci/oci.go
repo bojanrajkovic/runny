@@ -1,4 +1,4 @@
-// Package oci pulls tart-format VM images from OCI registries (ADR-0008).
+// Package oci pulls tart-format VM images from OCI registries.
 // tart's layout is deliberately non-standard: the bundle's three files ride
 // as layers with cirruslabs media types, disk.img split across many
 // Apple-LZ4-framed layers that concatenate by uncompressed size. Cilicon
@@ -156,7 +156,7 @@ func NewClient() *Client {
 // Resolve returns the manifest digest for a ref (tag → digest, or the pinned
 // digest verified to exist). It takes a bounded.Context because the client's
 // transport carries no timeout of its own — an unbounded caller would hang
-// forever on a registry that accepts TCP and never answers (ADR-0011).
+// forever on a registry that accepts TCP and never answers.
 func (c *Client) Resolve(ctx bounded.Context, ref Ref) (string, error) {
 	_, _, digest, err := c.fetchManifest(ctx, ref)
 	return digest, err
@@ -304,7 +304,7 @@ var pullLocks sync.Map // destDir -> chan struct{} (capacity-1 semaphore)
 // PullTo pulls into a sibling temp dir and renames into place, so destDir
 // either exists complete or not at all — ENSURE_IMAGE's idempotence depends
 // on this. The bounded.Context is typically stall-bounded (Stall.Watch):
-// pull duration is unknowable, but silence is not tolerable (ADR-0011).
+// pull duration is unknowable, but silence is not tolerable.
 //
 // Concurrent callers for the same destDir serialize on a per-destination
 // lock: one pulls, the rest wait and take the cache hit. The wait itself is

@@ -1,6 +1,6 @@
 // Package bounded makes runny's core invariant — no operation is ever
 // unbounded — a property of the type system instead of a code-review
-// convention (ADR-0011). A bounded.Context can only be obtained from a
+// convention. A bounded.Context can only be obtained from a
 // constructor that attaches a bound: a wall-clock deadline (WithTimeout,
 // WithDeadline) or a progress watcher (Stall.Watch). Functions that talk to
 // a network or a guest take bounded.Context, so an unbounded call site is a

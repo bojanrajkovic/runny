@@ -18,8 +18,8 @@ type drainSlot interface {
 }
 
 // drainer drives the fleet to stable idle and then hands the process to
-// launchd for a cold start. Two causes share it (ADR-0012's wedge
-// escalation and ADR-0014's config reload): pause holds each slot in
+// launchd for a cold start. Two causes share it (the wedge escalation and
+// config reload): pause holds each slot in
 // BACKOFF after its current cycle (a running job finishes first), recycle
 // ends LISTENING without waiting out max-idle, and the daemon exits only
 // once every slot is in a stable state — wedged, or paused in BACKOFF,

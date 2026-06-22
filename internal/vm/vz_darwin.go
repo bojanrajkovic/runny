@@ -17,13 +17,13 @@ import (
 
 // VZManager is the real Manager: in-process Virtualization.framework via
 // Code-Hex/vz. The binary must be codesigned with the
-// com.apple.security.virtualization entitlement (ADR-0008).
+// com.apple.security.virtualization entitlement.
 type VZManager struct{}
 
 var _ Manager = VZManager{}
 
 // Boot builds the VZ configuration from the bundle's tart config and starts
-// the guest, dispatching on the bundle's OS (ADR-0009): the Mac platform
+// the guest, dispatching on the bundle's OS: the Mac platform
 // path for darwin, EFI for linux. A fresh machine identifier and a fresh
 // random MAC are used — the bundle's own values may be shared by other
 // clones (spike-verified).

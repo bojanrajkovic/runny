@@ -22,7 +22,7 @@ type Config struct {
 
 // GitHubConfig is one pool's App credentials. Each pool carries its own —
 // different registration targets are different App installations with
-// different keys (ADR-0009).
+// different keys.
 type GitHubConfig struct {
 	AppID          int64  `yaml:"app_id"`
 	PrivateKeyPath string `yaml:"private_key_path"`
@@ -30,7 +30,7 @@ type GitHubConfig struct {
 	APIBase string `yaml:"api_base"`
 }
 
-// PoolConfig is one homogeneous group of runner slots (ADR-0009).
+// PoolConfig is one homogeneous group of runner slots.
 type PoolConfig struct {
 	// Name becomes the slot prefix: <name>-1, <name>-2, ...
 	Name string `yaml:"name"`
@@ -43,7 +43,7 @@ type PoolConfig struct {
 	Target TargetConfig `yaml:"target"`
 	// GitHub is this pool's App credentials. Required and per-pool: different
 	// registration targets are different App installations with different
-	// keys (ADR-0009).
+	// keys.
 	GitHub GitHubConfig `yaml:"github"`
 	Labels []string     `yaml:"labels"`
 	// Runner group; 1 is the default group.
@@ -57,7 +57,7 @@ type PoolConfig struct {
 	// teardown pressure may need more headroom than the 3s default.
 	SSHTimeout Duration `yaml:"ssh_timeout"`
 	// SSHHardening selects what happens to guest SSH after the first
-	// authenticated session (ADR-0013). "rotate" (the default) mints a
+	// authenticated session. "rotate" (the default) mints a
 	// per-cycle in-memory keypair, installs it, disables password auth, and
 	// reconnects with the key and pinned host keys — the SECURE_SSH state.
 	// "off" keeps password auth for the whole cycle (interactive debugging;
@@ -103,8 +103,8 @@ func (t TargetConfig) String() string {
 	return t.Owner + "/" + t.Repo
 }
 
-// Deadlines are the per-state budgets of ADR-0004, calibrated from spike
-// measurements. Zero values take defaults.
+// Deadlines are the per-state budgets of the crash-only FSM, calibrated from
+// spike measurements. Zero values take defaults.
 type Deadlines struct {
 	Clone     Duration `yaml:"clone"`
 	Boot      Duration `yaml:"boot"`
@@ -114,7 +114,7 @@ type Deadlines struct {
 	Provision Duration `yaml:"provision"`
 	Teardown  Duration `yaml:"teardown"`
 	// SecureSSH bounds the per-cycle key rotation (host-key capture, key
-	// install + sshd config flip, reconnect — ADR-0013): two short execs and
+	// install + sshd config flip, reconnect): two short execs and
 	// a redial against a guest that just answered AWAIT_SSH, so the budget is
 	// small; a guest that can't finish in it is wedged, not slow.
 	SecureSSH Duration `yaml:"secure_ssh"`

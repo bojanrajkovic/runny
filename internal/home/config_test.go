@@ -53,7 +53,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 		t.Errorf("SSHTimeout = %v, want 3s", got)
 	}
 	// Hardening defaults ON: the password is a bootstrap credential, not the
-	// cycle's (ADR-0013). Opting out is explicit.
+	// cycle's. Opting out is explicit.
 	if p.SSHHardening != SSHHardeningRotate {
 		t.Errorf("SSHHardening = %q, want %q", p.SSHHardening, SSHHardeningRotate)
 	}

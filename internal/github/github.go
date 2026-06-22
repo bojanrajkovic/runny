@@ -1,5 +1,6 @@
-// Package github implements the App-auth → JIT-config chain of ADR-0003 and
-// the runner reconcile/delete surface the FSM's health logic needs. It speaks
+// Package github implements the App-auth → JIT-config chain (App JWT →
+// installation token → generate-jitconfig) and the runner reconcile/delete
+// surface the FSM's health logic needs. It speaks
 // the REST API directly — the dependency footprint of a full client library
 // isn't warranted for five endpoints.
 package github
@@ -39,7 +40,7 @@ type Config struct {
 	APIBase        string
 }
 
-// Target is a registration scope: an org, or an owner/repo pair (ADR-0009).
+// Target is a registration scope: an org, or an owner/repo pair.
 type Target struct {
 	Org   string
 	Owner string
@@ -211,7 +212,7 @@ func (c *Client) installationToken(ctx context.Context) (string, error) {
 
 // CheckRunnerPerm mints (or reuses) a token and asserts the target-scoped
 // runner-administration permission is actually present — the doctor check
-// ADR-0003 calls for, target-aware per ADR-0009.
+// the JIT-config flow requires, scoped to this pool's target.
 func (c *Client) CheckRunnerPerm(ctx bounded.Context) error {
 	if _, err := c.installationToken(ctx); err != nil {
 		return err
@@ -237,7 +238,7 @@ type JITRunner struct {
 
 // GenerateJITConfig registers an ephemeral runner and returns its one-shot
 // config. The runner auto-removes after one job; if it never takes one, the
-// caller must DeleteRunner on teardown (ADR-0003).
+// caller must DeleteRunner on teardown.
 func (c *Client) GenerateJITConfig(ctx bounded.Context, name string, labels []string, groupID int64) (*JITRunner, error) {
 	tok, err := c.installationToken(ctx)
 	if err != nil {

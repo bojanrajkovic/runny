@@ -45,7 +45,7 @@ func (d Dialer) WaitFor(ctx bounded.Context, addr string) (statemachine.Guest, e
 // Guest is one authenticated session into a booted runner VM. It retains the
 // addr and sshx.Config that built its current client so it can Redial after a
 // transport death (a guest reboot mid-DEBUG, issue #39) and so HostKeys can
-// surface the pins (ADR-0013).
+// surface the pins.
 type Guest struct {
 	c        *sshx.Client
 	addr     string
@@ -54,7 +54,7 @@ type Guest struct {
 }
 
 // The rotation scripts install the per-cycle public key and shut password
-// auth off (ADR-0013). They rely on the image contract the provision scripts
+// auth off. They rely on the image contract the provision scripts
 // already demand — passwordless sudo, an sshd_config that includes
 // sshd_config.d, sshd recent enough for KbdInteractiveAuthentication (8.7+).
 // An image missing any of these fails the exec or the post-flip verification
@@ -92,7 +92,7 @@ const rotateScriptDarwin = rotateScriptBase
 // (ParseAuthorizedKey reads the second key as the first one's comment).
 const captureHostKeys = `awk 1 /etc/ssh/ssh_host_*_key.pub`
 
-// Rotate hardens an authenticated session (ADR-0013): mint an in-memory
+// Rotate hardens an authenticated session: mint an in-memory
 // per-cycle ed25519 key, capture the guest's host keys, install the key and
 // disable password auth over the existing password session, reconnect
 // authenticated by the key with the host keys pinned — then PROVE the
@@ -311,7 +311,7 @@ func (g *Guest) PullDiag(ctx bounded.Context) ([]byte, error) {
 // Scope: the proof targets the listener (the job-eligibility surface).
 // Runner.Worker and job-step processes do not reliably carry --jitconfig and
 // may survive the pkill; a dead listener plus single-use JIT is the
-// no-new-jobs guarantee (ADR-0014). pkill/pgrep ship on both guest OSes.
+// no-new-jobs guarantee. pkill/pgrep ship on both guest OSes.
 const stopRunnerScript = `PAT='[-]-jitconfig'
 alive() {
   pgrep -f "$PAT" >/dev/null 2>&1

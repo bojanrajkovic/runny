@@ -153,7 +153,7 @@ func (s *localNetworkSampler) set(v int32) {
 
 // run samples once immediately, then on every tick until ctx ends. Bounded by
 // design: each probe carries localNetworkGrant's 2s dial timeout, and the loop
-// stops with the daemon — no unbounded operation (ADR-0011).
+// stops with the daemon — no unbounded operation.
 func (s *localNetworkSampler) run(ctx context.Context) {
 	sample := func() { s.set(int32(localNetworkGrant())) }
 	sample()

@@ -1,6 +1,6 @@
 // Package cycle owns the per-cycle artifact record: every teardown — success
 // or failure — writes a cycle.json timeline, the machine-readable currency
-// behind `runnyctl why` (ADR-0004). Failure cycles additionally retain
+// behind `runnyctl why`. Failure cycles additionally retain
 // post-mortem files alongside it.
 package cycle
 

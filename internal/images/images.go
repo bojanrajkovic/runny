@@ -232,7 +232,8 @@ func (e *Ensurer) log() *slog.Logger {
 // and the service-declared sha256, possibly empty on older GHES) — see
 // github.Client.RunnerDownload for why "latest release" is not it. It takes
 // a bounded.Context because it hits the GitHub API from a state that
-// carries no deadline of its own (ADR-0011).
+// carries no deadline of its own — the bound is mandatory, enforced by the
+// type.
 type RunnerResolver func(ctx bounded.Context) (filename, url, sha256 string, err error)
 
 // tarballLocks serializes per-filename ensures: slots of the same OS race to
@@ -242,7 +243,7 @@ type RunnerResolver func(ctx bounded.Context) (filename, url, sha256 string, err
 // wait here was uninterruptible by operator recycle AND invisible (no
 // watcher is armed yet, so the slot just sat with no annotation at all).
 // The wait is transitively bounded by the holder's own stall-watched
-// download (ADR-0011's delegation argument).
+// download (a wait on a peer's already-bounded operation is itself bounded).
 var tarballLocks sync.Map // filename -> chan struct{} (capacity-1 semaphore)
 
 // EnsureRunnerTarball makes sure the service-current actions-runner tarball

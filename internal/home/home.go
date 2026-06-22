@@ -1,7 +1,7 @@
 // Package home owns the runny home on-disk layout: every path runnyd touches
 // lives under one root (deployment-resolved — see Dir), and this package is the
 // only place that knows the shape. Nothing here is authoritative state — vms/ is
-// swept at startup, images/ is a cache, cycles/ holds artifacts (ADR-0004).
+// swept at startup, images/ is a cache, cycles/ holds artifacts.
 package home
 
 import (

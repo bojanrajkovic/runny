@@ -1,5 +1,5 @@
 // Package vm boots tart-format bundles as macOS guests, in-process via
-// Virtualization.framework (ADR-0008). The Manager/Machine seam exists so the
+// Virtualization.framework. The Manager/Machine seam exists so the
 // state machine tests against fakes on any OS; the real implementation is
 // darwin-only.
 package vm
@@ -34,14 +34,14 @@ type BootOptions struct {
 const ShareTag = "runny-cache"
 
 // Machine is one running guest. Every method takes bounded.Context — nothing
-// here may block indefinitely, and the type system enforces it (ADR-0011).
+// here may block indefinitely, and the type system enforces it.
 type Machine interface {
 	// MAC returns the guest's network MAC (fresh per boot).
 	MAC() string
 	// WaitIP polls the host's DHCP leases until the guest's MAC has one.
 	WaitIP(ctx bounded.Context) (string, error)
 	// Stop requests a graceful stop, waits up to grace, then force-stops.
-	// It must not fail-and-leave-running: force is the floor (ADR-0004).
+	// It must not fail-and-leave-running: force is the floor.
 	Stop(ctx bounded.Context, grace time.Duration) error
 	// Done is closed when the guest stops for any reason.
 	Done() <-chan struct{}

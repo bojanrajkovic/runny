@@ -1,5 +1,5 @@
 // Package socket serves the runny.v1 control surface over the daemon's unix
-// socket. runnyctl and RunnyBar are equal clients of this server (ADR-0006).
+// socket. runnyctl and RunnyBar are equal clients of this server.
 package socket
 
 import (
@@ -79,8 +79,8 @@ const WireProtocolVersion uint32 = 2
 // back for acknowledgement. The app sends a UUID (36 chars); the cap is generous
 // but finite because the daemon appends every applied id to the slot's
 // recent_applied_command_ids history — an unbounded id from a malformed or
-// hostile client (the socket is a trust boundary: ADR-0006 makes every client
-// equal and unprivileged) would amplify into unbounded per-slot memory. Empty is
+// hostile client (the socket is a trust boundary: every client is equal and
+// unprivileged) would amplify into unbounded per-slot memory. Empty is
 // allowed and means "don't track this command".
 const maxCommandIDLen = 128
 

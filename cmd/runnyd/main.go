@@ -1,6 +1,6 @@
 // runnyd is the runner daemon: one crash-only state machine per runner slot,
 // serving the runny.v1 control surface over a unix socket. Restart is a cold
-// start by design (ADR-0004): validate, sweep, run.
+// start by design: validate, sweep, run.
 package main
 
 import (
@@ -129,7 +129,7 @@ func run() error {
 		"config_sha256", startupSHA)
 
 	// Sweep the vms dir BEFORE validation: teardown deliberately retains a
-	// wedged guest's clone (ADR-0012), and its divergence can tip
+	// wedged guest's clone, and its divergence can tip
 	// disk-headroom under the threshold — validating first would crash-loop
 	// every respawn on a leak only this sweep can free. The sweep depends on
 	// nothing (not prefix, not clients, not network) and runs only on the
@@ -180,7 +180,7 @@ func run() error {
 
 	// This install's runner-name namespace: <slug(hostname)>-<rand8>, derived
 	// and persisted (not configured) so it can't be mistyped and stays stable
-	// across restarts — the sweep below depends on it (ADR-0009).
+	// across restarts — the sweep below depends on it.
 	prefix, err := dir.InstancePrefix()
 	if err != nil {
 		return err
@@ -190,7 +190,7 @@ func run() error {
 	}
 	logger.Info("runner namespace", "prefix", prefix)
 
-	// Registration sweep: cold start owns the world (ADR-0004). Offline
+	// Registration sweep: cold start owns the world. Offline
 	// registrations carrying our prefix, on every target. (The vms-dir sweep
 	// already ran, before validation.)
 	for _, c := range distinctClients {
@@ -254,9 +254,9 @@ func run() error {
 	// can prove the respawn came up on the config its preflight vetted.
 	srv.ConfigSHA256 = startupSHA
 
-	// Drain coordination: the wedge escalation (ADR-0012 — a guest that
-	// survives force-stop can only be reclaimed by process exit) and the
-	// config reload (ADR-0014) share one drainer. It drives every slot to a
+	// Drain coordination: the wedge escalation (a guest that survives
+	// force-stop can only be reclaimed by process exit) and the config reload
+	// share one drainer. It drives every slot to a
 	// stable state (wedged, or paused in BACKOFF — running jobs finish
 	// first), re-issuing commands on every status change so a dropped
 	// command or the backoffWait timer-vs-pause race cannot stall the
@@ -300,7 +300,7 @@ func run() error {
 		s.OnChange(d.observe)
 	}
 
-	// Reload entry point (ADR-0014), shared by the Reload RPC and SIGHUP.
+	// Reload entry point, shared by the Reload RPC and SIGHUP.
 	// Serialized so concurrent callers never run overlapping preflights
 	// (each serialized call still revalidates fresh). It never gates on an
 	// active drain: the imminent respawn loads the on-disk file whether or
@@ -466,8 +466,8 @@ func (e *poolClientError) Error() string { return fmt.Sprintf("pool %s: %v", e.P
 func (e *poolClientError) Unwrap() error { return e.Err }
 
 // buildClients constructs one GitHub client per distinct (App, target):
-// pools targeting different orgs or repos usually carry different Apps
-// (ADR-0009), so credentials are per-pool. Used by startup and by the
+// pools targeting different orgs or repos usually carry different Apps,
+// so credentials are per-pool. Used by startup and by the
 // reload preflight — client construction runs BEFORE the doctor suite at
 // startup, so the preflight must replay it too (a deleted private key
 // would pass a parse-only preflight and crash-loop the respawn).
@@ -499,7 +499,7 @@ func buildClients(cfg *home.Config) (map[ghKey]*github.Client, []*github.Client,
 // against the candidate config and clients — so a reload can only be
 // accepted when the respawn's own startup validation would pass on the
 // same inputs. Each network check self-bounds (checkBudget) regardless of
-// ctx; no SSH or guest calls exist on this path (ADR-0011).
+// ctx; no SSH or guest calls exist on this path.
 func preflightReload(ctx context.Context, dir home.Dir, configPath string) (sha string, failed, warnings []socket.DoctorCheck) {
 	// One read: the SHA describes exactly the bytes validated below, so the
 	// accepted hash provably names the file version this preflight vetted.

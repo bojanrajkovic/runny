@@ -59,7 +59,7 @@ type imagePuller struct {
 	// ctx is the puller's lifetime context, cancelled when the last subscriber
 	// leaves (or on terminal). Not a bounded.Context: the actual network ops get
 	// their bounds from a per-attempt stall watch and the disk hold from
-	// holdBudget; this is a deliberate lifetime context (ADR-0011).
+	// holdBudget; this is a deliberate lifetime context, not a bounded one.
 	ctx    context.Context
 	cancel context.CancelFunc
 

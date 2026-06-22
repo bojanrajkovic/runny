@@ -1,5 +1,5 @@
-// Package statemachine is runny's core: one crash-only FSM per runner slot
-// (ADR-0004). Every state is entered with a context deadline; the only
+// Package statemachine is runny's core: one crash-only FSM per runner slot.
+// Every state is entered with a context deadline; the only
 // response to any failure is TEARDOWN → BACKOFF with capped exponential
 // backoff. Teardown cannot fail — escalating force is the floor.
 package statemachine
@@ -94,7 +94,7 @@ type Cloner func(src tart.Bundle, dst string) error
 
 // GitHub is the slice of internal/github the FSM needs. Every method takes
 // bounded.Context: these are network calls, and an unbounded call site is a
-// compile error (ADR-0011).
+// compile error.
 type GitHub interface {
 	GenerateJITConfig(ctx bounded.Context, name string, labels []string, groupID int64) (*github.JITRunner, error)
 	ListRunners(ctx bounded.Context) ([]github.Runner, error)
@@ -128,7 +128,7 @@ type Guest interface {
 	// ErrGuestUnreachable (the command provably never reached the guest).
 	InstallAuthorizedKey(ctx bounded.Context, line string) error
 	// HostKeys returns the pinned guest host keys in known_hosts form; empty
-	// when the guest is unhardened (ssh_hardening: off, ADR-0013).
+	// when the guest is unhardened (ssh_hardening: off).
 	HostKeys() []string
 	// Redial re-establishes the session after transport death (a guest
 	// reboot). NEVER called during JOB — it closes the client carrying the
@@ -140,7 +140,7 @@ type Guest interface {
 // Dialer establishes Guest sessions (sshx's seam).
 type Dialer interface {
 	WaitFor(ctx bounded.Context, addr string) (Guest, error)
-	// Rotate hardens an authenticated session (ADR-0013, the SECURE_SSH
+	// Rotate hardens an authenticated session (the SECURE_SSH
 	// state): mint a per-cycle key, install it in the guest, disable
 	// password auth, reconnect keyed with host keys pinned. Returns the new
 	// session; on success the old one is closed, on failure the caller
@@ -151,14 +151,14 @@ type Dialer interface {
 
 // Deps wires a slot to the world. Everything is an interface or func so the
 // FSM tests on any OS with fakes. Images/GitHub/Dial are pool-scoped
-// (per-pool image, registration target, and guest credentials — ADR-0009);
+// (per-pool image, registration target, and guest credentials);
 // Config carries the global deadlines/limits/retention.
 type Deps struct {
 	Home   home.Dir
 	Config *home.Config
 	Pool   home.PoolConfig
 	// InstancePrefix is this install's runner-name namespace
-	// (<slug(hostname)>-<rand8>, derived and persisted by home.Dir, ADR-0009):
+	// (<slug(hostname)>-<rand8>, derived and persisted by home.Dir):
 	// runner names are <InstancePrefix>-<slot>-<cycle8>.
 	InstancePrefix string
 	VM             vm.Manager
@@ -272,7 +272,7 @@ type Status struct {
 	Detail string
 	// Wedged: the guest survived force-stop and still occupies a
 	// Virtualization.framework guest slot. The slot is parked; only a daemon
-	// restart (cold start) reclaims the guest (ADR-0012).
+	// restart (cold start) reclaims the guest.
 	Wedged bool
 	// DebugHoldExpires is the auto-release deadline of a DEBUG hold; non-zero
 	// only in DEBUG, cleared the instant DEBUG is left (issue #39).
@@ -300,7 +300,7 @@ type Slot struct {
 	status   Status
 	onChange []func(Status)
 
-	// failure streak for backoff; reset per ADR-0004.
+	// failure streak for backoff; reset on job completion or a held LISTENING.
 	failures uint32
 	paused   bool
 }
@@ -399,7 +399,7 @@ func (s *Slot) Run(ctx context.Context) {
 			// The guest survived force-stop: it still occupies one of the
 			// host's Virtualization.framework guest slots, so every further
 			// boot on this slot is doomed. Park; only a daemon restart (cold
-			// start) reclaims an in-process VM (ADR-0012).
+			// start) reclaims an in-process VM.
 			s.markWedged()
 			return
 		}
@@ -677,7 +677,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	// enter runs one deadline-bounded state. The state function receives the
 	// deadline as a bounded.Context it can hand straight to the guest and
 	// network seams — the per-state deadline is the contract, and the type
-	// system carries it to the call sites (ADR-0011).
+	// system carries it to the call sites.
 	enter := func(state State, d time.Duration, f func(bounded.Context) error) bool {
 		bctx, cancel := bounded.WithTimeout(cctx, d)
 		ok := runState(state, bctx, func() error { return f(bctx) })
@@ -766,7 +766,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	}
 	// SECURE_SSH must precede MINT_JIT, strictly: the JIT config — the
 	// GitHub credential — must never exist while the guest still accepts
-	// password auth (ADR-0013). Only an explicit `off` skips the state; the
+	// password auth. Only an explicit `off` skips the state; the
 	// gate fails closed, so a zero-value SSHHardening (a Deps.Pool that never
 	// saw config defaulting) rotates rather than silently un-hardening. With
 	// `off`, the cycle record carries no SECURE_SSH entry and the cycle is
@@ -1795,7 +1795,7 @@ func (s *Slot) finishCycle(rec *cycle.Record, benign bool) {
 }
 
 // heldListening: a cycle that listened ≥10min resets backoff even if it ended
-// in a non-success (e.g. operator recycle, zombie after hours) — ADR-0004.
+// in a non-success (e.g. operator recycle, zombie after hours).
 func heldListening(rec *cycle.Record) bool {
 	for _, sr := range rec.States {
 		if sr.State == string(StateListening) && sr.Left.Sub(sr.Entered) >= 10*time.Minute {

@@ -994,6 +994,15 @@ func TestLocalNetworkNote(t *testing.T) {
 		// chasing a live network problem. The note must not claim a specific cause.
 		t.Errorf("UNKNOWN note must not assert a specific cause; got %q", s)
 	}
+	// SELF_DAEMONIZED must be loud AND carry the launch-context remediation, NOT
+	// the TCC-grant one (which is a dead end for a mislaunched daemon).
+	if s := localNetworkNote(runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_SELF_DAEMONIZED); s == "" {
+		t.Error("SELF_DAEMONIZED should surface a note")
+	} else if !strings.Contains(s, "launchd") || !strings.Contains(s, "foreground") {
+		t.Errorf("SELF_DAEMONIZED note must give the launch-context fix; got %q", s)
+	} else if strings.Contains(s, "grant it Local Network access") {
+		t.Errorf("SELF_DAEMONIZED note must NOT render the dead-end TCC-grant fix; got %q", s)
+	}
 	if s := localNetworkNote(runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_REACHABLE); s != "" {
 		t.Errorf("REACHABLE should be quiet; got %q", s)
 	}

@@ -168,6 +168,12 @@ message GetStatusRequest {}
 // still bump; this one straddles nothing.) The UNSPECIFIED zero additionally
 // covers a non-darwin or not-yet-sampled daemon, distinct from the ambiguous
 // boot_id/exit_held zeros (""/false) that DID need the >= 2 gate.
+//
+// Adding a value here is likewise un-gated: it has never shipped in a release, so
+// no client knows only the older values. A client that did see an unknown value
+// degrades cleanly to "no affordance" (runnyctl prints nothing; the app's
+// @unknown default hides the card) and falls back to the local-network doctor
+// check + the startup log.
 enum LocalNetworkGrant {
   // The daemon does not publish this signal (predates the field) or has not yet
   // sampled, and on non-darwin builds. Clients show no grant affordance and rely
@@ -185,6 +191,16 @@ enum LocalNetworkGrant {
   // process — the TCC-denial signature (the host shell reaches it; this daemon
   // does not). Clients surface the grant affordance.
   LOCAL_NETWORK_GRANT_DENIED = 3;
+  // runnyd was self-daemonized / reparented — launchd did not start it and it
+  // has no live parent — so macOS silently denies it Local Network access. This
+  // is a launch-context fact known at startup, NOT a reachability probe result:
+  // it would otherwise read DENIED once a vmnet interface comes up. It carries a
+  // DISTINCT remediation — start via launchd or run in the foreground, never
+  // background it — because toggling the TCC grant cannot repair the launch
+  // context. Clients must render this differently from DENIED (whose fix is the
+  // System Settings grant); the cause is also on the local-network doctor check
+  // and the startup log.
+  LOCAL_NETWORK_GRANT_SELF_DAEMONIZED = 4;
 }
 
 message GetStatusResponse {

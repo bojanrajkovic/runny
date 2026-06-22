@@ -22,6 +22,11 @@ struct AffordanceRow<Trailing: View>: View {
                 .font(.caption)
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
+                // Claim the row width explicitly rather than leaning on the Spacer to
+                // push the trailing control: with an empty trailing view (the
+                // self-daemonized card) a Spacer-only layout lets the Spacer steal
+                // width and wrap the text early, leaving a right-side gap.
+                .frame(maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: 4)
             trailing
         }

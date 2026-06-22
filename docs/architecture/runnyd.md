@@ -199,8 +199,11 @@ that can hold a guest services it (ADR-0015):
   same port. A launchd-started daemon of any uid, and foreground children of
   sshd, are auto-allowed. runnyd reads its launch context at startup (via the
   `XPC_SERVICE_NAME` launchd sets) and makes the orphaned case loud — a red
-  `local-network` check plus an Error log, before the first guest dial — without
-  refusing to boot, since foreground and launchd starts are fine. The deployment
+  `local-network` check, an Error log, and a distinct `SELF_DAEMONIZED` value on
+  the status-published `local_network_grant` (so the app/CLI render the
+  launch-context fix, not the dead-end TCC-grant ask), all before the first guest
+  dial — without refusing to boot, since foreground and launchd starts are fine.
+  The deployment
   owns the grant story via a per-user LaunchAgent; symptoms and the fix live in
   `docs/deploy.md` "Troubleshooting: Local Network permission".
 - **Never trust the image's bundled runner**: cirruslabs images preinstall

@@ -379,10 +379,13 @@ seam, so every decision is unit-tested without launchd. The invariants:
   from a later `.connected` snapshot within a healthy-cold-start bound, surfacing
   "Start issued but the daemon hasn't come up" on expiry — never a silent spinner.
 - **Proactive Local Network grant card**, driven by the daemon-published
-  `local_network_grant` tri-state, not the button-gated doctor check (which is
+  `local_network_grant` signal, not the button-gated doctor check (which is
   `ok` until a guest boots). It fires *before* the first guest dial fails: UNKNOWN
   (no vmnet yet — prompt may be pending) and DENIED both surface a System-Settings
-  deep link; REACHABLE and a daemon predating the field show nothing.
+  deep link; SELF_DAEMONIZED surfaces a DISTINCT card with the launch-context
+  remediation (start via launchd or run foreground) and NO deep link, since the
+  TCC grant cannot repair a daemon launchd didn't start; REACHABLE and a daemon
+  predating the field show nothing.
 - **Post-upgrade update**, offered when the app-installed agent is a newer build
   than the running daemon, is the existing drain-gated reload (jobs finish first,
   then launchd cold-starts the new binary) — it adds nothing to the drain

@@ -15,8 +15,13 @@ enum LocalNetworkCard: Equatable {
     /// unreachable", proactively, rather than waiting for a dial to fail.
     case pendingOrUnknown
     /// A vmnet interface is up but the subnet is unreachable — the TCC denial is
-    /// confirmed. Surfaced firmly.
+    /// confirmed. Surfaced firmly, with the System Settings grant CTA.
     case denied
+    /// runnyd was self-daemonized / reparented — launchd did not start it — so
+    /// macOS denies it guest access. Distinct from `denied`: the System Settings
+    /// grant cannot repair the launch context, so this surfaces the launch-context
+    /// remediation (start via launchd or run foreground) with NO Settings button.
+    case selfDaemonized
 }
 
 extension DaemonStore {
@@ -34,6 +39,7 @@ extension DaemonStore {
         switch grant {
         case .unknown: return .pendingOrUnknown
         case .denied: return .denied
+        case .selfDaemonized: return .selfDaemonized
         case .reachable, .unspecified: return .hidden
         @unknown default: return .hidden
         }
@@ -67,20 +73,41 @@ struct LocalNetworkGrantCard: View {
         case .hidden:
             EmptyView()
         case .pendingOrUnknown:
-            card(
+            settingsCard(
                 "Runny may need Local Network access to reach guests. If runners can't be reached, grant it.",
                 tint: .orange
             )
         case .denied:
-            card(
+            settingsCard(
                 "Local Network access is denied, so runnyd can't reach guests. Grant it in System Settings.",
+                tint: .red
+            )
+        case .selfDaemonized:
+            // No trailing button: the TCC grant can't fix a daemon launchd didn't
+            // start. The remediation is the launch context, so the card only explains.
+            card(
+                "runnyd was started in the background, so macOS denies it access to guests. "
+                    + "Toggling Local Network access won't help — start it via launchd or run it in the "
+                    + "foreground, never background it.",
                 tint: .red
             )
         }
     }
 
-    private func card(_ text: String, tint: Color) -> some View {
-        AffordanceRow(systemImage: "network.badge.shield.half.filled", text: text, tint: tint) {
+    /// One AffordanceRow per grant state, with the shared icon defined once. The
+    /// trailing control defaults to none (the self-daemonized card, whose fix is
+    /// the launch context, not a Settings deep link); the grantable states pass an
+    /// "Open Settings" button.
+    private func card(
+        _ text: String, tint: Color, @ViewBuilder trailing: () -> some View = { EmptyView() }
+    ) -> some View {
+        AffordanceRow(
+            systemImage: "network.badge.shield.half.filled", text: text, tint: tint, trailing: trailing
+        )
+    }
+
+    private func settingsCard(_ text: String, tint: Color) -> some View {
+        card(text, tint: tint) {
             Button("Open Settings") {
                 if let url = Self.settingsURL { NSWorkspace.shared.open(url) }
             }

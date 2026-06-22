@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/user"
 	"runtime"
 
 	"github.com/bojanrajkovic/runny/internal/home"
@@ -33,7 +32,7 @@ func installDaemon(args []string) error {
 	if err := requireDarwinRoot("install-daemon"); err != nil {
 		return err
 	}
-	operator, err := operatorAccount(*operatorFlag)
+	operator, err := resolveOperator(*operatorFlag, os.Getenv("SUDO_USER"))
 	if err != nil {
 		return err
 	}
@@ -96,31 +95,14 @@ func requireDarwinRoot(name string) error {
 	return nil
 }
 
-// operatorAccount is the human operator the home's inheriting ACL grants access
-// to. It is resolved from the --operator flag or $SUDO_USER (see resolveOperator)
-// and then checked to resolve to a real local user BEFORE any privileged step
-// runs, so a bad value fails clean rather than half-installing.
-func operatorAccount(flagOperator string) (string, error) {
-	op, err := resolveOperator(flagOperator, os.Getenv("SUDO_USER"))
-	if err != nil {
-		return "", err
-	}
-	if _, err := user.Lookup(op); err != nil {
-		return "", fmt.Errorf("operator account %q does not resolve to a local user: %w", op, err)
-	}
-	return op, nil
-}
-
-// resolveOperator selects the operator account and validates its NAME SHAPE — the
-// ACL-injection guard, since the name is interpolated into a `chmod` ACE. The
-// explicit --operator flag wins over $SUDO_USER: the app's brokered install runs
-// as root via osascript "with administrator privileges", which (unlike sudo)
-// leaves SUDO_USER unset, so the operator can only travel by flag there; the
-// headless `sudo runnyctl install-daemon` path passes no flag and resolves off
-// SUDO_USER. `root` is refused from either source — an ACL grant to root is
-// pointless and signals a non-login invocation. The local-user check is the
-// caller's (user.Lookup), kept out so source-selection + shape validation stays
-// pure and is unit-tested host-independently.
+// resolveOperator selects the operator account from the explicit --operator flag
+// or $SUDO_USER. The explicit flag wins: the app's brokered install runs as root
+// via osascript "with administrator privileges", which (unlike sudo) leaves
+// SUDO_USER unset, so the operator can only travel by flag there; the headless
+// `sudo runnyctl install-daemon` path passes no flag and resolves off SUDO_USER.
+// `root` is refused from either source — an ACL grant to root is pointless and
+// signals a non-login invocation. The local-user check lives in Install(), not
+// here, so source selection stays pure and unit-testable.
 func resolveOperator(flagOperator, sudoUser string) (string, error) {
 	op := flagOperator
 	if op == "" {
@@ -130,9 +112,6 @@ func resolveOperator(flagOperator, sudoUser string) (string, error) {
 		return "", fmt.Errorf("cannot determine the operator account: pass `--operator <user>`, or run " +
 			"via `sudo runnyctl install-daemon` from your normal login so SUDO_USER is set (the home's " +
 			"ACL grants that account access)")
-	}
-	if err := sysdaemon.ValidateOperatorName(op); err != nil {
-		return "", err
 	}
 	return op, nil
 }

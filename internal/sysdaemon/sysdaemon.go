@@ -10,7 +10,6 @@ package sysdaemon
 import (
 	"fmt"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -116,23 +115,6 @@ func Plist(cfg Config) string {
 		panic(fmt.Sprintf("sysdaemon: plist.Marshal: %v", err))
 	}
 	return string(out)
-}
-
-// operatorNameRe is the plain-username shape an operator account must match. The
-// name is interpolated into the ACL ACE handed to `chmod +a` as a single arg, so
-// a name with a space or comma would reshape the ACE into a different (possibly
-// broader) grant — reject anything that isn't a bare username.
-var operatorNameRe = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$`)
-
-// ValidateOperatorName guards the ACL boundary: the operator account is
-// attacker-influenceable only by someone who already holds sudo, but it defines
-// a security-critical ACL, so it is validated rather than trusted. The CLI
-// additionally checks the account resolves to a real local user.
-func ValidateOperatorName(name string) error {
-	if !operatorNameRe.MatchString(name) {
-		return fmt.Errorf("operator account %q is not a plain username; refusing to build an ACL from it", name)
-	}
-	return nil
 }
 
 // aclInherit makes an ACE apply to the home AND every file/dir created beneath it

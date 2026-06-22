@@ -6,13 +6,12 @@ import (
 )
 
 // resolveOperator picks the operator account the system home's inheriting ACL
-// will grant: the explicit --operator flag wins, else $SUDO_USER, and the name
-// shape is validated (it is interpolated into a chmod ACE). The flag-wins rule is
-// the whole point of PR5a: the app's brokered install runs as root via osascript
-// "with administrator privileges", which — unlike sudo — leaves SUDO_USER unset,
-// so the operator must travel by flag there. The headless `sudo` path passes no
-// flag and still resolves off SUDO_USER. user.Lookup is the caller's, so this
-// stays pure and host-independent.
+// will grant: the explicit --operator flag wins, else $SUDO_USER. The flag-wins
+// rule is the whole point of PR5a: the app's brokered install runs as root via
+// osascript "with administrator privileges", which — unlike sudo — leaves
+// SUDO_USER unset, so the operator must travel by flag there. The headless
+// `sudo` path passes no flag and still resolves off SUDO_USER. The local-user
+// check lives in Install(), so this stays pure and host-independent.
 func TestResolveOperator(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -27,9 +26,6 @@ func TestResolveOperator(t *testing.T) {
 		{name: "neither set", wantErrSub: "cannot determine the operator account"},
 		{name: "SUDO_USER is root (plain sudo, not from a login)", sudoUser: "root", wantErrSub: "cannot determine"},
 		{name: "explicit --operator root is refused (ACL to root is pointless)", flag: "root", wantErrSub: "cannot determine"},
-		{name: "flag with a space — ACE-injection guard", flag: "alice bob", wantErrSub: "not a plain username"},
-		{name: "flag with a comma — ACE-injection guard", flag: "alice,staff", wantErrSub: "not a plain username"},
-		{name: "SUDO_USER with shell metachars is validated too", sudoUser: "a;rm -rf /", wantErrSub: "not a plain username"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

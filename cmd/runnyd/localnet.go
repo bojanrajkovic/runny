@@ -75,24 +75,25 @@ func vmnetInterfaceUp() bool {
 	return false
 }
 
-// localNetworkGrant classifies this process's Local Network (TCC) access into
-// the three states the daemon can actually distinguish — the tri-state published
-// in GetStatusResponse.local_network_grant. It is the same probe localNetworkReach
-// runs (no vmnet → can't tell; vmnet up → reachable or denied), shaped for the
-// app's proactive grant card rather than the doctor's (ok, detail) pair. There
-// is no fourth "definitely never granted" state: macOS exposes no API to read a
-// process's own grant, so until a vmnet interface exists the honest answer is
-// UNKNOWN, which the app treats as "prompt may be pending".
+// localNetworkGrant classifies this process's Local Network (TCC) access for the
+// status-published GetStatusResponse.local_network_grant. It is the same probe
+// localNetworkReach runs (no vmnet → can't tell; vmnet up → reachable or denied),
+// shaped for the app's proactive grant card rather than the doctor's (ok, detail)
+// pair, plus the launch-context short-circuit below. macOS exposes no API to read
+// a process's own grant, so the reachability arm has no "definitely never granted"
+// state: until a vmnet interface exists the honest answer is UNKNOWN, which the
+// app treats as "prompt may be pending".
 func localNetworkGrant() runnyv1.LocalNetworkGrant {
 	// A self-daemonized / orphaned daemon would read DENIED from the live probe
 	// once a vmnet interface is up, but DENIED makes runnyctl and the app render a
 	// "grant Local Network in System Settings" remediation that cannot fix a daemon
-	// launchd did not start. Report the neutral UNKNOWN instead — unconditionally,
-	// since the probe would otherwise return DENIED post-vmnet — and leave the
-	// orphaned cause to the local-network doctor check (orphanedDenyDetail) and the
-	// startup log; a distinct client-side grant state is app-track work (#112).
+	// launchd did not start. Report the distinct SELF_DAEMONIZED instead —
+	// unconditionally, since the probe would otherwise return DENIED post-vmnet —
+	// so the clients render the launch-context remediation (start via launchd or
+	// run foreground); the same cause is on the local-network doctor check
+	// (orphanedDenyDetail) and the startup log.
 	if launchContextNow() == launchOrphaned {
-		return runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNKNOWN
+		return runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_SELF_DAEMONIZED
 	}
 	if !vmnetInterfaceUp() {
 		return runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNKNOWN

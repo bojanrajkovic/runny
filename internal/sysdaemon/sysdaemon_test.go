@@ -4,12 +4,24 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/user"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/bojanrajkovic/runny/internal/home"
 )
+
+// testOperator is a local account that resolves via user.Lookup on any host,
+// CI included. Install now requires the operator to be a real local user
+// (user.Lookup), so a hardcoded developer name fails everywhere that account
+// doesn't exist; the running user always resolves, with root as the fallback.
+var testOperator = func() string {
+	if u, err := user.Current(); err == nil {
+		return u.Username
+	}
+	return "root"
+}()
 
 func TestPlist(t *testing.T) {
 	cfg := DefaultConfig()
@@ -56,7 +68,6 @@ func TestACEsPinned(t *testing.T) {
 		t.Errorf("serviceACE drift:\n got %q\nwant %q", got, wantSvc)
 	}
 }
-
 
 func TestFirstFreeID(t *testing.T) {
 	if got, err := firstFreeID(map[int]bool{200: true, 201: true}); err != nil || got != 202 {
@@ -148,7 +159,7 @@ func indexOfCall(calls [][]string, pred func([]string) bool) int {
 
 func newTestInstaller(r *recordedRun, wf func(string, []byte, os.FileMode) error) *Installer {
 	cfg := DefaultConfig()
-	cfg.Operator = "brajkovic"
+	cfg.Operator = testOperator
 	cfg.RunnydPath = "/opt/homebrew/bin/runnyd"
 	return &Installer{cfg: cfg, run: r.run, writeFile: wf, log: func(string, ...any) {}}
 }
@@ -188,7 +199,7 @@ func TestInstallPlan(t *testing.T) {
 	if !exactCall(r.calls, "/bin/chmod", "0700", home.SystemHomeDir) {
 		t.Error("missing chmod 0700 on the home")
 	}
-	if !exactCall(r.calls, "/bin/chmod", "-R", "+a", operatorACE("brajkovic"), home.SystemHomeDir) {
+	if !exactCall(r.calls, "/bin/chmod", "-R", "+a", operatorACE(testOperator), home.SystemHomeDir) {
 		t.Error("missing operator ACE (recursive)")
 	}
 	if !exactCall(r.calls, "/bin/chmod", "-R", "+a", serviceACE("_runny"), home.SystemHomeDir) {

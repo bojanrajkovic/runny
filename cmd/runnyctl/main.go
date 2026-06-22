@@ -419,12 +419,16 @@ const (
 
 // localNetworkNote returns an operator-facing line for the daemon's live Local
 // Network (TCC) grant, or "" when no affordance is warranted. It mirrors the
-// app's grant card for the headless channel: DENIED (runnyd can't reach the
-// guest subnet) is loud, UNKNOWN is a proactive heads-up that the grant is
-// pending confirmation, and REACHABLE / UNSPECIFIED (old or non-darwin daemon)
-// stay quiet so routine status output isn't cluttered.
+// app's grant card for the headless channel: SELF_DAEMONIZED and DENIED (runnyd
+// can't reach the guest subnet) are loud — but with DISTINCT remediations, since
+// toggling the TCC grant cannot fix a mislaunched daemon — UNKNOWN is a proactive
+// heads-up that the grant is pending confirmation, and REACHABLE / UNSPECIFIED
+// (old or non-darwin daemon) stay quiet so routine status output isn't cluttered.
 func localNetworkNote(g runnyv1.LocalNetworkGrant) string {
 	switch g {
+	case runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_SELF_DAEMONIZED:
+		// Distinct from DENIED: the fix is the launch context, not the TCC grant.
+		return "local network: self-daemonized — launchd did not start runnyd, so macOS denies it guest access; toggling Local Network access won't help. Start it via launchd or run it in the foreground, never background it (see docs/deploy.md)"
 	case runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_DENIED:
 		return "local network: DENIED — runnyd can't reach the guest subnet; grant it Local Network access (see docs/deploy.md)"
 	case runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNKNOWN:

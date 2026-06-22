@@ -18,6 +18,15 @@ final class LocalNetworkCardTests: XCTestCase {
         XCTAssertEqual(DaemonStore.localNetworkVerdict(grant: .unknown, isSystemDaemon: false), .pendingOrUnknown)
     }
 
+    func testSelfDaemonizedIsItsOwnCardNotDenied() {
+        // The launch-context state gets a DISTINCT card: the System Settings grant
+        // can't repair a daemon launchd didn't start, so it must not collapse to
+        // .denied (whose CTA is exactly that dead-end grant).
+        XCTAssertEqual(
+            DaemonStore.localNetworkVerdict(grant: .selfDaemonized, isSystemDaemon: false), .selfDaemonized
+        )
+    }
+
     func testReachableAndUnspecifiedHideTheCard() {
         XCTAssertEqual(DaemonStore.localNetworkVerdict(grant: .reachable, isSystemDaemon: false), .hidden)
         // UNSPECIFIED = old daemon / not sampled — no card, defer to the skew banner.
@@ -26,9 +35,9 @@ final class LocalNetworkCardTests: XCTestCase {
 
     func testSystemDaemonNeverShowsTheCard() {
         // A launchd-started system daemon is auto-allowed Local Network (TN3179), so
-        // the card must NEVER show for it — including on the UNKNOWN/DENIED grants that
-        // surface it for a per-user agent.
-        for grant: Runny_V1_LocalNetworkGrant in [.unknown, .denied, .reachable, .unspecified] {
+        // the card must NEVER show for it — including on the UNKNOWN/DENIED/self-daemonized
+        // grants that surface it for a per-user agent.
+        for grant: Runny_V1_LocalNetworkGrant in [.unknown, .denied, .selfDaemonized, .reachable, .unspecified] {
             XCTAssertEqual(
                 DaemonStore.localNetworkVerdict(grant: grant, isSystemDaemon: true), .hidden,
                 "grant \(grant) must be hidden for a system daemon"

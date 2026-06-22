@@ -51,17 +51,18 @@ func TestLocalNetworkReachFailsWhenOrphaned(t *testing.T) {
 	}
 }
 
-// The orphaned context must report UNKNOWN, never DENIED — unconditionally, even
-// once a vmnet interface is up (the live probe would otherwise return DENIED).
-// runnyctl and the app render DENIED as "grant Local Network in System Settings",
-// a dead end for a self-daemonized daemon (Codex review, #111). The cause is
-// surfaced via the local-network doctor check + the startup log; a distinct
-// client-side grant state is app-track work (#112).
-func TestLocalNetworkGrantUnknownWhenOrphaned(t *testing.T) {
+// The orphaned context must report the distinct SELF_DAEMONIZED grant, never
+// DENIED — unconditionally, even once a vmnet interface is up (the live probe
+// would otherwise return DENIED). runnyctl and the app render DENIED as "grant
+// Local Network in System Settings", a dead end for a self-daemonized daemon;
+// SELF_DAEMONIZED instead carries the launch-context remediation (start via
+// launchd or run foreground). The cause is also on the local-network doctor
+// check + the startup log.
+func TestLocalNetworkGrantSelfDaemonizedWhenOrphaned(t *testing.T) {
 	defer func(orig func() launchContext) { launchContextNow = orig }(launchContextNow)
 	launchContextNow = func() launchContext { return launchOrphaned }
-	if got := localNetworkGrant(); got != runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNKNOWN {
-		t.Errorf("orphaned grant = %v, want UNKNOWN (never DENIED — misleads the TCC remediation; cause is on the doctor check, app-track #112)", got)
+	if got := localNetworkGrant(); got != runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_SELF_DAEMONIZED {
+		t.Errorf("orphaned grant = %v, want SELF_DAEMONIZED (never DENIED — that misleads the TCC remediation)", got)
 	}
 }
 

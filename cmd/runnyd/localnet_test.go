@@ -62,6 +62,11 @@ func TestLocalNetworkGrantUnknownWithoutVmnet(t *testing.T) {
 	if vmnetInterfaceUp() {
 		t.Skip("a 192.168.64.0/24 interface is present; the live probe would run")
 	}
+	// Pin foreground: the UNKNOWN-without-vmnet arm is reached only past the
+	// orphaned short-circuit, so the test asserts the reachability arm, not the
+	// launch-context one.
+	defer func(orig func() launchContext) { launchContextNow = orig }(launchContextNow)
+	launchContextNow = func() launchContext { return launchForeground }
 	if got := localNetworkGrant(); got != runnyv1.LocalNetworkGrant_LOCAL_NETWORK_GRANT_UNKNOWN {
 		t.Errorf("grant without vmnet = %v, want UNKNOWN", got)
 	}

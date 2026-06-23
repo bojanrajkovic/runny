@@ -95,9 +95,9 @@ struct AgentInstallRow: View {
     }
 
     /// The Daemon row content, gated on the ownership verdict: "Checking…" until a
-    /// gather runs, then either the observer banner (a foreign/foreground/
-    /// indeterminate owner — install is replaced by guidance naming the channel) or
-    /// the normal install/toggle section (the daemon is the app's to manage).
+    /// gather runs, then either the observer banner (a systemManaged or indeterminate
+    /// owner — install is replaced by guidance) or the normal install/toggle section
+    /// (the daemon is the app's to manage, i.e. unmanaged/selfManaged/awaitingApproval).
     @ViewBuilder private var ownershipAwareContent: some View {
         if !agent.ownershipChecked {
             Label("Checking who manages runnyd…", systemImage: "hourglass")
@@ -109,68 +109,6 @@ struct AgentInstallRow: View {
             } else {
                 installSection
             }
-            // Beneath the verdict's own UI: cleanup for the competing owners the single
-            // verdict doesn't name (the latent split-brain `agent.collisions` surfaces).
-            collisionWarnings
-        }
-    }
-
-    /// Per-owner cleanup for the contenders the verdict hides. Our own agent is
-    /// removable in-app under a foreign owner — `collisions.ownAgent` is true for an
-    /// enabled OR a pending agent, so a `.requiresApproval` registration (which has no
-    /// toggle of its own under a foreign banner) still gets an in-app withdrawal. A
-    /// foreign manual registration the verdict didn't name gets a copy-paste command,
-    /// safety-built by `manualCleanupCommand` (rm-only when our agent holds the live
-    /// label, bootout+rm when the manual job is the loaded foreign one).
-    @ViewBuilder private var collisionWarnings: some View {
-        let collisions = agent.collisions
-        // Our own agent competing under a foreign owner (Homebrew or a system daemon):
-        // remove it through the SAME live-guest-aware teardown the toggle uses —
-        // disabling it in Login Items instead would stop a possibly-job-running agent
-        // with no abandon warning.
-        if collisions.ownAgent, agent.ownership == .foreignBrew || agent.ownership == .systemManaged {
-            Text("Runny's own agent is also registered and competing — remove it to leave the other manager in charge.")
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .fixedSize(horizontal: false, vertical: true)
-            Button("Remove Runny's agent") { requestUninstall() }
-                .controlSize(.small)
-        }
-        // A foreign manual registration the verdict didn't name: a dormant plist under
-        // selfManaged, or a co-present manual install under foreignBrew/systemManaged.
-        // foreignManual's own observer banner already carries this command, so it is NOT
-        // doubled there.
-        if collisions.manual,
-           agent.ownership == .selfManaged || agent.ownership == .foreignBrew
-           || agent.ownership == .systemManaged,
-           let command = AgentController.manualCleanupCommand(collisions)
-        {
-            Text("A manually-installed runnyd agent is also present and will contend for the daemon "
-                + "at the next login. Once no job is running, remove it with:")
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(command)
-                .font(.caption.monospaced())
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        // A Homebrew agent co-present under a system-daemon verdict. Only reachable
-        // here: a registered brew label is otherwise the verdict itself (foreignBrew),
-        // but a system daemon now outranks it, so the systemManaged banner names the
-        // system daemon and this surfaces the leftover brew the verdict hides — else a
-        // migration host follows the banner, removes the system daemon, and Homebrew
-        // still owns runnyd unmentioned.
-        if collisions.brew, agent.ownership == .systemManaged {
-            Text("A Homebrew-managed runnyd agent is also registered and will contend for the "
-                + "daemon. Stop it with:")
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("brew services stop runny")
-                .font(.caption.monospaced())
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -236,15 +174,15 @@ struct AgentInstallRow: View {
 
     private func bannerIcon(_ kind: ObserverHint.Kind) -> String {
         switch kind {
-        case .managedByHomebrew, .managedManually, .managedBySystemDaemon: "info.circle"
-        case .foregroundDaemon, .indeterminate: "exclamationmark.triangle"
+        case .systemManaged: "info.circle"
+        case .indeterminate: "exclamationmark.triangle"
         }
     }
 
     private func bannerTint(_ kind: ObserverHint.Kind) -> Color {
         switch kind {
-        case .managedByHomebrew, .managedManually, .managedBySystemDaemon: .secondary
-        case .foregroundDaemon, .indeterminate: .orange
+        case .systemManaged: .secondary
+        case .indeterminate: .orange
         }
     }
 
@@ -269,8 +207,8 @@ struct AgentInstallRow: View {
 
     /// Remove the app's agent through the live-guest-aware path: raise the abandon
     /// confirmation when a job may be live (or the daemon is disconnected and we can't
-    /// prove otherwise), else uninstall directly. Shared by the toggle and the
-    /// brew-collision removal so neither route bypasses the warning.
+    /// prove otherwise), else uninstall directly. The toggle's OFF path routes through
+    /// here so it never bypasses the warning.
     private func requestUninstall() {
         // A pending (`.requiresApproval`) agent is registered but never started, so it
         // can't be the daemon serving any job — removing it abandons nothing. Skip the

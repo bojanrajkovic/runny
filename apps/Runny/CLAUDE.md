@@ -78,11 +78,11 @@ bounds) and ADR-0016 (decisions). Sharp edges below.
   axis, so they can't diverge.** `RunnyHome.socketPath` is `directory/runnyd.sock`
   and `artifactURL` reads `cycles/` from `directory`; keying the socket on a
   separate socket-file-existence axis would let the app dial one home while
-  reading artifacts from another. Selection is by dir existence; LIVENESS stays
-  `SocketProbe`'s connect-based job (Go's stat-for-selection / connect-for-liveness
-  split). The literal `systemSocketPath`/`perUserSocketPath` stay for the install
-  gate — `AgentController.liveSocketOccupied` probes BOTH so a stale system socket
-  can't mask a live per-user daemon. `ensureDirectory` only ever creates the
+  reading artifacts from another. Selection is by dir existence; LIVENESS is the
+  daemon connection's job — the `DaemonStore` gRPC `WatchStatus` stream (Go's
+  stat-for-selection / connect-for-liveness split). The ownership install gate no
+  longer has a socket axis: it reads only the `system/`-domain launchd probe + the
+  app's own SMAppService self-status. `ensureDirectory` only ever creates the
   **per-user** home (its default target), never the installer-owned system home;
   dir-existence resolution makes this safe-by-construction (the system home only
   wins when it already exists). On a host with a system install, the app targets
@@ -147,8 +147,8 @@ bounds) and ADR-0016 (decisions). Sharp edges below.
   must respect: `SMAppService` success means *requested*, so `installState` is
   derived from `service.status`, never a call return; every spawn-triggering action
   funnels through `AgentController.attemptSpawn` (the gate now carries the
-  daemon-ownership verdict — install/repair/start are denied for a foreign or
-  indeterminate owner) — no view calls `SMAppService`/`launchctl` directly; the bundled
+  daemon-ownership verdict — install/repair/start are denied for a `systemManaged`,
+  `awaitingApproval`, or `indeterminate` owner) — no view calls `SMAppService`/`launchctl` directly; the bundled
   LaunchAgent plist is `BundleProgram`-relative and is NOT the host-install
   template (two shapes, do not unify); the Local Network grant card reads the
   **daemon-published `local_network_grant`**, never the button-gated `doctorChecks`;

@@ -6,8 +6,8 @@ import RunnyV1
 /// The home LOCATION is deployment-resolved, never overridden (no environment
 /// variable, no Settings field): the system-daemon home `/Library/Application
 /// Support/runny` when it EXISTS, else the per-user `~/.runny`. This mirrors
-/// Go's `home.ResolveClient` — selection by existence, not a liveness probe (that
-/// stays `SocketProbe`'s job) — so a Finder-launched app and the daemon resolve
+/// Go's `home.ResolveClient` — selection by existence, not a liveness probe
+/// (liveness is the daemon connection's job) — so a Finder-launched app and the daemon resolve
 /// the same home and can never disagree about where the socket, credentials, and
 /// artifacts live. The whole home resolves (not just the socket): `artifactURL`
 /// reads `cycles/` from `directory`, so a system daemon's artifacts are only
@@ -53,17 +53,10 @@ enum RunnyHome {
     private static let socketName = "runnyd.sock"
 
     /// The socket inside a home — `<dir>/runnyd.sock`, the single join site
-    /// (mirrors Go's `Dir.SocketPath`), so the dialed socket and the install
-    /// gate's probed sockets can't drift apart.
+    /// (mirrors Go's `Dir.SocketPath`).
     private static func socket(in dir: URL) -> String {
         dir.appendingPathComponent(socketName).path
     }
-
-    /// The literal system / per-user socket paths, independent of resolution.
-    /// `AgentController.liveSocketOccupied` probes BOTH so the install gate sees a
-    /// live daemon at either path; dialing uses the resolved `socketPath`.
-    static var systemSocketPath: String { socket(in: systemDirectory) }
-    static var perUserSocketPath: String { socket(in: perUserDirectory) }
 
     /// Where the app dials the daemon: the socket inside the resolved home.
     static var socketPath: String { socket(in: directory) }

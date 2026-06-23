@@ -96,10 +96,7 @@ enum StartOutcome: Equatable {
 /// — those are the app's own install/approval UI, not an observer posture.
 struct ObserverHint: Equatable {
     enum Kind: Equatable {
-        case managedByHomebrew
-        case managedManually
-        case managedBySystemDaemon
-        case foregroundDaemon
+        case systemManaged
         case indeterminate
     }
 
@@ -148,11 +145,8 @@ final class AgentController {
     private let spawnGate: () async -> SpawnGate
     private let eligibilityProvider: () -> LaunchAgentStatus.Eligibility
     private let bundledAgentPresentProvider: () -> Bool
-    private let probeProvider: @Sendable (String) async -> LaunchdProbeResult
     private let systemProbeProvider: @Sendable (String) async -> LaunchdProbeResult
-    private let socketAnswersProvider: () async -> Bool
     private let homeIsCanonicalProvider: () -> Bool
-    private let manualPlistPersistedProvider: () -> Bool
 
     private var activationObserver: NSObjectProtocol?
 
@@ -161,30 +155,23 @@ final class AgentController {
         spawnGate: @escaping () async -> SpawnGate = { .allow },
         eligibility: @escaping () -> LaunchAgentStatus.Eligibility = { AgentController.bundleEligibility() },
         bundledAgentPresent: @escaping () -> Bool = { AgentController.bundledAgentPresent() },
-        probe: @escaping @Sendable (String) async -> LaunchdProbeResult = { await LaunchdProbe.probe(label: $0) },
         // Hermetic by default: existing tests construct AgentController without knowing
         // about systemProbe, so its default must NOT shell out to `launchctl print
-        // system/…` — unlike `probe`, which every test already overrides. `live()`
-        // supplies the real probe.
+        // system/…`. `live()` supplies the real probe.
         systemProbe: @escaping @Sendable (String) async -> LaunchdProbeResult = { _ in .notRegistered },
-        socketAnswers: @escaping () async -> Bool = { await AgentController.liveSocketOccupied() },
-        homeIsCanonical: @escaping () -> Bool = { true },
-        manualPlistPersisted: @escaping () -> Bool = { AgentController.manualPlistPersisted() }
+        homeIsCanonical: @escaping () -> Bool = { true }
     ) {
         self.registrar = registrar
         self.spawnGate = spawnGate
         eligibilityProvider = eligibility
         bundledAgentPresentProvider = bundledAgentPresent
-        probeProvider = probe
         systemProbeProvider = systemProbe
-        socketAnswersProvider = socketAnswers
         homeIsCanonicalProvider = homeIsCanonical
-        manualPlistPersistedProvider = manualPlistPersisted
         // Re-read the install status AND the ownership verdict when the app returns
         // to the foreground — e.g. after the user enabled the agent in System
-        // Settings via the Login Items CTA, or a brew daemon appeared while the app
-        // was idle — so an already-open window doesn't stay stale. The status read is
-        // cheap; the ownership refresh runs the bounded probes off the main actor.
+        // Settings via the Login Items CTA, or a system daemon was installed while the
+        // app was idle — so an already-open window doesn't stay stale. The status read
+        // is cheap; the ownership refresh runs the bounded probe off the main actor.
         // [weak self] + app-lifetime AgentController: no explicit removal needed (a
         // nonisolated deinit can't touch the MainActor property anyway, and the
         // controller never deinits — it's a @State for the app's whole run).
@@ -199,40 +186,31 @@ final class AgentController {
     }
 
     /// The production controller: a real `SMAppServiceRegistrar`, and a spawn gate
-    /// that gathers the live ownership verdict and denies install/repair/start for
-    /// any foreign or indeterminate owner. The same gather feeds `refreshOwnership`
-    /// (the observer banner), so the gate and the UI never disagree. The socket axis
-    /// is a bounded connect-probe (`liveSocketOccupied`): a live or wedged daemon
-    /// reads occupied (install blocked, the safe direction), but an affirmatively
-    /// dead (refused) stale socket reads empty, so a crashed hand-run daemon's
-    /// leftover inode no longer blocks install — what a file stat couldn't tell apart.
+    /// that gathers the live ownership verdict and denies install/repair/start for a
+    /// `systemManaged` or `indeterminate` owner. The same gather feeds
+    /// `refreshOwnership` (the observer banner), so the gate and the UI never
+    /// disagree. The one foreign-detection axis is the `system/`-domain canonical
+    /// label probe — a registered system daemon is the only stomp the per-user path
+    /// can't auto-heal, and a wedged probe fails closed.
     @MainActor
     static func live() -> AgentController {
         let registrar = SMAppServiceRegistrar()
-        let probe: @Sendable (String) async -> LaunchdProbeResult = { await LaunchdProbe.probe(label: $0) }
         let systemProbe: @Sendable (String) async -> LaunchdProbeResult = {
             await LaunchdProbe.probe(label: $0, domain: .system)
         }
-        let socketAnswers = { await Self.liveSocketOccupied() }
         let homeIsCanonical = { true }
         let bundledAgentPresent = { AgentController.bundledAgentPresent() }
-        let manualPlistPersisted = { AgentController.manualPlistPersisted() }
         return AgentController(
             registrar: registrar,
             spawnGate: {
                 await gateFor(DaemonOwnership.classify(gatherInputs(
-                    registrar: registrar, probe: probe, systemProbe: systemProbe,
-                    socketAnswers: socketAnswers,
-                    homeIsCanonical: homeIsCanonical, bundledAgentPresent: bundledAgentPresent,
-                    manualPlistPersisted: manualPlistPersisted
+                    registrar: registrar, systemProbe: systemProbe,
+                    homeIsCanonical: homeIsCanonical, bundledAgentPresent: bundledAgentPresent
                 )))
             },
             bundledAgentPresent: bundledAgentPresent,
-            probe: probe,
             systemProbe: systemProbe,
-            socketAnswers: socketAnswers,
-            homeIsCanonical: homeIsCanonical,
-            manualPlistPersisted: manualPlistPersisted
+            homeIsCanonical: homeIsCanonical
         )
     }
 
@@ -267,33 +245,6 @@ final class AgentController {
         return FileManager.default.fileExists(atPath: url.path)
     }
 
-    /// Whether the manual installer's plist persists at
-    /// `~/Library/LaunchAgents/com.coderinserepeat.runnyd.plist`. launchd auto-loads
-    /// that directory at login, so a manual agent `bootout`'d but not `rm`'d is a
-    /// dormant owner the loaded-label probe can't see. The app never writes here
-    /// (SMAppService registers the in-bundle plist), so a file at this path is
-    /// unambiguously foreign — feeds `classify` as the `manualPlistPersisted` signal.
-    nonisolated static func manualPlistPersisted() -> Bool {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/LaunchAgents")
-            .appendingPathComponent("\(DaemonOwnership.canonicalLabel).plist")
-        return FileManager.default.fileExists(atPath: url.path)
-    }
-
-    /// The production socket axis: a bounded connect-probe mapped to occupied/empty.
-    /// A live or wedged daemon reads occupied (blocks install, the safe direction);
-    /// only an affirmatively-dead (refused) stale socket or no file reads empty, so a
-    /// crashed hand-run daemon's leftover inode no longer blocks install. Replaces the
-    /// old `RunnyHome.socketExists` file stat, which couldn't tell stale from wedged.
-    static func liveSocketOccupied() async -> Bool {
-        // Check BOTH sockets, not just the resolved (system-first) one: the install gate
-        // must see a live daemon at EITHER path, so a stale system socket can't mask a
-        // live per-user daemon (or vice versa) into a `.unmanaged` stomp. Status DIALING
-        // still uses the resolved path; this is the broader "is anything live here".
-        if await SocketProbe.occupied(SocketProbe.probe(path: RunnyHome.systemSocketPath)) { return true }
-        return await SocketProbe.occupied(SocketProbe.probe(path: RunnyHome.perUserSocketPath))
-    }
-
     /// Recompute `installState` from the registrar's status. Called on appear and
     /// after every op — the single place a status maps to state. Passes whether the
     /// plist is actually bundled so the overloaded `.notFound` resolves correctly:
@@ -316,22 +267,16 @@ final class AgentController {
     /// have run.
     private(set) var ownershipChecked = false
 
-    /// Every competing daemon registration the host carries beyond the one `ownership`
-    /// names — for the UI's per-owner cleanup affordances, which must reach EVERY
-    /// contender, not just the verdict's. Refreshed from the same gather as the
-    /// verdict, so the two never disagree. Empty until the first gather runs.
-    private(set) var collisions = DaemonOwnershipCollisions()
-
     private var ownershipInFlight = false
     private var ownershipPending = false
 
-    /// Gather the ownership inputs and publish the verdict + collisions (for the
-    /// banner and the cleanup affordances). The gate's pre-act recheck calls
-    /// `gatherInputs` directly and classifies for a fresh verdict. Coalesces
-    /// overlapping triggers — the activation observer and a surface's `.task` can both
-    /// fire on one foreground — so a trigger arriving mid-gather loops the active run
-    /// once more against the latest state rather than spawning a second concurrent
-    /// probe pair and racing last-writer-wins to publish.
+    /// Gather the ownership inputs and publish the verdict (for the banner and the
+    /// install gate). The gate's pre-act recheck calls `gatherInputs` directly and
+    /// classifies for a fresh verdict. Coalesces overlapping triggers — the activation
+    /// observer and a surface's `.task` can both fire on one foreground — so a trigger
+    /// arriving mid-gather loops the active run once more against the latest state
+    /// rather than spawning a second concurrent probe and racing last-writer-wins to
+    /// publish.
     func refreshOwnership() async {
         if ownershipInFlight {
             ownershipPending = true
@@ -342,13 +287,10 @@ final class AgentController {
         repeat {
             ownershipPending = false
             let inputs = await Self.gatherInputs(
-                registrar: registrar, probe: probeProvider, systemProbe: systemProbeProvider,
-                socketAnswers: socketAnswersProvider,
-                homeIsCanonical: homeIsCanonicalProvider, bundledAgentPresent: bundledAgentPresentProvider,
-                manualPlistPersisted: manualPlistPersistedProvider
+                registrar: registrar, systemProbe: systemProbeProvider,
+                homeIsCanonical: homeIsCanonicalProvider, bundledAgentPresent: bundledAgentPresentProvider
             )
             ownership = DaemonOwnership.classify(inputs)
-            collisions = DaemonOwnership.collisions(inputs)
             ownershipChecked = true
         } while ownershipPending
     }
@@ -365,43 +307,28 @@ final class AgentController {
         return ownership == expected
     }
 
-    /// Gather the orthogonal facts into the raw inputs `classify` (the verdict) and
-    /// `collisions` (the hidden owners) both reduce. The two label probes and the
-    /// socket connect-probe run concurrently (independent, each bounded) so the install
-    /// tap waits at most one probe bound, not three; the self-status read and the
-    /// home/plist axes are cheap. Static so both `refreshOwnership` and the production
-    /// gate share one gather without a self-reference cycle.
+    /// Gather the three facts `classify` reduces to a verdict: the `system/`-domain
+    /// canonical-label probe (the one foreign-detection axis), the app's own
+    /// SMAppService self-status, and whether the home is canonical. Static so both
+    /// `refreshOwnership` and the production gate share one gather without a
+    /// self-reference cycle. `systemProbe` has no default: a defaulted "no system
+    /// probe" would be exactly the silent-skip (install over a system daemon) this
+    /// exists to prevent.
     @MainActor
     static func gatherInputs(
         registrar: ServiceRegistrar,
-        probe: @Sendable (String) async -> LaunchdProbeResult,
-        // No default: both callers pass it, and a defaulted "no system probe" would be
-        // exactly the silent-skip (install over a system daemon) this exists to prevent.
         systemProbe: @Sendable (String) async -> LaunchdProbeResult,
-        socketAnswers: () async -> Bool,
         homeIsCanonical: () -> Bool,
-        bundledAgentPresent: () -> Bool,
-        manualPlistPersisted: () -> Bool
+        bundledAgentPresent: () -> Bool
     ) async -> DaemonOwnershipInputs {
-        async let brew = probe(DaemonOwnership.brewLabel)
-        async let canonical = probe(DaemonOwnership.canonicalLabel)
-        // The canonical label in the system/ domain — a non-root headless daemon.
-        async let system = systemProbe(DaemonOwnership.canonicalLabel)
-        // The label probes are already in flight; awaiting the (global-queue-hopping)
-        // socket dial here lets all three run concurrently without an async-let over a
-        // non-Sendable closure.
-        let socketOccupied = await socketAnswers()
+        let system = await systemProbe(DaemonOwnership.canonicalLabel)
         let selfState = LaunchAgentStatus.state(
             from: registrar.status(), bundledAgentPresent: bundledAgentPresent()
         )
-        return await DaemonOwnershipInputs(
+        return DaemonOwnershipInputs(
             homeIsCanonical: homeIsCanonical(),
             selfState: selfState,
-            brewProbe: brew,
-            canonicalProbe: canonical,
-            systemProbe: system,
-            socketAnswers: socketOccupied,
-            manualPlistPersisted: manualPlistPersisted()
+            systemProbe: system
         )
     }
 
@@ -760,14 +687,8 @@ extension AgentController {
         switch ownership {
         case .unmanaged, .selfManaged:
             .allow
-        case .foreignBrew:
-            .deny(reason: "Homebrew manages runnyd on this host")
-        case .foreignManual:
-            .deny(reason: "a manually-installed LaunchAgent manages runnyd")
         case .systemManaged:
             .deny(reason: "a system daemon manages runnyd on this host")
-        case .foreground:
-            .deny(reason: "a runnyd is already running with no managing agent")
         case .awaitingApproval:
             .deny(reason: "the runnyd agent is registered and awaiting Login Items approval")
         case .indeterminate:
@@ -775,41 +696,15 @@ extension AgentController {
         }
     }
 
-    /// The observer banner for a verdict that is not the app's to install over.
-    /// `nil` for `unmanaged`/`selfManaged` (the install/toggle UI applies) and for
+    /// The observer banner for a verdict that replaces the install toggle. `nil` for
+    /// `unmanaged`/`selfManaged` (the install/toggle UI applies) and for
     /// `awaitingApproval` (the Login Items approval CTA, driven by `installState`,
-    /// already covers it). The `foreignManual` command is the **checkout-free**
-    /// `launchctl bootout` — never `tools/deploy/uninstall.sh`, which a host that
-    /// installed from a one-off `.dmg` no longer has. Pure → unit-tested wording.
+    /// already covers it). Only `systemManaged` and `indeterminate` carry a banner.
+    /// Pure → unit-tested wording.
     nonisolated static func observerMessage(for ownership: DaemonOwnership) -> ObserverHint? {
         switch ownership {
         case .unmanaged, .selfManaged, .awaitingApproval:
             nil
-        case .foreignBrew:
-            // Name the destructive nature of the restart: `brew services restart` does
-            // not drain — it stops the daemon, abandoning any in-flight job. Runny can't
-            // drain a daemon it doesn't manage, so the most it can do is warn.
-            ObserverHint(
-                kind: .managedByHomebrew,
-                message: "Homebrew manages runnyd on this host. Upgrade or restart it with "
-                    + "`brew services restart runny` — note this stops any in-flight job, so idle it "
-                    + "first. Runny won't install a competing agent."
-            )
-        case .foreignManual:
-            // Two states share this verdict: a LOADED manual job, and a DORMANT plist whose
-            // job was already booted out. bootout removes a loaded job; the persisted plist
-            // (~/Library/LaunchAgents, which launchd reloads at next login) is what actually
-            // makes a dormant owner. The separator is `;` not `&&`, and `rm -f`, BECAUSE the
-            // dormant case has nothing to boot out — bootout exits nonzero there, and an `&&`
-            // would skip the rm that is the whole point of clearing it.
-            ObserverHint(
-                kind: .managedManually,
-                message: "A manually-installed LaunchAgent manages runnyd. To let Runny manage it "
-                    + "instead — once no job is running, since this stops a loaded one immediately — "
-                    + "remove that agent with `launchctl bootout gui/$(id -u)/\(DaemonOwnership.canonicalLabel) "
-                    + "2>/dev/null; rm -f ~/Library/LaunchAgents/\(DaemonOwnership.canonicalLabel).plist`, "
-                    + "then reopen Runny."
-            )
         case .systemManaged:
             // The app installs/removes the system daemon via the System Service
             // settings section (the brokered `runnyctl install-daemon`/`uninstall-daemon`),
@@ -817,45 +712,17 @@ extension AgentController {
             // daemon as foreign. Status still streams over the shared socket; the per-user
             // install toggle is hidden because a system daemon outranks a login agent.
             ObserverHint(
-                kind: .managedBySystemDaemon,
+                kind: .systemManaged,
                 message: "Runny manages this as a system-wide LaunchDaemon — it streams status here and "
                     + "won't install a competing login agent. Remove it in Settings → System Service."
-            )
-        case .foreground:
-            ObserverHint(
-                kind: .foregroundDaemon,
-                message: "A runnyd is already serving the socket with no managing agent. Stop it "
-                    + "before installing the login agent so two daemons don't race for the socket — "
-                    + "or, if nothing is running, remove a stale ~/.runny/runnyd.sock and reopen Runny."
             )
         case .indeterminate:
             ObserverHint(
                 kind: .indeterminate,
                 message: "Couldn't determine who manages runnyd, so Runny isn't installing. Check "
-                    + "`launchctl print gui/$(id -u)/\(DaemonOwnership.canonicalLabel)` and reopen Runny."
+                    + "`launchctl print system/\(DaemonOwnership.canonicalLabel)` and reopen Runny."
             )
         }
-    }
-
-    /// The shell command to clear a foreign *manual* registration the verdict didn't
-    /// name — for the collision warnings (`selfManaged` hiding a dormant plist,
-    /// `foreignBrew` hiding a co-present manual install). nil when no manual
-    /// registration is present. The command is built from what's actually there:
-    /// `launchctl bootout` ONLY when the canonical label is loaded by a foreign job
-    /// (`manualLoaded` — true only when self isn't `.installed`, so the loaded label
-    /// is never ours), and `rm -f` ONLY when a dormant plist persists. This is the
-    /// safety crux: when our own agent is enabled it holds the canonical label, so a
-    /// bootout of that label would evict OUR agent — `manualLoaded` is false in that
-    /// case, so the command degrades to `rm` of the plist alone. Pure → unit-tested.
-    nonisolated static func manualCleanupCommand(_ collisions: DaemonOwnershipCollisions) -> String? {
-        guard collisions.manual else { return nil }
-        let label = DaemonOwnership.canonicalLabel
-        var parts: [String] = []
-        // `2>/dev/null` because a dormant-only case has nothing loaded to boot out;
-        // the parts are joined with `;` (not `&&`) so a no-op bootout never skips the rm.
-        if collisions.manualLoaded { parts.append("launchctl bootout gui/$(id -u)/\(label) 2>/dev/null") }
-        if collisions.manualPlist { parts.append("rm -f ~/Library/LaunchAgents/\(label).plist") }
-        return parts.joined(separator: "; ")
     }
 
     /// Pure: pull the resolved program path out of `launchctl print` output, which

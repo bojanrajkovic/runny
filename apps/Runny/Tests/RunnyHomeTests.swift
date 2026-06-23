@@ -33,8 +33,8 @@ final class RunnyHomeTests: XCTestCase {
 /// The app's home resolution mirrors Go's `home.ResolveClient`: prefer the system
 /// home when it EXISTS, else the per-user one — so the app reaches a system daemon
 /// (and reads its artifacts) with no configuration (selection by existence;
-/// liveness stays `SocketProbe`'s job). The literal system path is pinned here as
-/// the cross-language drift guard against Go's `home.SystemHomeDir`.
+/// liveness is the daemon connection's job). The literal system path is pinned here
+/// as the cross-language drift guard against Go's `home.SystemHomeDir`.
 final class RunnyHomeResolutionTests: XCTestCase {
     func testPrefersSystemHomeWhenPresent() {
         XCTAssertEqual(
@@ -45,10 +45,6 @@ final class RunnyHomeResolutionTests: XCTestCase {
             RunnyHome.systemDirectory.path, "/Library/Application Support/runny",
             "must match Go's home.SystemHomeDir"
         )
-        XCTAssertEqual(
-            RunnyHome.systemSocketPath, "/Library/Application Support/runny/runnyd.sock",
-            "must match Go's home.SystemHomeDir + runnyd.sock"
-        )
     }
 
     func testFallsBackToPerUserWhenSystemAbsent() {
@@ -57,14 +53,13 @@ final class RunnyHomeResolutionTests: XCTestCase {
         XCTAssertTrue(resolved.path.hasSuffix("/.runny"), "got \(resolved.path)")
     }
 
-    /// The dialed socket and the watched directory both derive from the resolved
-    /// home, so they can't diverge (dial one home while watching another).
-    func testPerUserSocketDerivesFromPerUserHome() {
+    /// The dialed socket derives from the resolved home, so the socket and the
+    /// watched directory can't diverge (dial one home while watching another).
+    func testSocketDerivesFromResolvedHome() {
         XCTAssertEqual(
-            RunnyHome.perUserSocketPath,
-            RunnyHome.perUserDirectory.appendingPathComponent("runnyd.sock").path
+            RunnyHome.socketPath,
+            RunnyHome.directory.appendingPathComponent("runnyd.sock").path
         )
-        XCTAssertTrue(RunnyHome.perUserSocketPath.hasSuffix("/.runny/runnyd.sock"))
     }
 }
 

@@ -18,10 +18,10 @@ import (
 	"github.com/bojanrajkovic/runny/internal/home"
 )
 
-// Label is the launchd job label, shared with the per-user agent and the manual
-// installer (they differ only by launchd DOMAIN — system/ vs gui/). It MUST stay
-// in sync with the per-user plist template, the per-user install.sh, and the
-// app's DaemonOwnership.canonicalLabel — Swift and bash can't import this const.
+// Label is the launchd job label, shared with the app's per-user LaunchAgent
+// (they differ only by launchd DOMAIN — system/ vs gui/). It MUST stay in sync
+// with the app's bundled LaunchAgent plist and its DaemonOwnership.canonicalLabel
+// — Swift can't import this const.
 const Label = "com.coderinserepeat.runnyd"
 
 // ServiceUser/ServiceGroup is the dedicated, hidden, home-less account runnyd

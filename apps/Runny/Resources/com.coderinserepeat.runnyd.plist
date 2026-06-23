@@ -5,12 +5,11 @@
      covered by the bundle signature and notarization (see tools/sign/sign.bzl
      inject_launch_agent).
 
-     This is NOT the host-install template (tools/deploy/com.coderinserepeat.runnyd.plist.tmpl):
-     that one runs an absolute @RUNNYD@ with @RUNNY_HOME@ log paths substituted at
-     install time. This one names the daemon by a bundle-relative BundleProgram and
-     ties the registration to the app via AssociatedBundleIdentifiers — the native
-     SMAppService shape. The two share only Label and the rationale comments below;
-     they are deliberately two shapes for two consumers and must NOT be unified. -->
+     This names the daemon by a bundle-relative BundleProgram and ties the
+     registration to the app via AssociatedBundleIdentifiers — the native
+     SMAppService shape. It is distinct from the system LaunchDaemon plist that
+     internal/sysdaemon generates (an absolute UserName=_runny job in the system/
+     domain); the two share only Label and must NOT be unified. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>

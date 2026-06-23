@@ -96,21 +96,6 @@ org-or-owner/repo target. The **semantic** rules it can't cleanly express
 daemon: `runnyd -doctor` and the load-time validation remain authoritative, and
 a config that passes the schema can still be refused there with a precise error.
 
-## Install (for testing, from this checkout)
-
-```sh
-RUNNYD=$(pwd)/bazel-bin/cmd/runnyd/runnyd_/runnyd \
-  ./tools/deploy/install.sh        # writes the LaunchAgent, bootstraps it
-runnyctl doctor                    # the running daemon's checks, incl. local-network
-./tools/deploy/uninstall.sh        # tear down (leaves ~/.runny intact)
-```
-
-Run `install.sh` from a GUI session, not a bare SSH shell. The agent label is
-`com.coderinserepeat.runnyd`; stop it with `launchctl bootout gui/$(id -u)/com.coderinserepeat.runnyd`,
-never by killing the process (KeepAlive would respawn it — that is deliberate,
-it is what makes the ADR-0012 wedge restart and the ADR-0014 config reload
-work).
-
 ## Production install (via the tap)
 
 Install through the Homebrew tap. The formula is **delivery-only** — it installs
@@ -129,8 +114,6 @@ bot App** (the `RELEASER_APP_ID` variable + `RELEASER_APP_PRIVATE_KEY` secret) w
 short-lived installation token scoped to `homebrew-tap`; it no-ops until those
 secrets exist. That App is deliberately *not* the runtime runner-registration
 App — release/CI and prod-host/runner-admin are separate blast radii.
-`tools/deploy/install.sh` remains the path for running a from-checkout per-user
-agent.
 
 ## Headless system daemon
 
@@ -349,7 +332,8 @@ On a host already serving runners through something else:
 
 ### Rollback
 
-`./tools/deploy/uninstall.sh` (or `brew services stop runny`), then
-re-bootstrap the old manager's plist. runnyd leaves no durable state that
-interferes — `~/.runny/vms` is swept on every start, and JIT runner
-registrations self-remove or are swept on the next cold start.
+Stop runnyd (toggle the daemon off in the Runny app, or `sudo runnyctl
+uninstall-daemon` for a system install), then re-bootstrap the old manager's
+plist. runnyd leaves no durable state that interferes — `~/.runny/vms` is swept
+on every start, and JIT runner registrations self-remove or are swept on the
+next cold start.

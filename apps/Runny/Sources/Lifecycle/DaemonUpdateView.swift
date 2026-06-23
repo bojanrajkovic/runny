@@ -14,13 +14,14 @@ struct DaemonUpdateAffordance: View {
     var body: some View {
         switch store.daemonUpdate(
             // Require BOTH ownership and installState — each guards a distinct way the
-            // other goes stale. ownership == .selfManaged rejects a Homebrew collision
-            // (our agent .installed but brew's, possibly older, daemon is what runs, so a
-            // drain-gated Update can't take). installState == .installed rejects a stale
-            // .selfManaged left behind by a teardown the verdict didn't re-gather (a
-            // partial uninstall/failed repair where the agent is gone but the daemon
-            // lingers connected) — Updating that would drain a daemon with no agent to
-            // respawn it. The AND can't be fooled by a single stale signal.
+            // other goes stale. ownership == .selfManaged rejects a verdict the app
+            // doesn't drain-update: a systemManaged daemon (managed from Settings →
+            // System Service, not a per-user drain-respawn) or any deferring verdict.
+            // installState == .installed rejects a stale .selfManaged left behind by a
+            // teardown the verdict didn't re-gather (a partial uninstall/failed repair
+            // where the agent is gone but the daemon lingers connected) — Updating that
+            // would drain a daemon with no agent to respawn it. The AND can't be fooled
+            // by a single stale signal.
             agentInstalled: agent.ownership == .selfManaged && agent.installState == .installed,
             agentCanonical: agentCanonical,
             runningBundleCanonical: agent.eligibility == .eligible

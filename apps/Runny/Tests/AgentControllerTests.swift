@@ -70,14 +70,13 @@ final class AgentControllerTests: XCTestCase {
 
     struct StubError: Error {}
 
-    /// install() re-gathers ownership on success, so these install tests inject the
-    /// ownership providers (probe/socket/plist) to stay hermetic — otherwise the
-    /// post-install refresh would shell out to the real `launchctl`.
+    /// install() re-gathers ownership on success. The default `systemProbe` is the
+    /// hermetic `{ _ in .notRegistered }`, so the post-install refresh never shells
+    /// out to the real `launchctl` — no provider injection needed.
     private func hermeticInstall(_ mock: MockRegistrar, eligible: Bool = false) -> AgentController {
         AgentController(
             registrar: mock,
-            eligibility: { eligible ? .eligible : .notInApplications(path: "/x") },
-            probe: { _ in .notRegistered }, socketAnswers: { false }, manualPlistPersisted: { false }
+            eligibility: { eligible ? .eligible : .notInApplications(path: "/x") }
         )
     }
 
@@ -204,28 +203,16 @@ final class AgentControllerTests: XCTestCase {
 
     // MARK: - Ownership gate
 
-    func testGateForAllowsOwnAndUnmanagedDeniesEveryForeign() {
+    func testGateForAllowsOwnAndUnmanagedDeniesTheRest() {
         XCTAssertEqual(AgentController.gateFor(.unmanaged), .allow)
         XCTAssertEqual(AgentController.gateFor(.selfManaged), .allow)
-        for owner: DaemonOwnership in [.foreignBrew, .foreignManual, .systemManaged, .foreground, .awaitingApproval, .indeterminate] {
+        // awaitingApproval denies the spawn (the Login Items CTA is the path forward, not
+        // an install); systemManaged and indeterminate deny too.
+        for owner: DaemonOwnership in [.systemManaged, .awaitingApproval, .indeterminate] {
             guard case .deny = AgentController.gateFor(owner) else {
                 return XCTFail("\(owner) must deny spawning")
             }
         }
-    }
-
-    func testRefreshOwnershipClassifiesFromGatheredInputs() async {
-        let mock = MockRegistrar()
-        mock.nextStatus = .notRegistered // not ours
-        let c = AgentController(
-            registrar: mock,
-            probe: { label in label == DaemonOwnership.brewLabel ? .registered : .notRegistered },
-            socketAnswers: { false },
-            homeIsCanonical: { true },
-            manualPlistPersisted: { false }
-        )
-        await c.refreshOwnership()
-        XCTAssertEqual(c.ownership, .foreignBrew, "a registered brew label with no self-agent is foreignBrew")
     }
 
     func testRefreshOwnershipSystemManagedWhenSystemDaemonRegistered() async {
@@ -236,11 +223,8 @@ final class AgentControllerTests: XCTestCase {
         mock.nextStatus = .notRegistered // not ours
         let c = AgentController(
             registrar: mock,
-            probe: { _ in .notRegistered },
             systemProbe: { label in label == DaemonOwnership.canonicalLabel ? .registered : .notRegistered },
-            socketAnswers: { false },
-            homeIsCanonical: { true },
-            manualPlistPersisted: { false }
+            homeIsCanonical: { true }
         )
         await c.refreshOwnership()
         XCTAssertEqual(c.ownership, .systemManaged, "a canonical label in the system/ domain is the installed system daemon")
@@ -249,113 +233,62 @@ final class AgentControllerTests: XCTestCase {
     func testRefreshOwnershipSelfManagedWhenOurAgentEnabled() async {
         let mock = MockRegistrar()
         mock.nextStatus = .enabled // ours
-        let c = AgentController(
-            registrar: mock, probe: { _ in .notRegistered }, socketAnswers: { true }, homeIsCanonical: { true },
-            manualPlistPersisted: { false }
-        )
+        let c = AgentController(registrar: mock, homeIsCanonical: { true })
         await c.refreshOwnership()
         XCTAssertEqual(c.ownership, .selfManaged)
     }
 
     func testRevalidateRefreshesAndComparesOwnership() async {
         // The non-gated actions (approval CTA, Update) re-gather at click time via
-        // revalidate(), so a foreign owner that appeared since render can't let the stale
+        // revalidate(), so a system daemon that appeared since render can't let the stale
         // CTA fire over it. revalidate publishes the fresh verdict (for the banner) and
         // reports whether it still matches.
         let mock = MockRegistrar()
         mock.nextStatus = .enabled
-        let c = AgentController(
-            registrar: mock, probe: { _ in .notRegistered }, socketAnswers: { false }, manualPlistPersisted: { false }
-        )
+        let c = AgentController(registrar: mock)
         let stillOurs = await c.revalidate(.selfManaged)
         XCTAssertTrue(stillOurs, "an enabled self-agent revalidates as selfManaged")
         XCTAssertEqual(c.ownership, .selfManaged, "revalidate publishes the fresh verdict for the banner too")
 
-        // A brew owner that appeared since render: revalidate sees it and reports false.
+        // A system daemon that appeared since render: revalidate sees it and reports false.
         let mock2 = MockRegistrar()
         mock2.nextStatus = .notRegistered
         let c2 = AgentController(
             registrar: mock2,
-            probe: { label in label == DaemonOwnership.brewLabel ? .registered : .notRegistered },
-            socketAnswers: { false }, manualPlistPersisted: { false }
+            systemProbe: { label in label == DaemonOwnership.canonicalLabel ? .registered : .notRegistered }
         )
         let stillOursAfterTakeover = await c2.revalidate(.selfManaged)
-        XCTAssertFalse(stillOursAfterTakeover, "a brew owner that appeared since render must fail revalidation")
-        XCTAssertEqual(c2.ownership, .foreignBrew, "and the fresh foreign verdict is published so the banner appears")
-    }
-
-    func testRefreshOwnershipForeignManualWhenDormantPlistPersists() async {
-        // The round-6 wiring end-to-end: both probes silent, no socket, but the manual
-        // installer's plist persists on disk — gatherOwnership must feed that signal to
-        // classify so the verdict is foreignManual (a dormant owner), not unmanaged.
-        let mock = MockRegistrar()
-        mock.nextStatus = .notRegistered
-        let c = AgentController(
-            registrar: mock, probe: { _ in .notRegistered }, socketAnswers: { false }, homeIsCanonical: { true },
-            manualPlistPersisted: { true }
-        )
-        await c.refreshOwnership()
-        XCTAssertEqual(c.ownership, .foreignManual, "a persisted manual plist is a dormant owner, never unmanaged")
-    }
-
-    func testRefreshOwnershipPublishesCollisionsAlongsideTheVerdict() async {
-        // The collision wiring end-to-end: one gather feeds both classify (verdict) and
-        // collisions (hidden owners). Brew registered while OUR agent is enabled → the
-        // verdict names brew, but collisions must also surface our competing agent so
-        // the UI can offer to remove it.
-        let mock = MockRegistrar()
-        mock.nextStatus = .enabled
-        let c = AgentController(
-            registrar: mock,
-            probe: { label in label == DaemonOwnership.brewLabel ? .registered : .notRegistered },
-            socketAnswers: { false }, homeIsCanonical: { true }, manualPlistPersisted: { false }
-        )
-        await c.refreshOwnership()
-        XCTAssertEqual(c.ownership, .foreignBrew, "brew overrides self in the verdict")
-        XCTAssertTrue(c.collisions.brew)
-        XCTAssertTrue(c.collisions.ownAgent, "our enabled agent is a hidden competitor the verdict didn't name")
-
-        // selfManaged hiding a dormant manual plist: the verdict is selfManaged, but the
-        // collision must surface the leftover manual owner so the UI warns about it.
-        let mock2 = MockRegistrar()
-        mock2.nextStatus = .enabled
-        let c2 = AgentController(
-            registrar: mock2, probe: { _ in .notRegistered }, socketAnswers: { false },
-            homeIsCanonical: { true }, manualPlistPersisted: { true }
-        )
-        await c2.refreshOwnership()
-        XCTAssertEqual(c2.ownership, .selfManaged)
-        XCTAssertTrue(c2.collisions.manual, "a dormant manual plist is a hidden owner under selfManaged")
-        XCTAssertFalse(c2.collisions.manualLoaded, "ours holds the live label, so it's a plist (rm), not a loaded job")
+        XCTAssertFalse(stillOursAfterTakeover, "a system daemon that appeared since render must fail revalidation")
+        XCTAssertEqual(c2.ownership, .systemManaged, "and the fresh verdict is published so the banner appears")
     }
 
     func testForeignOwnershipGateBlocksInstallWithoutRegistering() async {
-        // The production wiring end-to-end: a foreign verdict → gateFor → .deny →
+        // The production wiring end-to-end: a deferring verdict → gateFor → .deny →
         // attemptSpawn refuses without ever calling register (no stomp).
         let mock = MockRegistrar()
         mock.nextStatus = .notRegistered
-        let c = AgentController(registrar: mock, spawnGate: { AgentController.gateFor(.foreignBrew) })
+        let c = AgentController(registrar: mock, spawnGate: { AgentController.gateFor(.systemManaged) })
         await c.install()
-        XCTAssertEqual(mock.registerCalls, 0, "a foreign verdict must block install")
+        XCTAssertEqual(mock.registerCalls, 0, "a deferring verdict must block install")
         XCTAssertNotNil(c.spawnRefusal)
         XCTAssertEqual(c.installState, .notInstalled)
     }
 
     func testDeniedInstallPublishesFreshOwnershipForTheBanner() async {
-        // A foreign manager that appeared since the last refresh denies the pre-act
-        // gate; install() must publish the fresh verdict so the observer banner
-        // replaces the toggle, not leave a dead Install that silently no-ops.
+        // A system daemon that appeared since the last refresh denies the pre-act gate;
+        // install() must publish the fresh verdict so the observer banner replaces the
+        // toggle, not leave a dead Install that silently no-ops.
         let mock = MockRegistrar()
         mock.nextStatus = .notRegistered
         let c = AgentController(
             registrar: mock,
-            spawnGate: { AgentController.gateFor(.foreignBrew) },
-            probe: { label in label == DaemonOwnership.brewLabel ? .registered : .notRegistered },
-            socketAnswers: { false }, homeIsCanonical: { true }
+            spawnGate: { AgentController.gateFor(.systemManaged) },
+            systemProbe: { label in label == DaemonOwnership.canonicalLabel ? .registered : .notRegistered },
+            homeIsCanonical: { true }
         )
         await c.install()
         XCTAssertEqual(mock.registerCalls, 0)
-        XCTAssertEqual(c.ownership, .foreignBrew, "a denied install must publish the fresh verdict so the banner appears")
+        XCTAssertEqual(c.ownership, .systemManaged, "a denied install must publish the fresh verdict so the banner appears")
     }
 
     func testObserverMessageNamesTheManagingChannel() {
@@ -364,39 +297,17 @@ final class AgentControllerTests: XCTestCase {
         XCTAssertNil(AgentController.observerMessage(for: .selfManaged))
         XCTAssertNil(AgentController.observerMessage(for: .awaitingApproval))
 
-        let brew = AgentController.observerMessage(for: .foreignBrew)
-        XCTAssertEqual(brew?.kind, .managedByHomebrew)
-        XCTAssertEqual(brew?.message.contains("brew services restart runny"), true)
-        // The recommended restart is destructive (no drain) — the guidance must say so,
-        // since Runny can't drain a daemon it doesn't manage.
-        XCTAssertEqual(brew?.message.contains("in-flight job"), true)
-
-        let manual = AgentController.observerMessage(for: .foreignManual)
-        XCTAssertEqual(manual?.kind, .managedManually)
-        // bootout is immediate too — warn before recommending it.
-        XCTAssertEqual(manual?.message.contains("no job is running"), true)
-        // The checkout-free command, NOT tools/deploy/uninstall.sh — a host that
-        // installed from a one-off .dmg no longer has the checkout. Red-tested by
-        // swapping in the deploy-script string and confirming this fails.
-        XCTAssertEqual(manual?.message.contains("launchctl bootout"), true)
-        XCTAssertEqual(manual?.message.contains("uninstall.sh"), false)
-        // Must also remove the persisted plist (install.sh writes it to
-        // ~/Library/LaunchAgents); bootout alone leaves it to reload at next login. The
-        // separator is `;` + `rm -f`, NOT `&&`: a dormant-plist owner has nothing to boot
-        // out (bootout exits nonzero), so `&&` would skip the rm that is the whole point.
-        XCTAssertEqual(manual?.message.contains("rm -f ~/Library/LaunchAgents/"), true)
-        XCTAssertEqual(manual?.message.contains("&& rm"), false)
-
-        XCTAssertEqual(AgentController.observerMessage(for: .foreground)?.kind, .foregroundDaemon)
-        XCTAssertEqual(AgentController.observerMessage(for: .indeterminate)?.kind, .indeterminate)
-
         let system = AgentController.observerMessage(for: .systemManaged)
-        XCTAssertEqual(system?.kind, .managedBySystemDaemon)
+        XCTAssertEqual(system?.kind, .systemManaged)
         // Names the system daemon as app-managed (the System Service settings section)
         // and that Runny won't install a competing login agent over it.
         XCTAssertEqual(system?.message.contains("system-wide LaunchDaemon"), true)
         XCTAssertEqual(system?.message.contains("won't install a competing"), true)
         XCTAssertEqual(system?.message.contains("System Service"), true)
+
+        let indeterminate = AgentController.observerMessage(for: .indeterminate)
+        XCTAssertEqual(indeterminate?.kind, .indeterminate)
+        XCTAssertEqual(indeterminate?.message.contains("Couldn't determine"), true)
     }
 
     // MARK: - Start affordance
@@ -435,12 +346,12 @@ final class AgentControllerTests: XCTestCase {
     }
 
     func testStartHiddenWhenOwnershipIsNotSelfManaged() {
-        // The Finding-2 gap: a stopped Homebrew service leaves OUR agent registered too
-        // (installState .installed) while the daemon is unreachable, but ownership is
-        // .foreignBrew. Start must hide — every kickstart would be rejected by the spawn
+        // A system daemon leaves OUR agent possibly registered too (installState
+        // .installed) while the per-user daemon is unreachable, but ownership is
+        // .systemManaged. Start must hide — every kickstart would be rejected by the spawn
         // gate, so a rendered Start is a dead button that only loops "Try Again". The
         // observer banner carries the real guidance. Same for any non-selfManaged owner.
-        for owner: DaemonOwnership in [.foreignBrew, .foreignManual, .systemManaged, .foreground, .indeterminate, .unmanaged] {
+        for owner: DaemonOwnership in [.systemManaged, .indeterminate, .unmanaged] {
             XCTAssertEqual(
                 LaunchAgentStatus.startAffordance(
                     state: .installed, ownership: owner, daemonUnreachable: true, canonical: true
@@ -472,7 +383,7 @@ final class AgentControllerTests: XCTestCase {
         // (which itself defers whenever another owner is present). A .requiresApproval
         // self-status with a deferring verdict (a foreign owner, or an inconclusive probe)
         // suppresses the CTA — folding the round-3 view-level gate into the pure decision.
-        for owner: DaemonOwnership in [.indeterminate, .foreignBrew, .foreignManual, .systemManaged, .foreground] {
+        for owner: DaemonOwnership in [.indeterminate, .systemManaged, .unmanaged, .selfManaged] {
             XCTAssertEqual(
                 LaunchAgentStatus.startAffordance(
                     state: .requiresApproval, ownership: owner, daemonUnreachable: true, canonical: true
@@ -500,10 +411,7 @@ final class AgentControllerTests: XCTestCase {
 
     func testStartGateDenyDoesNotKickstart() async {
         let mock = MockRegistrar()
-        let c = AgentController(
-            registrar: mock, spawnGate: { .deny(reason: "deferred") },
-            probe: { _ in .notRegistered }, socketAnswers: { false }, manualPlistPersisted: { false }
-        )
+        let c = AgentController(registrar: mock, spawnGate: { .deny(reason: "deferred") })
         await c.start(isConnected: { true })
         XCTAssertEqual(mock.kickstartCalls, 0, "a denied gate must NOT kickstart")
         guard case .refused = c.startOutcome else {
@@ -520,9 +428,8 @@ final class AgentControllerTests: XCTestCase {
         mock.nextStatus = .notRegistered
         let c = AgentController(
             registrar: mock,
-            spawnGate: { AgentController.gateFor(.foreignBrew) },
-            probe: { label in label == DaemonOwnership.brewLabel ? .registered : .notRegistered },
-            socketAnswers: { false }, manualPlistPersisted: { false }
+            spawnGate: { AgentController.gateFor(.systemManaged) },
+            systemProbe: { label in label == DaemonOwnership.canonicalLabel ? .registered : .notRegistered }
         )
         await c.start(isConnected: { false })
         XCTAssertEqual(mock.kickstartCalls, 0, "a denied gate must NOT kickstart")
@@ -530,7 +437,7 @@ final class AgentControllerTests: XCTestCase {
             return XCTFail("a denied start must be loud, got \(c.startOutcome)")
         }
         XCTAssertEqual(
-            c.ownership, .foreignBrew,
+            c.ownership, .systemManaged,
             "a denied start must publish the fresh verdict so the Start row gives way to the observer banner"
         )
     }
@@ -696,22 +603,21 @@ final class AgentControllerTests: XCTestCase {
 
     func testRepairDenyGateDoesNotReRegisterAndIsSurfaced() async {
         let mock = MockRegistrar()
-        mock.nextStatus = .enabled // the existing (foreign) agent is still registered
+        mock.nextStatus = .enabled // our agent is registered, but a system daemon outranks it
         let c = AgentController(
             registrar: mock, spawnGate: { .deny(reason: "another manager owns it") }, eligibility: { .eligible },
-            probe: { label in label == DaemonOwnership.brewLabel ? .registered : .notRegistered },
-            socketAnswers: { false }, manualPlistPersisted: { false }
+            systemProbe: { label in label == DaemonOwnership.canonicalLabel ? .registered : .notRegistered }
         )
         c.refresh() // installed
         await c.repair()
         XCTAssertEqual(mock.registerCalls, 0, "a denied gate must NOT re-register")
-        XCTAssertEqual(mock.unregisterCalls, 0, "a denied repair must NOT unregister — the foreign agent stays intact")
+        XCTAssertEqual(mock.unregisterCalls, 0, "a denied repair must NOT unregister — the existing agent stays intact")
         XCTAssertNotNil(c.repairError, "a denied repair must be surfaced in the row, not silently no-op")
         XCTAssertEqual(c.installState, .installed, "a denied repair must not change the install state")
-        // Round-9: like install/start, a denied repair must publish the fresh verdict the
-        // gate gathered, so the observer banner replaces the Repair UI instead of a button
-        // the gate re-denies on every press until the next app activation.
-        XCTAssertEqual(c.ownership, .foreignBrew, "a denied repair must publish the fresh foreign verdict")
+        // Like install/start, a denied repair must publish the fresh verdict the gate
+        // gathered, so the observer banner replaces the Repair UI instead of a button the
+        // gate re-denies on every press until the next app activation.
+        XCTAssertEqual(c.ownership, .systemManaged, "a denied repair must publish the fresh deferring verdict")
     }
 
     func testRepairAbortsIfReRegisterDoesNotConfirm() async {
@@ -724,10 +630,7 @@ final class AgentControllerTests: XCTestCase {
         let mock = MockRegistrar()
         mock.nextStatus = .enabled
         mock.registerDoesNotConfirm = true // launchd accepts the re-register but never completes it
-        let c = AgentController(
-            registrar: mock, eligibility: { .eligible },
-            probe: { _ in .notRegistered }, socketAnswers: { false }, manualPlistPersisted: { false }
-        )
+        let c = AgentController(registrar: mock, eligibility: { .eligible })
         await c.repair(within: .milliseconds(60), poll: .milliseconds(10))
         XCTAssertEqual(mock.unregisterCalls, 1, "verified repair unregisters first")
         XCTAssertEqual(mock.registerCalls, 1, "then re-registers")

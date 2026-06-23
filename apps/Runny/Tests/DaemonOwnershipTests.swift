@@ -57,34 +57,34 @@ final class DaemonOwnershipTests: XCTestCase {
         XCTAssertEqual(DaemonOwnership.classify(inputs(socketAnswers: true)), .foreground)
     }
 
-    func testForeignSystemWhenSystemLabelRegistered() {
-        // A runnyd in the system/ domain — the headless non-root daemon — is a foreign
-        // owner the app observes (over the shared socket) and never installs over.
-        XCTAssertEqual(DaemonOwnership.classify(inputs(systemProbe: .registered)), .foreignSystem)
+    func testSystemManagedWhenSystemLabelRegistered() {
+        // A runnyd in the system/ domain — the installed non-root daemon — the app
+        // observes (over the shared socket) and never installs a per-user agent over.
+        XCTAssertEqual(DaemonOwnership.classify(inputs(systemProbe: .registered)), .systemManaged)
     }
 
-    func testForeignSystemSurfacesOverBrew() {
+    func testSystemManagedSurfacesOverBrew() {
         // The app dials the shared socket first, so a system daemon must outrank a
         // co-registered (leftover-migration) brew label — the verdict/banner names the
         // daemon the app actually reaches, not the brew service it doesn't.
         XCTAssertEqual(
             DaemonOwnership.classify(inputs(brewProbe: .registered, systemProbe: .registered)),
-            .foreignSystem
+            .systemManaged
         )
     }
 
-    func testForeignSystemSurfacesOverSelfAndForeground() {
+    func testSystemManagedSurfacesOverSelfAndForeground() {
         // Like brew, a system daemon surfaces ahead of self (system daemon + our own
         // agent is a real two-manager conflict)...
         XCTAssertEqual(
             DaemonOwnership.classify(inputs(selfState: .installed, systemProbe: .registered)),
-            .foreignSystem
+            .systemManaged
         )
         // ...and ahead of the foreground branch, so a system daemon answering the
         // shared socket is named, not mislabeled a hand-run daemon.
         XCTAssertEqual(
             DaemonOwnership.classify(inputs(systemProbe: .registered, socketAnswers: true)),
-            .foreignSystem
+            .systemManaged
         )
     }
 

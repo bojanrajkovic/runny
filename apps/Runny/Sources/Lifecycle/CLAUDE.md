@@ -119,7 +119,7 @@ never exercised live in tests.
   launchctl yields `.indeterminate` without leaking a process or FDs.
 - **The `system/` domain IS probed (the headless daemon).** `LaunchdProbe` takes a
   `domain` (`gui`/`system`); `gatherInputs` probes the canonical label in `system/`, and a
-  registered hit is the `foreignSystem` verdict — so the app observes a non-root system
+  registered hit is the `systemManaged` verdict — so the app observes a non-root system
   daemon over the shared socket and never installs a competing per-user agent over it
   (`gateFor`/`startAffordance` treat it as not-ours; the observer banner names it). A
   non-root user CAN `launchctl print system/<label>` (verified: registered → label in

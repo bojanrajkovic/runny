@@ -764,7 +764,7 @@ extension AgentController {
             .deny(reason: "Homebrew manages runnyd on this host")
         case .foreignManual:
             .deny(reason: "a manually-installed LaunchAgent manages runnyd")
-        case .foreignSystem:
+        case .systemManaged:
             .deny(reason: "a system daemon manages runnyd on this host")
         case .foreground:
             .deny(reason: "a runnyd is already running with no managing agent")
@@ -810,16 +810,16 @@ extension AgentController {
                     + "2>/dev/null; rm -f ~/Library/LaunchAgents/\(DaemonOwnership.canonicalLabel).plist`, "
                     + "then reopen Runny."
             )
-        case .foreignSystem:
-            // The system daemon isn't the app's to remove — it's a privileged,
-            // system-domain job. Runny observes it (status streams over the shared
-            // socket) and won't install a competing per-user agent; removal is the
-            // headless uninstaller's job (admin), not an in-app bootout.
+        case .systemManaged:
+            // The app installs/removes the system daemon via the System Service
+            // settings section (the brokered `runnyctl install-daemon`/`uninstall-daemon`),
+            // so the banner names that as the management surface rather than framing the
+            // daemon as foreign. Status still streams over the shared socket; the per-user
+            // install toggle is hidden because a system daemon outranks a login agent.
             ObserverHint(
                 kind: .managedBySystemDaemon,
-                message: "A system daemon manages runnyd on this host. Runny is observing it over the "
-                    + "shared socket and won't install a competing per-user agent. To manage it from "
-                    + "the app instead, remove the system daemon (requires admin), then reopen Runny."
+                message: "Runny manages this as a system-wide LaunchDaemon — it streams status here and "
+                    + "won't install a competing login agent. Remove it in Settings → System Service."
             )
         case .foreground:
             ObserverHint(

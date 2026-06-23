@@ -128,7 +128,7 @@ struct AgentInstallRow: View {
         // remove it through the SAME live-guest-aware teardown the toggle uses —
         // disabling it in Login Items instead would stop a possibly-job-running agent
         // with no abandon warning.
-        if collisions.ownAgent, agent.ownership == .foreignBrew || agent.ownership == .foreignSystem {
+        if collisions.ownAgent, agent.ownership == .foreignBrew || agent.ownership == .systemManaged {
             Text("Runny's own agent is also registered and competing — remove it to leave the other manager in charge.")
                 .font(.caption)
                 .foregroundStyle(.orange)
@@ -137,12 +137,12 @@ struct AgentInstallRow: View {
                 .controlSize(.small)
         }
         // A foreign manual registration the verdict didn't name: a dormant plist under
-        // selfManaged, or a co-present manual install under foreignBrew/foreignSystem.
+        // selfManaged, or a co-present manual install under foreignBrew/systemManaged.
         // foreignManual's own observer banner already carries this command, so it is NOT
         // doubled there.
         if collisions.manual,
            agent.ownership == .selfManaged || agent.ownership == .foreignBrew
-           || agent.ownership == .foreignSystem,
+           || agent.ownership == .systemManaged,
            let command = AgentController.manualCleanupCommand(collisions)
         {
             Text("A manually-installed runnyd agent is also present and will contend for the daemon "
@@ -157,11 +157,11 @@ struct AgentInstallRow: View {
         }
         // A Homebrew agent co-present under a system-daemon verdict. Only reachable
         // here: a registered brew label is otherwise the verdict itself (foreignBrew),
-        // but a system daemon now outranks it, so the foreignSystem banner names the
+        // but a system daemon now outranks it, so the systemManaged banner names the
         // system daemon and this surfaces the leftover brew the verdict hides — else a
         // migration host follows the banner, removes the system daemon, and Homebrew
         // still owns runnyd unmentioned.
-        if collisions.brew, agent.ownership == .foreignSystem {
+        if collisions.brew, agent.ownership == .systemManaged {
             Text("A Homebrew-managed runnyd agent is also registered and will contend for the "
                 + "daemon. Stop it with:")
                 .font(.caption)

@@ -92,7 +92,7 @@ struct SystemDaemonInstallRow: View {
             // install is the cancellable/failable step — so a cancelled or failed
             // install leaves the login agent untouched, never "left with nothing". The
             // reverse direction is already covered: the per-user install gate denies a
-            // foreignSystem owner.
+            // systemManaged owner.
             guard old == .installing, new == .installed, hasLoginAgent else { return }
             Task { await agent.uninstall() }
         }

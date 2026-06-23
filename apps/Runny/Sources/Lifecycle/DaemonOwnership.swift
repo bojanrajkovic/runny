@@ -17,11 +17,12 @@ enum DaemonOwnership: Equatable {
     /// The canonical `com.coderinserepeat.runnyd` label is registered, but not by
     /// us — a manual `launchctl` installer.
     case foreignManual
-    /// A runnyd is registered in the `system/` launchd domain — the headless
-    /// non-root system daemon (or a `sudo brew services` root daemon). The app
-    /// observes it over the shared socket and never installs a competing per-user
-    /// agent over it.
-    case foreignSystem
+    /// A runnyd is registered in the `system/` launchd domain — the installed
+    /// non-root system daemon. The app installs and removes it via the system path
+    /// (`runnyctl install-daemon` / `uninstall-daemon`, brokered through the app or
+    /// run directly), observes it over the shared socket, and never installs a
+    /// competing per-user agent over it.
+    case systemManaged
     /// A daemon answers the socket but no agent is registered — a hand-run runnyd.
     case foreground
     /// Our own agent is registered but awaiting Login Items approval.
@@ -125,7 +126,7 @@ extension DaemonOwnership {
         //    doesn't. Also ahead of self (system + our own agent is a real two-manager
         //    conflict) and the foreground branch (a system daemon answering the shared
         //    socket must be named, not mislabeled a hand-run daemon).
-        if inputs.systemProbe == .registered { return .foreignSystem }
+        if inputs.systemProbe == .registered { return .systemManaged }
         // 3. A registered Homebrew service is a foreign daemon on its OWN label, so a
         //    positive brew probe surfaces even when our own agent is also enabled —
         //    that is a real two-manager conflict, not a self-managed host.

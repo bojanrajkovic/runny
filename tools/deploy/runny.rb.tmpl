@@ -29,22 +29,26 @@ class Runny < Formula
 
   def caveats
     <<~TEXT
-      This installs the runnyd and runnyctl binaries only — it does not register
-      a service. The binary ships signed with com.apple.security.virtualization.
+      MIGRATION REQUIRED if you previously ran runnyd via `brew services start runny`:
+      that path no longer works. This formula delivers the runnyd and runnyctl
+      binaries only — it registers no service.
 
-      To run runnyd headless as a non-root system LaunchDaemon:
+      Choose one supported path:
 
-          sudo runnyctl install-daemon
+        Headless / server host:
+            sudo runnyctl install-daemon
+            $EDITOR "/Library/Application Support/runny/config.yaml"
 
-      One privileged step creates a dedicated service account and the system
-      LaunchDaemon; the daemon then runs unprivileged. Afterward write the config
-      at /Library/Application Support/runny/config.yaml (your account has
-      write access via an inheriting ACL) and the daemon comes up on its next
-      restart; verify with `runnyctl doctor`. A launchd-started daemon of any uid
-      is auto-allowed Local Network access — no GUI prompt.
+        Desktop / per-user:
+            Open Runny.app, then Settings -> Daemon -> "Start runnyd at login"
 
-      For a desktop, per-user install instead, use the Runny app. See
-      docs/deploy.md.
+      If an old `brew services`-managed runnyd is still registered, remove it:
+          brew services stop runny 2>/dev/null
+          launchctl bootout gui/$(id -u)/com.coderinserepeat.runnyd 2>/dev/null
+          rm -f ~/Library/LaunchAgents/homebrew.mxcl.runny.plist
+
+      A launchd-started runnyd of any uid is auto-allowed Local Network access —
+      no GUI prompt. See the runny deploy docs for full migration instructions.
     TEXT
   end
 

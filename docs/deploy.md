@@ -108,6 +108,13 @@ brew install bojanrajkovic/tap/runny
 sudo runnyctl install-daemon   # register the non-root system LaunchDaemon
 ```
 
+For a **desktop, per-user** install instead, download `Runny.app` (the `.dmg` on
+the [Releases](https://github.com/bojanrajkovic/runny/releases) page) and use its
+**Settings → Daemon → "Start runnyd at login"** toggle — see "The Runny app and
+the command-line tool" below. These are the two supported shapes, split by
+audience: the system LaunchDaemon (`sudo runnyctl install-daemon`) is the
+headless-fleet path; the app is the desktop path.
+
 The release workflow regenerates the formula from `tools/deploy/runny.rb.tmpl`
 on every release and pushes it to the tap, authenticating as the **release
 bot App** (the `RELEASER_APP_ID` variable + `RELEASER_APP_PRIVATE_KEY` secret) with a

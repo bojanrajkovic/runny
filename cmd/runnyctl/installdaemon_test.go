@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/bojanrajkovic/runny/internal/launchd"
 )
 
 // resolveOperator picks the operator account the system home's inheriting ACL
@@ -58,5 +60,44 @@ func TestInstallDaemonRejectsBadArgs(t *testing.T) {
 	}
 	if err := installDaemon([]string{"extra"}); err == nil || !strings.Contains(err.Error(), "positional") {
 		t.Errorf("a stray positional should be refused; got %v", err)
+	}
+}
+
+// install-daemon refuses to install a system daemon over a registered per-user
+// agent: it would strand the per-user daemon orphaned behind the system one. The
+// pure guard decides from the operator + the probe result, so it is host- and
+// launchd-independent.
+func TestPerUserAgentGuard(t *testing.T) {
+	const op = "alice"
+	const target = "gui/501/com.coderinserepeat.runnyd"
+
+	// A registered per-user agent: refuse, naming the operator, the target, and the
+	// bootout remedy. No warning (a refusal is not a proceed).
+	refuse, warning := perUserAgentGuard(op, target, launchd.Registered)
+	if refuse == nil {
+		t.Fatal("a registered per-user agent must refuse the install")
+	}
+	for _, want := range []string{op, target, "bootout"} {
+		if !strings.Contains(refuse.Error(), want) {
+			t.Errorf("refusal %q must name %q", refuse.Error(), want)
+		}
+	}
+	if warning != "" {
+		t.Errorf("a refusal carries no warning, got %q", warning)
+	}
+
+	// No per-user agent: proceed cleanly.
+	if refuse, warning := perUserAgentGuard(op, target, launchd.NotRegistered); refuse != nil || warning != "" {
+		t.Errorf("an absent agent must proceed cleanly, got refuse=%v warning=%q", refuse, warning)
+	}
+
+	// Inconclusive probe: proceed, but warn — don't block a privileged install on a
+	// transient launchctl failure; the doctor check and the flock are the safety nets.
+	refuse, warning = perUserAgentGuard(op, target, launchd.Indeterminate)
+	if refuse != nil {
+		t.Errorf("an inconclusive probe must NOT block install, got %v", refuse)
+	}
+	if !strings.Contains(warning, op) {
+		t.Errorf("an inconclusive probe must warn (naming the operator), got %q", warning)
 	}
 }

@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"runtime"
 
 	"github.com/bojanrajkovic/runny/internal/home"
+	"github.com/bojanrajkovic/runny/internal/launchd"
 	"github.com/bojanrajkovic/runny/internal/sysdaemon"
 )
 
@@ -34,6 +36,9 @@ func installDaemon(args []string) error {
 	}
 	operator, err := resolveOperator(*operatorFlag, os.Getenv("SUDO_USER"))
 	if err != nil {
+		return err
+	}
+	if err := checkNoPerUserAgent(operator); err != nil {
 		return err
 	}
 	exe, err := os.Executable()
@@ -114,4 +119,48 @@ func resolveOperator(flagOperator, sudoUser string) (string, error) {
 			"ACL grants that account access)")
 	}
 	return op, nil
+}
+
+// checkNoPerUserAgent refuses install-daemon when the operator already has a
+// per-user runnyd LaunchAgent registered: installing the system daemon over it
+// would strand the per-user daemon orphaned behind it (clients resolve the system
+// home, but the per-user agent keeps running and contends for the same VMs). The
+// operator is validated authoritatively by Install (via user.Lookup), so a lookup
+// miss here just skips the probe — Install then produces the canonical operator
+// error rather than a duplicate. install-daemon runs as root, so probing the
+// operator's gui/ domain is unrestricted.
+func checkNoPerUserAgent(operator string) error {
+	u, err := user.Lookup(operator)
+	if err != nil {
+		return nil
+	}
+	target := fmt.Sprintf("gui/%s/%s", u.Uid, sysdaemon.Label)
+	refuse, warning := perUserAgentGuard(operator, target, launchd.Probe(context.Background(), launchd.ExecRunner, target))
+	if warning != "" {
+		fmt.Fprintln(os.Stderr, "warning:", warning)
+	}
+	return refuse
+}
+
+// perUserAgentGuard is the pure guard decision over the operator and the probe
+// result. A registered per-user agent is a hard refusal. An inconclusive probe does
+// NOT block — a transient launchctl failure must not stop a privileged install, so
+// it warns instead, and the competing-registration doctor check plus the
+// single-instance flock are the remaining safety nets.
+func perUserAgentGuard(operator, guiTarget string, reg launchd.Result) (refuse error, warning string) {
+	switch reg {
+	case launchd.Registered:
+		return fmt.Errorf(
+			"a per-user runnyd LaunchAgent is registered for %s (%s) — installing the system daemon over it would "+
+				"strand the per-user daemon orphaned behind it. Withdraw it first (toggle the daemon off in the Runny "+
+				"app, or `launchctl bootout %s`), then re-run `sudo runnyctl install-daemon`",
+			operator, guiTarget, guiTarget,
+		), ""
+	case launchd.Indeterminate:
+		return nil, fmt.Sprintf(
+			"couldn't verify whether a per-user runnyd agent is registered for %s (launchctl probe inconclusive); "+
+				"if `runnyctl doctor` later flags a competing registration, withdraw the per-user agent", operator,
+		)
+	}
+	return nil, ""
 }

@@ -4,12 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
-	"strings"
 	"syscall"
-	"time"
 
 	"github.com/bojanrajkovic/runny/internal/home"
+	"github.com/bojanrajkovic/runny/internal/launchd"
 	"github.com/bojanrajkovic/runny/internal/socket"
 	"github.com/bojanrajkovic/runny/internal/sysdaemon"
 )
@@ -26,50 +24,13 @@ import (
 // co-present system daemon, because the system home would have won client home
 // resolution (so we'd be the system daemon, not a per-user one).
 
-// regState is the tri-state result of a launchd registration probe. regUnknown is
-// the fail-closed direction — a probe that wedged, timed out, or was denied is
-// reported loudly, never mistaken for "absent".
-type regState int
-
-const (
-	regUnknown regState = iota
-	regAbsent
-	regPresent
-)
-
-// competingProbeTimeout bounds the launchctl probe: a wedged launchd must not hang
-// the doctor suite (the no-unbounded-operations invariant).
-const competingProbeTimeout = 5 * time.Second
-
-// launchctlPrint runs `launchctl print <target>` under a bound and returns its
-// combined output. A package var so the doctor test fakes it without a live
-// launchd; production never reassigns it.
-var launchctlPrint = func(ctx context.Context, target string) (string, error) {
-	cctx, cancel := context.WithTimeout(ctx, competingProbeTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(cctx, "/bin/launchctl", "print", target).CombinedOutput()
-	return string(out), err
-}
-
-// parseRegistration maps a `launchctl print` result to a registration state,
-// mirroring sysdaemon.jobLoaded: a zero exit (the job dump) is present; a "could
-// not find" (service absent in a reachable domain, OR no such domain because the
-// operator isn't logged in — neither is a loaded competitor) is absent; anything
-// else — a timeout, a permission denial, a wedged launchd — is Unknown, surfaced
-// loudly rather than mistaken for absent.
-func parseRegistration(out string, err error) regState {
-	if err == nil {
-		return regPresent
-	}
-	if strings.Contains(strings.ToLower(out), "could not find") {
-		return regAbsent
-	}
-	return regUnknown
-}
+// launchdRunner is the launchd probe seam, overridden in tests; production uses the
+// bounded `launchctl print`.
+var launchdRunner launchd.Runner = launchd.ExecRunner
 
 // competingRegistrationVerdict is the pure doctor verdict over the gathered facts,
 // unit-tested without launchctl or a filesystem.
-func competingRegistrationVerdict(systemHome, operatorResolved bool, guiTarget string, state regState) socket.DoctorCheck {
+func competingRegistrationVerdict(systemHome, operatorResolved bool, guiTarget string, reg launchd.Result) socket.DoctorCheck {
 	const name = "competing-registration"
 	if !systemHome {
 		return socket.DoctorCheck{Name: name, OK: true, Detail: "per-user home — no competing registration to detect"}
@@ -80,8 +41,8 @@ func competingRegistrationVerdict(systemHome, operatorResolved bool, guiTarget s
 			Detail: "couldn't determine the operator account (the owner of config.yaml) to probe for a competing per-user agent",
 		}
 	}
-	switch state {
-	case regPresent:
+	switch reg {
+	case launchd.Registered:
 		return socket.DoctorCheck{
 			Name: name, OK: false,
 			Detail: fmt.Sprintf(
@@ -91,7 +52,7 @@ func competingRegistrationVerdict(systemHome, operatorResolved bool, guiTarget s
 				guiTarget, guiTarget,
 			),
 		}
-	case regAbsent:
+	case launchd.NotRegistered:
 		return socket.DoctorCheck{Name: name, OK: true, Detail: "no competing per-user runnyd agent is registered"}
 	default:
 		return socket.DoctorCheck{
@@ -110,15 +71,14 @@ func competingRegistrationVerdict(systemHome, operatorResolved bool, guiTarget s
 // account whose gui/ domain a leftover per-user agent would live in.
 func checkCompetingRegistration(ctx context.Context, dir home.Dir, configPath string) socket.DoctorCheck {
 	if dir.String() != home.SystemHomeDir {
-		return competingRegistrationVerdict(false, false, "", regUnknown)
+		return competingRegistrationVerdict(false, false, "", launchd.Indeterminate)
 	}
 	uid, err := fileOwnerUID(configPath)
 	if err != nil {
-		return competingRegistrationVerdict(true, false, "", regUnknown)
+		return competingRegistrationVerdict(true, false, "", launchd.Indeterminate)
 	}
 	guiTarget := fmt.Sprintf("gui/%d/%s", uid, sysdaemon.Label)
-	out, perr := launchctlPrint(ctx, guiTarget)
-	return competingRegistrationVerdict(true, true, guiTarget, parseRegistration(out, perr))
+	return competingRegistrationVerdict(true, true, guiTarget, launchd.Probe(ctx, launchdRunner, guiTarget))
 }
 
 // fileOwnerUID returns the uid that owns path.

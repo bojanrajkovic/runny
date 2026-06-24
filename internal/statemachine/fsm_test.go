@@ -329,6 +329,7 @@ type fakeGitHub struct {
 	deleted    []int64
 	nextID     int64
 	listErr    error
+	deleteErr  error
 	dropAll    bool
 }
 
@@ -365,6 +366,9 @@ func (g *fakeGitHub) ListRunners(ctx bounded.Context) ([]github.Runner, error) {
 func (g *fakeGitHub) DeleteRunner(ctx bounded.Context, id int64) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.deleteErr != nil {
+		return g.deleteErr // the registration was not removed
+	}
 	g.deleted = append(g.deleted, id)
 	return nil
 }
@@ -808,6 +812,71 @@ func TestOperatorRecycle(t *testing.T) {
 	recs := h.records(t)
 	if !strings.Contains(recs[0].Failure.Error, "recycled by operator") {
 		t.Errorf("failure = %+v", recs[0].Failure)
+	}
+}
+
+// teardownRecord returns the TEARDOWN StateRecord from a cycle record.
+func teardownRecord(t *testing.T, r *cycle.Record) cycle.StateRecord {
+	t.Helper()
+	for _, sr := range r.States {
+		if sr.State == string(StateTeardown) {
+			return sr
+		}
+	}
+	t.Fatalf("no TEARDOWN state in record %+v", r)
+	return cycle.StateRecord{}
+}
+
+// A teardown that destroys the guest but fails a best-effort cleanup — the
+// GitHub deregistration and/or the clone deletion — must record TEARDOWN as a
+// warn naming the failure, never a bare ok: a cycle.json that swears teardown
+// was clean while an orphan registration or clone lingers is the silent-record
+// gap (#151). The warn is non-fatal — it must not escalate the slot's failure
+// streak, since the local destruction succeeded and the orphan self-heals on
+// the next cold-start sweep.
+func TestTeardownRecordsFailedCleanupsAsWarn(t *testing.T) {
+	h := newHarness(t, nil)
+	h.gh.deleteErr = errors.New("github 500")
+	orig := removeAll
+	removeAll = func(string) error { return errors.New("clone busy") }
+	t.Cleanup(func() { removeAll = orig })
+
+	cancel := h.start(t)
+	_ = cancel
+
+	h.waitState(t, StateProvision)
+	h.proc.say(markerListening)
+	h.waitState(t, StateListening)
+
+	// No job ran, but a runner is registered → teardown deregisters (and fails).
+	if !h.slot.Command(Command{Kind: CmdRecycle, Reason: "image bump"}) {
+		t.Fatal("command rejected")
+	}
+	h.waitState(t, StateTeardown)
+	st := h.waitState(t, StateBackoff)
+	if st.ConsecutiveFailures != 0 {
+		t.Errorf("failures = %d; a recorded cleanup warn must not escalate the streak", st.ConsecutiveFailures)
+	}
+	cancel()
+
+	// Target the operator-recycle cycle by content: backoff may elapse and a
+	// trailing cycle start before cancel() lands, so its position is not fixed.
+	var rec *cycle.Record
+	for _, r := range h.records(t) {
+		if r.Failure != nil && strings.Contains(r.Failure.Error, "recycled by operator") {
+			rec = r
+			break
+		}
+	}
+	if rec == nil {
+		t.Fatal("no operator-recycle cycle in records")
+	}
+	tr := teardownRecord(t, rec)
+	if tr.Outcome != cycle.OutcomeWarn {
+		t.Errorf("teardown outcome = %q, want %q (failed cleanups recorded as a warn)", tr.Outcome, cycle.OutcomeWarn)
+	}
+	if !strings.Contains(tr.Error, "github 500") || !strings.Contains(tr.Error, "clone busy") {
+		t.Errorf("teardown error = %q, want both cleanup failures named", tr.Error)
 	}
 }
 

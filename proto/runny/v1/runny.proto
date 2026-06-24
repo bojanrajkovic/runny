@@ -134,7 +134,8 @@ message SlotStatus {
   // Populated when each state finishes; empty in BACKOFF and from older
   // daemons. The current state is state+state_entered (not included here):
   // clients render it as a live clock. Left is always set; outcome is "ok",
-  // "error", or "deadline".
+  // "error", or "deadline" (never "warn" — that lands only on the teardown
+  // record, which is not surfaced here, only in CycleRecord.states).
   repeated StateRecord active_cycle_states = 19;
   // A bounded, recent-first-evicted history of the command_ids the daemon has
   // actually APPLIED for this slot (PauseRequest.command_id /
@@ -397,7 +398,8 @@ message StateRecord {
   SlotState state = 1;
   google.protobuf.Timestamp entered = 2;
   google.protobuf.Timestamp left = 3;
-  // "ok", "error", or "deadline".
+  // "ok", "warn" (mandatory work done, a best-effort cleanup left an orphan),
+  // "error", or "deadline".
   string outcome = 4;
   string error = 5;
 }

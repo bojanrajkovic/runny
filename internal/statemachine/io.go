@@ -13,7 +13,9 @@ func writeFile(dir, name string, data []byte) error {
 	return os.WriteFile(filepath.Join(dir, name), data, 0o600)
 }
 
-func removeAll(path string) error {
+// removeAll is a var so teardown's best-effort clone deletion can be made to
+// fail in tests (the cleanup-failure-is-recorded path).
+var removeAll = func(path string) error {
 	if path == "" {
 		return nil
 	}

@@ -390,6 +390,26 @@ func TestRenderCycleShowsImageRef(t *testing.T) {
 	}
 }
 
+// A "warn" state outcome (a teardown that destroyed the guest but left a
+// swept-later orphan) must render visibly in `why` — never be dropped the way
+// a bare "ok" drops its error text, which would hide the cleanup failure.
+func TestRenderCycleShowsWarnOutcome(t *testing.T) {
+	now := timestamppb.New(time.Now())
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	c.renderCycle(&runnyv1.CycleRecord{
+		CycleId: "abcd1234", Slot: "mac-1", Result: "failure",
+		Started: now, Finished: now,
+		States: []*runnyv1.StateRecord{{
+			State: runnyv1.SlotState_SLOT_STATE_TEARDOWN, Entered: now, Left: now,
+			Outcome: "warn", Error: "deregister runner 101: github 500",
+		}},
+	})
+	if got := buf.String(); !strings.Contains(got, "warn: deregister runner 101: github 500") {
+		t.Errorf("warn outcome must render its detail in why:\n%s", got)
+	}
+}
+
 // Backoff already elapsed (or no backoff) must not print a negative/zero
 // "retry in 0s" countdown.
 func TestRenderStatusNoRetryWhenBackoffElapsed(t *testing.T) {

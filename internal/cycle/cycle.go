@@ -32,6 +32,11 @@ const (
 	OutcomeOK       Outcome = "ok"
 	OutcomeError    Outcome = "error"
 	OutcomeDeadline Outcome = "deadline"
+	// OutcomeWarn: the state did its mandatory job, but a best-effort cleanup
+	// sub-step failed (e.g. a teardown destroyed the guest yet could not
+	// deregister the runner or delete the clone — a swept-later orphan). Not a
+	// failure: it does not escalate the slot's failure streak.
+	OutcomeWarn Outcome = "warn"
 )
 
 // Record is the cycle.json schema. It mirrors runny.v1.CycleRecord; the proto

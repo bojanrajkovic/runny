@@ -522,6 +522,13 @@ struct StateRow: View {
             Image(systemName: "checkmark")
                 .foregroundStyle(.green)
                 .font(.caption)
+        case "warn":
+            // The state did its mandatory job; a best-effort cleanup left an
+            // orphan. Non-fatal — orange, not red, and the detail stays visible.
+            Label(record.error, systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.orange)
+                .font(.caption)
+                .lineLimit(2)
         case "deadline":
             Label("DEADLINE: \(record.error)", systemImage: "clock.badge.exclamationmark")
                 .foregroundStyle(.red)
@@ -538,6 +545,10 @@ struct StateRow: View {
     }
 
     private var barColor: Color {
-        record.outcome == "ok" ? record.state.tint : .red
+        switch record.outcome {
+        case "ok": record.state.tint
+        case "warn": .orange
+        default: .red
+        }
     }
 }

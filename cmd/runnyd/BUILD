@@ -29,6 +29,7 @@ go_library(
         "//internal/guest",
         "//internal/home",
         "//internal/images",
+        "//internal/launchd",
         "//internal/logring",
         "//internal/oci",
         "//internal/socket",
@@ -125,6 +126,7 @@ go_test(
     embed = [":runnyd_lib"],
     deps = [
         "//internal/home",
+        "//internal/launchd",
         "//internal/socket",
         "//internal/statemachine",
         "//proto/runny/v1:runny",

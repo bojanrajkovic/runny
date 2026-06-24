@@ -16,6 +16,7 @@ go_library(
     visibility = ["//visibility:private"],
     deps = [
         "//internal/home",
+        "//internal/launchd",
         "//internal/sysdaemon",
         "//proto/runny/v1:runny",
         "@com_github_rivo_uniseg//:uniseg",
@@ -53,6 +54,7 @@ go_test(
     ],
     embed = [":runnyctl_lib"],
     deps = [
+        "//internal/launchd",
         "//internal/socket",
         "//proto/runny/v1:runny",
         "@org_golang_google_grpc//:grpc",

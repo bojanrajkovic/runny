@@ -7,6 +7,7 @@ load("//tools/sign:sign.bzl", "codesign_binary", "notarize_binary")
 go_library(
     name = "runnyd_lib",
     srcs = [
+        "competing.go",
         "drain.go",
         "launchcontext.go",
         "launchcontext_darwin.go",
@@ -33,6 +34,7 @@ go_library(
         "//internal/socket",
         "//internal/sshx",
         "//internal/statemachine",
+        "//internal/sysdaemon",
         "//internal/tart",
         "//proto/runny/v1:runny",
         "@org_golang_x_sys//unix",
@@ -112,6 +114,7 @@ notarize_binary(
 go_test(
     name = "runnyd_test",
     srcs = [
+        "competing_test.go",
         "drain_test.go",
         "installassert_test.go",
         "launchcontext_test.go",

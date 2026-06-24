@@ -2,6 +2,14 @@
 
 **Status:** Accepted (2026-06-07; states finalized 2026-06-09)
 
+**Amended:** 2026-06-24 — the *definition* of crash-only graduated into a
+standalone principle, [`architecture/crash-only.md`](../architecture/crash-only.md).
+This ADR owns the FSM decision and its alternatives; that doc owns what the term
+means — the property (no silent failure), its destroy-and-recycle mechanism, and
+what it explicitly is *not* (notably, distinct from the hermeticity boundary and
+from the no-unbounded-operations invariant) — and is what other docs link to
+instead of restating.
+
 ## Context
 
 sand's architecture allowed a single hung operation to freeze the daemon

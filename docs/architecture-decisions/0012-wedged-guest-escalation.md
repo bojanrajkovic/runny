@@ -4,8 +4,9 @@
 
 ## Context
 
-Teardown's force-stop is the floor of the crash-only doctrine, but
-Virtualization.framework can refuse it: `vzMachine.Stop` genuinely returns
+Teardown's escalating force-stop is the floor that guarantees teardown cannot
+fail, but Virtualization.framework can refuse it: `vzMachine.Stop` genuinely
+returns
 "force stop failed with guest still running". Guests are in-process VMs, so
 no amount of in-process escalation reclaims one — only process exit does.
 And macOS hard-caps concurrent macOS guests at 2, so an undead guest
@@ -53,8 +54,9 @@ that would free it could run.
 
 ## Rejected alternatives
 
-- **Exit immediately on wedge**: simplest and most crash-only, but kills a
-  job mid-run on the healthy sibling slot for a condition that can wait up
+- **Exit immediately on wedge**: the simplest teardown — process exit is the
+  ultimate cold start — but kills a job mid-run on the healthy sibling slot for
+  a condition that can wait up
   to one job's duration. The fleet is tiny (2 macOS slots); half of it
   staying useful for the tail of a job is worth the small added machinery.
 - **Park forever, no exit**: leaves capacity silently halved until an

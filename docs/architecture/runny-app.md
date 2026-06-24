@@ -29,9 +29,10 @@ neither is enumerated here.
 ## Connection supervision
 
 `DaemonStore` owns one supervised `WatchStatus` stream and a four-state
-connection FSM — the daemon-side crash-only philosophy applied to the
-client: streams are torn down and re-established, never nursed. This is the
-living diagram and tracks the code.
+connection FSM: a dropped or stalled stream is torn down and re-established,
+never nursed — reconnect-on-failure supervision, not the guest-lifecycle
+[crash-only](crash-only.md) property (a connection has no VM to destroy and can
+sit unreachable). This is the living diagram and tracks the code.
 
 ```mermaid
 stateDiagram-v2

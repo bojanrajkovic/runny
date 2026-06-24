@@ -52,7 +52,7 @@ For per-directory detail, read that directory's `CLAUDE.md` if present. For curr
 ## Invariants
 
 - **No unbounded operations.** Every guest-facing call carries a deadline or a progress bound, enforced by the type system: guest/network seams take `bounded.Context`, constructible only with a bound attached (ADR-0011; the ADR lists the few deliberate lifetime-context exceptions). SSH clients come from `internal/sshx` only — plain `ssh.Dial` silently reintroduces the failure mode this project exists to kill (ADR-0002).
-- **Crash-only.** Failure handling is destroy-and-recycle, never repair-in-place; teardown cannot fail (ADR-0004).
+- **Crash-only.** Failure is never silent: a broken guest is met with a visible, recorded destroy-and-recycle, never in-place repair; teardown can't silently stick; a restart is a cold start. Defined in `docs/architecture/crash-only.md` — including what it is *not* (distinct from ephemeral/hermetic guests and from no-unbounded-operations); the FSM that enforces it is ADR-0004.
 - **No tart binary at runtime**; tart *format* compatibility is the contract (ADR-0008).
 - **No .xcodeproj, ever.** Xcode is SDK-vendor only (ADR-0007).
 - **Conventional Commits**, enforced by the commit-msg hook; atomic commits. See `CONTRIBUTING.md`.

@@ -35,8 +35,9 @@ flowchart LR
 
 The crash-only FSM design (per-state deadlines, the TEARDOWN sink, backoff
 policy) is decided in
-[ADR-0004](../architecture-decisions/0004-crash-only-state-machine.md); the
-per-cycle SSH hardening state is
+[ADR-0004](../architecture-decisions/0004-crash-only-state-machine.md), and the
+property it implements — destroy-and-recycle, never repair-in-place — is defined
+in [crash-only.md](crash-only.md); the per-cycle SSH hardening state is
 [ADR-0013](../architecture-decisions/0013-ephemeral-ssh-keys-in-band-rotation.md).
 The code (`internal/statemachine`) is the authority on states and deadline
 defaults; the diagram below is the living transition map and tracks the code.

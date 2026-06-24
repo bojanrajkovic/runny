@@ -122,11 +122,12 @@ accountability layer, not a second authorization tier.
 
 ## Ephemeral guests
 
-Each cycle runs a **fresh APFS clone that is destroyed on teardown**; no state
-survives between jobs in a slot (crash-only,
-[ADR-0004](architecture-decisions/0004-crash-only-state-machine.md)). A job
-cannot leave credentials, artifacts, or a foothold for the next occupant of its
-slot.
+Each cycle runs a **fresh APFS clone, destroyed on teardown** by the crash-only
+recycle ([ADR-0004](architecture-decisions/0004-crash-only-state-machine.md));
+no state survives between jobs in a slot. Single-use isolation is the security
+property here — distinct from crash-only, which only supplies the destruction
+that enforces it. A job cannot leave credentials, artifacts, or a foothold for
+the next occupant of its slot.
 
 ## GitHub authentication
 

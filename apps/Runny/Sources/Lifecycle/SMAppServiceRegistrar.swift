@@ -62,9 +62,10 @@ final class SMAppServiceRegistrar: ServiceRegistrar {
     }
 
     func kickstart() async throws {
-        // No -k: kickstart starts a stopped job, never SIGKILLs a running one
-        // (crash-only forbids interrupting a job). The daemon coming up is confirmed
-        // from the connection by AgentController, not this call.
+        // No -k: kickstart starts a stopped job, never SIGKILLs a running one —
+        // a SIGKILL would take runnyd's in-process VMs, and the job running in
+        // one, down with it. The daemon coming up is confirmed from the
+        // connection by AgentController, not this call.
         switch await runLaunchctl(["kickstart", jobTarget]) {
         case .timedOut:
             throw LaunchctlFailure(message: "launchctl kickstart did not respond within \(Int(Self.launchctlTimeout))s")

@@ -15,7 +15,10 @@ go_library(
 
 go_test(
     name = "guest_test",
-    srcs = ["guest_test.go"],
+    srcs = [
+        "guest_test.go",
+        "stop_runner_shell_test.go",
+    ],
     embed = [":guest"],
     deps = [
         "//internal/bounded",

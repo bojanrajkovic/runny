@@ -1,6 +1,65 @@
 # ADR-0019: Detecting who manages the daemon
 
-**Status:** Accepted (2026-06-18)
+**Status:** Accepted (2026-06-18). **Amended (2026-06-23)** — reduced to five
+verdicts over three axes; see the amendment below. The original Decision and
+Consequences are kept as the 2026-06-18 record.
+
+## Amendment (2026-06-23): collapsed to the five-verdict model
+
+runnyd is supported in exactly two shapes — the app's per-user LaunchAgent
+(`SMAppService`) and the installed system LaunchDaemon (`sudo runnyctl
+install-daemon`). With only two cooperative users, who can start fresh, the
+ownership model is reduced from eight verdicts over seven input axes (plus a
+collisions matrix) to **five verdicts over three axes**, with no collisions
+machinery:
+
+- **Verdicts:** `unmanaged`, `selfManaged`, `awaitingApproval`, `systemManaged`,
+  `indeterminate`. The former `foreignSystem` is renamed **`systemManaged`** — the
+  app installs, updates, and removes the system daemon, so "foreign" was the wrong
+  word.
+- **Inputs:** `homeIsCanonical`, the `SMAppService` self-status, and a single
+  `system/`-domain canonical-label `launchctl` probe. The ladder: a non-canonical
+  home defers first; a registered system daemon wins (`systemManaged`, top
+  precedence); a wedged system probe fails closed (`indeterminate`); else the
+  self-status gives the per-user agent's life stage.
+
+The single end-state failure the per-user path can produce is installing over a
+working system daemon, guarded by the `system/`-domain probe (`systemManaged` at top
+precedence) plus the fail-closed home-canonical defer. Every removed signal was only
+preventing a stomp that converges via the single-instance `flock`; a hand-run dev
+daemon reads `unmanaged` and converges harmlessly, not detected.
+
+**Superseded by this amendment** (the matching sections below are kept as the
+2026-06-18 record):
+
+- The **gui-domain foreign-detection probe** and the **Homebrew label**
+  (`homebrew.mxcl.runny`): the app no longer probes the brew label or the
+  `gui/`-domain canonical label. The only launchd probe is the `system/`-domain
+  canonical label.
+- The **dormant-manual-install** signal (the persisted-plist → `foreignManual`
+  paragraph): removed; no `~/Library/LaunchAgents` plist probe.
+- The **socket-occupancy axis** as an *ownership* signal (the `connect()` probe):
+  removed. Liveness is the app's gRPC connection, not an ownership input.
+- The **collisions** surface (`DaemonOwnership.collisions` + the per-verdict cleanup
+  commands): removed — with only two supported shapes there is no multi-owner
+  contention to enumerate.
+- The Consequences limitation "detection covers only `gui/<uid>`; a `system/` daemon
+  is not detected" is now **resolved**: the `system/`-domain probe is the one
+  foreign-detection axis. The residual cross-shape conflict — a leftover per-user
+  agent co-registered with a system daemon — is surfaced by the
+  `competing-registration` doctor check and refused at the source by the `runnyctl
+  install-daemon` guard.
+
+**Behavior change:** the system probe is now checked *before* the self-status, so a
+wedged system probe defers (`indeterminate`) even when the app's own agent reads
+`.enabled` — the original model let self-identity override a wedged probe. If a
+system daemon is in fact present it outranks the per-user agent, so failing closed is
+the conservative choice; the wedge is a sub-second `launchctl` read that self-heals
+on the next app-foreground refresh.
+
+The rejected alternatives below (`SMAppService`-only; full enumerate-and-parse) are
+unchanged and still rejected — this is a scope reduction of the same decision, not a
+new one.
 
 ## Context
 

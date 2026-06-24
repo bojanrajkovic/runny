@@ -173,15 +173,15 @@ agent prompts on its own, and macOS supplies generic text, ignoring any embed.
 
 The app installs that agent **only when it owns the daemon**. Before any spawn —
 install, repair, start-at-login enable, kickstart — it computes an ownership
-verdict (its own `SMAppService` self-status plus a bounded `launchctl` probe of
-the brew and canonical labels in the user's `gui/<uid>` domain) and proceeds only
-for an unowned or app-owned daemon; a Homebrew-managed or manually-installed
-daemon, or any inconclusive probe, denies the spawn and routes to an observer
-banner. So the app never registers a competing agent over a foreign manager, and
-the only TCC-prompting surface — the bundled `runnyd` actually spawning — is
-reached only on the unowned/app-owned path, so an observer never provokes a Local
-Network prompt. Detection is local, `gui/<uid>`-scoped, and read-only: it spawns
-`launchctl print` under a hard bound but mutates nothing.
+verdict (its own `SMAppService` self-status plus a single bounded `launchctl print
+system/<canonical-label>` probe to detect an installed system LaunchDaemon) and
+proceeds only for an unowned or app-owned daemon; an installed system daemon, or
+any inconclusive probe, denies the spawn and routes to an observer banner. So the
+app never registers a competing agent over a system daemon, and the only
+TCC-prompting surface — the bundled `runnyd` actually
+spawning — is reached only on the unowned/app-owned path, so an observer never
+provokes a Local Network prompt. Detection is read-only: it spawns `launchctl
+print` under a hard bound but mutates nothing.
 
 ## Headless system daemon
 
@@ -191,8 +191,7 @@ directory ([ADR-0020](architecture-decisions/0020-headless-system-daemon.md),
 [deploy.md](deploy.md) "Headless system daemon"). The install is privileged
 **once** (`sudo runnyctl install-daemon` creates the account, the home, and the
 LaunchDaemon, then `launchctl bootstrap system`); the daemon then **runs
-unprivileged** as `_runny` — strictly less privilege than the `sudo brew
-services` alternative, which would run runnyd as root. A launchd-started daemon
+unprivileged** as `_runny` — strictly less privilege than a root LaunchDaemon. A launchd-started daemon
 is auto-allowed Local Network access regardless of uid (Apple TN3179), so
 reaching guests needs neither a GUI prompt nor root.
 

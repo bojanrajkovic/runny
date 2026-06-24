@@ -250,10 +250,9 @@ The socket is `<home>/runnyd.sock`, and retained-artifact reads (`cycles/`) come
 from the same resolved home — one axis, so the app can't dial one home while
 reading artifacts from another. On a host carrying a system install the app
 targets the system daemon even when it is down (reporting "down" rather than
-silently falling back to a per-user socket); the install gate separately probes
-both literal sockets so a stale socket at one path can't mask a live daemon at
-the other. The app reads nothing else from the runny home — files under it belong
-to the daemon (ADR-0006 symmetry: the app knows only the contract).
+silently falling back to a per-user socket). The app reads nothing else from the
+runny home — files under it belong to the daemon (ADR-0006 symmetry: the app
+knows only the contract).
 
 ## Command-line tool vending
 
@@ -315,17 +314,20 @@ never refuse, printed to stderr before command output.
 
 ## Daemon lifecycle (app-managed LaunchAgent)
 
-The app installs `runnyd` as a **per-user LaunchAgent via `SMAppService`** — the
-GUI install channel beside the Homebrew service (ADR-0018). The job's plist
+The app installs `runnyd` as a **per-user LaunchAgent via `SMAppService`** —
+the desktop channel (ADR-0018). The headless channel is the installed system
+LaunchDaemon (`runnyctl install-daemon`), which runs under `_runny` and is
+brokered through the app or run directly by the operator. The per-user plist
 (`Contents/Library/LaunchAgents/com.coderinserepeat.runnyd.plist`) is injected
 into the bundle *before* signing so it is covered by the signature and the
 notarization staple, and names the daemon by a bundle-relative
 `BundleProgram = Contents/MacOS/runnyd` with
 `AssociatedBundleIdentifiers = [com.coderinserepeat.runny]`. The version lock is
 free: an in-place app upgrade replaces the bundle, so the job's program *is* the
-new binary, and a drain-gated respawn moves the running process onto it. This is
-not the host-install plist template (absolute `ProgramArguments`, `RUNNY_HOME`
-log paths) — two shapes for two channels, deliberately not unified.
+new binary, and a drain-gated respawn moves the running process onto it. This
+is not the system LaunchDaemon plist (an absolute `UserName = _runny` job that
+`internal/sysdaemon` generates) — two shapes for two channels, deliberately not
+unified.
 
 `Sources/Lifecycle/` mirrors `DaemonStore`'s split: pure `nonisolated static`
 verdicts (`LaunchAgentStatus`) plus a thin side-effect wrapper (`AgentController`)
@@ -340,39 +342,50 @@ seam, so every decision is unit-tested without launchd. The invariants:
   daemon is actually up" is a separate, later `.connected` snapshot.
 - **One spawn chokepoint, gated on ownership.** Every spawn-triggering action
   (install, repair, start-at-login enable, Start) funnels through a single
-  `attemptSpawn` that consults the `spawnGate` — now the daemon-ownership verdict
+  `attemptSpawn` that consults the `spawnGate` — the daemon-ownership verdict
   ([ADR-0019](../architecture-decisions/0019-daemon-ownership-detection.md)): it
-  allows only an unowned or app-owned daemon and denies every foreign or
-  indeterminate owner, aborting loud. No view action calls
+  allows `unmanaged` and `selfManaged`, and denies `systemManaged`,
+  `awaitingApproval`, and `indeterminate`, aborting loud. No view action calls
   `SMAppService`/`launchctl` directly.
-- **The ownership axis is orthogonal to install state.** Beside `installState` (the
-  app's own registration) the controller publishes an ownership verdict —
-  `unmanaged`/`selfManaged`/`foreignBrew`/`foreignManual`/`foreground`/
-  `awaitingApproval`/`indeterminate` — a pure `classify` over the app's
-  `SMAppService` self-status, two bounded `launchctl` label probes (brew + canonical,
-  run concurrently), the socket axis (a bounded `connect()` probe that tells a stale
-  socket from a live/wedged one — a refused stale inode reads empty so it no longer
-  blocks install), and a home-canonical flag, with
-  `indeterminate` dominant so an inconclusive probe defers ahead of every positive
-  branch. It refreshes on app-foreground and freshly before each spawn (the pre-act
-  recheck catches a brew daemon that appeared since). On a foreign/foreground/
-  indeterminate verdict the Daemon row **replaces the install toggle with an
-  observer banner** naming the managing channel and the operator's next step (a
-  checkout-free `launchctl bootout`, never `tools/deploy/uninstall.sh`); it shows
-  "Checking…" until the first gather runs, so a pristine launch never flashes the
-  indeterminate diagnostic. The shared canonical label is disambiguated by
-  self-status, never a label match — a foreign `launchctl bootstrap` never reads
-  `.enabled` (ADR-0019). The verdict names ONE owner, but the same gather also
-  publishes a **collision set** of every detected registration, so the row can
-  surface cleanup for the contenders the verdict hides (a co-present Homebrew +
-  manual install, a dormant manual plist alongside our own enabled agent) — our own
-  competing agent via an in-app removal, a foreign manual one via a safety-built
-  `launchctl bootout`/`rm` command (rm-only when our agent holds the live label).
+- **Ownership is five verdicts over three facts.** Beside `installState` (the
+  app's own registration) the controller publishes a `DaemonOwnership` verdict — one
+  of `unmanaged`/`selfManaged`/`awaitingApproval`/`systemManaged`/`indeterminate` — a
+  pure `classify` over three gathered inputs, in load-bearing order:
+  1. **`homeIsCanonical`** — a non-canonical home defers FIRST (a defence-in-depth
+     guard; the home override is gone, but a re-introduced one must never cause a
+     cross-home stomp).
+  2. **`systemProbe`** — a bounded `launchctl print system/<label>` probe on the
+     canonical label (`com.coderinserepeat.runnyd`). A registered system daemon wins
+     next (`systemManaged`) — it owns the shared socket the app dials, and a
+     per-user agent installed over a live system daemon would run orphaned while
+     clients keep resolving the system home. A wedged or timed-out probe then fails
+     CLOSED (`indeterminate`) — a system daemon MIGHT be here, so never install over
+     what can't be ruled out.
+  3. **`selfState`** — the app's own `SMAppService` self-status. With no system
+     daemon confirmed absent, the verdict is the per-user agent's life stage:
+     `.installed` → `selfManaged`, `.requiresApproval` → `awaitingApproval`,
+     `.registrationFailed` → `indeterminate`, `.notInstalled`/`.notFound` →
+     `unmanaged`. The shared canonical label is disambiguated by self-status, never a
+     label match — a system-domain `launchctl bootstrap` never flips the app's
+     SMAppService status to `.enabled` (ADR-0019).
+
+  The verdict refreshes on app-foreground and freshly before each spawn (the
+  pre-act recheck catches a system daemon that appeared while the window stayed
+  open). On a `systemManaged` or `indeterminate` verdict the Daemon row **replaces
+  the install toggle with an observer banner**: the `systemManaged` banner names
+  the system LaunchDaemon and points at Settings → System Service to remove it;
+  the `indeterminate` banner points at `launchctl print system/<label>`. The banner
+  shows "Checking…" until the first gather runs, so a pristine launch never flashes
+  the indeterminate diagnostic. A hand-run dev daemon reads `unmanaged` — the
+  single-instance `flock` makes installing over it converge harmlessly, and it is
+  deliberately not detected. The `competing-registration` doctor check and the
+  `runnyctl install-daemon` guard catch the edge case where a leftover per-user
+  agent is co-registered with a system daemon.
 - **Install refuses outside `/Applications`, recoverably.** A translocated bundle
   is refused with "re-launch from Applications" — recoverable, so a first-launch
   quarantine of a correctly-installed app is never permanently locked out. Install
   is behind an explicit click with a label-naming confirmation; the ownership gate
-  above is the structural guard that a brew/manual daemon is never displaced.
+  above is the structural guard that a system daemon is never displaced.
 - **Start affordance** (menu bar + main window) shows only when the agent is
   installed and the daemon is unreachable; `requiresApproval` routes to the Login
   Items CTA, never a dead Start. It `kickstart`s (no `-k`) and confirms recovery
@@ -390,8 +403,8 @@ seam, so every decision is unit-tested without launchd. The invariants:
   than the running daemon, is the existing drain-gated reload (jobs finish first,
   then launchd cold-starts the new binary) — it adds nothing to the drain
   mechanics. A non-converged result is named loud ("update didn't take — still
-  vX"), never folded into the generic reload note. A brew/manual daemon is offered
-  only the generic skew banner, not a futile fleet-draining update.
+  vX"), never folded into the generic reload note. A system daemon is offered only
+  the generic skew banner, not a futile fleet-draining update.
 - **Uninstall** is `unregister()` then a best-effort `launchctl bootout` ("No such
   process" = success); a mid-job uninstall first raises a destructive confirmation
   naming the abandoned slot. **Reconcile-on-launch** compares the registered
@@ -404,8 +417,8 @@ seam, so every decision is unit-tested without launchd. The invariants:
   (the reconcile coalesces a concurrent trigger so the verification is never
   dropped; a re-point that doesn't take keeps showing foreign, never a false
   all-clear). It is reached only for the app's own agent — the ownership gate denies
-  a foreign owner and the observer banner replaces the section hosting the button —
-  so a brew/manual daemon is never unregistered. A failed re-register after the
+  a system/indeterminate owner and the observer banner replaces the section hosting
+  the button — so a system daemon is never unregistered. A failed re-register after the
   unregister took leaves the agent honestly gone (the toggle offers reinstall); a
   denied gate never unregisters, so a foreign agent stays intact.
 

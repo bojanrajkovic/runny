@@ -78,6 +78,21 @@ func TestFailedChecksExcludesLocalNetwork(t *testing.T) {
 	}
 }
 
+// competing-registration is excluded from the startup gate: a leftover per-user
+// agent (or an inconclusive launchctl probe) must not refuse boot — the daemon
+// surfaces it loudly via doctor and the single-instance flock handles the actual
+// runtime conflict. Refusing to start would be strictly worse: no daemon at all,
+// over a latent condition that only matters once the operator logs into a GUI.
+func TestFailedChecksExcludesCompetingRegistration(t *testing.T) {
+	got := failedChecks([]socket.DoctorCheck{
+		{Name: "competing-registration", OK: false, Detail: "a per-user runnyd agent is registered"},
+		{Name: "macos-guest-cap", OK: false, Detail: "over cap"},
+	})
+	if len(got) != 1 || got[0].Name != "macos-guest-cap" {
+		t.Errorf("failedChecks = %+v, want only macos-guest-cap (competing-registration excluded)", got)
+	}
+}
+
 // The exit gate re-runs this local check, so a mid-drain edit that overflows
 // the darwin guest cap holds the drain instead of crash-looping the respawn.
 func TestCheckMacOSGuestCap(t *testing.T) {
@@ -103,11 +118,18 @@ func TestSplitPreflightChecks(t *testing.T) {
 	failed, warnings := splitPreflightChecks([]socket.DoctorCheck{
 		{Name: "platform", OK: true, Detail: "darwin/arm64"},
 		{Name: "local-network", OK: false, Detail: "cannot reach the guest subnet"},
+		{Name: "competing-registration", OK: false, Detail: "a per-user runnyd agent is registered"},
 		{Name: "disk-headroom", OK: false, Detail: "12GB free; <30GB risks mid-job disk exhaustion"},
 		{Name: "runner-perm:org:example", OK: false, Detail: "401"},
 	})
-	if len(warnings) != 1 || warnings[0].Name != "local-network" {
-		t.Errorf("warnings = %+v, want just local-network", warnings)
+	// local-network AND competing-registration both become warnings — neither
+	// affects whether the new config is valid, so neither must refuse a reload.
+	warnNames := map[string]bool{}
+	for _, c := range warnings {
+		warnNames[c.Name] = true
+	}
+	if len(warnings) != 2 || !warnNames["local-network"] || !warnNames["competing-registration"] {
+		t.Errorf("warnings = %+v, want local-network + competing-registration", warnings)
 	}
 	if len(failed) != 2 {
 		t.Fatalf("failed = %+v, want disk-headroom + runner-perm", failed)

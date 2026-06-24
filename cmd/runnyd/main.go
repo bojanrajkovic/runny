@@ -532,13 +532,16 @@ func preflightReload(ctx context.Context, dir home.Dir, configPath string) (sha 
 //   - disk-headroom stays a refusal (fail-safe), but at preflight it counts
 //     live clones' divergence that the drain + respawn sweep will free, so
 //     the detail says why the number may differ.
+//   - competing-registration is orthogonal to whether the new config is valid:
+//     a leftover per-user agent must not refuse a reload, so it becomes a
+//     warning (like local-network).
 func splitPreflightChecks(checks []socket.DoctorCheck) (failed, warnings []socket.DoctorCheck) {
 	for _, c := range checks {
 		if c.OK {
 			continue
 		}
 		switch c.Name {
-		case "local-network":
+		case "local-network", "competing-registration":
 			warnings = append(warnings, c)
 		case "disk-headroom":
 			c.Detail += " (measured with guests running; the respawn sweeps clones before re-checking — free space or retry)"
@@ -550,8 +553,13 @@ func splitPreflightChecks(checks []socket.DoctorCheck) (failed, warnings []socke
 	return failed, warnings
 }
 
-// failedChecks filters to the failures that should block daemon startup. Two
+// failedChecks filters to the failures that should block daemon startup. Three
 // checks are excluded as informational-at-startup:
+//   - competing-registration: a leftover per-user agent (or an inconclusive
+//     launchctl probe) is a latent conflict, not a reason to refuse boot — the
+//     single-instance flock handles the actual runtime contention, and refusing
+//     to start would be strictly worse (no daemon at all). It stays loud via
+//     `runnyctl doctor`.
 //   - config-drift: the file on disk differs from the running config; the
 //     respawn re-reads the file AFTER the vms-sweep window, so a concurrent
 //     re-template (Ansible) must not crash-loop startup on a check that does not
@@ -566,7 +574,7 @@ func splitPreflightChecks(checks []socket.DoctorCheck) (failed, warnings []socke
 func failedChecks(checks []socket.DoctorCheck) []socket.DoctorCheck {
 	var out []socket.DoctorCheck
 	for _, c := range checks {
-		if !c.OK && c.Name != "config-drift" && c.Name != "local-network" {
+		if !c.OK && c.Name != "config-drift" && c.Name != "local-network" && c.Name != "competing-registration" {
 			out = append(out, c)
 		}
 	}
@@ -687,6 +695,10 @@ func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*gi
 		if runtime.GOOS == "darwin" {
 			ok, detail := localNetworkReach()
 			add("local-network", ok, detail)
+			// A per-user runnyd agent co-registered with this system daemon is the one
+			// cross-shape conflict the ownership model no longer auto-resolves — surface
+			// it loudly here so a headless operator can spot it in one command.
+			checks = append(checks, checkCompetingRegistration(ctx, dir, configPath))
 		}
 
 		for _, gh := range clients {

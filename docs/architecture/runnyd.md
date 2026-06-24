@@ -115,8 +115,10 @@ their job).
    the real-startup path under the lock; `-doctor` stays read-only.
 2. **Validate**: the doctor suite (the check inventory lives in
    `cmd/runnyd`'s `makeDoctor`; `runnyd -doctor` prints it, and it includes
-   a `config-drift` check against the running config). Any failure refuses
-   startup loudly. The `runnyd starting` line logs the config file's
+   a `config-drift` check against the running config, and a Darwin-only
+   `competing-registration` check that warns — non-blocking — when a leftover
+   per-user LaunchAgent is co-registered alongside the system daemon). Any
+   failure refuses startup loudly. The `runnyd starting` line logs the config file's
    SHA-256, chaining the audit trail across reload restarts.
 3. **Sweep registrations** (cold start owns the world): deregister offline
    runners carrying our instance prefix.
@@ -204,7 +206,9 @@ that can hold a guest services it (ADR-0015):
   launch-context fix, not the dead-end TCC-grant ask), all before the first guest
   dial — without refusing to boot, since foreground and launchd starts are fine.
   The deployment
-  owns the grant story via a per-user LaunchAgent; symptoms and the fix live in
+  owns the grant story via a per-user LaunchAgent (SMAppService) or an
+  installed system LaunchDaemon (`runnyctl install-daemon`); symptoms and
+  the fix live in
   `docs/deploy.md` "Troubleshooting: Local Network permission".
 - **Never trust the image's bundled runner**: cirruslabs images preinstall
   `~/actions-runner`, which rots into broker-rejected versions ("deprecated

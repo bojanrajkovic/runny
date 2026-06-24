@@ -192,8 +192,7 @@ translocated app (move Runny to your Applications folder first). The same pane
 removes the link.
 
 The app can also **install and manage the daemon** as a per-user LaunchAgent —
-the desktop-GUI install channel, beside the Homebrew service for headless fleets.
-From a copy of Runny in `/Applications`:
+the desktop-GUI install channel. From a copy of Runny in `/Applications`:
 
 - **Settings → Daemon → "Start runnyd at login"** registers the bundled `runnyd`
   via `SMAppService` (one confirmation names the launchd label). The first guest
@@ -211,24 +210,16 @@ From a copy of Runny in `/Applications`:
 
 Install requires Runny in `/Applications` (a translocated or `~/Downloads` launch
 is refused, recoverably). **The two channels split by audience:** the app is the
-**desktop-GUI** install path (a per-user agent in your login session); the
-Homebrew service (or the manual LaunchAgent) is the **headless-fleet** path. The
-app installs its agent **only when no other manager owns the daemon**: it probes
-the launchd domain, and on detecting a Homebrew-managed (`homebrew.mxcl.runny`) or
-manually-installed (`com.coderinserepeat.runnyd`) daemon it does **not** install —
-it drops to an observer (status streams normally as a sibling client over the same
-socket), replaces the install toggle with a banner naming the managing channel
-("Managed by Homebrew — `brew services restart runny`"), and never displaces the
-other manager. To switch a host from brew/manual to the app, remove the foreign
-agent first — `brew services stop runny`, or for a manual install
-`launchctl bootout gui/$(id -u)/com.coderinserepeat.runnyd 2>/dev/null; rm -f ~/Library/LaunchAgents/com.coderinserepeat.runnyd.plist`
-(the `rm` is load-bearing, and separated by `;` not `&&`: `bootout` only unloads a
-running job and exits nonzero when the job is already gone, but launchd reloads a
-leftover plist at next login, and the app treats a persisted plist as a dormant
-owner it will not install over) — then reopen Runny. A
-bundled `runnyctl` on PATH can lag a `brew`-managed `runnyd`; when it does,
-`runnyctl` prints a one-line version-skew warning to stderr before its output
-(warn, never refuse).
+**desktop-GUI** install path (a per-user agent in your login session); `sudo
+runnyctl install-daemon` is the **headless-fleet** path (a non-root system
+LaunchDaemon). The app installs its per-user agent only when no system daemon is
+present. If a system LaunchDaemon is already installed, the app observes it (status
+streams normally as a sibling client over the same socket) and the Settings pane
+points to **Settings → System Service** instead of offering the install toggle. A
+hand-run or leftover runnyd converges via the single-instance flock and does not
+require manual cleanup. A bundled `runnyctl` on PATH can lag a `brew`-upgraded
+`runnyd`; when it does, `runnyctl` prints a one-line version-skew warning to stderr
+before its output (warn, never refuse).
 
 ## Applying config changes
 
@@ -274,9 +265,11 @@ Relatedly, since SIGHUP is claimed for reload, a foreground runnyd whose
 terminal closes now drains gracefully instead of dying instantly;
 SIGINT/SIGTERM still shut down.
 
-The blunt fallback remains: `runnyctl pause` every slot, wait until each
-sits paused in BACKOFF (`runnyctl status`), then
-`brew services restart runny`. Same effect, no validation.
+The blunt fallback remains: `runnyctl pause` every slot, wait until each sits
+paused in BACKOFF (`runnyctl status`), then stop and let KeepAlive respawn —
+`sudo launchctl bootout system/com.coderinserepeat.runnyd` for a system daemon, or
+toggle the daemon off and back on in the Runny app for a per-user agent. Same
+effect, no validation.
 
 ## Troubleshooting: Local Network permission
 
@@ -290,18 +283,20 @@ daemon is denied.)
 If `local-network` is not ok:
 
 1. Open **System Settings → Privacy & Security → Local Network**. If `runnyd`
-   is listed, enable it, then `brew services restart runny`.
-2. If it is not listed, the daemon has never run where macOS could ask. From
-   a terminal **in the GUI session** — not over SSH, not inside tmux/screen —
-   run `brew services restart runny`, wait for a guest to boot, and accept
-   the **"runnyd would like to find and connect to devices on your local
-   network"** prompt.
-3. Don't start it with `sudo`. `sudo brew services` runs runnyd as a **root
-   LaunchDaemon** — unnecessary privilege, and a different install than the
-   per-user agent the rest of this guide assumes. If you ran it that way,
-   `sudo brew services stop runny`, then start it without sudo from the GUI
-   session.
-4. To isolate the permission from other network problems: run `runnyd` in the
+   is listed, enable it, then restart the daemon: `sudo launchctl bootout
+   system/com.coderinserepeat.runnyd` for a system daemon (KeepAlive respawns
+   it), or toggle the daemon off and back on in the Runny app's Settings pane
+   for a per-user agent.
+2. If it is not listed, the daemon has never run where macOS could ask. For a
+   per-user agent, the Runny app surfaces a grant card proactively when the
+   grant is missing — open the app from a terminal **in the GUI session** (not
+   over SSH, not inside tmux/screen) so the prompt can render, and accept the
+   **"runnyd would like to find and connect to devices on your local network"**
+   dialog. For a system daemon the grant is automatic (a launchd-started daemon
+   of any uid is auto-allowed); if `local-network` is failing under a system
+   daemon, revisit whether the daemon is actually running as `_runny` under
+   launchd (`runnyctl doctor` and `sudo launchctl list com.coderinserepeat.runnyd`).
+3. To isolate the permission from other network problems: run `runnyd` in the
    foreground of an interactive SSH session (it prints its log to the terminal
    there, in addition to the log file). That context is exempt — if guests
    provision there but not under the LaunchAgent, the permission is the problem.
@@ -314,8 +309,8 @@ rest of the cycle: mid-cycle `ssh admin@<guest-ip>` fails with
 `Permission denied` by design, and the per-cycle private key lives only in
 runnyd's memory. For interactive debugging, set `ssh_hardening: off` on the
 pool and apply it with **`runnyctl reload`** (see "Applying config changes" —
-runnyd reads config once at startup, so a recycle alone keeps the old
-setting, and a bare `brew services restart runny` kills in-flight jobs),
+runnyd reads config once at startup, so a recycle alone keeps the old setting,
+and a hard restart kills in-flight jobs),
 then SSH into a fresh guest with the pool password. Re-enable hardening and
 reload again when done. (On-demand operator key injection into a live hardened guest is
 tracked in [#39](https://github.com/bojanrajkovic/runny/issues/39).)

@@ -137,17 +137,19 @@ residual skew is **made loud**.
   crash-only forbids interrupting a job. The verdict is a pure function beside the
   reload/ack verdicts in `DaemonStore`, unit-tested without a live daemon.
 
-- **Homebrew stays the headless channel; reconcile by detect-and-defer.** `brew`
-  and the documented manual LaunchAgent remain the path for fleet hosts with no
-  GUI. The app installs its agent **only when no other manager owns the daemon**;
-  if it detects an externally-managed `runnyd` — a `brew` `homebrew.mxcl.runny`
-  agent, or the manual `com.coderinserepeat.runnyd` — it does not install its
-  own, acts as an observer, and points the operator at the managing channel. The
-  app-managed and manual agents share the canonical label
-  `com.coderinserepeat.runnyd`; they are mutually exclusive installers of one
-  label. Mutual exclusion is the industry norm (Tailscale's `conflicts_with`);
-  runny enforces it at runtime rather than at package install because both
-  channels are legitimate for different audiences.
+- **The system LaunchDaemon is the headless channel; reconcile by detect-and-defer.**
+  The installed non-root system LaunchDaemon (`sudo runnyctl install-daemon`) is the
+  path for fleet hosts with no GUI; the Homebrew formula delivers the binaries only.
+  The app installs its per-user agent **only when no system daemon owns the home**;
+  if it detects an installed system daemon (any verdict other than
+  `unmanaged`/`selfManaged`/`awaitingApproval`) it does not install its own, acts as
+  an observer, and points the operator at Settings → System Service. The app's
+  per-user agent and the system daemon share the canonical label
+  `com.coderinserepeat.runnyd` (they differ only by launchd domain — `gui/` vs
+  `system/`); they are mutually exclusive owners of one home. Mutual exclusion is the
+  industry norm (Tailscale's `conflicts_with`); runny enforces it at runtime rather
+  than at package install because both channels are legitimate for different
+  audiences.
 
 ## Rejected alternatives
 
@@ -177,7 +179,7 @@ residual skew is **made loud**.
   and never delivers the one-click story the bundled shape exists for. A
   legitimate lighter shape; rejected because the decided destination is the
   managed agent. (The app stays observer-*capable* — see Consequences — but that
-  is its degraded mode against a foreign daemon, not its purpose.)
+  is its degraded mode against a system daemon, not its purpose.)
 
 - **Treat bundling as sufficient to eliminate skew — no detector.** Bundling
   cannot close the upgrade window or the shared-host case; assuming it does

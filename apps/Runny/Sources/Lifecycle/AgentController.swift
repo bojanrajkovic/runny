@@ -196,7 +196,7 @@ final class AgentController {
     static func live() -> AgentController {
         let registrar = SMAppServiceRegistrar()
         let systemProbe: @Sendable (String) async -> LaunchdProbeResult = {
-            await LaunchdProbe.probe(label: $0, domain: .system)
+            await LaunchdProbe.probe(label: $0)
         }
         let homeIsCanonical = { true }
         let bundledAgentPresent = { AgentController.bundledAgentPresent() }

@@ -14,7 +14,7 @@ final class LaunchdProbeTests: XCTestCase {
         }
     }
 
-    /// Records the args so a test can pin the launchctl target string per domain.
+    /// Records the args so a test can pin the launchctl target string.
     private final class CapturingRunner: CommandRunner, @unchecked Sendable {
         private(set) var args: [String] = []
         let result: CommandResult
@@ -25,14 +25,14 @@ final class LaunchdProbeTests: XCTestCase {
         }
     }
 
-    // MARK: - Domain target (the system/ extension)
+    // MARK: - Probe target (system/ is the only domain)
 
-    func testSystemDomainTargetsSystemSlashLabel() async {
+    func testProbeTargetsSystemSlashLabel() async {
         // A non-root user CAN `launchctl print system/<label>` (verified): registered
-        // prints the label in stdout, so classify is shared — only the target differs.
+        // prints the label in stdout. The probe is system-only — pin that target.
         let label = "com.coderinserepeat.runnyd"
         let runner = CapturingRunner(result: .exited(code: 0, stdout: "system/\(label) = {\n}", stderr: ""))
-        let r = await LaunchdProbe.probe(label: label, domain: .system, runner: runner)
+        let r = await LaunchdProbe.probe(label: label, runner: runner)
         XCTAssertEqual(runner.args, ["print", "system/\(label)"])
         XCTAssertEqual(r, .registered)
     }
@@ -41,17 +41,17 @@ final class LaunchdProbeTests: XCTestCase {
 
     func testRegisteredWhenLabelInStdout() async {
         let label = "com.coderinserepeat.runnyd"
-        let stdout = "gui/501/\(label) = {\n\tstate = running\n\tprogram = /x\n}"
+        let stdout = "system/\(label) = {\n\tstate = running\n\tprogram = /x\n}"
         let r = await LaunchdProbe.probe(label: label, runner: FakeRunner(result: .exited(code: 0, stdout: stdout, stderr: "")))
         XCTAssertEqual(r, .registered)
     }
 
     func testStoppedButRegisteredStillReadsRegistered() async {
-        // A1: `brew services stop` leaves the job bootstrapped; the label is still
-        // in stdout with `state = not running`, so it reads .registered — the exact
+        // A1: a bootstrapped-but-stopped system daemon still prints the label in
+        // stdout with `state = not running`, so it reads .registered — the exact
         // case an exit-status read would silently miss.
-        let label = "homebrew.mxcl.runny"
-        let stdout = "gui/501/\(label) = {\n\tstate = not running\n\tlast exit code = 0\n}"
+        let label = "com.coderinserepeat.runnyd"
+        let stdout = "system/\(label) = {\n\tstate = not running\n\tlast exit code = 0\n}"
         let r = await LaunchdProbe.probe(label: label, runner: FakeRunner(result: .exited(code: 0, stdout: stdout, stderr: "")))
         XCTAssertEqual(r, .registered)
     }
@@ -61,7 +61,7 @@ final class LaunchdProbeTests: XCTestCase {
         // the label only in stderr. Searching the combined stream would
         // false-positive; searching stdout only correctly reads .notRegistered.
         let label = "com.coderinserepeat.runnyd"
-        let stderr = "Could not find service \"\(label)\" in domain for user gui: 501"
+        let stderr = "Could not find service \"\(label)\" in domain for system"
         let r = await LaunchdProbe.probe(label: label, runner: FakeRunner(result: .exited(code: 113, stdout: "", stderr: stderr)))
         XCTAssertEqual(r, .notRegistered)
     }

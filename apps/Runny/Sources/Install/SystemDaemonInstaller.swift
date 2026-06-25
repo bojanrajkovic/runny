@@ -54,7 +54,7 @@ final class SystemDaemonInstaller {
 
     init(
         systemProbe: @escaping @Sendable () async -> LaunchdProbeResult = {
-            await LaunchdProbe.probe(label: DaemonOwnership.canonicalLabel, domain: .system)
+            await LaunchdProbe.probe(label: DaemonOwnership.canonicalLabel)
         }
     ) {
         self.systemProbe = systemProbe

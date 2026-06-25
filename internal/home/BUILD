@@ -6,6 +6,7 @@ go_library(
         "config.go",
         "home.go",
         "instance.go",
+        "warnings.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/home",
     visibility = ["//:__subpackages__"],
@@ -21,6 +22,7 @@ go_test(
         "config_test.go",
         "instance_test.go",
         "resolve_test.go",
+        "warnings_test.go",
     ],
     embed = [":home"],
 )

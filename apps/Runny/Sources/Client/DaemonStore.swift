@@ -1056,8 +1056,16 @@ final class DaemonStore {
             // dialog is open — not worth an approval-tracking state machine.
             // ponytail: accept the dialog-open edit window; Error is the one outcome
             // we hard-block, a changed Warn just applies.
+            //
+            // Surface a block through `commandError` (the always-presented "Command
+            // failed" alert, same channel as the unreachable case above) — NOT the
+            // affordance's gate row. The Reload buttons reach this with the update
+            // affordance hidden (`daemonUpdateVerdict == .none` during the fail-closed
+            // settling window), where the row would render nowhere: the dialog would
+            // vanish and nothing reload, with no visible reason. The alert is loud
+            // regardless of the affordance.
             if isUpdate, case let .block(message) = await probeUpdateGate() {
-                configGateBlock = message
+                commandError = "reload not sent — \(message)"
                 return
             }
             do {

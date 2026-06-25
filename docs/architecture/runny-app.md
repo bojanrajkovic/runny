@@ -426,12 +426,16 @@ seam, so every decision is unit-tested without launchd. The invariants:
   - **Commit is the gate.** `performReload`, immediately before the irreversible
     drain+respawn, re-probes the bundled (new) runnyd against the current on-disk
     config: a hard incompatibility (or an `unavailable` probe) **blocks** with no
-    reload; anything else proceeds. The daemon's own reload preflight runs the *old*
-    binary — blind to what the new one rejects — so this is the only check that sees
-    it. A *warning* found here is not re-surfaced: it's non-fatal (the daemon comes
-    up), and the only way the verdict could differ from the click is the operator
-    editing `config.yaml` in the ~2s the dialog is open — an accepted, commented
-    residual, not a state machine.
+    reload — surfaced through the always-presented command-error alert (the same
+    "reload not sent" channel as the unreachable-daemon case), *not* the affordance's
+    gate row, since the Reload buttons can block here with the affordance hidden
+    (`daemonUpdateVerdict == .none` during the fail-closed settling window) where a
+    row would render nowhere. Anything else proceeds. The daemon's own reload
+    preflight runs the *old* binary — blind to what the new one rejects — so this is
+    the only check that sees it. A *warning* found here is not re-surfaced: it's
+    non-fatal (the daemon comes up), and the only way the verdict could differ from
+    the click is the operator editing `config.yaml` in the ~2s the dialog is open —
+    an accepted, commented residual, not a state machine.
   - **Click is advisory display.** `DaemonStore.gatedDaemonUpdate` probes once to
     drive the affordance: **OK** arms the confirmed reload, **Warn** shows the
     warnings (rendered as rows) and still arms, **Error**/`unavailable` shows a loud

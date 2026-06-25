@@ -413,6 +413,14 @@ seam, so every decision is unit-tested without launchd. The invariants:
   mechanics. A non-converged result is named loud ("update didn't take — still
   vX"), never folded into the generic reload note. A system daemon is offered only
   the generic skew banner, not a futile fleet-draining update.
+- **The config-compat gate** (`ConfigCompatGate`, `Sources/Lifecycle`) execs the
+  bundled `runnyd -test-config <in-place config>` (via the bounded-process shell)
+  and parses its JSON verdict (`ok`/`warn`/`error`, with warnings) — the substrate
+  for gating an update on the *new* binary accepting the *current* config, so a
+  schema-incompatible upgrade is blocked rather than drained into a crash-loop.
+  Parsing is the pure, unit-tested surface; an unparseable verdict is `unavailable`
+  (blocking), never a fabricated OK. Wiring it into the update flow (OK auto-applies,
+  Warn drops to a manual CTA, Error blocks) is the next slice.
 - **Uninstall** is `unregister()` then a best-effort `launchctl bootout` ("No such
   process" = success); a mid-job uninstall first raises a destructive confirmation
   naming the abandoned slot. **Reconcile-on-launch** compares the registered

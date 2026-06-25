@@ -598,8 +598,14 @@ func TestWaitForRetriesAuthRejection(t *testing.T) {
 
 	// And when rejection never lifts, the expiry error names it — in text
 	// (WaitFor deliberately keeps lastErr out of the chain; see its comment).
+	// The budget must clear one full rejection round-trip before expiry so
+	// lastErr holds the rejection, not the ctx abort. Under -race a loopback
+	// dial+handshake runs several times slower and the scheduler can starve
+	// even the TCP connect, so the budget is a generous multiple of the 1s
+	// per-attempt timeout — a tighter window lets the first attempt straddle
+	// the deadline and report an i/o timeout instead.
 	accept.Store(false)
-	ctx2, cancel2 := bounded.WithTimeout(t.Context(), 400*time.Millisecond)
+	ctx2, cancel2 := bounded.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel2()
 	_, err = WaitFor(ctx2, addr, Config{User: "admin", Signer: signer, Timeout: time.Second}, 50*time.Millisecond)
 	if err == nil {

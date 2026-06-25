@@ -105,9 +105,10 @@ final class ConfigCompatGateTests: XCTestCase {
     }
 
     func testCommitGateNewWarnReconfirms() {
-        // OK at click → Warn at commit: surface the unseen warnings, don't apply.
-        XCTAssertEqual(ConfigCompatGate.commitGate(.confirm([w1]), confirmedWarnings: []), .reconfirm([w1]))
-        // Warn at click → a DIFFERENT Warn at commit: re-confirm the new set.
-        XCTAssertEqual(ConfigCompatGate.commitGate(.confirm([w2]), confirmedWarnings: [w1]), .reconfirm([w2]))
+        // OK at click → Warn at commit: the verdict passes through as .confirm
+        // (a changed/unseen Warn to re-surface), not a silent proceed.
+        XCTAssertEqual(ConfigCompatGate.commitGate(.confirm([w1]), confirmedWarnings: []), .confirm([w1]))
+        // Warn at click → a DIFFERENT Warn at commit: the new set passes through.
+        XCTAssertEqual(ConfigCompatGate.commitGate(.confirm([w2]), confirmedWarnings: [w1]), .confirm([w2]))
     }
 }

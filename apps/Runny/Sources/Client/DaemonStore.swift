@@ -970,20 +970,18 @@ final class DaemonStore {
         reloadConfirm = true
     }
 
-    /// The in-place config the gate validates — the daemon's resolved home. Resolved
-    /// here, not threaded from the view, so the click-time gate and the commit-time
-    /// re-check can't drift on which config they read.
-    private var gateConfigPath: String { RunnyHome.directory.appendingPathComponent("config.yaml").path }
-
-    /// Probe the config-compat gate: validate the current on-disk config with the
-    /// bundled (new) runnyd and map it to the OK/Warn/Error action. `unavailable`
-    /// (no bundled runnyd, or the probe couldn't run/parse) blocks — a gate that
-    /// can't speak must never green-light an upgrade.
+    /// Probe the config-compat gate: validate the current on-disk config (the
+    /// daemon's resolved home, read here rather than threaded from the view so the
+    /// click-time and commit-time checks can't drift) with the bundled (new) runnyd,
+    /// and map it to the OK/Warn/Error action. `unavailable` (no bundled runnyd, or
+    /// the probe couldn't run/parse) blocks — a gate that can't speak must never
+    /// green-light an upgrade.
     private func probeUpdateGate() async -> ConfigCompatGate.UpdateGate {
         guard let runnydPath = SystemDaemonInstaller.bundleRunnydPath else {
             return .block("this build carries no bundled runnyd to validate the config")
         }
-        return await ConfigCompatGate.updateGate(for: ConfigCompatGate.probe(runnydPath: runnydPath, configPath: gateConfigPath))
+        let configPath = RunnyHome.directory.appendingPathComponent("config.yaml").path
+        return await ConfigCompatGate.updateGate(for: ConfigCompatGate.probe(runnydPath: runnydPath, configPath: configPath))
     }
 
     /// Gate a daemon update on the bundled (new) runnyd validating the in-place
@@ -1058,7 +1056,9 @@ final class DaemonStore {
                 case let .block(message):
                     configGateBlock = message
                     return
-                case let .reconfirm(warnings):
+                // A .confirm here is a CHANGED/new Warn (commitGate collapsed an
+                // already-confirmed Warn to .proceed) — re-surface, don't reload.
+                case let .confirm(warnings):
                     configGateWarnings = warnings
                     return
                 }

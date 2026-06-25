@@ -106,18 +106,4 @@ enum ConfigCompatGate {
             return .block("couldn't verify the config against the new runnyd: \(why)")
         }
     }
-
-    /// The re-gate decision at the *confirmed* reload, reusing `UpdateGate` (no
-    /// near-identical twin type). Given the commit-time verdict and the warnings the
-    /// operator already confirmed at the click: a Warn whose warnings they already
-    /// saw collapses to `.proceed`; everything else is the verdict unchanged. So a
-    /// `.confirm` returned here means a CHANGED/new Warn to re-surface (not silently
-    /// apply), and `.block` a hard incompatibility — the only new judgment is "is
-    /// this the same Warn they already confirmed?".
-    static func commitGate(_ verdict: UpdateGate, confirmedWarnings: [ConfigCompatVerdict.Warning]) -> UpdateGate {
-        if case let .confirm(warnings) = verdict, warnings == confirmedWarnings {
-            return .proceed
-        }
-        return verdict
-    }
 }

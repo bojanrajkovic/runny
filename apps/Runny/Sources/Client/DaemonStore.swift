@@ -1016,17 +1016,6 @@ final class DaemonStore {
         configGateRunning = false
     }
 
-    /// Dismissing the reload confirmation WITHOUT accepting must drop the update
-    /// intent and the cached Warn approval. The gate populates `configGateWarnings`
-    /// before the dialog is accepted; if it lingered past a cancel, a later
-    /// respawn-upgrading reload would match it at the commit gate and proceed as if
-    /// those warnings had been confirmed. Bound to the dialog's Cancel button (which
-    /// also catches Esc / tap-away).
-    func cancelReload() {
-        pendingUpdateIntent = false
-        clearConfigGate()
-    }
-
     /// The confirmed path: send the reload. Acceptance arms a pendingReload that
     /// `noteRespawnIfReady` resolves into a verdict once a new daemon (a changed
     /// boot id) answers; refusal surfaces the failed checks at once and leaves the
@@ -1052,27 +1041,24 @@ final class DaemonStore {
         let gen = reloadGeneration
         reloadTask = Task { @MainActor in
             defer { if gen == reloadGeneration { reloadInFlight = false } }
-            // Re-gate an UPDATE at the commit point. The click-time gate validated
-            // the config as it was then, but the operator (or a deploy) can change it
-            // before confirming, and the daemon's own reload preflight runs the OLD
-            // binary — blind to what the NEW one rejects. Re-validate the current
-            // on-disk config and don't silently apply a verdict the operator hasn't
-            // seen: a hard incompatibility blocks (no crash-loop), and a changed/new
-            // Warn re-surfaces its warnings for re-confirmation rather than slipping
-            // through. A Warn the operator already confirmed proceeds unchanged.
-            if isUpdate {
-                switch await ConfigCompatGate.commitGate(probeUpdateGate(), confirmedWarnings: configGateWarnings) {
-                case .proceed:
-                    break
-                case let .block(message):
-                    configGateBlock = message
-                    return
-                // A .confirm here is a CHANGED/new Warn (commitGate collapsed an
-                // already-confirmed Warn to .proceed) — re-surface, don't reload.
-                case let .confirm(warnings):
-                    configGateWarnings = warnings
-                    return
-                }
+            // The authoritative gate is HERE, at the commit — the one irreversible
+            // point, just before the drain+respawn. Re-probe the bundled (new) runnyd
+            // against the current on-disk config: a hard incompatibility blocks (no
+            // crash-loop into a config the new binary can't load); anything else
+            // proceeds. The daemon's own reload preflight runs the OLD binary, blind
+            // to what the NEW one rejects, so this is the only check that sees it. The
+            // click-time gate is advisory display only (it shows the warnings/block in
+            // the affordance) — this re-probe is what actually decides.
+            //
+            // A *warning* found here is deliberately NOT re-surfaced: it's non-fatal
+            // (the daemon comes up), and the only way the verdict could differ from
+            // the click is the operator editing config.yaml in the ~2s the confirm
+            // dialog is open — not worth an approval-tracking state machine.
+            // ponytail: accept the dialog-open edit window; Error is the one outcome
+            // we hard-block, a changed Warn just applies.
+            if isUpdate, case let .block(message) = await probeUpdateGate() {
+                configGateBlock = message
+                return
             }
             do {
                 let resp = try await client.reload(reason: "operator request (Runny)")

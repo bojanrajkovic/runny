@@ -439,9 +439,12 @@ seam, so every decision is unit-tested without launchd. The invariants:
   described. **The plain Reload Config buttons gate too**:
   the per-user agent's `BundleProgram` points at this app bundle, so when the app is
   ahead *any* drain-gated reload respawns the newer binary — the menu-bar and
-  main-window Reload pass `requestReload(respawnUpgrades:)` (computed from
-  `daemonUpdateVerdict`), routing through the same commit gate, so a reload can't
-  bypass it and crash-loop where Update would have blocked. Default-on auto-apply on
+  main-window Reload pass `requestReload(respawnUpgrades:)` (computed by
+  `reloadMightUpgrade`, which **fails closed** while the agent facts are still
+  settling at first appear — `ownership .indeterminate` / `reconcile .notChecked` —
+  so a quick post-upgrade Reload can't slip through ungated), routing through the
+  same commit gate, so a reload can't bypass it and crash-loop where Update would
+  have blocked. Default-on auto-apply on
   OK is the next slice.
 - **Uninstall** is `unregister()` then a best-effort `launchctl bootout` ("No such
   process" = success); a mid-job uninstall first raises a destructive confirmation

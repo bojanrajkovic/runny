@@ -143,7 +143,8 @@ struct MenuBarView: View {
                 activation.openMainWindow(openWindow)
                 // If the app-installed agent is behind, this reload respawns the newer
                 // bundled binary — gate it like an update so it can't crash-loop.
-                store.requestReload(respawnUpgrades: daemonUpdateVerdict(store, agent) != .none)
+                // Fails closed while the agent facts are still settling.
+                store.requestReload(respawnUpgrades: reloadMightUpgrade(store, agent))
             }
             .disabled(store.reloadInFlight || store.client == nil)
             Spacer()

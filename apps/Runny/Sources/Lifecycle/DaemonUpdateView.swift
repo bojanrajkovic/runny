@@ -113,3 +113,19 @@ func daemonUpdateVerdict(_ store: DaemonStore, _ agent: AgentController) -> Daem
         runningBundleCanonical: agent.eligibility == .eligible
     )
 }
+
+/// Whether a plain Reload right now might respawn a newer bundled binary — the
+/// signal the Reload buttons pass to `requestReload(respawnUpgrades:)`. It FAILS
+/// CLOSED while the agent facts are still settling (`ownership == .indeterminate`
+/// or `reconcileState == .notChecked`, the values they hold at first window-appear
+/// before the async refresh/reconcile finish): in that window the verdict can't yet
+/// say it's an update, so a quick post-upgrade Reload would otherwise skip the gate
+/// and crash-loop. Once the facts are settled, `daemonUpdateVerdict` is
+/// authoritative — a genuine non-update reload (`.none`) stays ungated.
+@MainActor
+func reloadMightUpgrade(_ store: DaemonStore, _ agent: AgentController) -> Bool {
+    if agent.ownership == .indeterminate || agent.reconcileState == .notChecked {
+        return true
+    }
+    return daemonUpdateVerdict(store, agent) != .none
+}

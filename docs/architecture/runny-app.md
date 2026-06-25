@@ -330,6 +330,13 @@ is not the system LaunchDaemon plist (an absolute `UserName = _runny` job that
 `internal/sysdaemon` generates) — two shapes for two channels, deliberately not
 unified.
 
+The app-brokered system daemon's *update* path re-stages the binaries in place with
+an atomic tmp-write → `rename(2)` (`SystemDaemonInstaller.restageScript`), never a
+`cp`-over: this OS has no `ETXTBSY` guard, so copying over a running binary truncates
+the live inode and corrupts the running process. The running daemon keeps the old
+inode until the drain-gated reload exits it, and launchd cold-starts onto the
+renamed-in binary. The re-stage is update-only — it never re-runs the installer.
+
 `Sources/Lifecycle/` mirrors `DaemonStore`'s split: pure `nonisolated static`
 verdicts (`LaunchAgentStatus`) plus a thin side-effect wrapper (`AgentController`)
 whose `SMAppService`/`launchctl` calls sit behind a `ServiceRegistrar` protocol

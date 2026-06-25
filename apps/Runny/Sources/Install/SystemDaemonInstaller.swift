@@ -227,6 +227,31 @@ extension SystemDaemonInstaller {
         return PrivilegedBroker.appleScript(doShell: sh)
     }
 
+    /// The brokered re-stage one-liner — the UPDATE path for an app-managed system
+    /// daemon, run once as root. Unlike `installScript` it does NOT re-run
+    /// install-daemon: it only swaps the staged binaries, atomically, leaving the
+    /// drain-gated reload to a separate step. Each new binary is written to a temp
+    /// path in `libexecDir`, chmod'd, then `mv`'d over the live path — a
+    /// same-directory `mv` is `rename(2)`. The spike showed this OS has no `ETXTBSY`
+    /// guard: a `cp` straight over a running binary silently truncates the live inode
+    /// in place and corrupts / code-sign-kills the running daemon on its next page
+    /// fault. So the rename — not a copy-over — is the safety: the running daemon
+    /// keeps the old inode until the reload exits it, and launchd cold-starts onto
+    /// the renamed-in new one. The bundle paths are single-quoted; the staging paths
+    /// are fixed constants.
+    nonisolated static func restageScript(bundleRunnyd: String, bundleRunnyctl: String) -> String {
+        let runnyd = PrivilegedBroker.shellSingleQuote(bundleRunnyd)
+        let runnyctl = PrivilegedBroker.shellSingleQuote(bundleRunnyctl)
+        let stagedRunnyd = "\(libexecDir)/runnyd"
+        let stagedRunnyctl = "\(libexecDir)/runnyctl"
+        let tmpRunnyd = "\(libexecDir)/.runnyd.new"
+        let tmpRunnyctl = "\(libexecDir)/.runnyctl.new"
+        let sh = "mkdir -p \(libexecDir) && "
+            + "cp \(runnyd) \(tmpRunnyd) && chmod 0755 \(tmpRunnyd) && mv \(tmpRunnyd) \(stagedRunnyd) && "
+            + "cp \(runnyctl) \(tmpRunnyctl) && chmod 0755 \(tmpRunnyctl) && mv \(tmpRunnyctl) \(stagedRunnyctl)"
+        return PrivilegedBroker.appleScript(doShell: sh)
+    }
+
     /// The brokered uninstall one-liner: the BUNDLE's runnyctl uninstall-daemon (boots
     /// out the job, removes the plist AND the system home). Uses the bundle copy, not
     /// the staged one, so uninstall works even if `libexecDir` was cleaned;

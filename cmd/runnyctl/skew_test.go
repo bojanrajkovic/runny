@@ -47,8 +47,12 @@ func TestVersionSkew(t *testing.T) {
 		// An unstamped dev build (version "dev", no core) must not wear a false
 		// warning against any real daemon.
 		{"unstamped dev CLI", "dev", "0.6.0", 2, 2, false, "", ""},
-		// The shared-host case: a brew-managed daemon at a wholly different x.y.z.
-		{"different release", "0.6.0", "0.5.0", 2, 2, true, "runnyctl is 0.6.0 but runnyd is 0.5.0", ""},
+		// The actionable headless case: the daemon is BEHIND this (newer) runnyctl —
+		// name the verb (a brew upgrade landed a newer runnyctl; upgrade the daemon).
+		{"daemon behind names upgrade-daemon", "0.6.0", "0.5.0", 2, 2, true, "upgrade-daemon", ""},
+		// The other direction: the daemon is AHEAD, so runnyctl is the lagging install
+		// — never suggest upgrading the daemon down.
+		{"daemon ahead, runnyctl lagging", "0.5.0", "0.6.0", 2, 2, true, "upgrade the lagging install", "upgrade-daemon"},
 		// The text names the daemon CORE, not its sha-bearing suffix, so a same-
 		// core daemon rebuild yields an identical warning (no churn).
 		{"mismatch names core not suffix", "0.6.0", "0.5.0-beta.deadbeef", 2, 2, true, "0.5.0", "deadbeef"},
@@ -120,7 +124,7 @@ func TestWarnSkew(t *testing.T) {
 		err          error
 		wantContains string // "" means nothing printed
 	}{
-		{"version mismatch warns", &runnyv1.GetStatusResponse{Version: "0.5.0", ProtocolVersion: 2}, nil, "different releases"},
+		{"version mismatch warns", &runnyv1.GetStatusResponse{Version: "0.5.0", ProtocolVersion: 2}, nil, "upgrade-daemon"},
 		{"protocol behind warns", &runnyv1.GetStatusResponse{Version: "0.6.0", ProtocolVersion: 1}, nil, "predates a capability"},
 		{"matched is silent", &runnyv1.GetStatusResponse{Version: "0.6.0", ProtocolVersion: 2}, nil, ""},
 		// Best-effort: a down/old daemon fails the probe; the command itself

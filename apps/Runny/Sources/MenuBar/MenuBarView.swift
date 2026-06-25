@@ -438,6 +438,10 @@ struct ReloadConfirmation: ViewModifier {
             "Reload daemon config?", isPresented: $store.reloadConfirm
         ) {
             Button("Validate & Reload") { store.performReload() }
+            // Explicit cancel (also fires on Esc / tap-away): drop the update intent
+            // and any cached Warn approval so a cancelled confirmation can't be
+            // mistaken for consent by a later respawn-upgrading reload.
+            Button("Cancel", role: .cancel) { store.cancelReload() }
         } message: {
             Text(
                 "Validates the on-disk config, then drains the fleet (running jobs "

@@ -1016,6 +1016,17 @@ final class DaemonStore {
         configGateRunning = false
     }
 
+    /// Dismissing the reload confirmation WITHOUT accepting must drop the update
+    /// intent and the cached Warn approval. The gate populates `configGateWarnings`
+    /// before the dialog is accepted; if it lingered past a cancel, a later
+    /// respawn-upgrading reload would match it at the commit gate and proceed as if
+    /// those warnings had been confirmed. Bound to the dialog's Cancel button (which
+    /// also catches Esc / tap-away).
+    func cancelReload() {
+        pendingUpdateIntent = false
+        clearConfigGate()
+    }
+
     /// The confirmed path: send the reload. Acceptance arms a pendingReload that
     /// `noteRespawnIfReady` resolves into a verdict once a new daemon (a changed
     /// boot id) answers; refusal surfaces the failed checks at once and leaves the

@@ -431,9 +431,12 @@ seam, so every decision is unit-tested without launchd. The invariants:
   an upgrade from draining into a crash-loop. It never silently applies a verdict the
   operator hasn't seen (`ConfigCompatGate.commitGate`): a Warn they already confirmed
   proceeds, a hard incompatibility aborts, and a changed/new Warn re-surfaces its
-  warnings for re-confirmation. The gate rows render only while an update is on
-  offer and the gate state is cleared on convergence/reconnect, so a verdict can't
-  linger after the update it described. **The plain Reload Config buttons gate too**:
+  warnings for re-confirmation (a Warn approval is cached only to confirm past it,
+  and is dropped if the confirmation dialog is **cancelled** — `cancelReload` — so a
+  cancelled approval can't be mistaken for consent by a later reload). The gate rows
+  render only while an update is on offer and the gate state is cleared on
+  convergence/reconnect/cancel, so a verdict can't linger after the update it
+  described. **The plain Reload Config buttons gate too**:
   the per-user agent's `BundleProgram` points at this app bundle, so when the app is
   ahead *any* drain-gated reload respawns the newer binary — the menu-bar and
   main-window Reload pass `requestReload(respawnUpgrades:)` (computed from

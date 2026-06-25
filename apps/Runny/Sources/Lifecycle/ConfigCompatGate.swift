@@ -106,4 +106,28 @@ enum ConfigCompatGate {
             return .block("couldn't verify the config against the new runnyd: \(why)")
         }
     }
+
+    /// The re-gate decision at the *confirmed* reload, given the commit-time verdict
+    /// and the warnings the operator already confirmed at the click. Proceed on OK,
+    /// or on a Warn whose warnings the operator already saw and confirmed; otherwise
+    /// don't silently apply an unseen verdict — `block` a hard incompatibility, or
+    /// `reconfirm` a changed/new Warn so its warnings surface and the operator
+    /// re-confirms. The click-time gate and this both go through `updateGate`, so the
+    /// only new judgment here is "is this the same Warn they already confirmed?".
+    enum CommitGate: Equatable {
+        case proceed
+        case block(String)
+        case reconfirm([ConfigCompatVerdict.Warning])
+    }
+
+    static func commitGate(_ verdict: UpdateGate, confirmedWarnings: [ConfigCompatVerdict.Warning]) -> CommitGate {
+        switch verdict {
+        case .proceed:
+            .proceed
+        case let .block(message):
+            .block(message)
+        case let .confirm(warnings):
+            warnings == confirmedWarnings ? .proceed : .reconfirm(warnings)
+        }
+    }
 }

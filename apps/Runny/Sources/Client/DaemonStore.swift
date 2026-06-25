@@ -1039,13 +1039,21 @@ final class DaemonStore {
             // the config as it was then, but the operator (or a deploy) can change it
             // before confirming, and the daemon's own reload preflight runs the OLD
             // binary — blind to what the NEW one rejects. Re-validate the current
-            // on-disk config with the bundled runnyd and abort on a hard
-            // incompatibility, so an upgrade can't drain into the crash-loop the gate
-            // exists to prevent. A Warn was already confirmed via the dialog, so only
-            // Error/unavailable blocks here.
-            if isUpdate, case let .block(message) = await probeUpdateGate() {
-                configGateBlock = message
-                return
+            // on-disk config and don't silently apply a verdict the operator hasn't
+            // seen: a hard incompatibility blocks (no crash-loop), and a changed/new
+            // Warn re-surfaces its warnings for re-confirmation rather than slipping
+            // through. A Warn the operator already confirmed proceeds unchanged.
+            if isUpdate {
+                switch await ConfigCompatGate.commitGate(probeUpdateGate(), confirmedWarnings: configGateWarnings) {
+                case .proceed:
+                    break
+                case let .block(message):
+                    configGateBlock = message
+                    return
+                case let .reconfirm(warnings):
+                    configGateWarnings = warnings
+                    return
+                }
             }
             do {
                 let resp = try await client.reload(reason: "operator request (Runny)")

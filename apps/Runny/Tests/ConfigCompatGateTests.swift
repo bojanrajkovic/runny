@@ -82,4 +82,32 @@ final class ConfigCompatGateTests: XCTestCase {
         }
         XCTAssertTrue(msg.contains("runnyd timed out"))
     }
+
+    // MARK: - commit re-gate (re-confirm a changed verdict, never silently apply)
+
+    private var w1: ConfigCompatVerdict.Warning { .init(kind: "deadline-too-short", message: "await_ssh 1s") }
+    private var w2: ConfigCompatVerdict.Warning { .init(kind: "resource-overcommit", message: "512 cores") }
+
+    func testCommitGateOKProceeds() {
+        XCTAssertEqual(ConfigCompatGate.commitGate(.proceed, confirmedWarnings: []), .proceed)
+        // A Warn-at-click that improved to OK by commit still proceeds.
+        XCTAssertEqual(ConfigCompatGate.commitGate(.proceed, confirmedWarnings: [w1]), .proceed)
+    }
+
+    func testCommitGateBlocks() {
+        XCTAssertEqual(ConfigCompatGate.commitGate(.block("over cap"), confirmedWarnings: [w1]), .block("over cap"))
+    }
+
+    func testCommitGateSameWarnProceedsNoReconfirmLoop() {
+        // The operator already confirmed exactly these warnings — proceed, or a stable
+        // Warn config could never be updated (it would re-confirm forever).
+        XCTAssertEqual(ConfigCompatGate.commitGate(.confirm([w1]), confirmedWarnings: [w1]), .proceed)
+    }
+
+    func testCommitGateNewWarnReconfirms() {
+        // OK at click → Warn at commit: surface the unseen warnings, don't apply.
+        XCTAssertEqual(ConfigCompatGate.commitGate(.confirm([w1]), confirmedWarnings: []), .reconfirm([w1]))
+        // Warn at click → a DIFFERENT Warn at commit: re-confirm the new set.
+        XCTAssertEqual(ConfigCompatGate.commitGate(.confirm([w2]), confirmedWarnings: [w1]), .reconfirm([w2]))
+    }
 }

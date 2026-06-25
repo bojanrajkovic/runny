@@ -51,6 +51,7 @@ func run() error {
 	configFlag := flag.String("config", "", "config path (default <home>/config.yaml)")
 	checkOnly := flag.Bool("doctor", false, "run validation checks and exit")
 	showVersion := flag.Bool("version", false, "print the daemon version and exit")
+	testConfig := flag.String("test-config", "", "validate a config file (local checks only), print a JSON verdict, and exit")
 	flag.Parse()
 
 	// Side-effect-free: no home, no config, no lock — so it works against an
@@ -58,6 +59,15 @@ func run() error {
 	if *showVersion {
 		fmt.Println(version)
 		return nil
+	}
+
+	// The config-compat gate: the NEW binary validates the in-place config with
+	// local checks only and prints a JSON verdict. Side-effect-free like -version
+	// (no home, no lock, no network), so the bundled/on-disk new binary can run
+	// it before an upgrade commits — answering "will the new binary accept this
+	// config?", the question the old daemon's reload preflight structurally can't.
+	if *testConfig != "" {
+		return runTestConfig(*testConfig)
 	}
 
 	dir, err := home.ResolveServer()

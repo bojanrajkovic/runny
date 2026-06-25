@@ -152,6 +152,39 @@ confirm the respawn that comes back is the one it asked for, and tell a
 slow-but-healthy drain apart from a hung one — the client-facing other half is
 [reload-convergence.md](reload-convergence.md).
 
+## The config-compat gate (`-test-config`)
+
+`runnyd -test-config <path>` validates a config with the **new** binary and
+prints a machine-readable verdict, so an update can be gated on "will the new
+binary accept the in-place config?" — the question the running daemon's reload
+preflight structurally cannot answer (it validates against the *old* schema).
+
+It runs **local checks only** — strict parse + `validate()`, the macOS guest
+cap, the runner-name length cap, the per-pool image-reference parse
+(`oci.ParseRef`, which startup also runs before booting a slot), and the
+soft-validation warnings (`Config.Warnings`) — and **no** network checks: upgrade-readiness is a question
+about config-schema compatibility, not live GitHub/registry/disk health, and a
+transient blip must never refuse a valid upgrade. It is read-only — no lock, no
+network, no writes (no `instance-id` generated). The runner-name cap is checked
+against the persisted prefix when it can be read (matching exactly what the
+daemon validates at startup), else a conservative worst-case prefix that can
+over-refuse a borderline config but never under-estimate the real prefix into a
+false OK — a renamed host keeps its longer persisted prefix, so a stateless
+current-hostname guess could otherwise green-light a config the respawn rejects.
+
+The verdict is JSON on stdout — a stable, cross-language contract the Swift app
+and `runnyctl` both parse:
+
+```json
+{ "status": "ok" | "warn" | "error", "errors": ["…"], "warnings": [{ "kind": "…", "message": "…" }] }
+```
+
+`ok` applies an update; `warn` drops to a manual confirmation showing the
+warnings; `error` blocks and names the incompatibility. `errors` and `warnings`
+are always arrays (never null). The exit code mirrors the status (0 for
+ok/warn, non-zero for error), but the JSON is the contract. This is distinct
+from `-doctor`, which runs the full network suite for operational diagnosis.
+
 ## On-disk layout
 
 `internal/home` is the authority. Shape: `config.yaml`, `runnyd.sock` (0600),

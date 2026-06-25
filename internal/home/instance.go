@@ -39,6 +39,39 @@ func ValidateRunnerNames(prefix string, pools []PoolConfig) error {
 	return errors.Join(errs...)
 }
 
+// maxHostnameSlug caps the hostname slug in a derived instance prefix, and
+// instanceTailLen is the hex-encoded random tail (4 bytes). Together they bound
+// the length of any hostname-derived prefix: <=maxHostnameSlug + 1 + instanceTailLen.
+const (
+	maxHostnameSlug = 24
+	instanceTailLen = 8
+)
+
+// ReadInstancePrefix returns the persisted runner-name prefix WITHOUT generating
+// one — for read-only callers (the config-compat gate) that must not create
+// instance-id as a side effect. Returns ("", false) when none is persisted or it
+// can't be read, so a caller falls back to WorstCasePrefix rather than failing.
+func (d Dir) ReadInstancePrefix() (string, bool) {
+	b, err := os.ReadFile(d.InstanceIDPath())
+	if err != nil {
+		return "", false
+	}
+	if s := strings.TrimSpace(string(b)); s != "" {
+		return s, true
+	}
+	return "", false
+}
+
+// WorstCasePrefix returns the longest runner-name prefix a hostname-derived
+// InstancePrefix can produce: a max-length slug plus the random tail. The
+// stateless config-compat gate validates against this when it can't read the
+// persisted prefix, so it may over-refuse a borderline config but can never
+// green-light one the daemon's real (<= this length) prefix would reject at
+// startup — the gate must never under-estimate the prefix into a false OK.
+func WorstCasePrefix() string {
+	return strings.Repeat("a", maxHostnameSlug) + "-" + strings.Repeat("0", instanceTailLen)
+}
+
 // slugHostname reduces a hostname to a GitHub-runner-name-safe token: the
 // short name (cut at the first dot), lowercased, every run of non-alphanumeric
 // collapsed to a single dash, trimmed, and length-capped.
@@ -48,8 +81,8 @@ func slugHostname(h string) string {
 	}
 	h = slugNonAlnum.ReplaceAllString(strings.ToLower(h), "-")
 	h = strings.Trim(h, "-")
-	if len(h) > 24 {
-		h = strings.Trim(h[:24], "-")
+	if len(h) > maxHostnameSlug {
+		h = strings.Trim(h[:maxHostnameSlug], "-")
 	}
 	if h == "" {
 		h = "runny"

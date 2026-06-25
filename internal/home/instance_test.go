@@ -51,6 +51,40 @@ func TestInstancePrefixPersists(t *testing.T) {
 	}
 }
 
+func TestReadInstancePrefix(t *testing.T) {
+	d := Dir(t.TempDir())
+	// Absent → ("", false), and read-only: it must not create instance-id.
+	if p, ok := d.ReadInstancePrefix(); ok || p != "" {
+		t.Errorf("absent instance-id: got (%q, %v), want (\"\", false)", p, ok)
+	}
+	if _, err := os.Stat(d.InstanceIDPath()); !os.IsNotExist(err) {
+		t.Error("ReadInstancePrefix must not create instance-id")
+	}
+	// Present → the trimmed persisted value.
+	if err := os.WriteFile(d.InstanceIDPath(), []byte("myhost-deadbeef\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if p, ok := d.ReadInstancePrefix(); !ok || p != "myhost-deadbeef" {
+		t.Errorf("persisted instance-id: got (%q, %v), want (\"myhost-deadbeef\", true)", p, ok)
+	}
+}
+
+func TestWorstCasePrefixBoundsDerivedPrefixes(t *testing.T) {
+	w := WorstCasePrefix()
+	// Exactly the longest a hostname-derived prefix can be: maxSlug + "-" + tail.
+	if want := maxHostnameSlug + 1 + instanceTailLen; len(w) != want {
+		t.Errorf("WorstCasePrefix len = %d, want %d", len(w), want)
+	}
+	// No hostname-derived prefix can exceed it — slugHostname caps the slug — so the
+	// stateless gate validating against it can never under-estimate the real prefix.
+	for _, h := range []string{"a-very-long-hostname-that-exceeds-the-cap", "mac", "build-server-01"} {
+		derived := slugHostname(h) + "-" + strings.Repeat("0", instanceTailLen)
+		if len(derived) > len(w) {
+			t.Errorf("derived prefix for %q (%d) exceeds worst-case (%d)", h, len(derived), len(w))
+		}
+	}
+}
+
 func TestValidateRunnerNames(t *testing.T) {
 	// Worst-case prefix: 24-char slug + dash + rand8 = 33 chars.
 	long := "abcdefghijklmnopqrstuvwx-a1b2c3d4"

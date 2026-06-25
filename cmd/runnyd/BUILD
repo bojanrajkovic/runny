@@ -9,6 +9,8 @@ go_library(
     srcs = [
         "competing.go",
         "drain.go",
+        "hostprobe_darwin.go",
+        "hostprobe_other.go",
         "launchcontext.go",
         "launchcontext_darwin.go",
         "launchcontext_other.go",
@@ -18,6 +20,7 @@ go_library(
         "platform_darwin.go",
         "platform_other.go",
         "rotate.go",
+        "testconfig.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/cmd/runnyd",
     visibility = ["//visibility:private"],
@@ -122,6 +125,7 @@ go_test(
         "localnet_test.go",
         "reload_test.go",
         "rotate_test.go",
+        "testconfig_test.go",
     ],
     embed = [":runnyd_lib"],
     deps = [

@@ -21,6 +21,14 @@ that supersedes the contingency framing here is
 [#84](https://github.com/bojanrajkovic/runny/issues/84). The body below is
 preserved as the decision-time record — read it through this banner.
 
+**Amended (2026-06-24, [ADR-0022](0022-app-driven-runnyd-updates.md)):** the
+Consequence below that a system daemon is offered "only the generic skew banner,
+not a futile fleet-draining update" is superseded. The installed system daemon
+now gets a real, config-gated update — an app-brokered atomic re-stage + reload,
+or operator-driven `runnyctl upgrade-daemon` on a headless host — each gated on
+the new binary validating the in-place config. The bundling, version-lock, and
+loud-skew decisions here stand; only the no-system-daemon-update stance changes.
+
 ## Context
 
 A release stamps all three artifacts — `Runny.app`, `runnyd`, `runnyctl` — at

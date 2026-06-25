@@ -90,7 +90,7 @@ its rejected alternatives are
 | Package | Owns |
 | --- | --- |
 | `internal/bounded` | `bounded.Context` — the no-unbounded-operations invariant as a type (ADR-0011); wall-clock and progress-stall bounds |
-| `internal/home` | the `~/.runny` layout and the config schema (parse/default/validate once, at the boundary) |
+| `internal/home` | the `~/.runny` layout and the config schema (parse/default/validate once, at the boundary); a non-fatal warnings channel (`Config.Warnings`) runs local soft-validations feeding the config-compat gate (ADR-0022) |
 | `internal/cycle` | cycle.json records: write/read/prune, retention |
 | `internal/tart` | tart bundle format: config.json parse, validation, clonefile |
 | `internal/oci` | tart-format image pull: registry auth, manifest, Apple-LZ4 disk assembly; declared sizes enforced on every blob and decode |

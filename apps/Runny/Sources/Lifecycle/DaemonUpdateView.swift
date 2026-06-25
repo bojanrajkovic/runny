@@ -12,6 +12,35 @@ struct DaemonUpdateAffordance: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            updateAffordance
+            gateRows
+        }
+    }
+
+    /// The config-compat gate's surfaced state: a "checking…" row while the probe
+    /// runs, a loud red block when the new runnyd refuses the config, and the
+    /// warnings to confirm past on a Warn verdict. Plain conditionals (no
+    /// transitions) per the hosted-SwiftUI rule.
+    @ViewBuilder private var gateRows: some View {
+        if store.configGateRunning {
+            AffordanceRow(systemImage: icon, text: "Checking the new runnyd accepts the current config…", tint: .secondary) {
+                ProgressView().controlSize(.small)
+            }
+        }
+        if let block = store.configGateBlock {
+            AffordanceRow(systemImage: "exclamationmark.triangle.fill", text: "Update blocked — \(block)", tint: .red) {
+                EmptyView()
+            }
+        }
+        ForEach(store.configGateWarnings, id: \.message) { warning in
+            AffordanceRow(systemImage: "exclamationmark.circle", text: "Config warning — \(warning.message)", tint: .orange) {
+                EmptyView()
+            }
+        }
+    }
+
+    @ViewBuilder private var updateAffordance: some View {
         switch store.daemonUpdate(
             // Require BOTH ownership and installState — each guards a distinct way the
             // other goes stale. ownership == .selfManaged rejects a verdict the app
@@ -61,7 +90,13 @@ struct DaemonUpdateAffordance: View {
             // must cancel it — draining a foreign fleet for an update that can't take is
             // active harm, not a no-op. The render gate can be minutes stale by click.
             if await agent.revalidate(.selfManaged), agent.installState == .installed {
-                store.requestDaemonUpdate()
+                // Gate on the bundled (new) runnyd validating the in-place config
+                // before any reload: OK proceeds, Warn surfaces warnings + confirms,
+                // Error blocks loud. requestDaemonUpdate is reached only via the gate.
+                await store.gatedDaemonUpdate(
+                    runnydPath: SystemDaemonInstaller.bundleRunnydPath,
+                    configPath: RunnyHome.directory.appendingPathComponent("config.yaml").path
+                )
             }
         }
     }

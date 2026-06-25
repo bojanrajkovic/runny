@@ -419,8 +419,12 @@ seam, so every decision is unit-tested without launchd. The invariants:
   for gating an update on the *new* binary accepting the *current* config, so a
   schema-incompatible upgrade is blocked rather than drained into a crash-loop.
   Parsing is the pure, unit-tested surface; an unparseable verdict is `unavailable`
-  (blocking), never a fabricated OK. Wiring it into the update flow (OK auto-applies,
-  Warn drops to a manual CTA, Error blocks) is the next slice.
+  (blocking), never a fabricated OK. The manual Update is gated on it via
+  `DaemonStore.gatedDaemonUpdate`: **OK** proceeds to the confirmed reload, **Warn**
+  surfaces the warnings (rendered in the affordance) and still confirms past them,
+  **Error** — or an `unavailable` gate — blocks loud with no reload (`requestDaemonUpdate`
+  is reached only through the gate). The OK/Warn/Error decision is the pure
+  `ConfigCompatGate.updateGate`; default-on auto-apply on OK is the next slice.
 - **Uninstall** is `unregister()` then a best-effort `launchctl bootout` ("No such
   process" = success); a mid-job uninstall first raises a destructive confirmation
   naming the abandoned slot. **Reconcile-on-launch** compares the registered

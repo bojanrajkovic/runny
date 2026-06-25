@@ -178,6 +178,16 @@ final class DaemonStore {
     /// a cancelled update can't inherit the stale intent.
     private var pendingUpdateIntent = false
 
+    /// The config-compat gate's result for an in-flight daemon update. `block` is a
+    /// loud refusal (the new runnyd rejects the config, or the gate couldn't run) —
+    /// the update is NOT issued. `warnings` accompany a Warn verdict that the
+    /// operator can still confirm past. Both are cleared when a fresh update starts.
+    private(set) var configGateBlock: String?
+    private(set) var configGateWarnings: [ConfigCompatVerdict.Warning] = []
+    /// True while the gate's subprocess probe is running — the affordance shows a
+    /// brief "checking…" rather than a stale state.
+    private(set) var configGateRunning = false
+
     /// Is the app a strictly newer build than the running daemon? The upgrade
     /// direction the symmetric skew verdict does not itself report.
     var appNewerThanDaemon: Bool {
@@ -945,6 +955,33 @@ final class DaemonStore {
     func requestDaemonUpdate() {
         pendingUpdateIntent = true
         reloadConfirm = true
+    }
+
+    /// Gate a daemon update on the bundled (new) runnyd validating the in-place
+    /// config, then branch on the verdict: OK proceeds to the confirmed reload;
+    /// Warn proceeds but surfaces the warnings to confirm past; Error/unavailable
+    /// blocks loud and issues no reload — a schema-incompatible upgrade is stopped
+    /// here, not drained into a crash-loop. The async probe is the live shell
+    /// (`ConfigCompatGate.probe`); the OK/Warn/Error mapping is the pure, unit-tested
+    /// `ConfigCompatGate.updateGate`.
+    func gatedDaemonUpdate(runnydPath: String?, configPath: String) async {
+        configGateBlock = nil
+        configGateWarnings = []
+        guard let runnydPath else {
+            configGateBlock = "this build carries no bundled runnyd to validate the config"
+            return
+        }
+        configGateRunning = true
+        defer { configGateRunning = false }
+        switch await ConfigCompatGate.updateGate(for: ConfigCompatGate.probe(runnydPath: runnydPath, configPath: configPath)) {
+        case .proceed:
+            requestDaemonUpdate()
+        case let .confirm(warnings):
+            configGateWarnings = warnings
+            requestDaemonUpdate()
+        case let .block(message):
+            configGateBlock = message
+        }
     }
 
     /// The confirmed path: send the reload. Acceptance arms a pendingReload that

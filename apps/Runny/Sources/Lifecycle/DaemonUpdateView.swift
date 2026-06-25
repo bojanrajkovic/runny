@@ -12,20 +12,7 @@ struct DaemonUpdateAffordance: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        let verdict = store.daemonUpdate(
-            // Require BOTH ownership and installState — each guards a distinct way the
-            // other goes stale. ownership == .selfManaged rejects a verdict the app
-            // doesn't drain-update: a systemManaged daemon (managed from Settings →
-            // System Service, not a per-user drain-respawn) or any deferring verdict.
-            // installState == .installed rejects a stale .selfManaged left behind by a
-            // teardown the verdict didn't re-gather (a partial uninstall/failed repair
-            // where the agent is gone but the daemon lingers connected) — Updating that
-            // would drain a daemon with no agent to respawn it. The AND can't be fooled
-            // by a single stale signal.
-            agentInstalled: agent.ownership == .selfManaged && agent.installState == .installed,
-            agentCanonical: agentCanonical,
-            runningBundleCanonical: agent.eligibility == .eligible
-        )
+        let verdict = daemonUpdateVerdict(store, agent)
         VStack(alignment: .leading, spacing: 6) {
             updateAffordance(verdict)
             // Gate rows belong to an available/in-flight update — render them only
@@ -104,12 +91,25 @@ struct DaemonUpdateAffordance: View {
             }
         }
     }
+}
 
-    /// Update requires AFFIRMATIVE canonical confirmation — `.ok`, not the
-    /// unchecked `.notChecked` default (nor `.foreign`/`.undetermined`). A reload
-    /// for a foreign or unverified agent could respawn the wrong BundleProgram, so
-    /// the surfaces run reconcile on appear and Update stays hidden until it lands.
-    private var agentCanonical: Bool {
-        agent.reconcileState == .ok
-    }
+/// The daemon-update verdict for the current store + agent — shared by the update
+/// affordance and by the plain Reload buttons (which must gate a reload that would
+/// respawn the newer bundled binary). It requires BOTH ownership and installState,
+/// each guarding a distinct staleness: `ownership == .selfManaged` rejects a verdict
+/// the app doesn't drain-update (a `systemManaged` daemon, or any deferring verdict);
+/// `installState == .installed` rejects a stale `.selfManaged` left by a teardown the
+/// verdict didn't re-gather. The canonical checks (`reconcileState == .ok`,
+/// `eligibility == .eligible`) require AFFIRMATIVE confirmation that the registered
+/// agent and the running bundle are THIS `/Applications` app, so the verdict reflects
+/// the binary a reload would actually respawn — never a translocated or foreign one.
+/// `!= .none` therefore means "a reload right now would cold-start a newer bundled
+/// daemon", the precise condition under which a plain reload is really an update.
+@MainActor
+func daemonUpdateVerdict(_ store: DaemonStore, _ agent: AgentController) -> DaemonStore.DaemonUpdate {
+    store.daemonUpdate(
+        agentInstalled: agent.ownership == .selfManaged && agent.installState == .installed,
+        agentCanonical: agent.reconcileState == .ok,
+        runningBundleCanonical: agent.eligibility == .eligible
+    )
 }

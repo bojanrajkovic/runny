@@ -106,6 +106,7 @@ extension View {
 /// Compact daemon status: connection, version, uptime, last update.
 struct DaemonCard: View {
     @Environment(DaemonStore.self) private var store
+    @Environment(AgentController.self) private var agent
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -139,7 +140,9 @@ struct DaemonCard: View {
             DaemonUpdateAffordance()
             HStack {
                 Button(store.reloadInFlight ? "Validating…" : "Reload Config…") {
-                    store.requestReload()
+                    // If the app-installed agent is behind, this reload respawns the
+                    // newer bundled binary — gate it like an update so it can't crash-loop.
+                    store.requestReload(respawnUpgrades: daemonUpdateVerdict(store, agent) != .none)
                 }
                 .disabled(store.reloadInFlight || store.client == nil)
                 // Manual re-dial of the same daemon at the fixed ~/.runny.

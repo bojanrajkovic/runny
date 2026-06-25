@@ -946,8 +946,16 @@ final class DaemonStore {
     /// Stage the reload confirmation dialog. Reload restarts the whole daemon
     /// and drains every slot (jobs finish first), so it's gated behind explicit
     /// consent like the `-force` recycle cases.
-    func requestReload() {
-        pendingUpdateIntent = false
+    ///
+    /// `respawnUpgrades` is set by the caller when the app-installed per-user agent
+    /// is behind — i.e. the agent's `BundleProgram` points at this (newer) app
+    /// bundle, so the drain-gated respawn cold-starts the NEW binary. In that state
+    /// a plain reload IS an update and must clear the config-compat gate at the
+    /// commit point (`performReload`), or a schema-incompatible config crash-loops
+    /// the respawn exactly as an unguarded Update would. A reload that respawns the
+    /// same binary carries no update intent and isn't gated.
+    func requestReload(respawnUpgrades: Bool = false) {
+        pendingUpdateIntent = respawnUpgrades
         reloadConfirm = true
     }
 

@@ -141,7 +141,9 @@ struct MenuBarView: View {
             // panel has no reliable presenter), so route through the window.
             Button(store.reloadInFlight ? "Validating…" : "Reload…") {
                 activation.openMainWindow(openWindow)
-                store.requestReload()
+                // If the app-installed agent is behind, this reload respawns the newer
+                // bundled binary — gate it like an update so it can't crash-loop.
+                store.requestReload(respawnUpgrades: daemonUpdateVerdict(store, agent) != .none)
             }
             .disabled(store.reloadInFlight || store.client == nil)
             Spacer()

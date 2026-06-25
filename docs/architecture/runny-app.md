@@ -433,7 +433,13 @@ seam, so every decision is unit-tested without launchd. The invariants:
   proceeds, a hard incompatibility aborts, and a changed/new Warn re-surfaces its
   warnings for re-confirmation. The gate rows render only while an update is on
   offer and the gate state is cleared on convergence/reconnect, so a verdict can't
-  linger after the update it described. Default-on auto-apply on OK is the next slice.
+  linger after the update it described. **The plain Reload Config buttons gate too**:
+  the per-user agent's `BundleProgram` points at this app bundle, so when the app is
+  ahead *any* drain-gated reload respawns the newer binary — the menu-bar and
+  main-window Reload pass `requestReload(respawnUpgrades:)` (computed from
+  `daemonUpdateVerdict`), routing through the same commit gate, so a reload can't
+  bypass it and crash-loop where Update would have blocked. Default-on auto-apply on
+  OK is the next slice.
 - **Uninstall** is `unregister()` then a best-effort `launchctl bootout` ("No such
   process" = success); a mid-job uninstall first raises a destructive confirmation
   naming the abandoned slot. **Reconcile-on-launch** compares the registered

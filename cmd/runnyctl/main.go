@@ -833,6 +833,9 @@ func (c *ctl) renderCycle(rec *runnyv1.CycleRecord) {
 		switch sr.GetOutcome() {
 		case "ok":
 			fmt.Fprintf(c.out, "    %-13s %8s  ok\n", state, d)
+		case "warn":
+			// State did its mandatory job; a best-effort cleanup left an orphan.
+			fmt.Fprintf(c.out, "    %-13s %8s  warn: %s\n", state, d, sr.GetError())
 		case "deadline":
 			fmt.Fprintf(c.out, "    %-13s %8s  DEADLINE EXCEEDED: %s\n", state, d, sr.GetError())
 		default:

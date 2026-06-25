@@ -1732,12 +1732,20 @@ func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInput
 		}
 	}
 
+	// Steps 4 and 5 are best-effort cleanups: the guest is already destroyed, so
+	// a failure here leaves only a swept-later orphan (a clone dir, an offline
+	// registration). Recorded as a warn — never a bare ok (a clean-looking record
+	// over a failed cleanup is the silent-record gap) and never an error (that is
+	// the wedge: the mandatory teardown could not complete).
+	var cleanupWarns []string
+
 	// 4. Delete the clone bundle — unless the undead guest still holds it.
 	// Deleting the disk out from under a live guest destroys the evidence
 	// and frees nothing that matters (the guest-cap slot stays occupied).
 	if !wedged {
 		if err := removeAll(in.vmDir); err != nil {
 			s.deps.Log.Error("removing vm dir", "err", err)
+			cleanupWarns = append(cleanupWarns, fmt.Sprintf("remove clone: %v", err))
 		}
 	}
 
@@ -1745,16 +1753,26 @@ func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInput
 	if in.runnerID != 0 && !in.jobRan {
 		if err := s.deps.GitHub.DeleteRunner(tctx, in.runnerID); err != nil {
 			s.deps.Log.Warn("deregistering runner", "id", in.runnerID, "err", err)
+			cleanupWarns = append(cleanupWarns, fmt.Sprintf("deregister runner %d: %v", in.runnerID, err))
 		}
 	}
 
 	tr.Left = time.Now()
-	if wedged {
+	switch {
+	case wedged:
 		// Recording OK here once hid the exact outage this project exists
 		// to kill: cycle.json swore teardown succeeded while a ghost guest
-		// ate the macOS guest cap and every later boot failed.
+		// ate the macOS guest cap and every later boot failed. A dereg can
+		// still fail on this path (step 5 runs regardless); note it, but the
+		// wedge dominates the outcome. tr.Error already holds the stop failure.
 		tr.Outcome = cycle.OutcomeError
-	} else {
+		if len(cleanupWarns) > 0 {
+			tr.Error += "; " + strings.Join(cleanupWarns, "; ")
+		}
+	case len(cleanupWarns) > 0:
+		tr.Outcome = cycle.OutcomeWarn
+		tr.Error = strings.Join(cleanupWarns, "; ")
+	default:
 		tr.Outcome = cycle.OutcomeOK
 	}
 	rec.States = append(rec.States, tr)

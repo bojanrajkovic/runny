@@ -19,3 +19,6 @@ xcuserdata/
 .idea/
 .vscode/
 node_modules/
+
+# Agent/skill local caches (never code)
+.impeccable/

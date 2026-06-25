@@ -424,7 +424,14 @@ seam, so every decision is unit-tested without launchd. The invariants:
   surfaces the warnings (rendered in the affordance) and still confirms past them,
   **Error** — or an `unavailable` gate — blocks loud with no reload (`requestDaemonUpdate`
   is reached only through the gate). The OK/Warn/Error decision is the pure
-  `ConfigCompatGate.updateGate`; default-on auto-apply on OK is the next slice.
+  `ConfigCompatGate.updateGate`. The gate is **re-run at the confirmed reload**
+  (`performReload`), not just at the click: the config can change between the gate
+  and the confirm, and the daemon's own reload preflight is the *old* binary (blind
+  to what the new one rejects), so the commit-point re-check is what actually keeps
+  an upgrade from draining into a crash-loop (a Warn was already confirmed, so only
+  Error/unavailable aborts there). The gate rows render only while an update is on
+  offer and the gate state is cleared on convergence/reconnect, so a verdict can't
+  linger after the update it described. Default-on auto-apply on OK is the next slice.
 - **Uninstall** is `unregister()` then a best-effort `launchctl bootout` ("No such
   process" = success); a mid-job uninstall first raises a destructive confirmation
   naming the abandoned slot. **Reconcile-on-launch** compares the registered

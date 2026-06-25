@@ -455,6 +455,7 @@ final class DaemonStore {
         skew = nil
         dismissedSkew = nil
         daemonUpdateAttempted = false
+        clearConfigGate()
         pendingReload = nil
         reloadJobInFlight = false
         reloadStallSince = nil
@@ -638,8 +639,12 @@ final class DaemonStore {
         )
         // Once the app is no longer ahead on either axis — the update took, or it
         // was never behind — clear the attempt flag so a future skew shows
-        // "available", not a stale "didn't take".
-        if !appAheadOfDaemon { daemonUpdateAttempted = false }
+        // "available", not a stale "didn't take", and clear any gate block/warnings
+        // so they don't linger after the update they described converged.
+        if !appAheadOfDaemon {
+            daemonUpdateAttempted = false
+            clearConfigGate()
+        }
     }
 
     // MARK: - Commands (requested vs confirmed)
@@ -957,23 +962,35 @@ final class DaemonStore {
         reloadConfirm = true
     }
 
+    /// The in-place config the gate validates — the daemon's resolved home. Resolved
+    /// here, not threaded from the view, so the click-time gate and the commit-time
+    /// re-check can't drift on which config they read.
+    private var gateConfigPath: String { RunnyHome.directory.appendingPathComponent("config.yaml").path }
+
+    /// Probe the config-compat gate: validate the current on-disk config with the
+    /// bundled (new) runnyd and map it to the OK/Warn/Error action. `unavailable`
+    /// (no bundled runnyd, or the probe couldn't run/parse) blocks — a gate that
+    /// can't speak must never green-light an upgrade.
+    private func probeUpdateGate() async -> ConfigCompatGate.UpdateGate {
+        guard let runnydPath = SystemDaemonInstaller.bundleRunnydPath else {
+            return .block("this build carries no bundled runnyd to validate the config")
+        }
+        return await ConfigCompatGate.updateGate(for: ConfigCompatGate.probe(runnydPath: runnydPath, configPath: gateConfigPath))
+    }
+
     /// Gate a daemon update on the bundled (new) runnyd validating the in-place
     /// config, then branch on the verdict: OK proceeds to the confirmed reload;
     /// Warn proceeds but surfaces the warnings to confirm past; Error/unavailable
     /// blocks loud and issues no reload — a schema-incompatible upgrade is stopped
-    /// here, not drained into a crash-loop. The async probe is the live shell
-    /// (`ConfigCompatGate.probe`); the OK/Warn/Error mapping is the pure, unit-tested
+    /// here, not drained into a crash-loop. The probe is re-run at the confirmed
+    /// reload (`performReload`) too, so a config edited between click and confirm
+    /// can't slip past. The OK/Warn/Error mapping is the pure, unit-tested
     /// `ConfigCompatGate.updateGate`.
-    func gatedDaemonUpdate(runnydPath: String?, configPath: String) async {
-        configGateBlock = nil
-        configGateWarnings = []
-        guard let runnydPath else {
-            configGateBlock = "this build carries no bundled runnyd to validate the config"
-            return
-        }
+    func gatedDaemonUpdate() async {
+        clearConfigGate()
         configGateRunning = true
         defer { configGateRunning = false }
-        switch await ConfigCompatGate.updateGate(for: ConfigCompatGate.probe(runnydPath: runnydPath, configPath: configPath)) {
+        switch await probeUpdateGate() {
         case .proceed:
             requestDaemonUpdate()
         case let .confirm(warnings):
@@ -982,6 +999,15 @@ final class DaemonStore {
         case let .block(message):
             configGateBlock = message
         }
+    }
+
+    /// Clear the config-compat gate's surfaced state — on a fresh gate, on
+    /// convergence (the update took), and on reconnect — so a stale block/warning
+    /// can't outlive the update it described.
+    private func clearConfigGate() {
+        configGateBlock = nil
+        configGateWarnings = []
+        configGateRunning = false
     }
 
     /// The confirmed path: send the reload. Acceptance arms a pendingReload that
@@ -1009,6 +1035,18 @@ final class DaemonStore {
         let gen = reloadGeneration
         reloadTask = Task { @MainActor in
             defer { if gen == reloadGeneration { reloadInFlight = false } }
+            // Re-gate an UPDATE at the commit point. The click-time gate validated
+            // the config as it was then, but the operator (or a deploy) can change it
+            // before confirming, and the daemon's own reload preflight runs the OLD
+            // binary — blind to what the NEW one rejects. Re-validate the current
+            // on-disk config with the bundled runnyd and abort on a hard
+            // incompatibility, so an upgrade can't drain into the crash-loop the gate
+            // exists to prevent. A Warn was already confirmed via the dialog, so only
+            // Error/unavailable blocks here.
+            if isUpdate, case let .block(message) = await probeUpdateGate() {
+                configGateBlock = message
+                return
+            }
             do {
                 let resp = try await client.reload(reason: "operator request (Runny)")
                 guard !Task.isCancelled else { return }

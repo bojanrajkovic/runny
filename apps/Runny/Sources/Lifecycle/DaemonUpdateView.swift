@@ -12,9 +12,28 @@ struct DaemonUpdateAffordance: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
+        let verdict = store.daemonUpdate(
+            // Require BOTH ownership and installState — each guards a distinct way the
+            // other goes stale. ownership == .selfManaged rejects a verdict the app
+            // doesn't drain-update: a systemManaged daemon (managed from Settings →
+            // System Service, not a per-user drain-respawn) or any deferring verdict.
+            // installState == .installed rejects a stale .selfManaged left behind by a
+            // teardown the verdict didn't re-gather (a partial uninstall/failed repair
+            // where the agent is gone but the daemon lingers connected) — Updating that
+            // would drain a daemon with no agent to respawn it. The AND can't be fooled
+            // by a single stale signal.
+            agentInstalled: agent.ownership == .selfManaged && agent.installState == .installed,
+            agentCanonical: agentCanonical,
+            runningBundleCanonical: agent.eligibility == .eligible
+        )
         VStack(alignment: .leading, spacing: 6) {
-            updateAffordance
-            gateRows
+            updateAffordance(verdict)
+            // Gate rows belong to an available/in-flight update — render them only
+            // while one is on offer, so a Warn/block doesn't linger after the update
+            // converges to .none (the state is also cleared on convergence/reconnect).
+            if verdict != .none {
+                gateRows
+            }
         }
     }
 
@@ -40,21 +59,8 @@ struct DaemonUpdateAffordance: View {
         }
     }
 
-    @ViewBuilder private var updateAffordance: some View {
-        switch store.daemonUpdate(
-            // Require BOTH ownership and installState — each guards a distinct way the
-            // other goes stale. ownership == .selfManaged rejects a verdict the app
-            // doesn't drain-update: a systemManaged daemon (managed from Settings →
-            // System Service, not a per-user drain-respawn) or any deferring verdict.
-            // installState == .installed rejects a stale .selfManaged left behind by a
-            // teardown the verdict didn't re-gather (a partial uninstall/failed repair
-            // where the agent is gone but the daemon lingers connected) — Updating that
-            // would drain a daemon with no agent to respawn it. The AND can't be fooled
-            // by a single stale signal.
-            agentInstalled: agent.ownership == .selfManaged && agent.installState == .installed,
-            agentCanonical: agentCanonical,
-            runningBundleCanonical: agent.eligibility == .eligible
-        ) {
+    @ViewBuilder private func updateAffordance(_ verdict: DaemonStore.DaemonUpdate) -> some View {
+        switch verdict {
         case .none:
             EmptyView()
         case .available:
@@ -92,11 +98,9 @@ struct DaemonUpdateAffordance: View {
             if await agent.revalidate(.selfManaged), agent.installState == .installed {
                 // Gate on the bundled (new) runnyd validating the in-place config
                 // before any reload: OK proceeds, Warn surfaces warnings + confirms,
-                // Error blocks loud. requestDaemonUpdate is reached only via the gate.
-                await store.gatedDaemonUpdate(
-                    runnydPath: SystemDaemonInstaller.bundleRunnydPath,
-                    configPath: RunnyHome.directory.appendingPathComponent("config.yaml").path
-                )
+                // Error blocks loud. requestDaemonUpdate is reached only via the gate,
+                // and the gate is re-run at the confirmed reload (performReload).
+                await store.gatedDaemonUpdate()
             }
         }
     }

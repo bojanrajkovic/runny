@@ -11,6 +11,7 @@ go_library(
         "installdaemon.go",
         "main.go",
         "skew.go",
+        "upgradedaemon.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/cmd/runnyctl",
     visibility = ["//visibility:private"],
@@ -51,6 +52,7 @@ go_test(
         "installdaemon_test.go",
         "main_test.go",
         "skew_test.go",
+        "upgradedaemon_test.go",
     ],
     embed = [":runnyctl_lib"],
     deps = [

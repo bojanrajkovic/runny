@@ -300,6 +300,14 @@ The daemon never self-upgrades — the restart is launchd's, triggered by the
 operator. brew owns the binary delivery, so there is no re-stage step (unlike the
 app-brokered system daemon, which stages its own copy).
 
+You don't have to remember to check: when the running daemon's version lags the
+installed `runnyctl` (the state a `brew upgrade` leaves until you reload), every
+`runnyctl` command — including `runnyctl doctor` — prints a one-line hint first:
+`a newer runnyd is available … — run runnyctl upgrade-daemon`. It's the existing
+version-skew warning, pointed at the actionable verb in the daemon-behind
+direction (a daemon *ahead* of the CLI still reads as "upgrade the lagging
+install" instead).
+
 ## Troubleshooting: Local Network permission
 
 Symptom: every cycle dies at `AWAIT_SSH` with `connect: no route to host`,

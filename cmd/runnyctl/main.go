@@ -68,6 +68,11 @@ commands:
                       validate the config on disk; if valid, drain the
                       fleet (running jobs finish first) and restart
                       runnyd on it (clears operator pauses)
+  upgrade-daemon [-force]
+                      validate the in-place config with the on-disk (newer)
+                      runnyd, then drain-gated reload onto it after a
+                      brew upgrade; -force upgrades despite warnings (never
+                      over a hard error)
   why SLOT [-cycles N]
                       render SLOT's recent cycle timelines
 
@@ -253,6 +258,15 @@ func (c *ctl) dispatch(ctx context.Context, args []string) error {
 			return c.reloadWait(ctx, *reason, defaultFollowOpts(*respawnTimeout, *timeout))
 		}
 		return c.reload(ctx, *reason)
+	case "upgrade-daemon":
+		fs, j := subFlags("upgrade-daemon")
+		force := fs.Bool("force", false, "upgrade despite config warnings (never overrides a hard error)")
+		respawnTimeout := fs.Duration("respawn-timeout", 90*time.Second, "max wait for the respawn after the daemon exits")
+		timeout := fs.Duration("timeout", 0, "optional hard cap on the entire wait (0 = none)")
+		if err := c.parseNoArgs(fs, j, rest); err != nil {
+			return err
+		}
+		return c.upgradeDaemon(ctx, *force, defaultFollowOpts(*respawnTimeout, *timeout))
 	case "why":
 		fs, j := subFlags("why")
 		cycles := fs.Int("cycles", 1, "how many recent cycles")

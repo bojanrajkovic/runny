@@ -271,6 +271,35 @@ paused in BACKOFF (`runnyctl status`), then stop and let KeepAlive respawn —
 toggle the daemon off and back on in the Runny app for a per-user agent. Same
 effect, no validation.
 
+## Upgrading the daemon binary (headless)
+
+A `brew upgrade` (or any re-install) updates the on-disk `runnyd`, but the
+**running** daemon is still the old binary until something drains and respawns
+it. On a headless host there's no GUI "Update Daemon" button, so the CLI does it:
+
+```sh
+brew upgrade runny        # delivers the new binary
+sudo runnyctl upgrade-daemon
+```
+
+`upgrade-daemon` gates the update on the **new** binary validating the in-place
+config — it execs the on-disk `runnyd -test-config ~/.runny/config.yaml` (local
+checks only, no network) and reads the JSON verdict:
+
+- **OK** → it issues the drain-gated reload (running jobs finish first, then
+  launchd cold-starts the new binary), the same path as `runnyctl reload -wait`.
+- **Warn** → it prints the warnings and refuses unless you pass `-force`; the
+  upgrade still works, the config just has a soft footgun (e.g. an aggregate
+  resource overcommit or a too-short deadline).
+- **Error** → it prints the incompatibility and refuses; `-force` does **not**
+  override a hard error. This is the case the gate exists for: a schema change
+  the new binary rejects is blocked here instead of crash-looping the respawn
+  under launchd KeepAlive.
+
+The daemon never self-upgrades — the restart is launchd's, triggered by the
+operator. brew owns the binary delivery, so there is no re-stage step (unlike the
+app-brokered system daemon, which stages its own copy).
+
 ## Troubleshooting: Local Network permission
 
 Symptom: every cycle dies at `AWAIT_SSH` with `connect: no route to host`,

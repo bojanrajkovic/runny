@@ -1,4 +1,12 @@
 import SwiftUI
+import UserNotifications
+
+/// UserDefaults keys for the app's preferences.
+enum Prefs {
+    /// Default-on "automatically apply runnyd upgrades". Read by the surface-driven
+    /// auto-apply trigger and bound by the Settings toggle.
+    static let autoApplyDaemonUpdates = "autoApplyDaemonUpdates"
+}
 
 /// The post-upgrade daemon-update affordance for the menu bar and main window.
 /// Shown only when the app installed the agent AND is the newer build: Update
@@ -174,4 +182,89 @@ struct ConfigGateAlerts: ViewModifier {
 
 extension View {
     func configGateAlerts() -> some View { modifier(ConfigGateAlerts()) }
+}
+
+/// The surface-driven auto-apply trigger. Run (by `AutoApplyOnAppear`) when the update
+/// verdict settles to `.available` while a Runny surface is open — so the operator is
+/// present when the fleet drains. Fires only when the default-on setting is enabled, an
+/// update is on offer, none's been attempted this cycle
+/// (`autoApplyShouldAttempt`), ownership re-confirms `.selfManaged` + installed (never
+/// auto-drain a daemon we don't own), and the config gate returns OK (`autoApplyOnOK`
+/// — Warn/Error leave the manual Update affordance for a deliberate click). On a fired
+/// auto-apply it posts the notification, since the drain happened without a click.
+@MainActor
+func maybeAutoApply(_ store: DaemonStore, _ agent: AgentController, settingOn: Bool) async {
+    guard DaemonStore.autoApplyShouldAttempt(
+        settingOn: settingOn,
+        update: daemonUpdateVerdict(store, agent),
+        attempted: store.daemonUpdateAttempted
+    ) else { return }
+    guard await agent.revalidate(.selfManaged), agent.installState == .installed else { return }
+    // daemonVersion may be a sha-bearing build label; appVersion is already its bare
+    // core (build-stripped), so normalize only the daemon side before the notice.
+    let from = DaemonStore.versionCore(store.daemonVersion) ?? store.daemonVersion
+    if await store.autoApplyOnOK() {
+        AutoApplyNotifier.notifyApplying(from: from, to: DaemonStore.appVersion)
+    }
+}
+
+/// The surface-driven auto-apply trigger as one modifier, applied to both the menu-bar
+/// popover and the main window so the gather and the default-on setting live in ONE
+/// place, not copy-pasted per surface.
+///
+/// Two halves, because the update verdict isn't ready when the surface appears: the
+/// `.task` gathers ALL three of the verdict's agent facts (installState via `refresh`,
+/// reconcileState via `runReconcile`, ownership via `refreshOwnership`) on appear — so
+/// the trigger doesn't lean on the foreground observer happening to have refreshed
+/// ownership, which a popover-only open need not have. The verdict ALSO needs the live
+/// daemon connection — `daemonUpdate` is `.none` until a status snapshot lands, and that
+/// snapshot arrives asynchronously after appear. So firing once in the `.task` races the
+/// connection and loses. Instead `.onChange(…, initial: true)` re-evaluates whenever the
+/// verdict changes, firing auto-apply the moment it settles to `.available` (whether
+/// that's already true at appear or lands a beat later). `maybeAutoApply` re-checks
+/// eligibility, so non-`.available` transitions are no-ops and `autoApplyOnOK` backs out
+/// a concurrent second fire on `reloadInFlight`/`daemonUpdateAttempted`.
+struct AutoApplyOnAppear: ViewModifier {
+    @Environment(DaemonStore.self) private var store
+    @Environment(AgentController.self) private var agent
+    @AppStorage(Prefs.autoApplyDaemonUpdates) private var autoApplyDaemonUpdates = true
+
+    func body(content: Content) -> some View {
+        content
+            .task {
+                agent.refresh()
+                await agent.runReconcile()
+                await agent.refreshOwnership()
+            }
+            .onChange(of: daemonUpdateVerdict(store, agent), initial: true) {
+                Task { await maybeAutoApply(store, agent, settingOn: autoApplyDaemonUpdates) }
+            }
+    }
+}
+
+extension View {
+    func autoApplyOnAppear() -> some View { modifier(AutoApplyOnAppear()) }
+}
+
+/// Best-effort local notification when auto-apply drains+restarts the fleet without a
+/// click. Authorization is requested lazily on first post; if denied (or on an
+/// ad-hoc/unnotarized build where it's flaky), it stays silent — the affordance still
+/// shows the in-progress/outcome state, so a missing notification is never a missing
+/// signal.
+enum AutoApplyNotifier {
+    static func notifyApplying(from: String, to: String) {
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "Applying runnyd update"
+            // `to` (the app version) never coalesces to empty. When `from == to` — a
+            // protocol-only upgrade (same version core, older protocol) — don't render
+            // "0.6.0 → 0.6.0"; just name the target.
+            content.body = (from.isEmpty || from == to)
+                ? "Updating runnyd to \(to) and restarting the fleet (running jobs finish first)."
+                : "Updating runnyd \(from) → \(to) and restarting the fleet (running jobs finish first)."
+            center.add(UNNotificationRequest(identifier: "runnyd-auto-apply", content: content, trigger: nil))
+        }
+    }
 }

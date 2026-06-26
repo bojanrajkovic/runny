@@ -83,13 +83,11 @@ struct MenuBarView: View {
         .onAppear {
             store.start()
             cli.refresh()
-            // Refresh the agent's install state so the Start/Update affordances here
-            // (and in the main window) reflect an already-registered agent on launch,
-            // not the default .notInstalled until Settings is opened. Reconcile too,
-            // so Update gates on a fresh canonical verdict rather than the default.
-            agent.refresh()
-            Task { await agent.runReconcile() }
         }
+        // Refreshes the agent + reconciles so the Start/Update affordances reflect an
+        // already-registered agent, then runs the surface-driven auto-apply. Shared with
+        // the main window so the trigger + the default-on setting live in one place.
+        .autoApplyOnAppear()
     }
 
     /// A Runny-owned `runnyctl` link left dangling by a removed copy. `.orphaned`

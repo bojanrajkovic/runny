@@ -122,4 +122,35 @@ final class DaemonUpdateTests: XCTestCase {
             .didNotTake(daemonCore: "0.5.0")
         )
     }
+
+    func testAutoApplyEligibilityIsSettingTimesAvailableTimesNotAttempted() {
+        // Fires only when the setting is on, an update is actually on offer, and none
+        // has been attempted this cycle. The OK-only gate + confirmed-ownership are
+        // checked after this (async), in the trigger.
+        XCTAssertTrue(DaemonStore.autoApplyShouldAttempt(settingOn: true, update: .available, attempted: false))
+        // Setting off → button-only behavior, never auto.
+        XCTAssertFalse(DaemonStore.autoApplyShouldAttempt(settingOn: false, update: .available, attempted: false))
+        // Already attempted → the loop backstop: a didNotTake drops to the manual
+        // "Try Again", never an auto-retry drain loop.
+        XCTAssertFalse(DaemonStore.autoApplyShouldAttempt(settingOn: true, update: .available, attempted: true))
+        // No update on offer → never (none / in-flight / didNotTake are not .available).
+        XCTAssertFalse(DaemonStore.autoApplyShouldAttempt(settingOn: true, update: .none, attempted: false))
+        XCTAssertFalse(DaemonStore.autoApplyShouldAttempt(settingOn: true, update: .inProgress, attempted: false))
+        XCTAssertFalse(DaemonStore.autoApplyShouldAttempt(settingOn: true, update: .didNotTake(daemonCore: "0.5.0"), attempted: false))
+    }
+
+    func testAutoApplyWillIssueRejectsAnAlreadyAttemptedCycle() {
+        // The will-issue check is re-evaluated at the commit point, AFTER the gate
+        // probe await — so it must reject a fire whose cycle was already claimed while
+        // it was suspended. Without the `attempted` term, two surfaces firing on one
+        // settle let a straggler (resumed after the first reload cleared reloadInFlight)
+        // drain the fleet a second time.
+        XCTAssertTrue(DaemonStore.autoApplyWillIssue(clientPresent: true, reloadInFlight: false, attempted: false))
+        // Already attempted this cycle → back out even though the client is up and no
+        // reload is in flight (the straggler window).
+        XCTAssertFalse(DaemonStore.autoApplyWillIssue(clientPresent: true, reloadInFlight: false, attempted: true))
+        // No client / a reload already in flight → back out (mirrors performReload's guards).
+        XCTAssertFalse(DaemonStore.autoApplyWillIssue(clientPresent: false, reloadInFlight: false, attempted: false))
+        XCTAssertFalse(DaemonStore.autoApplyWillIssue(clientPresent: true, reloadInFlight: true, attempted: false))
+    }
 }

@@ -1016,6 +1016,42 @@ final class DaemonStore {
         performReload()
     }
 
+    /// The auto-apply commit: probe the gate and reload ONLY on OK, returning whether
+    /// it fired (so the caller can post the auto-apply notification). Warn and Error
+    /// never auto-apply — they leave the manual Update affordance untouched for a
+    /// deliberate click. The caller (`maybeAutoApply`) has already confirmed the cheap
+    /// eligibility (`autoApplyShouldAttempt`) and revalidated confirmed-`.selfManaged`
+    /// ownership, so this never auto-drains a daemon we don't own; the `performReload`
+    /// commit re-probe remains the crash-loop backstop.
+    func autoApplyOnOK() async -> Bool {
+        guard case .proceed = await probeUpdateGate() else { return false }
+        // Report "fired" (so the caller notifies) ONLY when the reload will actually
+        // issue. The client/reloadInFlight terms mirror performReload's own guards and
+        // run atomically with confirmGatedUpdate (no await between), so a second
+        // OVERLAPPING fire sees reloadInFlight and backs out — no double-drain. The
+        // `attempted` term closes the straggler window the other two miss: a second
+        // surface's fire suspended in the gate probe across this whole reload would
+        // resume AFTER the defer cleared reloadInFlight, see it false, and drain again —
+        // but daemonUpdateAttempted is set (on accept) before that clear, so it backs
+        // the straggler out too.
+        guard Self.autoApplyWillIssue(
+            clientPresent: client != nil,
+            reloadInFlight: reloadInFlight,
+            attempted: daemonUpdateAttempted
+        ) else { return false }
+        confirmGatedUpdate()
+        return true
+    }
+
+    /// Pure: may an auto-apply actually issue the reload right now? A live client, no
+    /// reload already draining, and this upgrade cycle not already claimed. Re-checked
+    /// at the commit point (after the gate-probe await) so a fire that was eligible at
+    /// entry but lost the race — client dropped, another reload landed, or another
+    /// surface already applied this cycle — backs out instead of double-draining.
+    nonisolated static func autoApplyWillIssue(clientPresent: Bool, reloadInFlight: Bool, attempted: Bool) -> Bool {
+        clientPresent && !reloadInFlight && !attempted
+    }
+
     /// Clear the config-compat gate's surfaced state — on dismiss of either gate
     /// alert, on a fresh gate, on convergence (the update took), and on reconnect —
     /// so a stale block/warning can't outlive the update it described.
@@ -1484,6 +1520,18 @@ final class DaemonStore {
         if reloadPending { return .inProgress }
         if attempted { return .didNotTake(daemonCore: daemonCore) }
         return .available
+    }
+
+    /// Pure: whether to ATTEMPT auto-apply — the cheap precondition checked before
+    /// the async revalidate + config-compat probe. Fires only when the default-on
+    /// setting is enabled, an update is actually on offer (`.available`), and none has
+    /// been attempted this cycle. `attempted` (`daemonUpdateAttempted`) is the loop
+    /// backstop: a non-converged update leaves it set, so a `didNotTake` drops to the
+    /// manual "Try Again" rather than an auto-retry drain loop. The OK-only gate (Warn/
+    /// Error never auto-apply) and the confirmed-`.selfManaged` ownership check happen
+    /// after this, in the trigger.
+    nonisolated static func autoApplyShouldAttempt(settingOn: Bool, update: DaemonUpdate, attempted: Bool) -> Bool {
+        settingOn && update == .available && !attempted
     }
 
     /// Pure: must the uninstall raise the abandon confirmation? Yes whenever a live

@@ -69,6 +69,9 @@ struct MainWindowView: View {
         .recycleConfirmation()
         .reloadConfirmation()
         .configGateAlerts()
+        // Surface-driven auto-apply (shared with the popover) for a direct
+        // main-window open.
+        .autoApplyOnAppear()
     }
 }
 

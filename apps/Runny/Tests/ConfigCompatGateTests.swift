@@ -48,4 +48,38 @@ final class ConfigCompatGateTests: XCTestCase {
             return XCTFail("an unknown status must be unavailable")
         }
     }
+
+    // MARK: - update gate (OK proceed / Warn confirm / Error+unavailable block)
+
+    func testUpdateGateOKProceeds() {
+        let g = ConfigCompatGate.updateGate(for: .verdict(.init(status: .ok, errors: [], warnings: [])))
+        XCTAssertEqual(g, .proceed)
+    }
+
+    func testUpdateGateWarnConfirmsWithWarnings() {
+        let w = ConfigCompatVerdict.Warning(kind: "deadline-too-short", message: "await_ssh is 1s")
+        let g = ConfigCompatGate.updateGate(for: .verdict(.init(status: .warn, errors: [], warnings: [w])))
+        XCTAssertEqual(g, .confirm([w]))
+    }
+
+    func testUpdateGateErrorBlocksWithDetail() {
+        let g = ConfigCompatGate.updateGate(for: .verdict(.init(status: .error, errors: ["macos-guest-cap: over"], warnings: [])))
+        guard case let .block(msg) = g else { return XCTFail("error must block") }
+        XCTAssertTrue(msg.contains("macos-guest-cap"))
+    }
+
+    func testUpdateGateErrorWithNoMessagesStillBlocksNonEmpty() {
+        guard case let .block(msg) = ConfigCompatGate.updateGate(for: .verdict(.init(status: .error, errors: [], warnings: []))) else {
+            return XCTFail("error must block")
+        }
+        XCTAssertFalse(msg.isEmpty)
+    }
+
+    func testUpdateGateUnavailableBlocks() {
+        // A gate that can't speak must block — never silently proceed to a reload.
+        guard case let .block(msg) = ConfigCompatGate.updateGate(for: .unavailable("runnyd timed out")) else {
+            return XCTFail("unavailable must block")
+        }
+        XCTAssertTrue(msg.contains("runnyd timed out"))
+    }
 }

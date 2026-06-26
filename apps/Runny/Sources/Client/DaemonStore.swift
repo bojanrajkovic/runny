@@ -178,6 +178,15 @@ final class DaemonStore {
     /// a cancelled update can't inherit the stale intent.
     private var pendingUpdateIntent = false
 
+    /// The config-compat gate's surfaced result for an in-flight upgrade reload, each
+    /// driving a popup (not an inline row): `block` is a loud refusal — the new runnyd
+    /// rejects the config, or the gate couldn't run — shown as an error alert with no
+    /// reload; `warnings` is a Warn verdict shown as a confirm-or-cancel alert the
+    /// operator can proceed past. Both are cleared on dismiss and when a fresh gate
+    /// starts.
+    private(set) var configGateBlock: String?
+    private(set) var configGateWarnings: [ConfigCompatVerdict.Warning] = []
+
     /// Is the app a strictly newer build than the running daemon? The upgrade
     /// direction the symmetric skew verdict does not itself report.
     var appNewerThanDaemon: Bool {
@@ -445,6 +454,7 @@ final class DaemonStore {
         skew = nil
         dismissedSkew = nil
         daemonUpdateAttempted = false
+        clearConfigGate()
         pendingReload = nil
         reloadJobInFlight = false
         reloadStallSince = nil
@@ -628,8 +638,12 @@ final class DaemonStore {
         )
         // Once the app is no longer ahead on either axis — the update took, or it
         // was never behind — clear the attempt flag so a future skew shows
-        // "available", not a stale "didn't take".
-        if !appAheadOfDaemon { daemonUpdateAttempted = false }
+        // "available", not a stale "didn't take", and clear any gate block/warnings
+        // so they don't linger after the update they described converged.
+        if !appAheadOfDaemon {
+            daemonUpdateAttempted = false
+            clearConfigGate()
+        }
     }
 
     // MARK: - Commands (requested vs confirmed)
@@ -928,23 +942,86 @@ final class DaemonStore {
 
     // MARK: - Reload (validate → drain → confirm the respawn)
 
-    /// Stage the reload confirmation dialog. Reload restarts the whole daemon
-    /// and drains every slot (jobs finish first), so it's gated behind explicit
-    /// consent like the `-force` recycle cases.
-    func requestReload() {
-        pendingUpdateIntent = false
+    /// Stage the generic "Reload daemon config?" drain-confirmation dialog. Reload
+    /// restarts the whole daemon and drains every slot (jobs finish first), so it's
+    /// gated behind explicit consent like the `-force` recycle cases.
+    ///
+    /// `asUpdate` is the consent seam between the two reload entry points after an OK
+    /// gate: the **Reload Config** button shows this dialog as the consent (`asUpdate:
+    /// true` when that reload would upgrade, so `performReload`'s commit re-probe still
+    /// runs as the crash-loop backstop), while **Update Daemon** took its consent from
+    /// the click and reloads immediately via `confirmGatedUpdate`. A plain reload that
+    /// can't upgrade stays `asUpdate: false` — same binary, the daemon's own preflight
+    /// validates it, no commit gate.
+    func requestReload(asUpdate: Bool = false) {
+        pendingUpdateIntent = asUpdate
         reloadConfirm = true
     }
 
-    /// Issue a daemon update: identical to a reload (drain jobs, then exit for
-    /// launchd to cold-start the freshly-bundled binary), tagged so a non-converged
-    /// result surfaces "update didn't take" rather than the generic reload note.
-    /// Inherits the reload's drain-stall arm and convergence confirmation wholesale.
-    /// The intent is consumed only when the reload is ACCEPTED (in performReload),
-    /// so cancelling the confirmation leaves no "didn't take" residue.
-    func requestDaemonUpdate() {
+    /// Probe the config-compat gate: validate the current on-disk config (the
+    /// daemon's resolved home, read here rather than threaded from the view so the
+    /// click-time and commit-time checks can't drift) with the bundled (new) runnyd,
+    /// and map it to the OK/Warn/Error action. `unavailable` (no bundled runnyd, or
+    /// the probe couldn't run/parse) blocks — a gate that can't speak must never
+    /// green-light an upgrade.
+    private func probeUpdateGate() async -> ConfigCompatGate.UpdateGate {
+        // Probe the binary the per-user agent will actually RESPAWN — the canonical
+        // /Applications/Runny.app runnyd — NOT `Bundle.main`'s, which on a translocated
+        // or ~/Downloads launch is a different (maybe older) build than the one launchd
+        // cold-starts. Probing the running instance there could OK a config the respawn
+        // binary rejects (crash-loop) or block one it accepts. This mirrors the
+        // reconcile's "never Bundle.main, always canonical" rule — `SystemDaemonInstaller.
+        // bundleRunnydPath` stays Bundle.main-based for the system-daemon *install* (it
+        // copies from the running bundle), which is a different operation.
+        let runnydPath = LaunchAgentStatus.canonicalAgentProgram
+        guard FileManager.default.fileExists(atPath: runnydPath) else {
+            return .block("the installed Runny.app has no runnyd to validate the config")
+        }
+        let configPath = RunnyHome.directory.appendingPathComponent("config.yaml").path
+        return await ConfigCompatGate.updateGate(for: ConfigCompatGate.probe(runnydPath: runnydPath, configPath: configPath))
+    }
+
+    /// Gate an upgrade reload on the bundled (new) runnyd validating the in-place
+    /// config, surfacing the verdict as a popup rather than an inline row. Warn and
+    /// Error are identical for both entry points: Warn sets `configGateWarnings`
+    /// (a confirm-or-cancel alert whose "Reload Anyway" is the consent); Error/
+    /// unavailable sets `configGateBlock` (an error alert, no reload — the
+    /// schema-incompatible upgrade is stopped here, not drained into a crash-loop).
+    ///
+    /// **OK is the one place the entry points differ** (`explicitUpdate`): the Update
+    /// Daemon click was already the drain consent, so it reloads immediately; the
+    /// Reload Config button instead shows its "Reload daemon config?" drain dialog as
+    /// the consent (`asUpdate: true`, so `performReload`'s commit re-probe still backstops
+    /// a config that changed since). The probe re-runs at the reload regardless. The
+    /// OK/Warn/Error mapping is the pure, unit-tested `ConfigCompatGate.updateGate`.
+    func gatedDaemonUpdate(explicitUpdate: Bool) async {
+        clearConfigGate()
+        switch await probeUpdateGate() {
+        case .proceed:
+            if explicitUpdate { confirmGatedUpdate() } else { requestReload(asUpdate: true) }
+        case let .confirm(warnings):
+            configGateWarnings = warnings
+        case let .block(message):
+            configGateBlock = message
+        }
+    }
+
+    /// Commit an upgrade reload past the gate — the OK path, and the operator's
+    /// "Reload Anyway" on the Warn alert. Tags it as an update (so a non-converged
+    /// respawn surfaces "update didn't take") and reloads now; the commit-point
+    /// re-probe in `performReload` is the backstop if the config changed since.
+    func confirmGatedUpdate() {
+        clearConfigGate()
         pendingUpdateIntent = true
-        reloadConfirm = true
+        performReload()
+    }
+
+    /// Clear the config-compat gate's surfaced state — on dismiss of either gate
+    /// alert, on a fresh gate, on convergence (the update took), and on reconnect —
+    /// so a stale block/warning can't outlive the update it described.
+    func clearConfigGate() {
+        configGateBlock = nil
+        configGateWarnings = []
     }
 
     /// The confirmed path: send the reload. Acceptance arms a pendingReload that
@@ -972,6 +1049,33 @@ final class DaemonStore {
         let gen = reloadGeneration
         reloadTask = Task { @MainActor in
             defer { if gen == reloadGeneration { reloadInFlight = false } }
+            // The authoritative gate is HERE, at the commit — the one irreversible
+            // point, just before the drain+respawn. Re-probe the bundled (new) runnyd
+            // against the current on-disk config: a hard incompatibility blocks (no
+            // crash-loop into a config the new binary can't load); anything else
+            // proceeds. The daemon's own reload preflight runs the OLD binary, blind
+            // to what the NEW one rejects, so this is the only check that sees it. The
+            // click-time gate is advisory display only (it shows the warnings/block in
+            // the affordance) — this re-probe is what actually decides.
+            //
+            // A *warning* found here is deliberately NOT re-surfaced: it's non-fatal
+            // (the daemon comes up), and the only way the verdict could differ from
+            // the click is the operator editing config.yaml in the ~2s the confirm
+            // dialog is open — not worth an approval-tracking state machine.
+            // ponytail: accept the dialog-open edit window; Error is the one outcome
+            // we hard-block, a changed Warn just applies.
+            //
+            // Surface a block through `commandError` (the always-presented "Command
+            // failed" alert, same channel as the unreachable case above) — NOT the
+            // affordance's gate row. The Reload buttons reach this with the update
+            // affordance hidden (`daemonUpdateVerdict == .none` during the fail-closed
+            // settling window), where the row would render nowhere: the dialog would
+            // vanish and nothing reload, with no visible reason. The alert is loud
+            // regardless of the affordance.
+            if isUpdate, case let .block(message) = await probeUpdateGate() {
+                commandError = "reload not sent — \(message)"
+                return
+            }
             do {
                 let resp = try await client.reload(reason: "operator request (Runny)")
                 guard !Task.isCancelled else { return }

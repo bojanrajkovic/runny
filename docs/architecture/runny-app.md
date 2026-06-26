@@ -419,8 +419,52 @@ seam, so every decision is unit-tested without launchd. The invariants:
   for gating an update on the *new* binary accepting the *current* config, so a
   schema-incompatible upgrade is blocked rather than drained into a crash-loop.
   Parsing is the pure, unit-tested surface; an unparseable verdict is `unavailable`
-  (blocking), never a fabricated OK. Wiring it into the update flow (OK auto-applies,
-  Warn drops to a manual CTA, Error blocks) is the next slice.
+  (blocking), never a fabricated OK. **The gate verdict IS the prompt** (popups, not
+  inline rows — a row rendered behind the modal reload prompt was easy to miss), with
+  one authoritative re-check at the commit — the model that collapses the
+  approval-lifecycle edges (TOCTOU, re-confirm loops, stale/cancelled approvals) into
+  impossibility rather than handling each:
+  - **Click drives the popup.** `DaemonStore.gatedDaemonUpdate` probes once and the
+    verdict picks the prompt: **OK** proceeds to the reload — *immediately* for the
+    Update Daemon affordance (its click was the drain consent), or via the normal
+    "Reload daemon config?" drain dialog for the plain Reload Config button (its dialog
+    is the consent); **Warn** presents a confirm-or-cancel alert listing the warnings
+    (Cancel is the safe default, "Reload Anyway" the destructive deliberate action, the
+    same for both buttons); **Error**/`unavailable` presents an acknowledge-only alert
+    and reloads nothing. The OK/Warn/Error decision is the pure `ConfigCompatGate.updateGate`.
+    The warnings/block are *display only* — never persisted as an "approved set" or
+    compared at commit, so there is no stale approval to leak across a cancel or a
+    later reload; both clear on dismiss and on convergence/reconnect.
+  - **Commit is the backstop.** `performReload`, immediately before the irreversible
+    drain+respawn, re-probes the bundled (new) runnyd against the current on-disk
+    config: a hard incompatibility (or an `unavailable` probe) **blocks** with no
+    reload, surfaced through the always-presented command-error alert (the same
+    "reload not sent" channel as the unreachable-daemon case). The daemon's own reload
+    preflight runs the *old* binary — blind to what the new one rejects — so this is
+    the only check that sees it. A *warning* found only here is not re-surfaced: it's
+    non-fatal (the daemon comes up), and the only way the verdict could differ from
+    the click is the operator editing `config.yaml` in the seconds between click and
+    reload — an accepted, commented residual, not a state machine.
+  **Both entry points share one action** (`startGatedReload`); after re-gathering
+  ownership they part on their *inherent* strictness. **Update Daemon** means "upgrade
+  MY per-user daemon", so it proceeds only when ownership is confirmed `.selfManaged`
+  and installed (the original `update()` guard) — indeterminate (wedged probe),
+  foreign/system, or uninstalled all **refuse**, never draining a daemon we can't confirm
+  is ours; the affordance re-renders and self-hides. The click is the drain consent, so
+  OK reloads immediately. **Reload Config** means "reload the CONNECTED daemon", so it
+  gates iff `reloadMightUpgrade` — a reload that would respawn our newer bundle.
+  **Ownership decides it** (`.selfManaged` → ours, gate; `.indeterminate` → fail closed,
+  crash-loop-proof; a settled non-self owner respawns its own binary, validated by its
+  own preflight → the generic reload confirm). The version compare is a short-circuit
+  *trusted only from the canonical bundle*: `appAheadOfDaemon` reads the RUNNING bundle's
+  version, but the respawn binary is the canonical `/Applications` one, so "not ahead →
+  skip the gate" holds only when the running bundle IS canonical (`eligibility ==
+  .eligible`). From a stray/translocated copy that version is meaningless to the respawn,
+  so it fails closed (gates onto the canonical binary it probes) rather than skip. Either
+  way the drain dialog is the consent; it never silently drains. Reconcile and the
+  affordance verdict still don't enter (a `selfManaged` daemon respawns our bundle
+  regardless) — the model is ownership + a canonical-trusted version short-circuit, not a
+  per-cell cross product. Default-on auto-apply on OK is the next slice.
 - **Uninstall** is `unregister()` then a best-effort `launchctl bootout` ("No such
   process" = success); a mid-job uninstall first raises a destructive confirmation
   naming the abandoned slot. **Reconcile-on-launch** compares the registered

@@ -68,6 +68,7 @@ struct MainWindowView: View {
         .commandAlerts()
         .recycleConfirmation()
         .reloadConfirmation()
+        .configGateAlerts()
     }
 }
 
@@ -106,6 +107,7 @@ extension View {
 /// Compact daemon status: connection, version, uptime, last update.
 struct DaemonCard: View {
     @Environment(DaemonStore.self) private var store
+    @Environment(AgentController.self) private var agent
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -139,7 +141,10 @@ struct DaemonCard: View {
             DaemonUpdateAffordance()
             HStack {
                 Button(store.reloadInFlight ? "Validating…" : "Reload Config…") {
-                    store.requestReload()
+                    // Shared gate (explicitUpdate: false — this button's drain dialog is
+                    // the consent): an upgrade reload runs the gate (Warn/Error pop up, OK
+                    // shows the drain confirm); a plain reload gets the generic confirm.
+                    Task { await startGatedReload(store, agent, explicitUpdate: false) }
                 }
                 .disabled(store.reloadInFlight || store.client == nil)
                 // Manual re-dial of the same daemon at the fixed ~/.runny.

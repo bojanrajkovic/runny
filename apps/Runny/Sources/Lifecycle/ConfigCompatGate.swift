@@ -78,4 +78,32 @@ enum ConfigCompatGate {
         }
         return .verdict(verdict)
     }
+
+    /// What a daemon update does with a gate result — the OK/Warn/Error decision of
+    /// the update flow. Pure and total: OK proceeds; Warn proceeds only behind a
+    /// manual confirmation that surfaces the warnings; Error and `unavailable`
+    /// block. A gate that returns an error or can't speak must never reload — a
+    /// schema-incompatible upgrade is blocked here, not drained into a crash-loop.
+    enum UpdateGate: Equatable {
+        case proceed
+        case confirm([ConfigCompatVerdict.Warning])
+        case block(String)
+    }
+
+    static func updateGate(for result: ConfigCompatResult) -> UpdateGate {
+        switch result {
+        case let .verdict(v):
+            switch v.status {
+            case .ok:
+                return .proceed
+            case .warn:
+                return .confirm(v.warnings)
+            case .error:
+                let detail = v.errors.isEmpty ? "the new runnyd rejects the current config" : v.errors.joined(separator: "; ")
+                return .block(detail)
+            }
+        case let .unavailable(why):
+            return .block("couldn't verify the config against the new runnyd: \(why)")
+        }
+    }
 }

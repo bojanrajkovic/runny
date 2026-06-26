@@ -502,7 +502,8 @@ final class AgentControllerTests: XCTestCase {
     }
 
     func testParseLaunchctlProgram() {
-        let output = """
+        // A hand-installed plist's absolute Program → .program (compared to canonical).
+        let absolute = """
         com.coderinserepeat.runnyd = {
         \tactive count = 1
         \tprogram = /Applications/Runny.app/Contents/MacOS/runnyd
@@ -510,12 +511,50 @@ final class AgentControllerTests: XCTestCase {
         }
         """
         XCTAssertEqual(
-            AgentController.parseLaunchctlProgram(output),
-            "/Applications/Runny.app/Contents/MacOS/runnyd"
+            AgentController.parseLaunchctlProgram(absolute),
+            .program("/Applications/Runny.app/Contents/MacOS/runnyd")
         )
-        // No program line (old/unparseable format) → nil, which reconciles to
-        // undetermined rather than a false foreign.
-        XCTAssertNil(AgentController.parseLaunchctlProgram("state = running\npid = 42"))
+        // Our SMAppService agent: a bundle-relative `program identifier` + our parent
+        // bundle id, no absolute `program =` (the real launchd shape) → .bundleProgram.
+        let bundle = """
+        com.coderinserepeat.runnyd = {
+        \tprogram identifier = Contents/MacOS/runnyd (mode: 2)
+        \tparent bundle identifier = com.coderinserepeat.runny
+        \tparent bundle version = 0.5.0
+        }
+        """
+        XCTAssertEqual(AgentController.parseLaunchctlProgram(bundle), .bundleProgram)
+        // A bundle-relative program under a FOREIGN parent id → undetermined, never a
+        // false canonical.
+        let foreignBundle = """
+        com.coderinserepeat.runnyd = {
+        \tprogram identifier = Contents/MacOS/runnyd (mode: 2)
+        \tparent bundle identifier = com.someone.else
+        }
+        """
+        XCTAssertEqual(AgentController.parseLaunchctlProgram(foreignBundle), .undetermined)
+        // Our parent id but a DIFFERENT BundleProgram (not runnyd) → undetermined: the
+        // gate probes Contents/MacOS/runnyd, so .bundleProgram must name exactly that.
+        let wrongProgram = """
+        com.coderinserepeat.runnyd = {
+        \tprogram identifier = Contents/MacOS/somethingelse (mode: 2)
+        \tparent bundle identifier = com.coderinserepeat.runny
+        }
+        """
+        XCTAssertEqual(AgentController.parseLaunchctlProgram(wrongProgram), .undetermined)
+        // No program line at all (unparseable format) → undetermined, not a false
+        // foreign.
+        XCTAssertEqual(AgentController.parseLaunchctlProgram("state = running\npid = 42"), .undetermined)
+    }
+
+    func testReconcileBundleProgramIsOk() async {
+        let mock = MockRegistrar()
+        // Our SMAppService bundle-relative agent reconciles canonical — it carries no
+        // absolute path to be foreign, and the parent bundle id confirmed it's ours.
+        mock.programResult = .bundleProgram
+        let c = AgentController(registrar: mock)
+        await c.runReconcile()
+        XCTAssertEqual(c.reconcileState, .ok)
     }
 
     func testReconcileResetsAfterUninstall() async {

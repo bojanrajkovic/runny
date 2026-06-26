@@ -3,7 +3,7 @@ import UserNotifications
 
 /// UserDefaults keys for the app's preferences.
 enum Prefs {
-    /// B3: default-on "automatically apply runnyd upgrades". Read by the surface-driven
+    /// Default-on "automatically apply runnyd upgrades". Read by the surface-driven
     /// auto-apply trigger and bound by the Settings toggle.
     static let autoApplyDaemonUpdates = "autoApplyDaemonUpdates"
 }
@@ -184,13 +184,13 @@ extension View {
     func configGateAlerts() -> some View { modifier(ConfigGateAlerts()) }
 }
 
-/// B3 — the surface-driven auto-apply trigger. Called when a Runny surface appears
-/// (the menu-bar popover or the main window) AFTER the agent facts are re-gathered, so
-/// the operator is present when the fleet drains. Fires only when the default-on
-/// setting is enabled, an update is on offer, none's been attempted this cycle
+/// The surface-driven auto-apply trigger. Called when a Runny surface appears (the
+/// menu-bar popover or the main window) AFTER the agent facts are re-gathered, so the
+/// operator is present when the fleet drains. Fires only when the default-on setting is
+/// enabled, an update is on offer, none's been attempted this cycle
 /// (`autoApplyShouldAttempt`), ownership re-confirms `.selfManaged` + installed (never
 /// auto-drain a daemon we don't own), and the config gate returns OK (`autoApplyOnOK`
-/// — Warn/Error leave B2's manual affordance for a deliberate click). On a fired
+/// — Warn/Error leave the manual Update affordance for a deliberate click). On a fired
 /// auto-apply it posts the notification, since the drain happened without a click.
 @MainActor
 func maybeAutoApply(_ store: DaemonStore, _ agent: AgentController, settingOn: Bool) async {

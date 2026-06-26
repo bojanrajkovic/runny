@@ -1016,13 +1016,13 @@ final class DaemonStore {
         performReload()
     }
 
-    /// The auto-apply commit (B3): probe the gate and reload ONLY on OK, returning
-    /// whether it fired (so the caller can post the auto-apply notification). Warn and
-    /// Error never auto-apply — they leave B2's manual affordance untouched for a
-    /// deliberate click, per ADR-0022. The caller (`maybeAutoApply`) has already
-    /// confirmed the cheap eligibility (`autoApplyShouldAttempt`) and revalidated
-    /// confirmed-`.selfManaged` ownership, so this never auto-drains a daemon we don't
-    /// own; the `performReload` commit re-probe remains the crash-loop backstop.
+    /// The auto-apply commit: probe the gate and reload ONLY on OK, returning whether
+    /// it fired (so the caller can post the auto-apply notification). Warn and Error
+    /// never auto-apply — they leave the manual Update affordance untouched for a
+    /// deliberate click. The caller (`maybeAutoApply`) has already confirmed the cheap
+    /// eligibility (`autoApplyShouldAttempt`) and revalidated confirmed-`.selfManaged`
+    /// ownership, so this never auto-drains a daemon we don't own; the `performReload`
+    /// commit re-probe remains the crash-loop backstop.
     func autoApplyOnOK() async -> Bool {
         guard case .proceed = await probeUpdateGate() else { return false }
         // Report "fired" (so the caller notifies) ONLY when the reload will actually
@@ -1507,7 +1507,7 @@ final class DaemonStore {
         return .available
     }
 
-    /// Pure: whether to ATTEMPT auto-apply (B3) — the cheap precondition checked before
+    /// Pure: whether to ATTEMPT auto-apply — the cheap precondition checked before
     /// the async revalidate + config-compat probe. Fires only when the default-on
     /// setting is enabled, an update is actually on offer (`.available`), and none has
     /// been attempted this cycle. `attempted` (`daemonUpdateAttempted`) is the loop

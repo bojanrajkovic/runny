@@ -69,7 +69,7 @@ struct MainWindowView: View {
         .recycleConfirmation()
         .reloadConfirmation()
         .configGateAlerts()
-        // Surface-driven B3 auto-apply (shared with the popover) for a direct
+        // Surface-driven auto-apply (shared with the popover) for a direct
         // main-window open.
         .autoApplyOnAppear()
     }

@@ -85,8 +85,8 @@ struct MenuBarView: View {
             cli.refresh()
         }
         // Refreshes the agent + reconciles so the Start/Update affordances reflect an
-        // already-registered agent, then runs the surface-driven B3 auto-apply. Shared
-        // with the main window so the trigger + the default-on setting live in one place.
+        // already-registered agent, then runs the surface-driven auto-apply. Shared with
+        // the main window so the trigger + the default-on setting live in one place.
         .autoApplyOnAppear()
     }
 

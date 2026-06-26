@@ -14,7 +14,7 @@ struct AgentInstallRow: View {
     @State private var confirmingInstall = false
     @State private var confirmingUninstall = false
     @State private var confirmingRepair = false
-    /// B3: default-on. When on, a surface-driven trigger auto-applies an OK update
+    /// Default-on. When on, a surface-driven trigger auto-applies an OK update
     /// without the button (Warn/Error still drop to the manual affordance).
     @AppStorage(Prefs.autoApplyDaemonUpdates) private var autoApplyDaemonUpdates = true
 

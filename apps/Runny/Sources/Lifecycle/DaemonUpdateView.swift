@@ -222,8 +222,9 @@ func maybeAutoApply(_ store: DaemonStore, _ agent: AgentController, settingOn: B
 /// connection and loses. Instead `.onChange(…, initial: true)` re-evaluates whenever the
 /// verdict changes, firing auto-apply the moment it settles to `.available` (whether
 /// that's already true at appear or lands a beat later). `maybeAutoApply` re-checks
-/// eligibility, so non-`.available` transitions are no-ops and `autoApplyOnOK` backs out
-/// a concurrent second fire on `reloadInFlight`/`daemonUpdateAttempted`.
+/// eligibility, so non-`.available` transitions are no-ops; and the nudge goes through
+/// `store.considerAutoApply`, which single-flights — both surfaces firing on one settle
+/// collapse to a single attempt, so there's no per-surface race to guard.
 struct AutoApplyOnAppear: ViewModifier {
     @Environment(DaemonStore.self) private var store
     @Environment(AgentController.self) private var agent
@@ -237,7 +238,9 @@ struct AutoApplyOnAppear: ViewModifier {
                 await agent.refreshOwnership()
             }
             .onChange(of: daemonUpdateVerdict(store, agent), initial: true) {
-                Task { await maybeAutoApply(store, agent, settingOn: autoApplyDaemonUpdates) }
+                store.considerAutoApply {
+                    await maybeAutoApply(store, agent, settingOn: autoApplyDaemonUpdates)
+                }
             }
     }
 }

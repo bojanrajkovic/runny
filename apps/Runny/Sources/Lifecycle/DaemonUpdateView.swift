@@ -102,21 +102,28 @@ func reloadMightUpgrade(_ store: DaemonStore, _ agent: AgentController) -> Bool 
 }
 
 /// The single entry point both the Update Daemon affordance and the plain Reload
-/// buttons call. A reload that can't upgrade (the app isn't ahead, or doesn't own
-/// the agent) is a plain config reload — generic confirm, the daemon's own preflight
-/// validates it. A reload that WOULD upgrade re-gathers ownership first (the button
-/// can be stale, and an upgrade fires outside the spawn gate, so a daemon that
-/// changed hands must not be drained) and then runs the config-compat gate, which
-/// surfaces OK → reload now / Warn → confirm popup / Error → block popup. If
-/// ownership slipped to foreign/system, fall back to a plain reload rather than
-/// silently doing nothing.
+/// buttons call.
+///
+/// If the app isn't ahead, a reload can't upgrade — a live version/protocol compare,
+/// not a stale fact — so it's a plain config reload (generic confirm; the daemon's own
+/// preflight validates it). If the app IS ahead it might upgrade: re-gather ownership
+/// (the button can be stale, and an upgrade fires outside the spawn gate) and then
+/// FAIL CLOSED — gate unless ownership is now a PROVEN non-upgrade owner. Re-checking
+/// `reloadMightUpgrade` after the re-gather is load-bearing: `revalidate`'s false
+/// conflates "proven foreign" with "couldn't tell" (an `.indeterminate` wedged probe),
+/// and an indeterminate owner does NOT prove the reload won't respawn our newer
+/// BundleProgram — so it must stay gated, not drop to an ungated plain reload that
+/// skips the commit-time probe and could crash-loop. Only a settled foreign/system/
+/// unmanaged owner falls through to a plain reload. The gate surfaces OK → reload now /
+/// Warn → confirm popup / Error → block popup.
 @MainActor
 func startGatedReload(_ store: DaemonStore, _ agent: AgentController) async {
-    guard reloadMightUpgrade(store, agent) else {
+    guard store.appAheadOfDaemon else {
         store.requestReload()
         return
     }
-    if await agent.revalidate(.selfManaged), agent.installState == .installed {
+    _ = await agent.revalidate(.selfManaged)
+    if reloadMightUpgrade(store, agent) {
         await store.gatedDaemonUpdate()
     } else {
         store.requestReload()

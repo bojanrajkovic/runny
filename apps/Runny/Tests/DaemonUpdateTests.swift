@@ -138,4 +138,19 @@ final class DaemonUpdateTests: XCTestCase {
         XCTAssertFalse(DaemonStore.autoApplyShouldAttempt(settingOn: true, update: .inProgress, attempted: false))
         XCTAssertFalse(DaemonStore.autoApplyShouldAttempt(settingOn: true, update: .didNotTake(daemonCore: "0.5.0"), attempted: false))
     }
+
+    func testAutoApplyWillIssueRejectsAnAlreadyAttemptedCycle() {
+        // The will-issue check is re-evaluated at the commit point, AFTER the gate
+        // probe await — so it must reject a fire whose cycle was already claimed while
+        // it was suspended. Without the `attempted` term, two surfaces firing on one
+        // settle let a straggler (resumed after the first reload cleared reloadInFlight)
+        // drain the fleet a second time.
+        XCTAssertTrue(DaemonStore.autoApplyWillIssue(clientPresent: true, reloadInFlight: false, attempted: false))
+        // Already attempted this cycle → back out even though the client is up and no
+        // reload is in flight (the straggler window).
+        XCTAssertFalse(DaemonStore.autoApplyWillIssue(clientPresent: true, reloadInFlight: false, attempted: true))
+        // No client / a reload already in flight → back out (mirrors performReload's guards).
+        XCTAssertFalse(DaemonStore.autoApplyWillIssue(clientPresent: false, reloadInFlight: false, attempted: false))
+        XCTAssertFalse(DaemonStore.autoApplyWillIssue(clientPresent: true, reloadInFlight: true, attempted: false))
+    }
 }

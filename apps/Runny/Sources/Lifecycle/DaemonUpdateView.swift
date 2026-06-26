@@ -72,56 +72,43 @@ func daemonUpdateVerdict(_ store: DaemonStore, _ agent: AgentController) -> Daem
     )
 }
 
-/// Whether a plain Reload right now might respawn a newer bundled binary — the
-/// signal `startGatedReload` uses to choose the config-compat gate over a plain
-/// reload. Two legs, in order:
+/// Whether a reload would respawn our NEWER bundle, and so must run the config-compat
+/// gate. **Two facts decide it, and only two:**
 ///
-/// 1. **Is the app even ahead?** A reload can only upgrade if the bundled binary is
-///    newer than the running daemon — a pure version/protocol compare
-///    (`appAheadOfDaemon`) that does NOT depend on the ownership/reconcile facts. If
-///    the app isn't ahead (same version, an older/translocated build, or a dev build
-///    with no bundled `runnyd`), a reload can't upgrade, so it must NOT be gated on
-///    the bundled probe — an older or missing bundled binary would falsely block a
-///    config the running daemon happily accepts.
-/// 2. **Given it's ahead, is the respawn ours?** FAIL CLOSED while the agent facts
-///    aren't a settled, affirmative verdict — `ownership == .indeterminate`, or
-///    `reconcileState` `.notChecked` (not yet run) or `.undetermined` (wedged/
-///    unparseable `launchctl`): the reload could respawn the newer bundled daemon, so
-///    gate it or it crash-loops on a schema-incompatible config. Only once reconcile
-///    lands a real verdict (`.ok`/`.foreign`) is `daemonUpdateVerdict` authoritative.
+/// - **Ahead?** The app must be a newer build than the running daemon — a live
+///   version/protocol compare (`appAheadOfDaemon`). Not ahead → can't upgrade.
+/// - **Ours?** The reload must respawn OUR bundle, which only the *owner* determines:
+///   a `selfManaged` daemon is our per-user agent, so a reload cold-starts our
+///   `BundleProgram` — gate it. `indeterminate` (a wedged system probe) can't be told
+///   apart from ours, so fail closed. A settled non-self owner respawns its OWN binary,
+///   validated by its own reload preflight — not ours to gate.
+///
+/// Reconcile/canonical-ness and the affordance verdict deliberately do NOT enter: a
+/// `selfManaged` daemon respawns our `BundleProgram` regardless of them. Collapsing to
+/// these two axes is what stops this from sprouting an edge case per ownership ×
+/// reconcile × version cell.
 @MainActor
 func reloadMightUpgrade(_ store: DaemonStore, _ agent: AgentController) -> Bool {
     guard store.appAheadOfDaemon else { return false }
-    if agent.ownership == .indeterminate
-        || agent.reconcileState == .notChecked
-        || agent.reconcileState == .undetermined
-    {
+    switch agent.ownership {
+    // ponytail: `.indeterminate` fails closed though it's usually a foreign/system
+    // daemon — accepting a rare, transient, retryable false-block, because the
+    // alternative is a crash-loop if it really is our per-user agent, and
+    // crash-loop-proof beats false-block.
+    case .selfManaged, .indeterminate:
         return true
+    case .unmanaged, .systemManaged, .awaitingApproval:
+        return false
     }
-    return daemonUpdateVerdict(store, agent) != .none
 }
 
 /// The single entry point both the Update Daemon affordance and the plain Reload
-/// buttons call.
-///
-/// If the app isn't ahead, a reload can't upgrade — a live version/protocol compare,
-/// not a stale fact — so it's a plain config reload (generic confirm; the daemon's own
-/// preflight validates it). If the app IS ahead it might upgrade: re-gather ownership
-/// (the button can be stale, and an upgrade fires outside the spawn gate) and then
-/// FAIL CLOSED — gate unless ownership is now a PROVEN non-upgrade owner. Re-checking
-/// `reloadMightUpgrade` after the re-gather is load-bearing: `revalidate`'s false
-/// conflates "proven foreign" with "couldn't tell" (an `.indeterminate` wedged probe),
-/// and an indeterminate owner does NOT prove the reload won't respawn our newer
-/// BundleProgram — so it must stay gated, not drop to an ungated plain reload that
-/// skips the commit-time probe and could crash-loop. Only a settled foreign/system/
-/// unmanaged owner falls through to a plain reload. The gate surfaces OK → reload now /
-/// Warn → confirm popup / Error → block popup.
+/// buttons call. Re-gather ownership first — the button can be stale, and a reload
+/// drains the fleet, so a daemon that changed hands must not be drained for an upgrade
+/// it can't take — then gate an upgrade reload (config-compat popups) and plain-confirm
+/// anything else (the daemon's own preflight validates a non-upgrade).
 @MainActor
 func startGatedReload(_ store: DaemonStore, _ agent: AgentController) async {
-    guard store.appAheadOfDaemon else {
-        store.requestReload()
-        return
-    }
     _ = await agent.revalidate(.selfManaged)
     if reloadMightUpgrade(store, agent) {
         await store.gatedDaemonUpdate()

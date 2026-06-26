@@ -444,12 +444,17 @@ seam, so every decision is unit-tested without launchd. The invariants:
     the click is the operator editing `config.yaml` in the seconds between click and
     reload — an accepted, commented residual, not a state machine.
   **Both entry points share one action** (`startGatedReload`): the Update Daemon
-  affordance and the plain Reload Config buttons. The per-user agent's `BundleProgram`
-  points at this app bundle, so when the app is ahead *any* drain-gated reload respawns
-  the newer binary — so a reload that `reloadMightUpgrade` (which **fails closed** while
-  the agent facts are unsettled, and only when the app is actually ahead) routes through
-  the same gate; a reload that can't upgrade falls through to the generic reload confirm.
-  Default-on auto-apply on OK is the next slice.
+  affordance and the plain Reload Config buttons. It re-gathers ownership, then gates
+  iff `reloadMightUpgrade` — a reload that would respawn our newer bundle. That turns
+  on **exactly two facts**: the app is **ahead** (a live version/protocol compare) AND
+  the daemon is **ours** to respawn (`ownership == .selfManaged`, since the per-user
+  agent's `BundleProgram` points at this bundle; `.indeterminate` fails closed). A
+  settled non-self owner (system/unmanaged) respawns its own binary — its own preflight
+  validates it — so it falls through to the generic reload confirm. Reconcile,
+  canonical-ness, and the affordance verdict deliberately don't enter the gate decision
+  (a `selfManaged` daemon respawns our bundle regardless) — collapsing to those two
+  axes is what keeps this from sprouting an edge per ownership × reconcile × version
+  cell. Default-on auto-apply on OK is the next slice.
 - **Uninstall** is `unregister()` then a best-effort `launchctl bootout` ("No such
   process" = success); a mid-job uninstall first raises a destructive confirmation
   naming the abandoned slot. **Reconcile-on-launch** compares the registered

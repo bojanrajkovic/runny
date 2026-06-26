@@ -1025,6 +1025,14 @@ final class DaemonStore {
     /// own; the `performReload` commit re-probe remains the crash-loop backstop.
     func autoApplyOnOK() async -> Bool {
         guard case .proceed = await probeUpdateGate() else { return false }
+        // Report "fired" (so the caller notifies) ONLY when the reload will actually
+        // issue: a daemon that dropped during the probe, or a reload already in flight
+        // (a concurrent surface-trigger, or a manual reload), means performReload would
+        // no-op — never post a notification claiming a drain that didn't happen. These
+        // mirror performReload's own guards and run atomically with confirmGatedUpdate
+        // (no await between), so a second concurrent auto-apply sees reloadInFlight and
+        // backs out here — no double-drain, no double-notify, no dangling intent.
+        guard client != nil, !reloadInFlight else { return false }
         confirmGatedUpdate()
         return true
     }

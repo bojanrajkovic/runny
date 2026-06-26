@@ -206,6 +206,30 @@ func maybeAutoApply(_ store: DaemonStore, _ agent: AgentController, settingOn: B
     }
 }
 
+/// The surface-driven auto-apply trigger as one modifier, applied to both the menu-bar
+/// popover and the main window so the order (refresh → reconcile → maybeAutoApply) and
+/// the default-on setting live in ONE place, not copy-pasted per surface. A cancellable
+/// `.task` (not a detached `onAppear` Task), so closing the surface mid-probe unwinds it.
+/// Concurrent fires from both surfaces are safe: `autoApplyOnOK` backs out the second on
+/// `reloadInFlight`.
+struct AutoApplyOnAppear: ViewModifier {
+    @Environment(DaemonStore.self) private var store
+    @Environment(AgentController.self) private var agent
+    @AppStorage(Prefs.autoApplyDaemonUpdates) private var autoApplyDaemonUpdates = true
+
+    func body(content: Content) -> some View {
+        content.task {
+            agent.refresh()
+            await agent.runReconcile()
+            await maybeAutoApply(store, agent, settingOn: autoApplyDaemonUpdates)
+        }
+    }
+}
+
+extension View {
+    func autoApplyOnAppear() -> some View { modifier(AutoApplyOnAppear()) }
+}
+
 /// Best-effort local notification when auto-apply drains+restarts the fleet without a
 /// click. Authorization is requested lazily on first post; if denied (or on an
 /// ad-hoc/unnotarized build where it's flaky), it stays silent — the affordance still
@@ -218,8 +242,11 @@ enum AutoApplyNotifier {
             guard granted else { return }
             let content = UNMutableNotificationContent()
             content.title = "Applying runnyd update"
-            content.body = to.isEmpty
-                ? "Updating the daemon and restarting the fleet (running jobs finish first)."
+            // `to` (the app version) never coalesces to empty. When `from == to` — a
+            // protocol-only upgrade (same version core, older protocol) — don't render
+            // "0.6.0 → 0.6.0"; just name the target.
+            content.body = (from.isEmpty || from == to)
+                ? "Updating runnyd to \(to) and restarting the fleet (running jobs finish first)."
                 : "Updating runnyd \(from) → \(to) and restarting the fleet (running jobs finish first)."
             center.add(UNNotificationRequest(identifier: "runnyd-auto-apply", content: content, trigger: nil))
         }

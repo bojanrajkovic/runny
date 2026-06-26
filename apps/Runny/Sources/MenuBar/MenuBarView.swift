@@ -8,7 +8,6 @@ struct MenuBarView: View {
     @Environment(CLIInstallModel.self) private var cli
     @Environment(AgentController.self) private var agent
     @Environment(\.openWindow) private var openWindow
-    @AppStorage(Prefs.autoApplyDaemonUpdates) private var autoApplyDaemonUpdates = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -84,19 +83,11 @@ struct MenuBarView: View {
         .onAppear {
             store.start()
             cli.refresh()
-            // Refresh the agent's install state so the Start/Update affordances here
-            // (and in the main window) reflect an already-registered agent on launch,
-            // not the default .notInstalled until Settings is opened. Reconcile too,
-            // so Update gates on a fresh canonical verdict rather than the default.
-            agent.refresh()
-            // Reconcile first so the auto-apply trigger reads a settled canonical
-            // verdict, then run the surface-driven B3 auto-apply (no-ops unless the
-            // setting is on + an OK update is on offer for our confirmed agent).
-            Task {
-                await agent.runReconcile()
-                await maybeAutoApply(store, agent, settingOn: autoApplyDaemonUpdates)
-            }
         }
+        // Refreshes the agent + reconciles so the Start/Update affordances reflect an
+        // already-registered agent, then runs the surface-driven B3 auto-apply. Shared
+        // with the main window so the trigger + the default-on setting live in one place.
+        .autoApplyOnAppear()
     }
 
     /// A Runny-owned `runnyctl` link left dangling by a removed copy. `.orphaned`

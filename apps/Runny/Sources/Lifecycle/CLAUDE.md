@@ -51,9 +51,13 @@ never exercised live in tests.
   `program identifier = Contents/MacOS/runnyd` (with `parent bundle identifier =
   com.coderinserepeat.runny`) and **no `program =` line at all**.
   `parseLaunchctlProgram` returns `.bundleProgram` (→ reconcile `.ok`) for that
-  shape when the parent id is ours — canonical by construction, since only our
-  registration produces a relative program under our label and the install gate
-  already refused a non-canonical bundle. Matching only `program =` (the bug a
+  shape when the parent id is ours AND the program names the bundled daemon
+  (`bundledAgentRelativeProgram`, comparing the path before launchctl's
+  " (mode: N)" suffix) — canonical by construction, since only our registration
+  produces *that* relative program under our label and the install gate already
+  refused a non-canonical bundle. A registration under our id pointing at a
+  different `BundleProgram` stays `.undetermined` (the gate probes
+  `Contents/MacOS/runnyd`, so `.ok` must mean exactly that binary). Matching only `program =` (the bug a
   live in-place upgrade caught — the unit fixture had fabricated an absolute line
   no real `SMAppService` agent emits) leaves every real per-user agent
   `.undetermined`, which silently hides the post-upgrade Update affordance. The

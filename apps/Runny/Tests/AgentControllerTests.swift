@@ -533,6 +533,15 @@ final class AgentControllerTests: XCTestCase {
         }
         """
         XCTAssertEqual(AgentController.parseLaunchctlProgram(foreignBundle), .undetermined)
+        // Our parent id but a DIFFERENT BundleProgram (not runnyd) → undetermined: the
+        // gate probes Contents/MacOS/runnyd, so .bundleProgram must name exactly that.
+        let wrongProgram = """
+        com.coderinserepeat.runnyd = {
+        \tprogram identifier = Contents/MacOS/somethingelse (mode: 2)
+        \tparent bundle identifier = com.coderinserepeat.runny
+        }
+        """
+        XCTAssertEqual(AgentController.parseLaunchctlProgram(wrongProgram), .undetermined)
         // No program line at all (unparseable format) → undetermined, not a false
         // foreign.
         XCTAssertEqual(AgentController.parseLaunchctlProgram("state = running\npid = 42"), .undetermined)

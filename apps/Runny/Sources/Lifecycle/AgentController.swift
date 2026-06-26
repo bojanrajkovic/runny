@@ -762,7 +762,14 @@ extension AgentController {
             }
         }
         if let absoluteProgram { return .program(absoluteProgram) }
-        if bundleRelativeProgram != nil, parentBundleID == LaunchAgentStatus.canonicalBundleIdentifier {
+        // A bundle-relative program under OUR bundle id is `.bundleProgram` only when it
+        // actually names the bundled daemon. launchctl appends " (mode: N)", so compare
+        // the leading path component; a stale/foreign registration under our id pointing
+        // at a DIFFERENT BundleProgram must not reconcile `.ok`, since the gate probes
+        // `Contents/MacOS/runnyd` while launchd would respawn that other executable.
+        if let bundleRelativeProgram, parentBundleID == LaunchAgentStatus.canonicalBundleIdentifier,
+           bundleRelativeProgram.prefix(while: { $0 != " " }) == LaunchAgentStatus.bundledAgentRelativeProgram
+        {
             return .bundleProgram
         }
         return .undetermined

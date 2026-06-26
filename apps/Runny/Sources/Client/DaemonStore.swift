@@ -965,8 +965,17 @@ final class DaemonStore {
     /// the probe couldn't run/parse) blocks — a gate that can't speak must never
     /// green-light an upgrade.
     private func probeUpdateGate() async -> ConfigCompatGate.UpdateGate {
-        guard let runnydPath = SystemDaemonInstaller.bundleRunnydPath else {
-            return .block("this build carries no bundled runnyd to validate the config")
+        // Probe the binary the per-user agent will actually RESPAWN — the canonical
+        // /Applications/Runny.app runnyd — NOT `Bundle.main`'s, which on a translocated
+        // or ~/Downloads launch is a different (maybe older) build than the one launchd
+        // cold-starts. Probing the running instance there could OK a config the respawn
+        // binary rejects (crash-loop) or block one it accepts. This mirrors the
+        // reconcile's "never Bundle.main, always canonical" rule — `SystemDaemonInstaller.
+        // bundleRunnydPath` stays Bundle.main-based for the system-daemon *install* (it
+        // copies from the running bundle), which is a different operation.
+        let runnydPath = LaunchAgentStatus.canonicalAgentProgram
+        guard FileManager.default.fileExists(atPath: runnydPath) else {
+            return .block("the installed Runny.app has no runnyd to validate the config")
         }
         let configPath = RunnyHome.directory.appendingPathComponent("config.yaml").path
         return await ConfigCompatGate.updateGate(for: ConfigCompatGate.probe(runnydPath: runnydPath, configPath: configPath))

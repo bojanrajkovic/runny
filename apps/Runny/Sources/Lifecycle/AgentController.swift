@@ -54,7 +54,15 @@ protocol ServiceRegistrar {
 /// reconcile. `undetermined` covers a timeout or unparseable output — surfaced as
 /// "couldn't determine", never a spin or a false "foreign".
 enum AgentProgram: Equatable {
+    /// An absolute `program = /path` — a hand-installed plist's `Program` key. The
+    /// reconcile compares it to the canonical location.
     case program(String)
+    /// Our own `SMAppService` registration: launchd reports a bundle-relative
+    /// `program identifier = Contents/MacOS/runnyd` (no absolute `program =`),
+    /// resolved against our app bundle (`parent bundle identifier` is ours).
+    /// Canonical by construction — only our registration produces this under our
+    /// label, and the install gate already refused a non-canonical bundle.
+    case bundleProgram
     case notRegistered
     case undetermined
 }
@@ -660,6 +668,7 @@ extension AgentController {
     nonisolated static func reconcileVerdict(_ program: AgentProgram) -> AgentReconcile {
         switch program {
         case .notRegistered: .ok
+        case .bundleProgram: .ok
         case .undetermined: .undetermined
         case let .program(path):
             LaunchAgentStatus.isCanonicalAgentProgram(path) ? .ok : .foreign(path: path)
@@ -725,18 +734,46 @@ extension AgentController {
         }
     }
 
-    /// Pure: pull the resolved program path out of `launchctl print` output, which
-    /// prints a `program = /path` line for a loaded job. Defensive — returns nil if
-    /// the line is absent (an unparseable/old format reconciles to undetermined,
-    /// never a false foreign).
-    nonisolated static func parseLaunchctlProgram(_ output: String) -> String? {
+    /// Pure: classify a loaded job from `launchctl print` output. Two shapes:
+    ///
+    /// - A hand-installed plist prints an absolute `program = /path` → `.program`,
+    ///   which the reconcile compares to the canonical location.
+    /// - Our `SMAppService` agent registers a bundle-relative `BundleProgram`, so
+    ///   launchd prints `program identifier = Contents/MacOS/runnyd` (no absolute
+    ///   `program =`) plus `parent bundle identifier = <app id>`. When that id is
+    ///   ours, it's our registration resolved against our bundle → `.bundleProgram`
+    ///   (canonical by construction).
+    ///
+    /// Anything else (neither line present, or a bundle-relative program under a
+    /// foreign parent id) is `.undetermined` — surfaced loud, never a false foreign
+    /// or a false canonical.
+    nonisolated static func parseLaunchctlProgram(_ output: String) -> AgentProgram {
+        var absoluteProgram: String?
+        var bundleRelativeProgram: String?
+        var parentBundleID: String?
         for line in output.split(whereSeparator: \.isNewline) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if let range = trimmed.range(of: "program = "), range.lowerBound == trimmed.startIndex {
-                let value = trimmed[range.upperBound...].trimmingCharacters(in: .whitespaces)
-                return value.isEmpty ? nil : value
+            if let value = Self.launchctlFieldValue(trimmed, "program = ") {
+                absoluteProgram = value
+            } else if let value = Self.launchctlFieldValue(trimmed, "program identifier = ") {
+                bundleRelativeProgram = value
+            } else if let value = Self.launchctlFieldValue(trimmed, "parent bundle identifier = ") {
+                parentBundleID = value
             }
         }
-        return nil
+        if let absoluteProgram { return .program(absoluteProgram) }
+        if bundleRelativeProgram != nil, parentBundleID == LaunchAgentStatus.canonicalBundleIdentifier {
+            return .bundleProgram
+        }
+        return .undetermined
+    }
+
+    /// The value of a `key = value` launchctl line, only when the trimmed line
+    /// STARTS with `prefix` (so `program identifier = …` is never mistaken for
+    /// `program = …`). Empty values are nil.
+    private nonisolated static func launchctlFieldValue(_ trimmed: String, _ prefix: String) -> String? {
+        guard trimmed.hasPrefix(prefix) else { return nil }
+        let value = trimmed.dropFirst(prefix.count).trimmingCharacters(in: .whitespaces)
+        return value.isEmpty ? nil : value
     }
 }

@@ -14,6 +14,13 @@ enum LaunchAgentStatus {
     /// reconcile flag a perfectly-good `/Applications` agent as foreign.
     static let canonicalBundlePath = "/Applications/Runny.app"
 
+    /// The app bundle's identifier — the `parent bundle identifier` launchctl reports
+    /// for our `SMAppService`-registered agent. The reconcile uses it to confirm a
+    /// bundle-relative `BundleProgram` agent is OURS (resolved against our app), not a
+    /// contrived foreign one. Note the trailing `runny`, not `runnyd` — the agent
+    /// LABEL is `…runnyd`, but the registering APP's id is `…runny`.
+    static let canonicalBundleIdentifier = "com.coderinserepeat.runny"
+
     /// The agent's program path when installed canonically — what a registered
     /// job's bundle-relative `BundleProgram` resolves to. The reconcile compares
     /// an observed program path against THIS.

@@ -52,12 +52,10 @@ final class SMAppServiceRegistrar: ServiceRegistrar {
                 // undetermined instead.
                 return stderr.lowercased().contains("could not find") ? .notRegistered : .undetermined
             }
-            // Loaded: pull the program path; an unparseable dump is undetermined,
-            // never a false "foreign".
-            if let program = AgentController.parseLaunchctlProgram(stdout) {
-                return .program(program)
-            }
-            return .undetermined
+            // Loaded: classify the job's program (absolute plist Program vs our
+            // SMAppService bundle-relative BundleProgram); an unparseable dump is
+            // undetermined, never a false "foreign".
+            return AgentController.parseLaunchctlProgram(stdout)
         }
     }
 
@@ -84,7 +82,8 @@ final class SMAppServiceRegistrar: ServiceRegistrar {
     /// (the SIGTERM→SIGKILL reaper, FD close, and byte caps live there, shared with
     /// `LaunchdProbe`). `bootout`/`kickstart`/`print` classify the `CommandResult`
     /// themselves. `print` is the only verbose verb; a 64 KB stdout cap comfortably
-    /// contains the early `program = …` line `agentProgramPath` parses.
+    /// contains the early program / parent-bundle-identifier lines `agentProgramPath`
+    /// parses.
     private func runLaunchctl(_ args: [String]) async -> CommandResult {
         await BoundedProcess.run(
             "/bin/launchctl", args, timeout: .seconds(Self.launchctlTimeout), stdoutByteCap: 64 * 1024

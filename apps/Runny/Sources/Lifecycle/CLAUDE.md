@@ -44,6 +44,21 @@ never exercised live in tests.
   and the reconcile compare against it, **never** `Bundle.main.bundlePath` —
   that is the transient translocation mount on a `~/Downloads` launch, which
   would flag a perfectly-good `/Applications` agent as foreign.
+- **The reconcile parses TWO launchctl program forms — our real agent is the
+  second.** `launchctl print` reports a *hand-installed* plist's `Program` as an
+  absolute `program = /path` (compared to canonical), but our own `SMAppService`
+  agent registers a bundle-relative `BundleProgram`, so launchd prints
+  `program identifier = Contents/MacOS/runnyd` (with `parent bundle identifier =
+  com.coderinserepeat.runny`) and **no `program =` line at all**.
+  `parseLaunchctlProgram` returns `.bundleProgram` (→ reconcile `.ok`) for that
+  shape when the parent id is ours — canonical by construction, since only our
+  registration produces a relative program under our label and the install gate
+  already refused a non-canonical bundle. Matching only `program =` (the bug a
+  live in-place upgrade caught — the unit fixture had fabricated an absolute line
+  no real `SMAppService` agent emits) leaves every real per-user agent
+  `.undetermined`, which silently hides the post-upgrade Update affordance. The
+  parser keys off `program = ` vs `program identifier = ` (the space-equals
+  disambiguates), so the order of the two checks is load-bearing.
 - **Translocation refuses recoverably, never permanently.** Gatekeeper can
   transiently translocate even a correctly-installed `/Applications` app on its
   first launch, so the translocated verdict is "re-launch and retry", distinct

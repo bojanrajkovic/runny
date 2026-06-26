@@ -47,7 +47,7 @@ struct DaemonUpdateAffordance: View {
     /// load-bearing from the popover.
     private func update() {
         activation.openMainWindow(openWindow)
-        Task { await startGatedReload(store, agent) }
+        Task { await startGatedReload(store, agent, explicitUpdate: true) }
     }
 }
 
@@ -102,17 +102,24 @@ func reloadMightUpgrade(_ store: DaemonStore, _ agent: AgentController) -> Bool 
     }
 }
 
-/// The single entry point both the Update Daemon affordance and the plain Reload
-/// buttons call. Re-gather ownership first — the button can be stale, and a reload
-/// drains the fleet, so a daemon that changed hands must not be drained for an upgrade
-/// it can't take — then gate an upgrade reload (config-compat popups) and plain-confirm
-/// anything else (the daemon's own preflight validates a non-upgrade).
+/// The single entry point both reload affordances call, distinguished only by
+/// `explicitUpdate` — true for the **Update Daemon** affordance (the click is the
+/// drain consent), false for the plain **Reload Config** button (its dialog is).
+///
+/// Re-gather ownership first — the button can be stale, and a reload drains the fleet,
+/// so a daemon that changed hands must not be drained for an upgrade it can't take.
+/// Then: an upgrade reload runs the config-compat gate (shared popups; OK differs by
+/// `explicitUpdate`). A reload that can't upgrade is a plain config reload for the
+/// Reload Config button — but for an **Update** click whose ownership/version no longer
+/// warrants it (slipped to a foreign/system daemon, or already current), REFUSE rather
+/// than fall through to draining a daemon we don't own; the affordance re-renders and
+/// self-hides on the re-gathered facts.
 @MainActor
-func startGatedReload(_ store: DaemonStore, _ agent: AgentController) async {
+func startGatedReload(_ store: DaemonStore, _ agent: AgentController, explicitUpdate: Bool) async {
     _ = await agent.revalidate(.selfManaged)
     if reloadMightUpgrade(store, agent) {
-        await store.gatedDaemonUpdate()
-    } else {
+        await store.gatedDaemonUpdate(explicitUpdate: explicitUpdate)
+    } else if !explicitUpdate {
         store.requestReload()
     }
 }

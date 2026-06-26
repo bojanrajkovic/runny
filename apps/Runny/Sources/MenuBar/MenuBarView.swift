@@ -141,10 +141,10 @@ struct MenuBarView: View {
             // panel has no reliable presenter), so route through the window.
             Button(store.reloadInFlight ? "Validating…" : "Reload…") {
                 activation.openMainWindow(openWindow)
-                // Shared gate: an upgrade reload runs the config-compat gate (OK
-                // reloads, Warn/Error pop up on the window); a plain reload gets the
-                // generic confirm.
-                Task { await startGatedReload(store, agent) }
+                // Shared gate (explicitUpdate: false — this button's drain dialog is
+                // the consent): an upgrade reload runs the gate (Warn/Error pop up, OK
+                // shows the drain confirm); a plain reload gets the generic confirm.
+                Task { await startGatedReload(store, agent, explicitUpdate: false) }
             }
             .disabled(store.reloadInFlight || store.client == nil)
             Spacer()

@@ -942,15 +942,19 @@ final class DaemonStore {
 
     // MARK: - Reload (validate → drain → confirm the respawn)
 
-    /// Stage the generic reload confirmation dialog for a PLAIN reload — one that
-    /// can't upgrade (the app isn't ahead, or doesn't own the agent), so the respawn
-    /// reruns the same binary and the daemon's own preflight validates the config.
-    /// Reload restarts the whole daemon and drains every slot (jobs finish first), so
-    /// it's gated behind explicit consent like the `-force` recycle cases. An upgrade
-    /// reload does NOT come through here — it goes through `gatedDaemonUpdate`, which
-    /// runs the config-compat gate and sets `pendingUpdateIntent` itself.
-    func requestReload() {
-        pendingUpdateIntent = false
+    /// Stage the generic "Reload daemon config?" drain-confirmation dialog. Reload
+    /// restarts the whole daemon and drains every slot (jobs finish first), so it's
+    /// gated behind explicit consent like the `-force` recycle cases.
+    ///
+    /// `asUpdate` is the consent seam between the two reload entry points after an OK
+    /// gate: the **Reload Config** button shows this dialog as the consent (`asUpdate:
+    /// true` when that reload would upgrade, so `performReload`'s commit re-probe still
+    /// runs as the crash-loop backstop), while **Update Daemon** took its consent from
+    /// the click and reloads immediately via `confirmGatedUpdate`. A plain reload that
+    /// can't upgrade stays `asUpdate: false` — same binary, the daemon's own preflight
+    /// validates it, no commit gate.
+    func requestReload(asUpdate: Bool = false) {
+        pendingUpdateIntent = asUpdate
         reloadConfirm = true
     }
 
@@ -969,19 +973,23 @@ final class DaemonStore {
     }
 
     /// Gate an upgrade reload on the bundled (new) runnyd validating the in-place
-    /// config, surfacing the verdict as a popup rather than an inline row: OK reloads
-    /// immediately (clicking Update/Reload was the consent — no extra prompt); Warn
-    /// sets `configGateWarnings`, presenting a confirm-or-cancel alert the operator can
-    /// proceed past; Error/unavailable sets `configGateBlock`, an error alert with no
-    /// reload — a schema-incompatible upgrade is stopped here, not drained into a
-    /// crash-loop. The probe is re-run at the reload (`performReload`) too, so a config
-    /// edited between click and reload can't slip past. The OK/Warn/Error mapping is
-    /// the pure, unit-tested `ConfigCompatGate.updateGate`.
-    func gatedDaemonUpdate() async {
+    /// config, surfacing the verdict as a popup rather than an inline row. Warn and
+    /// Error are identical for both entry points: Warn sets `configGateWarnings`
+    /// (a confirm-or-cancel alert whose "Reload Anyway" is the consent); Error/
+    /// unavailable sets `configGateBlock` (an error alert, no reload — the
+    /// schema-incompatible upgrade is stopped here, not drained into a crash-loop).
+    ///
+    /// **OK is the one place the entry points differ** (`explicitUpdate`): the Update
+    /// Daemon click was already the drain consent, so it reloads immediately; the
+    /// Reload Config button instead shows its "Reload daemon config?" drain dialog as
+    /// the consent (`asUpdate: true`, so `performReload`'s commit re-probe still backstops
+    /// a config that changed since). The probe re-runs at the reload regardless. The
+    /// OK/Warn/Error mapping is the pure, unit-tested `ConfigCompatGate.updateGate`.
+    func gatedDaemonUpdate(explicitUpdate: Bool) async {
         clearConfigGate()
         switch await probeUpdateGate() {
         case .proceed:
-            confirmGatedUpdate()
+            if explicitUpdate { confirmGatedUpdate() } else { requestReload(asUpdate: true) }
         case let .confirm(warnings):
             configGateWarnings = warnings
         case let .block(message):

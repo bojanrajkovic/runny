@@ -425,11 +425,13 @@ seam, so every decision is unit-tested without launchd. The invariants:
   approval-lifecycle edges (TOCTOU, re-confirm loops, stale/cancelled approvals) into
   impossibility rather than handling each:
   - **Click drives the popup.** `DaemonStore.gatedDaemonUpdate` probes once and the
-    verdict picks the prompt: **OK** reloads immediately with no prompt (clicking
-    Update/Reload was the consent); **Warn** presents a confirm-or-cancel alert
-    listing the warnings (Cancel is the safe default, "Reload Anyway" the destructive
-    deliberate action); **Error**/`unavailable` presents an acknowledge-only alert and
-    reloads nothing. The OK/Warn/Error decision is the pure `ConfigCompatGate.updateGate`.
+    verdict picks the prompt: **OK** proceeds to the reload — *immediately* for the
+    Update Daemon affordance (its click was the drain consent), or via the normal
+    "Reload daemon config?" drain dialog for the plain Reload Config button (its dialog
+    is the consent); **Warn** presents a confirm-or-cancel alert listing the warnings
+    (Cancel is the safe default, "Reload Anyway" the destructive deliberate action, the
+    same for both buttons); **Error**/`unavailable` presents an acknowledge-only alert
+    and reloads nothing. The OK/Warn/Error decision is the pure `ConfigCompatGate.updateGate`.
     The warnings/block are *display only* — never persisted as an "approved set" or
     compared at commit, so there is no stale approval to leak across a cancel or a
     later reload; both clear on dismiss and on convergence/reconnect.
@@ -443,18 +445,22 @@ seam, so every decision is unit-tested without launchd. The invariants:
     non-fatal (the daemon comes up), and the only way the verdict could differ from
     the click is the operator editing `config.yaml` in the seconds between click and
     reload — an accepted, commented residual, not a state machine.
-  **Both entry points share one action** (`startGatedReload`): the Update Daemon
-  affordance and the plain Reload Config buttons. It re-gathers ownership, then gates
+  **Both entry points share one action** (`startGatedReload`), distinguished only by
+  `explicitUpdate` — true for Update Daemon (the click consents to the drain), false for
+  the plain Reload Config button (its dialog does). It re-gathers ownership, then gates
   iff `reloadMightUpgrade` — a reload that would respawn our newer bundle. That turns
   on **exactly two facts**: the app is **ahead** (a live version/protocol compare) AND
   the daemon is **ours** to respawn (`ownership == .selfManaged`, since the per-user
   agent's `BundleProgram` points at this bundle; `.indeterminate` fails closed). A
   settled non-self owner (system/unmanaged) respawns its own binary — its own preflight
-  validates it — so it falls through to the generic reload confirm. Reconcile,
-  canonical-ness, and the affordance verdict deliberately don't enter the gate decision
-  (a `selfManaged` daemon respawns our bundle regardless) — collapsing to those two
-  axes is what keeps this from sprouting an edge per ownership × reconcile × version
-  cell. Default-on auto-apply on OK is the next slice.
+  validates it. For the plain Reload that falls through to the generic reload confirm;
+  for an **Update** click whose ownership/version no longer warrants it (slipped to a
+  foreign/system daemon, or already current) it **refuses** rather than drain a daemon
+  it doesn't own — the affordance re-renders and self-hides on the re-gathered facts.
+  Reconcile, canonical-ness, and the affordance verdict deliberately don't enter the
+  gate decision (a `selfManaged` daemon respawns our bundle regardless) — collapsing to
+  those two axes is what keeps this from sprouting an edge per ownership × reconcile ×
+  version cell. Default-on auto-apply on OK is the next slice.
 - **Uninstall** is `unregister()` then a best-effort `launchctl bootout` ("No such
   process" = success); a mid-job uninstall first raises a destructive confirmation
   naming the abandoned slot. **Reconcile-on-launch** compares the registered

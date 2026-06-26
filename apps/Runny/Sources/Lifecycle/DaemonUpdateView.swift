@@ -102,24 +102,29 @@ func reloadMightUpgrade(_ store: DaemonStore, _ agent: AgentController) -> Bool 
     }
 }
 
-/// The single entry point both reload affordances call, distinguished only by
-/// `explicitUpdate` — true for the **Update Daemon** affordance (the click is the
-/// drain consent), false for the plain **Reload Config** button (its dialog is).
+/// The single entry point both reload affordances call. Re-gather ownership first —
+/// the button can be stale, and a reload drains the fleet, so a daemon that changed
+/// hands must not be drained. Then the two entry points part on their *inherent*
+/// ownership strictness:
 ///
-/// Re-gather ownership first — the button can be stale, and a reload drains the fleet,
-/// so a daemon that changed hands must not be drained for an upgrade it can't take.
-/// Then: an upgrade reload runs the config-compat gate (shared popups; OK differs by
-/// `explicitUpdate`). A reload that can't upgrade is a plain config reload for the
-/// Reload Config button — but for an **Update** click whose ownership/version no longer
-/// warrants it (slipped to a foreign/system daemon, or already current), REFUSE rather
-/// than fall through to draining a daemon we don't own; the affordance re-renders and
-/// self-hides on the re-gathered facts.
+/// - **Update Daemon** (`explicitUpdate: true`) means "upgrade MY per-user daemon", so
+///   it proceeds ONLY when ownership is confirmed `.selfManaged` and installed — the
+///   original `update()` guard. Indeterminate (a wedged probe), foreign/system, or
+///   uninstalled → **refuse**, never drain a daemon we can't confirm is ours; the
+///   affordance re-renders and self-hides. The click is the drain consent, so OK reloads
+///   immediately.
+/// - **Reload Config** (`explicitUpdate: false`) means "reload the CONNECTED daemon", so
+///   it gates whenever the reload might upgrade — including indeterminate ownership
+///   (crash-loop-proof) — and otherwise does a plain reload; either way its drain dialog
+///   is the consent. Crucially it never silently drains.
 @MainActor
 func startGatedReload(_ store: DaemonStore, _ agent: AgentController, explicitUpdate: Bool) async {
-    _ = await agent.revalidate(.selfManaged)
-    if reloadMightUpgrade(store, agent) {
-        await store.gatedDaemonUpdate(explicitUpdate: explicitUpdate)
-    } else if !explicitUpdate {
+    let confirmedOurs = await agent.revalidate(.selfManaged) && agent.installState == .installed
+    if explicitUpdate {
+        if confirmedOurs { await store.gatedDaemonUpdate(explicitUpdate: true) }
+    } else if reloadMightUpgrade(store, agent) {
+        await store.gatedDaemonUpdate(explicitUpdate: false)
+    } else {
         store.requestReload()
     }
 }

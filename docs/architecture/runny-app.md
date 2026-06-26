@@ -445,18 +445,19 @@ seam, so every decision is unit-tested without launchd. The invariants:
     non-fatal (the daemon comes up), and the only way the verdict could differ from
     the click is the operator editing `config.yaml` in the seconds between click and
     reload — an accepted, commented residual, not a state machine.
-  **Both entry points share one action** (`startGatedReload`), distinguished only by
-  `explicitUpdate` — true for Update Daemon (the click consents to the drain), false for
-  the plain Reload Config button (its dialog does). It re-gathers ownership, then gates
-  iff `reloadMightUpgrade` — a reload that would respawn our newer bundle. That turns
-  on **exactly two facts**: the app is **ahead** (a live version/protocol compare) AND
-  the daemon is **ours** to respawn (`ownership == .selfManaged`, since the per-user
-  agent's `BundleProgram` points at this bundle; `.indeterminate` fails closed). A
-  settled non-self owner (system/unmanaged) respawns its own binary — its own preflight
-  validates it. For the plain Reload that falls through to the generic reload confirm;
-  for an **Update** click whose ownership/version no longer warrants it (slipped to a
-  foreign/system daemon, or already current) it **refuses** rather than drain a daemon
-  it doesn't own — the affordance re-renders and self-hides on the re-gathered facts.
+  **Both entry points share one action** (`startGatedReload`); after re-gathering
+  ownership they part on their *inherent* strictness. **Update Daemon** means "upgrade
+  MY per-user daemon", so it proceeds only when ownership is confirmed `.selfManaged`
+  and installed (the original `update()` guard) — indeterminate (wedged probe),
+  foreign/system, or uninstalled all **refuse**, never draining a daemon we can't confirm
+  is ours; the affordance re-renders and self-hides. The click is the drain consent, so
+  OK reloads immediately. **Reload Config** means "reload the CONNECTED daemon", so it
+  gates iff `reloadMightUpgrade` — a reload that would respawn our newer bundle, which
+  turns on **exactly two facts**: the app is **ahead** (a live version/protocol compare)
+  AND the daemon is **ours** to respawn (`ownership == .selfManaged`; `.indeterminate`
+  fails closed, crash-loop-proof). A settled non-self owner respawns its own binary
+  (its own preflight validates it) → the generic reload confirm. Either way its drain
+  dialog is the consent; it never silently drains.
   Reconcile, canonical-ness, and the affordance verdict deliberately don't enter the
   gate decision (a `selfManaged` daemon respawns our bundle regardless) — collapsing to
   those two axes is what keeps this from sprouting an edge per ownership × reconcile ×

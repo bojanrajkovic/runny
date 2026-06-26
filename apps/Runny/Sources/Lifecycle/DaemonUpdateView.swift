@@ -184,10 +184,10 @@ extension View {
     func configGateAlerts() -> some View { modifier(ConfigGateAlerts()) }
 }
 
-/// The surface-driven auto-apply trigger. Called when a Runny surface appears (the
-/// menu-bar popover or the main window) AFTER the agent facts are re-gathered, so the
-/// operator is present when the fleet drains. Fires only when the default-on setting is
-/// enabled, an update is on offer, none's been attempted this cycle
+/// The surface-driven auto-apply trigger. Run (by `AutoApplyOnAppear`) when the update
+/// verdict settles to `.available` while a Runny surface is open — so the operator is
+/// present when the fleet drains. Fires only when the default-on setting is enabled, an
+/// update is on offer, none's been attempted this cycle
 /// (`autoApplyShouldAttempt`), ownership re-confirms `.selfManaged` + installed (never
 /// auto-drain a daemon we don't own), and the config gate returns OK (`autoApplyOnOK`
 /// — Warn/Error leave the manual Update affordance for a deliberate click). On a fired
@@ -210,22 +210,32 @@ func maybeAutoApply(_ store: DaemonStore, _ agent: AgentController, settingOn: B
 }
 
 /// The surface-driven auto-apply trigger as one modifier, applied to both the menu-bar
-/// popover and the main window so the order (refresh → reconcile → maybeAutoApply) and
-/// the default-on setting live in ONE place, not copy-pasted per surface. A cancellable
-/// `.task` (not a detached `onAppear` Task), so closing the surface mid-probe unwinds it.
-/// Concurrent fires from both surfaces are safe: `autoApplyOnOK` backs out the second on
-/// `reloadInFlight`.
+/// popover and the main window so the gather and the default-on setting live in ONE
+/// place, not copy-pasted per surface.
+///
+/// Two halves, because the update verdict isn't ready when the surface appears: the
+/// `.task` gathers the agent facts (refresh + reconcile) on appear, while the verdict
+/// ALSO needs the live daemon connection — `daemonUpdate` is `.none` until a status
+/// snapshot lands, and that snapshot arrives asynchronously after appear. So firing once
+/// in the `.task` races the connection and loses. Instead `.onChange(…, initial: true)`
+/// re-evaluates whenever the verdict changes, firing auto-apply the moment it settles to
+/// `.available` (whether that's already true at appear or lands a beat later).
+/// `maybeAutoApply` re-checks eligibility, so non-`.available` transitions are no-ops and
+/// `autoApplyOnOK` backs out a concurrent second fire on `reloadInFlight`.
 struct AutoApplyOnAppear: ViewModifier {
     @Environment(DaemonStore.self) private var store
     @Environment(AgentController.self) private var agent
     @AppStorage(Prefs.autoApplyDaemonUpdates) private var autoApplyDaemonUpdates = true
 
     func body(content: Content) -> some View {
-        content.task {
-            agent.refresh()
-            await agent.runReconcile()
-            await maybeAutoApply(store, agent, settingOn: autoApplyDaemonUpdates)
-        }
+        content
+            .task {
+                agent.refresh()
+                await agent.runReconcile()
+            }
+            .onChange(of: daemonUpdateVerdict(store, agent), initial: true) {
+                Task { await maybeAutoApply(store, agent, settingOn: autoApplyDaemonUpdates) }
+            }
     }
 }
 

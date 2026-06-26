@@ -116,15 +116,20 @@ func daemonUpdateVerdict(_ store: DaemonStore, _ agent: AgentController) -> Daem
 
 /// Whether a plain Reload right now might respawn a newer bundled binary — the
 /// signal the Reload buttons pass to `requestReload(respawnUpgrades:)`. It FAILS
-/// CLOSED while the agent facts are still settling (`ownership == .indeterminate`
-/// or `reconcileState == .notChecked`, the values they hold at first window-appear
-/// before the async refresh/reconcile finish): in that window the verdict can't yet
-/// say it's an update, so a quick post-upgrade Reload would otherwise skip the gate
-/// and crash-loop. Once the facts are settled, `daemonUpdateVerdict` is
-/// authoritative — a genuine non-update reload (`.none`) stays ungated.
+/// CLOSED whenever the agent facts aren't a settled, affirmative verdict — when
+/// `ownership == .indeterminate`, or `reconcileState` is `.notChecked` (not yet run,
+/// the first-appear default) or `.undetermined` (run, but `launchctl` timed out or
+/// didn't parse). In any of those the verdict can't yet say it's an update, so a
+/// Reload that WOULD respawn the newer bundled daemon must still be gated, or it
+/// crash-loops on a schema-incompatible config. Only once reconcile lands a real
+/// verdict (`.ok`/`.foreign`) is `daemonUpdateVerdict` authoritative — a genuine
+/// non-update reload (`.none`) then stays ungated.
 @MainActor
 func reloadMightUpgrade(_ store: DaemonStore, _ agent: AgentController) -> Bool {
-    if agent.ownership == .indeterminate || agent.reconcileState == .notChecked {
+    if agent.ownership == .indeterminate
+        || agent.reconcileState == .notChecked
+        || agent.reconcileState == .undetermined
+    {
         return true
     }
     return daemonUpdateVerdict(store, agent) != .none

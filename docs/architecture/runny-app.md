@@ -419,38 +419,36 @@ seam, so every decision is unit-tested without launchd. The invariants:
   for gating an update on the *new* binary accepting the *current* config, so a
   schema-incompatible upgrade is blocked rather than drained into a crash-loop.
   Parsing is the pure, unit-tested surface; an unparseable verdict is `unavailable`
-  (blocking), never a fabricated OK. **The gate is one authoritative check at the
-  commit, plus advisory display at the click** — the model that collapses the
-  approval-lifecycle edges (TOCTOU, re-confirm loops, stale/cancelled approvals)
-  into impossibility rather than handling each:
-  - **Commit is the gate.** `performReload`, immediately before the irreversible
+  (blocking), never a fabricated OK. **The gate verdict IS the prompt** (popups, not
+  inline rows — a row rendered behind the modal reload prompt was easy to miss), with
+  one authoritative re-check at the commit — the model that collapses the
+  approval-lifecycle edges (TOCTOU, re-confirm loops, stale/cancelled approvals) into
+  impossibility rather than handling each:
+  - **Click drives the popup.** `DaemonStore.gatedDaemonUpdate` probes once and the
+    verdict picks the prompt: **OK** reloads immediately with no prompt (clicking
+    Update/Reload was the consent); **Warn** presents a confirm-or-cancel alert
+    listing the warnings (Cancel is the safe default, "Reload Anyway" the destructive
+    deliberate action); **Error**/`unavailable` presents an acknowledge-only alert and
+    reloads nothing. The OK/Warn/Error decision is the pure `ConfigCompatGate.updateGate`.
+    The warnings/block are *display only* — never persisted as an "approved set" or
+    compared at commit, so there is no stale approval to leak across a cancel or a
+    later reload; both clear on dismiss and on convergence/reconnect.
+  - **Commit is the backstop.** `performReload`, immediately before the irreversible
     drain+respawn, re-probes the bundled (new) runnyd against the current on-disk
     config: a hard incompatibility (or an `unavailable` probe) **blocks** with no
-    reload — surfaced through the always-presented command-error alert (the same
-    "reload not sent" channel as the unreachable-daemon case), *not* the affordance's
-    gate row, since the Reload buttons can block here with the affordance hidden
-    (`daemonUpdateVerdict == .none` during the fail-closed settling window) where a
-    row would render nowhere. Anything else proceeds. The daemon's own reload
+    reload, surfaced through the always-presented command-error alert (the same
+    "reload not sent" channel as the unreachable-daemon case). The daemon's own reload
     preflight runs the *old* binary — blind to what the new one rejects — so this is
-    the only check that sees it. A *warning* found here is not re-surfaced: it's
+    the only check that sees it. A *warning* found only here is not re-surfaced: it's
     non-fatal (the daemon comes up), and the only way the verdict could differ from
-    the click is the operator editing `config.yaml` in the ~2s the dialog is open —
-    an accepted, commented residual, not a state machine.
-  - **Click is advisory display.** `DaemonStore.gatedDaemonUpdate` probes once to
-    drive the affordance: **OK** arms the confirmed reload, **Warn** shows the
-    warnings (rendered as rows) and still arms, **Error**/`unavailable` shows a loud
-    block row and arms nothing. The OK/Warn/Error decision is the pure
-    `ConfigCompatGate.updateGate`. The warnings it surfaces are *display only* — they
-    are never persisted as an "approved set" or compared at commit, so there is no
-    stale approval to leak across a cancel or a later reload. The rows render only
-    while an update is on offer and clear on convergence/reconnect.
-  **The plain Reload Config buttons gate too**: the per-user agent's `BundleProgram`
-  points at this app bundle, so when the app is ahead *any* drain-gated reload
-  respawns the newer binary — the menu-bar and main-window Reload pass
-  `requestReload(respawnUpgrades:)` (computed by `reloadMightUpgrade`, which **fails
-  closed** while the agent facts are still settling at first appear — `ownership
-  .indeterminate` / `reconcile .notChecked`), routing through the same commit gate,
-  so a reload can't bypass it and crash-loop where Update would have blocked.
+    the click is the operator editing `config.yaml` in the seconds between click and
+    reload — an accepted, commented residual, not a state machine.
+  **Both entry points share one action** (`startGatedReload`): the Update Daemon
+  affordance and the plain Reload Config buttons. The per-user agent's `BundleProgram`
+  points at this app bundle, so when the app is ahead *any* drain-gated reload respawns
+  the newer binary — so a reload that `reloadMightUpgrade` (which **fails closed** while
+  the agent facts are unsettled, and only when the app is actually ahead) routes through
+  the same gate; a reload that can't upgrade falls through to the generic reload confirm.
   Default-on auto-apply on OK is the next slice.
 - **Uninstall** is `unregister()` then a best-effort `launchctl bootout` ("No such
   process" = success); a mid-job uninstall first raises a destructive confirmation

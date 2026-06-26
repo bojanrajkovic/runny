@@ -12,38 +12,9 @@ struct DaemonUpdateAffordance: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        let verdict = daemonUpdateVerdict(store, agent)
-        VStack(alignment: .leading, spacing: 6) {
-            updateAffordance(verdict)
-            // Gate rows belong to an available/in-flight update — render them only
-            // while one is on offer, so a Warn/block doesn't linger after the update
-            // converges to .none (the state is also cleared on convergence/reconnect).
-            if verdict != .none {
-                gateRows
-            }
-        }
-    }
-
-    /// The config-compat gate's surfaced state: a "checking…" row while the probe
-    /// runs, a loud red block when the new runnyd refuses the config, and the
-    /// warnings to confirm past on a Warn verdict. Plain conditionals (no
-    /// transitions) per the hosted-SwiftUI rule.
-    @ViewBuilder private var gateRows: some View {
-        if store.configGateRunning {
-            AffordanceRow(systemImage: icon, text: "Checking the new runnyd accepts the current config…", tint: .secondary) {
-                ProgressView().controlSize(.small)
-            }
-        }
-        if let block = store.configGateBlock {
-            AffordanceRow(systemImage: "exclamationmark.triangle.fill", text: "Update blocked — \(block)", tint: .red) {
-                EmptyView()
-            }
-        }
-        ForEach(store.configGateWarnings, id: \.message) { warning in
-            AffordanceRow(systemImage: "exclamationmark.circle", text: "Config warning — \(warning.message)", tint: .orange) {
-                EmptyView()
-            }
-        }
+        // The gate verdict is surfaced as popups (ConfigGateAlerts), not inline rows —
+        // a row rendered behind the modal reload prompt was easy to miss.
+        updateAffordance(daemonUpdateVerdict(store, agent))
     }
 
     @ViewBuilder private func updateAffordance(_ verdict: DaemonStore.DaemonUpdate) -> some View {
@@ -71,25 +42,12 @@ struct DaemonUpdateAffordance: View {
 
     private let icon = "arrow.down.circle"
 
-    /// The update's confirmation dialog is hosted only on the main window, so —
-    /// like the footer Reload button — open the main window first. From the main
-    /// window itself this just refocuses it; from the popover it's load-bearing
-    /// (otherwise the dialog has no presenter and the update silently no-ops).
+    /// The gate's popups are hosted on the main window (the popover panel has no
+    /// reliable presenter), so open it first — a no-op refocus from the window itself,
+    /// load-bearing from the popover.
     private func update() {
         activation.openMainWindow(openWindow)
-        Task {
-            // Re-gather before arming the drain-gated update: Update fires outside the
-            // spawn gate, so a foreign daemon that took over while the window stayed open
-            // must cancel it — draining a foreign fleet for an update that can't take is
-            // active harm, not a no-op. The render gate can be minutes stale by click.
-            if await agent.revalidate(.selfManaged), agent.installState == .installed {
-                // Gate on the bundled (new) runnyd validating the in-place config
-                // before any reload: OK proceeds, Warn surfaces warnings + confirms,
-                // Error blocks loud. requestDaemonUpdate is reached only via the gate,
-                // and the gate is re-run at the confirmed reload (performReload).
-                await store.gatedDaemonUpdate()
-            }
-        }
+        Task { await startGatedReload(store, agent) }
     }
 }
 
@@ -115,8 +73,8 @@ func daemonUpdateVerdict(_ store: DaemonStore, _ agent: AgentController) -> Daem
 }
 
 /// Whether a plain Reload right now might respawn a newer bundled binary — the
-/// signal the Reload buttons pass to `requestReload(respawnUpgrades:)`. Two legs,
-/// in order:
+/// signal `startGatedReload` uses to choose the config-compat gate over a plain
+/// reload. Two legs, in order:
 ///
 /// 1. **Is the app even ahead?** A reload can only upgrade if the bundled binary is
 ///    newer than the running daemon — a pure version/protocol compare
@@ -141,4 +99,68 @@ func reloadMightUpgrade(_ store: DaemonStore, _ agent: AgentController) -> Bool 
         return true
     }
     return daemonUpdateVerdict(store, agent) != .none
+}
+
+/// The single entry point both the Update Daemon affordance and the plain Reload
+/// buttons call. A reload that can't upgrade (the app isn't ahead, or doesn't own
+/// the agent) is a plain config reload — generic confirm, the daemon's own preflight
+/// validates it. A reload that WOULD upgrade re-gathers ownership first (the button
+/// can be stale, and an upgrade fires outside the spawn gate, so a daemon that
+/// changed hands must not be drained) and then runs the config-compat gate, which
+/// surfaces OK → reload now / Warn → confirm popup / Error → block popup. If
+/// ownership slipped to foreign/system, fall back to a plain reload rather than
+/// silently doing nothing.
+@MainActor
+func startGatedReload(_ store: DaemonStore, _ agent: AgentController) async {
+    guard reloadMightUpgrade(store, agent) else {
+        store.requestReload()
+        return
+    }
+    if await agent.revalidate(.selfManaged), agent.installState == .installed {
+        await store.gatedDaemonUpdate()
+    } else {
+        store.requestReload()
+    }
+}
+
+/// The config-compat gate's popups, hosted on the main window root alongside the
+/// command alerts and the generic reload confirm. The gate verdict IS the prompt:
+/// a Warn presents a confirm-or-cancel alert (Cancel is the safe default; "Reload
+/// Anyway" is the destructive, deliberate action); an Error presents an
+/// acknowledge-only alert that reloads nothing. OK shows no popup — it reloads
+/// straight away, since clicking Update/Reload was already the consent.
+struct ConfigGateAlerts: ViewModifier {
+    @Environment(DaemonStore.self) private var store
+
+    func body(content: Content) -> some View {
+        content
+            .alert("Config has warnings", isPresented: warnPresented) {
+                Button("Reload Anyway", role: .destructive) { store.confirmGatedUpdate() }
+                Button("Cancel", role: .cancel) { store.clearConfigGate() }
+            } message: {
+                Text(warnMessage)
+            }
+            .alert("Can’t update runnyd", isPresented: blockPresented) {
+                Button("OK", role: .cancel) { store.clearConfigGate() }
+            } message: {
+                Text("The newer runnyd rejects the current config, so nothing was changed:\n\n\(store.configGateBlock ?? "")")
+            }
+    }
+
+    private var warnPresented: Binding<Bool> {
+        Binding(get: { !store.configGateWarnings.isEmpty }, set: { if !$0 { store.clearConfigGate() } })
+    }
+
+    private var blockPresented: Binding<Bool> {
+        Binding(get: { store.configGateBlock != nil }, set: { if !$0 { store.clearConfigGate() } })
+    }
+
+    private var warnMessage: String {
+        let lines = store.configGateWarnings.map { "• \($0.message)" }.joined(separator: "\n")
+        return "The newer runnyd accepts this config but flagged:\n\n\(lines)\n\nReload onto it anyway?"
+    }
+}
+
+extension View {
+    func configGateAlerts() -> some View { modifier(ConfigGateAlerts()) }
 }

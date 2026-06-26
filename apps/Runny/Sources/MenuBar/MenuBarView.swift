@@ -141,10 +141,10 @@ struct MenuBarView: View {
             // panel has no reliable presenter), so route through the window.
             Button(store.reloadInFlight ? "Validating…" : "Reload…") {
                 activation.openMainWindow(openWindow)
-                // If the app-installed agent is behind, this reload respawns the newer
-                // bundled binary — gate it like an update so it can't crash-loop.
-                // Fails closed while the agent facts are still settling.
-                store.requestReload(respawnUpgrades: reloadMightUpgrade(store, agent))
+                // Shared gate: an upgrade reload runs the config-compat gate (OK
+                // reloads, Warn/Error pop up on the window); a plain reload gets the
+                // generic confirm.
+                Task { await startGatedReload(store, agent) }
             }
             .disabled(store.reloadInFlight || store.client == nil)
             Spacer()

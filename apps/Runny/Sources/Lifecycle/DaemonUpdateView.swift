@@ -115,17 +115,25 @@ func daemonUpdateVerdict(_ store: DaemonStore, _ agent: AgentController) -> Daem
 }
 
 /// Whether a plain Reload right now might respawn a newer bundled binary — the
-/// signal the Reload buttons pass to `requestReload(respawnUpgrades:)`. It FAILS
-/// CLOSED whenever the agent facts aren't a settled, affirmative verdict — when
-/// `ownership == .indeterminate`, or `reconcileState` is `.notChecked` (not yet run,
-/// the first-appear default) or `.undetermined` (run, but `launchctl` timed out or
-/// didn't parse). In any of those the verdict can't yet say it's an update, so a
-/// Reload that WOULD respawn the newer bundled daemon must still be gated, or it
-/// crash-loops on a schema-incompatible config. Only once reconcile lands a real
-/// verdict (`.ok`/`.foreign`) is `daemonUpdateVerdict` authoritative — a genuine
-/// non-update reload (`.none`) then stays ungated.
+/// signal the Reload buttons pass to `requestReload(respawnUpgrades:)`. Two legs,
+/// in order:
+///
+/// 1. **Is the app even ahead?** A reload can only upgrade if the bundled binary is
+///    newer than the running daemon — a pure version/protocol compare
+///    (`appAheadOfDaemon`) that does NOT depend on the ownership/reconcile facts. If
+///    the app isn't ahead (same version, an older/translocated build, or a dev build
+///    with no bundled `runnyd`), a reload can't upgrade, so it must NOT be gated on
+///    the bundled probe — an older or missing bundled binary would falsely block a
+///    config the running daemon happily accepts.
+/// 2. **Given it's ahead, is the respawn ours?** FAIL CLOSED while the agent facts
+///    aren't a settled, affirmative verdict — `ownership == .indeterminate`, or
+///    `reconcileState` `.notChecked` (not yet run) or `.undetermined` (wedged/
+///    unparseable `launchctl`): the reload could respawn the newer bundled daemon, so
+///    gate it or it crash-loops on a schema-incompatible config. Only once reconcile
+///    lands a real verdict (`.ok`/`.foreign`) is `daemonUpdateVerdict` authoritative.
 @MainActor
 func reloadMightUpgrade(_ store: DaemonStore, _ agent: AgentController) -> Bool {
+    guard store.appAheadOfDaemon else { return false }
     if agent.ownership == .indeterminate
         || agent.reconcileState == .notChecked
         || agent.reconcileState == .undetermined

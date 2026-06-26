@@ -1016,6 +1016,19 @@ final class DaemonStore {
         performReload()
     }
 
+    /// The auto-apply commit (B3): probe the gate and reload ONLY on OK, returning
+    /// whether it fired (so the caller can post the auto-apply notification). Warn and
+    /// Error never auto-apply — they leave B2's manual affordance untouched for a
+    /// deliberate click, per ADR-0022. The caller (`maybeAutoApply`) has already
+    /// confirmed the cheap eligibility (`autoApplyShouldAttempt`) and revalidated
+    /// confirmed-`.selfManaged` ownership, so this never auto-drains a daemon we don't
+    /// own; the `performReload` commit re-probe remains the crash-loop backstop.
+    func autoApplyOnOK() async -> Bool {
+        guard case .proceed = await probeUpdateGate() else { return false }
+        confirmGatedUpdate()
+        return true
+    }
+
     /// Clear the config-compat gate's surfaced state — on dismiss of either gate
     /// alert, on a fresh gate, on convergence (the update took), and on reconnect —
     /// so a stale block/warning can't outlive the update it described.

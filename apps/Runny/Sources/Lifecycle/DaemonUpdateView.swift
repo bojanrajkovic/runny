@@ -1,4 +1,12 @@
 import SwiftUI
+import UserNotifications
+
+/// UserDefaults keys for the app's preferences.
+enum Prefs {
+    /// B3: default-on "automatically apply runnyd upgrades". Read by the surface-driven
+    /// auto-apply trigger and bound by the Settings toggle.
+    static let autoApplyDaemonUpdates = "autoApplyDaemonUpdates"
+}
 
 /// The post-upgrade daemon-update affordance for the menu bar and main window.
 /// Shown only when the app installed the agent AND is the newer build: Update
@@ -174,4 +182,46 @@ struct ConfigGateAlerts: ViewModifier {
 
 extension View {
     func configGateAlerts() -> some View { modifier(ConfigGateAlerts()) }
+}
+
+/// B3 — the surface-driven auto-apply trigger. Called when a Runny surface appears
+/// (the menu-bar popover or the main window) AFTER the agent facts are re-gathered, so
+/// the operator is present when the fleet drains. Fires only when the default-on
+/// setting is enabled, an update is on offer, none's been attempted this cycle
+/// (`autoApplyShouldAttempt`), ownership re-confirms `.selfManaged` + installed (never
+/// auto-drain a daemon we don't own), and the config gate returns OK (`autoApplyOnOK`
+/// — Warn/Error leave B2's manual affordance for a deliberate click). On a fired
+/// auto-apply it posts the notification, since the drain happened without a click.
+@MainActor
+func maybeAutoApply(_ store: DaemonStore, _ agent: AgentController, settingOn: Bool) async {
+    guard DaemonStore.autoApplyShouldAttempt(
+        settingOn: settingOn,
+        update: daemonUpdateVerdict(store, agent),
+        attempted: store.daemonUpdateAttempted
+    ) else { return }
+    guard await agent.revalidate(.selfManaged), agent.installState == .installed else { return }
+    let from = DaemonStore.versionCore(store.daemonVersion) ?? store.daemonVersion
+    if await store.autoApplyOnOK() {
+        AutoApplyNotifier.notifyApplying(from: from, to: DaemonStore.appVersion)
+    }
+}
+
+/// Best-effort local notification when auto-apply drains+restarts the fleet without a
+/// click. Authorization is requested lazily on first post; if denied (or on an
+/// ad-hoc/unnotarized build where it's flaky), it stays silent — the affordance still
+/// shows the in-progress/outcome state, so a missing notification is never a missing
+/// signal.
+enum AutoApplyNotifier {
+    static func notifyApplying(from: String, to: String) {
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "Applying runnyd update"
+            content.body = to.isEmpty
+                ? "Updating the daemon and restarting the fleet (running jobs finish first)."
+                : "Updating runnyd \(from) → \(to) and restarting the fleet (running jobs finish first)."
+            center.add(UNNotificationRequest(identifier: "runnyd-auto-apply", content: content, trigger: nil))
+        }
+    }
 }

@@ -9,7 +9,9 @@ enum SidebarItem: Hashable {
 
 struct MainWindowView: View {
     @Environment(DaemonStore.self) private var store
+    @Environment(AgentController.self) private var agent
     @State private var selection: SidebarItem?
+    @AppStorage(Prefs.autoApplyDaemonUpdates) private var autoApplyDaemonUpdates = true
 
     var body: some View {
         @Bindable var store = store
@@ -69,6 +71,13 @@ struct MainWindowView: View {
         .recycleConfirmation()
         .reloadConfirmation()
         .configGateAlerts()
+        // Surface-driven B3 auto-apply for a direct main-window open (the menu-bar
+        // popover has its own trigger). Reconcile first so the verdict is settled.
+        .task {
+            agent.refresh()
+            await agent.runReconcile()
+            await maybeAutoApply(store, agent, settingOn: autoApplyDaemonUpdates)
+        }
     }
 }
 

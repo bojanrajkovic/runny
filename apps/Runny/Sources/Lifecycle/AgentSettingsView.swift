@@ -14,6 +14,9 @@ struct AgentInstallRow: View {
     @State private var confirmingInstall = false
     @State private var confirmingUninstall = false
     @State private var confirmingRepair = false
+    /// B3: default-on. When on, a surface-driven trigger auto-applies an OK update
+    /// without the button (Warn/Error still drop to the manual affordance).
+    @AppStorage(Prefs.autoApplyDaemonUpdates) private var autoApplyDaemonUpdates = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -122,6 +125,15 @@ struct AgentInstallRow: View {
                 .font(.caption)
                 .foregroundStyle(tint)
                 .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        // Auto-apply only applies to the per-user agent the app drain-respawns, so it's
+        // offered only once that agent is installed. Off = today's button-only behavior.
+        if agent.installState == .installed {
+            Toggle("Automatically apply runnyd upgrades", isOn: $autoApplyDaemonUpdates)
+            Text("When a newer runnyd ships with the app and accepts your config, apply it on open — draining running jobs first. Warnings or errors wait for you.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         if agent.installState == .requiresApproval {

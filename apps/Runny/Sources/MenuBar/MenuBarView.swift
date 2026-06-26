@@ -8,6 +8,7 @@ struct MenuBarView: View {
     @Environment(CLIInstallModel.self) private var cli
     @Environment(AgentController.self) private var agent
     @Environment(\.openWindow) private var openWindow
+    @AppStorage(Prefs.autoApplyDaemonUpdates) private var autoApplyDaemonUpdates = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -88,7 +89,13 @@ struct MenuBarView: View {
             // not the default .notInstalled until Settings is opened. Reconcile too,
             // so Update gates on a fresh canonical verdict rather than the default.
             agent.refresh()
-            Task { await agent.runReconcile() }
+            // Reconcile first so the auto-apply trigger reads a settled canonical
+            // verdict, then run the surface-driven B3 auto-apply (no-ops unless the
+            // setting is on + an OK update is on offer for our confirmed agent).
+            Task {
+                await agent.runReconcile()
+                await maybeAutoApply(store, agent, settingOn: autoApplyDaemonUpdates)
+            }
         }
     }
 

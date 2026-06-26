@@ -464,7 +464,20 @@ seam, so every decision is unit-tested without launchd. The invariants:
   way the drain dialog is the consent; it never silently drains. Reconcile and the
   affordance verdict still don't enter (a `selfManaged` daemon respawns our bundle
   regardless) — the model is ownership + a canonical-trusted version short-circuit, not a
-  per-cell cross product. Default-on auto-apply on OK is the next slice.
+  per-cell cross product.
+- **Auto-apply (default on) is surface-driven.** A default-on `@AppStorage`
+  (`Prefs.autoApplyDaemonUpdates`) preference; when a Runny surface appears (popover or
+  main window) and the agent facts re-gather, `maybeAutoApply` fires the update
+  *without the button* — but only on the cheap-then-strict chain: the pure
+  `autoApplyShouldAttempt` (setting on, an update actually `.available`,
+  `!daemonUpdateAttempted` as the loop backstop), then a re-confirmed `.selfManaged`
+  ownership, then `autoApplyOnOK` (probe → OK only; **Warn/Error never auto-apply** —
+  they leave the manual affordance for a deliberate click). Surface-driven by design:
+  the operator is present when the fleet drains, and a `UNUserNotificationCenter`
+  notice fires on the unattended-by-click apply (best-effort; the affordance still
+  shows progress, so a missing notification is never a missing signal). A non-converged
+  auto-apply drops to the manual "Try Again" via `daemonUpdateAttempted`, never an
+  auto-retry drain loop.
 - **Uninstall** is `unregister()` then a best-effort `launchctl bootout` ("No such
   process" = success); a mid-job uninstall first raises a destructive confirmation
   naming the abandoned slot. **Reconcile-on-launch** compares the registered

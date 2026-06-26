@@ -1486,6 +1486,18 @@ final class DaemonStore {
         return .available
     }
 
+    /// Pure: whether to ATTEMPT auto-apply (B3) — the cheap precondition checked before
+    /// the async revalidate + config-compat probe. Fires only when the default-on
+    /// setting is enabled, an update is actually on offer (`.available`), and none has
+    /// been attempted this cycle. `attempted` (`daemonUpdateAttempted`) is the loop
+    /// backstop: a non-converged update leaves it set, so a `didNotTake` drops to the
+    /// manual "Try Again" rather than an auto-retry drain loop. The OK-only gate (Warn/
+    /// Error never auto-apply) and the confirmed-`.selfManaged` ownership check happen
+    /// after this, in the trigger.
+    nonisolated static func autoApplyShouldAttempt(settingOn: Bool, update: DaemonUpdate, attempted: Bool) -> Bool {
+        settingOn && update == .available && !attempted
+    }
+
     /// Pure: must the uninstall raise the abandon confirmation? Yes whenever a live
     /// guest is present OR the live-guest state is UNKNOWN — a disconnected or
     /// pre-first-snapshot store reports an empty list that means "no snapshot", not

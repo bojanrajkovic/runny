@@ -200,12 +200,11 @@ func maybeAutoApply(_ store: DaemonStore, _ agent: AgentController, settingOn: B
         attempted: store.daemonUpdateAttempted
     ) else { return }
     guard await agent.revalidate(.selfManaged), agent.installState == .installed else { return }
-    // Both cores, so the from == to compare (a protocol-only upgrade) is apples-to-apples
-    // even if the app bundle's version string ever carries a non-core suffix.
+    // daemonVersion may be a sha-bearing build label; appVersion is already its bare
+    // core (build-stripped), so normalize only the daemon side before the notice.
     let from = DaemonStore.versionCore(store.daemonVersion) ?? store.daemonVersion
-    let to = DaemonStore.versionCore(DaemonStore.appVersion) ?? DaemonStore.appVersion
     if await store.autoApplyOnOK() {
-        AutoApplyNotifier.notifyApplying(from: from, to: to)
+        AutoApplyNotifier.notifyApplying(from: from, to: DaemonStore.appVersion)
     }
 }
 
@@ -214,14 +213,17 @@ func maybeAutoApply(_ store: DaemonStore, _ agent: AgentController, settingOn: B
 /// place, not copy-pasted per surface.
 ///
 /// Two halves, because the update verdict isn't ready when the surface appears: the
-/// `.task` gathers the agent facts (refresh + reconcile) on appear, while the verdict
-/// ALSO needs the live daemon connection — `daemonUpdate` is `.none` until a status
-/// snapshot lands, and that snapshot arrives asynchronously after appear. So firing once
-/// in the `.task` races the connection and loses. Instead `.onChange(…, initial: true)`
-/// re-evaluates whenever the verdict changes, firing auto-apply the moment it settles to
-/// `.available` (whether that's already true at appear or lands a beat later).
-/// `maybeAutoApply` re-checks eligibility, so non-`.available` transitions are no-ops and
-/// `autoApplyOnOK` backs out a concurrent second fire on `reloadInFlight`.
+/// `.task` gathers ALL three of the verdict's agent facts (installState via `refresh`,
+/// reconcileState via `runReconcile`, ownership via `refreshOwnership`) on appear — so
+/// the trigger doesn't lean on the foreground observer happening to have refreshed
+/// ownership, which a popover-only open need not have. The verdict ALSO needs the live
+/// daemon connection — `daemonUpdate` is `.none` until a status snapshot lands, and that
+/// snapshot arrives asynchronously after appear. So firing once in the `.task` races the
+/// connection and loses. Instead `.onChange(…, initial: true)` re-evaluates whenever the
+/// verdict changes, firing auto-apply the moment it settles to `.available` (whether
+/// that's already true at appear or lands a beat later). `maybeAutoApply` re-checks
+/// eligibility, so non-`.available` transitions are no-ops and `autoApplyOnOK` backs out
+/// a concurrent second fire on `reloadInFlight`/`daemonUpdateAttempted`.
 struct AutoApplyOnAppear: ViewModifier {
     @Environment(DaemonStore.self) private var store
     @Environment(AgentController.self) private var agent
@@ -232,6 +234,7 @@ struct AutoApplyOnAppear: ViewModifier {
             .task {
                 agent.refresh()
                 await agent.runReconcile()
+                await agent.refreshOwnership()
             }
             .onChange(of: daemonUpdateVerdict(store, agent), initial: true) {
                 Task { await maybeAutoApply(store, agent, settingOn: autoApplyDaemonUpdates) }

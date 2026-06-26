@@ -200,9 +200,12 @@ func maybeAutoApply(_ store: DaemonStore, _ agent: AgentController, settingOn: B
         attempted: store.daemonUpdateAttempted
     ) else { return }
     guard await agent.revalidate(.selfManaged), agent.installState == .installed else { return }
+    // Both cores, so the from == to compare (a protocol-only upgrade) is apples-to-apples
+    // even if the app bundle's version string ever carries a non-core suffix.
     let from = DaemonStore.versionCore(store.daemonVersion) ?? store.daemonVersion
+    let to = DaemonStore.versionCore(DaemonStore.appVersion) ?? DaemonStore.appVersion
     if await store.autoApplyOnOK() {
-        AutoApplyNotifier.notifyApplying(from: from, to: DaemonStore.appVersion)
+        AutoApplyNotifier.notifyApplying(from: from, to: to)
     }
 }
 

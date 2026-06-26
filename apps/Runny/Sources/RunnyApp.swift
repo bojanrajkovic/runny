@@ -27,8 +27,9 @@ struct RunnyApp: App {
                 .onAppear {
                     store.start()
                     activation.windowAppeared()
-                    agent.refresh()
-                    Task { await agent.runReconcile() }
+                    // The agent refresh + reconcile (and the auto-apply that follows)
+                    // run via `.autoApplyOnAppear()` on MainWindowView, shared with the
+                    // popover — so they aren't duplicated here.
                 }
         }
         .defaultSize(width: 920, height: 600)

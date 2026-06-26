@@ -73,23 +73,28 @@ func daemonUpdateVerdict(_ store: DaemonStore, _ agent: AgentController) -> Daem
 }
 
 /// Whether a reload would respawn our NEWER bundle, and so must run the config-compat
-/// gate. **Two facts decide it, and only two:**
+/// gate. **Ownership decides it; the version compare is a trusted-only-from-canonical
+/// short-circuit:**
 ///
-/// - **Ahead?** The app must be a newer build than the running daemon — a live
-///   version/protocol compare (`appAheadOfDaemon`). Not ahead → can't upgrade.
 /// - **Ours?** The reload must respawn OUR bundle, which only the *owner* determines:
 ///   a `selfManaged` daemon is our per-user agent, so a reload cold-starts our
 ///   `BundleProgram` — gate it. `indeterminate` (a wedged system probe) can't be told
 ///   apart from ours, so fail closed. A settled non-self owner respawns its OWN binary,
 ///   validated by its own reload preflight — not ours to gate.
+/// - **Ahead?** A reload can only *upgrade* if the respawn binary is newer — but the
+///   respawn binary is the canonical `/Applications` one, and `appAheadOfDaemon` reads
+///   the RUNNING bundle's version. That's only the same thing when the running bundle IS
+///   canonical (`eligibility == .eligible`). So "not ahead → skip the gate" is trusted
+///   only then; from a stray/translocated copy the running version is meaningless to the
+///   respawn, so fail closed (don't skip) and let ownership gate it onto the canonical
+///   binary it actually probes.
 ///
-/// Reconcile/canonical-ness and the affordance verdict deliberately do NOT enter: a
-/// `selfManaged` daemon respawns our `BundleProgram` regardless of them. Collapsing to
-/// these two axes is what stops this from sprouting an edge case per ownership ×
-/// reconcile × version cell.
+/// Reconcile and the affordance verdict still don't enter (a `selfManaged` daemon
+/// respawns our `BundleProgram` regardless) — the model stays ownership + a
+/// canonical-trusted version short-circuit, not a per-cell cross product.
 @MainActor
 func reloadMightUpgrade(_ store: DaemonStore, _ agent: AgentController) -> Bool {
-    guard store.appAheadOfDaemon else { return false }
+    if agent.eligibility == .eligible, !store.appAheadOfDaemon { return false }
     switch agent.ownership {
     // ponytail: `.indeterminate` fails closed though it's usually a foreign/system
     // daemon — accepting a rare, transient, retryable false-block, because the

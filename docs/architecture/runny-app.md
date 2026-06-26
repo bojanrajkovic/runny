@@ -452,16 +452,19 @@ seam, so every decision is unit-tested without launchd. The invariants:
   foreign/system, or uninstalled all **refuse**, never draining a daemon we can't confirm
   is ours; the affordance re-renders and self-hides. The click is the drain consent, so
   OK reloads immediately. **Reload Config** means "reload the CONNECTED daemon", so it
-  gates iff `reloadMightUpgrade` — a reload that would respawn our newer bundle, which
-  turns on **exactly two facts**: the app is **ahead** (a live version/protocol compare)
-  AND the daemon is **ours** to respawn (`ownership == .selfManaged`; `.indeterminate`
-  fails closed, crash-loop-proof). A settled non-self owner respawns its own binary
-  (its own preflight validates it) → the generic reload confirm. Either way its drain
-  dialog is the consent; it never silently drains.
-  Reconcile, canonical-ness, and the affordance verdict deliberately don't enter the
-  gate decision (a `selfManaged` daemon respawns our bundle regardless) — collapsing to
-  those two axes is what keeps this from sprouting an edge per ownership × reconcile ×
-  version cell. Default-on auto-apply on OK is the next slice.
+  gates iff `reloadMightUpgrade` — a reload that would respawn our newer bundle.
+  **Ownership decides it** (`.selfManaged` → ours, gate; `.indeterminate` → fail closed,
+  crash-loop-proof; a settled non-self owner respawns its own binary, validated by its
+  own preflight → the generic reload confirm). The version compare is a short-circuit
+  *trusted only from the canonical bundle*: `appAheadOfDaemon` reads the RUNNING bundle's
+  version, but the respawn binary is the canonical `/Applications` one, so "not ahead →
+  skip the gate" holds only when the running bundle IS canonical (`eligibility ==
+  .eligible`). From a stray/translocated copy that version is meaningless to the respawn,
+  so it fails closed (gates onto the canonical binary it probes) rather than skip. Either
+  way the drain dialog is the consent; it never silently drains. Reconcile and the
+  affordance verdict still don't enter (a `selfManaged` daemon respawns our bundle
+  regardless) — the model is ownership + a canonical-trusted version short-circuit, not a
+  per-cell cross product. Default-on auto-apply on OK is the next slice.
 - **Uninstall** is `unregister()` then a best-effort `launchctl bootout` ("No such
   process" = success); a mid-job uninstall first raises a destructive confirmation
   naming the abandoned slot. **Reconcile-on-launch** compares the registered

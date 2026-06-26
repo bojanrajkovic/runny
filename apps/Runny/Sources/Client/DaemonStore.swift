@@ -277,6 +277,11 @@ final class DaemonStore {
     /// The preflight is synchronous and can take most of a minute.
     private(set) var reloadInFlight = false
 
+    /// The in-flight surface-driven auto-apply attempt, if any — the single-flight
+    /// latch behind `considerAutoApply`. Non-nil means an attempt is running, so a
+    /// concurrent nudge from the other surface backs off instead of racing it.
+    private var autoApplyTask: Task<Void, Never>?
+
     private(set) var pending: [String: PendingCommand] = [:]
     /// Ids a snapshot confirmed in the last confirm→catch window, so a late RPC
     /// error doesn't contradict a confirmation the operator can already see.
@@ -1023,33 +1028,31 @@ final class DaemonStore {
     /// eligibility (`autoApplyShouldAttempt`) and revalidated confirmed-`.selfManaged`
     /// ownership, so this never auto-drains a daemon we don't own; the `performReload`
     /// commit re-probe remains the crash-loop backstop.
+    /// Single-flight the surface-driven auto-apply. Both surfaces (popover + main
+    /// window) nudge this on every verdict change, but at most one attempt runs at a
+    /// time: a second surface firing on the same settle — or a straggler resuming after
+    /// the first attempt's reload — finds a task already in flight and no-ops. The
+    /// concurrency the per-surface trigger would otherwise create collapses to one here,
+    /// so the attempt body needs only its plain eligibility guards, no race reasoning;
+    /// `daemonUpdateAttempted` (set on accept) then stops re-entry on later settles.
+    func considerAutoApply(_ attempt: @escaping () async -> Void) {
+        guard autoApplyTask == nil else { return }
+        autoApplyTask = Task { @MainActor in
+            await attempt()
+            autoApplyTask = nil
+        }
+    }
+
     func autoApplyOnOK() async -> Bool {
         guard case .proceed = await probeUpdateGate() else { return false }
         // Report "fired" (so the caller notifies) ONLY when the reload will actually
-        // issue. The client/reloadInFlight terms mirror performReload's own guards and
-        // run atomically with confirmGatedUpdate (no await between), so a second
-        // OVERLAPPING fire sees reloadInFlight and backs out — no double-drain. The
-        // `attempted` term closes the straggler window the other two miss: a second
-        // surface's fire suspended in the gate probe across this whole reload would
-        // resume AFTER the defer cleared reloadInFlight, see it false, and drain again —
-        // but daemonUpdateAttempted is set (on accept) before that clear, so it backs
-        // the straggler out too.
-        guard Self.autoApplyWillIssue(
-            clientPresent: client != nil,
-            reloadInFlight: reloadInFlight,
-            attempted: daemonUpdateAttempted
-        ) else { return false }
+        // issue — mirror performReload's own guards: a daemon that dropped during the
+        // probe, or a reload already draining, means performReload would no-op, so never
+        // post a notification claiming a drain that didn't happen. A second concurrent
+        // fire can't reach here — considerAutoApply single-flights the attempt.
+        guard client != nil, !reloadInFlight else { return false }
         confirmGatedUpdate()
         return true
-    }
-
-    /// Pure: may an auto-apply actually issue the reload right now? A live client, no
-    /// reload already draining, and this upgrade cycle not already claimed. Re-checked
-    /// at the commit point (after the gate-probe await) so a fire that was eligible at
-    /// entry but lost the race — client dropped, another reload landed, or another
-    /// surface already applied this cycle — backs out instead of double-draining.
-    nonisolated static func autoApplyWillIssue(clientPresent: Bool, reloadInFlight: Bool, attempted: Bool) -> Bool {
-        clientPresent && !reloadInFlight && !attempted
     }
 
     /// Clear the config-compat gate's surfaced state — on dismiss of either gate

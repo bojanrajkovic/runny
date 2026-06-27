@@ -116,8 +116,9 @@ never exercised live in tests.
   can't auto-heal (a per-user agent installed over a live system daemon runs orphaned
   while clients keep resolving the system home); every other contender — a hand-run
   dev daemon, a leftover brew/manual install — converges via the single-instance
-  `flock` and is deliberately NOT detected (it reads `unmanaged`). The same probe is
-  used by `SystemDaemonInstaller` to confirm its own install/uninstall.
+  `flock` and is deliberately NOT detected (it reads `unmanaged`). The probe is
+  read-only observation: the app never installs or removes the system daemon (that
+  is `runnyctl`'s; the app is non-privileged — ADR-0023).
 - **The probe is stdout-literal-match, bounded, and reaped.** `LaunchdProbe` runs
   `launchctl print system/<label>` and decides registration by the literal label
   appearing in byte-capped STDOUT — never exit code, never format parsing. A

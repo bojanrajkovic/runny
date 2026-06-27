@@ -214,9 +214,11 @@ is refused, recoverably). **The two channels split by audience:** the app is the
 runnyctl install-daemon` is the **headless-fleet** path (a non-root system
 LaunchDaemon). The app installs its per-user agent only when no system daemon is
 present. If a system LaunchDaemon is already installed, the app observes it (status
-streams normally as a sibling client over the same socket) and the Settings pane
-points to **Settings → System Service** instead of offering the install toggle. A
-hand-run or leftover runnyd converges via the single-instance flock and does not
+streams normally as a sibling client over the same socket) and shows an observer
+banner pointing at `runnyctl uninstall-daemon` instead of offering the install
+toggle. The app is non-privileged — it never installs, updates, or removes the
+system daemon (that is `runnyctl`'s job, raising no admin prompt; see ADR-0023).
+A hand-run or leftover runnyd converges via the single-instance flock and does not
 require manual cleanup. A bundled `runnyctl` on PATH can lag a `brew`-upgraded
 `runnyd`; when it does, `runnyctl` prints a one-line version-skew warning to stderr
 before its output (warn, never refuse).

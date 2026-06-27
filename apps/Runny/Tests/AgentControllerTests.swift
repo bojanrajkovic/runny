@@ -299,11 +299,11 @@ final class AgentControllerTests: XCTestCase {
 
         let system = AgentController.observerMessage(for: .systemManaged)
         XCTAssertEqual(system?.kind, .systemManaged)
-        // Names the system daemon as app-managed (the System Service settings section)
-        // and that Runny won't install a competing login agent over it.
-        XCTAssertEqual(system?.message.contains("system-wide LaunchDaemon"), true)
+        // Names the observed system daemon, that Runny won't install a competing login
+        // agent over it, and points removal at runnyctl (the app never manages it).
+        XCTAssertEqual(system?.message.contains("system-wide runnyd LaunchDaemon"), true)
         XCTAssertEqual(system?.message.contains("won't install a competing"), true)
-        XCTAssertEqual(system?.message.contains("System Service"), true)
+        XCTAssertEqual(system?.message.contains("runnyctl uninstall-daemon"), true)
 
         let indeterminate = AgentController.observerMessage(for: .indeterminate)
         XCTAssertEqual(indeterminate?.kind, .indeterminate)

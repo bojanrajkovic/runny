@@ -6,7 +6,6 @@ struct RunnyApp: App {
     @State private var store = DaemonStore()
     @State private var activation = ActivationCoordinator()
     @State private var cliInstall = CLIInstallModel()
-    @State private var systemDaemon = SystemDaemonInstaller()
     @State private var agent = AgentController.live()
 
     var body: some Scene {
@@ -46,7 +45,6 @@ struct RunnyApp: App {
             SettingsView()
                 .environment(store)
                 .environment(cliInstall)
-                .environment(systemDaemon)
                 .environment(agent)
                 .environment(activation)
         }

@@ -255,8 +255,8 @@ def codesign_app(name, app_zip, binaries = {}, entitlements = {}, entitlement_ke
                  macos_application target's default output).
         binaries: dict of bare bundle name -> signed-binary label, placed at
                  Contents/MacOS/<bare-name> and signed inside-out. The bare
-                 name is exact (no .bin suffix): a launchd BundleProgram and a
-                 vended-CLI symlink both depend on it.
+                 name is exact (no .bin suffix): a launchd BundleProgram and
+                 running a CLI from the bundle both depend on it.
         entitlements: dict of bare name -> entitlements .plist label embedded
                  when signing that binary. A name absent here is signed plain.
         entitlement_keys: dict of bare name -> the one entitlement key that

@@ -23,10 +23,9 @@ enum DaemonOwnership: Equatable {
     /// Our own agent is registered but awaiting Login Items approval.
     case awaitingApproval
     /// A runnyd is registered in the `system/` launchd domain — the installed
-    /// non-root system daemon. The app installs and removes it via the system path
-    /// (`runnyctl install-daemon` / `uninstall-daemon`, brokered through the app or
-    /// run directly), observes it over the shared socket, and never installs a
-    /// competing per-user agent over it.
+    /// non-root system daemon. The operator installs and removes it with `runnyctl
+    /// install-daemon` / `uninstall-daemon`; the app only observes it over the
+    /// shared socket and never installs a competing per-user agent over it.
     case systemManaged
     /// A probe was inconclusive, the self-status was unrecognized, or the home is
     /// non-canonical: defer with a diagnostic — never install over what can't be
@@ -57,7 +56,7 @@ struct DaemonOwnershipInputs: Equatable {
     /// authoritative self-identity signal).
     var selfState: LaunchAgentStatus.State
     /// Whether the canonical label is registered in the `system/` domain — the
-    /// installed non-root system daemon (the headless / brokered deployment).
+    /// installed non-root system daemon (the headless deployment).
     /// Defaults `.notRegistered` so a host with no system daemon — the common case —
     /// reads as the per-user agent's own life stage.
     var systemProbe: LaunchdProbeResult = .notRegistered

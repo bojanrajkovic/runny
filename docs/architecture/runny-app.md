@@ -255,7 +255,7 @@ silently falling back to a per-user socket). The app reads nothing else from the
 runny home — files under it belong to the daemon (ADR-0006 symmetry: the app
 knows only the contract).
 
-## Command-line tool vending
+## Bundled binaries
 
 The `.app` carries the same `runnyd` and `runnyctl` the Homebrew tarball ships,
 at `Contents/MacOS/{runnyd,runnyctl}` under their exact bare names. They are
@@ -268,57 +268,19 @@ for each nested Mach-O so Gatekeeper accepts them. The bundled `runnyd` is what
 the app registers as a LaunchAgent (see "Daemon lifecycle" below); its stable
 in-bundle path is the `BundleProgram` the agent's plist names.
 
-Settings exposes an **Install command-line tool** action that vends the bundled
-`runnyctl` as `/usr/local/bin/runnyctl` — the OrbStack/Docker pattern, which
-version-locks the CLI to the app for free. The decision logic is two pure
-functions in `apps/Runny/Sources/Install/CLIInstallPlan.swift`: a `plan` that
-classifies the filesystem state into a verdict, and a `verify` that reads the
-result back from disk. Those verdict and result cases are the authority and are
-not enumerated here; the invariants the surface guarantees are:
-
-- **Never clobber a foreign file, and name the managing channel.** A regular file,
-  or a symlink that doesn't point into a `Runny.app`, is something another channel
-  owns; the action refuses it and surfaces the *channel* (Homebrew when the target
-  resolves into a Cellar, a hand-rolled link, or a dropped file) with its remediation
-  — `brew unlink runny`, say — mirroring the daemon observer banner, not just the raw
-  path. (Docker Desktop clobbers a brew-managed CLI; Runny defers.)
-- **Reconcile an orphaned link on launch — surface, don't auto-rewrite.** A
-  drag-to-trash leaves `/usr/local/bin/runnyctl` dangling (macOS has no uninstall
-  hook); a later launch detects the Runny-owned link into a now-missing bundle and
-  surfaces a distinct *orphaned* state offering Remove (or Install to re-point), where
-  it used to read silently as *not installed*. It never rewrites the link on launch
-  unprompted (that would re-raise the admin prompt every restart) and never clobbers a
-  foreign owner — the two failure modes Docker Desktop's every-launch re-link has.
-- **Fail closed from a translocated bundle.** A link into a translocated
-  `…/AppTranslocation/…` copy evaporates on next launch, so the action refuses and
-  asks the operator to move Runny to Applications first. (The Security SPI that
-  answers translocation authoritatively isn't in the Swift import surface, so the
-  detector matches the App Translocation mount path, which Gatekeeper always uses.)
-- **One privileged line, guarded at write time.** An unprivileged
-  `createSymbolicLink` is tried first; only when `/usr/local/bin` needs admin does
-  it escalate, through one `with administrator privileges` shell line whose body
-  re-checks the foreign guard at the moment of mutation (test-and-create, never
-  `ln -f`), closing the TOCTOU window a `brew install` landing between plan and
-  write would open. The path is shell-quoted through the AppleScript layer.
-- **Confirmed from disk, never the exit code.** The model flips to *installed*
-  only on a read-back that resolves to this bundle, with a distinct *installed-but-
-  not-on-PATH* state and loud `conflict`/`translocated`/`failed`/`cancelled`
-  states; the admin prompt is bounded by a visible cancel, so it is never a silent
-  spinner. The app is accessory, so it activates to the foreground before raising
-  the prompt and reverts after.
-
-A menu-bar row nudges toward the action only while the CLI is absent (never on a
-dev build that carries no bundled `runnyctl`); the primary surface is Settings.
-The vended `runnyctl` can lag a Homebrew-managed `runnyd` on a shared host, so it
-carries the same version-skew warning the app does, on its own CLI axis — warn,
-never refuse, printed to stderr before command output.
+`runnyctl` ships in the bundle too, but **the app does not install it** — the app
+is non-privileged and never writes a system path
+([privilege boundary](privilege-boundary.md), ADR-0023). `runnyctl` reaches the
+user's PATH through the Homebrew tap formula or by running it from inside the bundle.
 
 ## Daemon lifecycle (app-managed LaunchAgent)
 
 The app installs `runnyd` as a **per-user LaunchAgent via `SMAppService`** —
 the desktop channel (ADR-0018). The headless channel is the installed system
 LaunchDaemon (`runnyctl install-daemon`), which runs under `_runny` and is
-brokered through the app or run directly by the operator. The per-user plist
+installed, updated, and removed **entirely by the operator via `runnyctl`** — the
+app is non-privileged and never manages it, only observes it (the
+[privilege boundary](privilege-boundary.md), ADR-0023). The per-user plist
 (`Contents/Library/LaunchAgents/com.coderinserepeat.runnyd.plist`) is injected
 into the bundle *before* signing so it is covered by the signature and the
 notarization staple, and names the daemon by a bundle-relative
@@ -329,13 +291,6 @@ new binary, and a drain-gated respawn moves the running process onto it. This
 is not the system LaunchDaemon plist (an absolute `UserName = _runny` job that
 `internal/sysdaemon` generates) — two shapes for two channels, deliberately not
 unified.
-
-The app-brokered system daemon's *update* path re-stages the binaries in place with
-an atomic tmp-write → `rename(2)` (`SystemDaemonInstaller.restageScript`), never a
-`cp`-over: this OS has no `ETXTBSY` guard, so copying over a running binary truncates
-the live inode and corrupts the running process. The running daemon keeps the old
-inode until the drain-gated reload exits it, and launchd cold-starts onto the
-renamed-in binary. The re-stage is update-only — it never re-runs the installer.
 
 `Sources/Lifecycle/` mirrors `DaemonStore`'s split: pure `nonisolated static`
 verdicts (`LaunchAgentStatus`) plus a thin side-effect wrapper (`AgentController`)
@@ -381,8 +336,9 @@ seam, so every decision is unit-tested without launchd. The invariants:
   pre-act recheck catches a system daemon that appeared while the window stayed
   open). On a `systemManaged` or `indeterminate` verdict the Daemon row **replaces
   the install toggle with an observer banner**: the `systemManaged` banner names
-  the system LaunchDaemon and points at Settings → System Service to remove it;
-  the `indeterminate` banner points at `launchctl print system/<label>`. The banner
+  the system LaunchDaemon and points at `runnyctl uninstall-daemon` to remove it
+  (the app never manages it); the `indeterminate` banner points at `launchctl print
+  system/<label>`. The banner
   shows "Checking…" until the first gather runs, so a pristine launch never flashes
   the indeterminate diagnostic. A hand-run dev daemon reads `unmanaged` — the
   single-instance `flock` makes installing over it converge harmlessly, and it is
@@ -411,8 +367,9 @@ seam, so every decision is unit-tested without launchd. The invariants:
   than the running daemon, is the existing drain-gated reload (jobs finish first,
   then launchd cold-starts the new binary) — it adds nothing to the drain
   mechanics. A non-converged result is named loud ("update didn't take — still
-  vX"), never folded into the generic reload note. A system daemon is offered only
-  the generic skew banner, not a futile fleet-draining update.
+  vX"), never folded into the generic reload note. A system daemon gets no
+  app-driven update — the app is non-privileged; the operator runs `runnyctl
+  upgrade-daemon`, and the app shows only the skew banner.
 - **The config-compat gate** (`ConfigCompatGate`, `Sources/Lifecycle`) execs the
   bundled `runnyd -test-config <in-place config>` (via the bounded-process shell)
   and parses its JSON verdict (`ok`/`warn`/`error`, with warnings) — the substrate

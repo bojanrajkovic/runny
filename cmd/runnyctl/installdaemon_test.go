@@ -9,11 +9,10 @@ import (
 
 // resolveOperator picks the operator account the system home's inheriting ACL
 // will grant: the explicit --operator flag wins, else $SUDO_USER. The flag-wins
-// rule is the whole point of PR5a: the app's brokered install runs as root via
-// osascript "with administrator privileges", which — unlike sudo — leaves
-// SUDO_USER unset, so the operator must travel by flag there. The headless
-// `sudo` path passes no flag and still resolves off SUDO_USER. The local-user
-// check lives in Install(), so this stays pure and host-independent.
+// rule covers a root invocation without sudo (e.g. CI, or `su root`), which leaves
+// SUDO_USER unset, so the operator must travel by flag there. The headless `sudo`
+// path passes no flag and still resolves off SUDO_USER. The local-user check
+// lives in Install(), so this stays pure and host-independent.
 func TestResolveOperator(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -22,7 +21,7 @@ func TestResolveOperator(t *testing.T) {
 		want       string
 		wantErrSub string // non-empty => expect an error containing this substring
 	}{
-		{name: "flag only, no SUDO_USER (the brokered-install case)", flag: "alice", want: "alice"},
+		{name: "flag only, no SUDO_USER (root without sudo)", flag: "alice", want: "alice"},
 		{name: "flag wins over SUDO_USER", flag: "alice", sudoUser: "bob", want: "alice"},
 		{name: "SUDO_USER fallback (the headless sudo path)", sudoUser: "bob", want: "bob"},
 		{name: "neither set", wantErrSub: "cannot determine the operator account"},

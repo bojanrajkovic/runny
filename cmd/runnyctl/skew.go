@@ -61,9 +61,9 @@ func splitCore(s string) [3]int {
 
 // versionSkew classifies the skew between this runnyctl and the runnyd it dials,
 // returning a one-line warning and whether to print it. Warn, never refuse — the
-// CLI mirror of the app's skew verdict, on the vended-CLI axis a bundled-app
-// install creates (a runnyctl carried in the .app can lag a brew-managed runnyd
-// on a shared host). Two independent axes, neither implied by the other:
+// CLI mirror of the app's skew verdict: a runnyctl that came from the .app bundle
+// can lag a brew-managed runnyd on a shared host. Two independent axes, neither
+// implied by the other:
 //   - version mismatch: the normalized x.y.z cores differ (the shared-host case).
 //   - protocol behind: the cores match but the daemon's protocol is below what
 //     this CLI's stubs expect — the upgrade window the matched cores hide; '<',

@@ -182,16 +182,13 @@ restart and the ADR-0014 reload depend on.
 
 ## The Runny app and the command-line tool
 
-The `Runny.app` bundle carries signed copies of `runnyd` and `runnyctl`, and its
-Settings pane can vend the CLI: **Install command-line tool** symlinks the bundled
-`runnyctl` to `/usr/local/bin/runnyctl`, so the app and the CLI it installs are
-always the same build. It tries an unprivileged link first and raises a single
-admin prompt only when `/usr/local/bin` needs it; it refuses to overwrite a
-`brew`-managed `runnyctl` (naming the conflict) and refuses to run from a
-translocated app (move Runny to your Applications folder first). The same pane
-removes the link.
+The `Runny.app` bundle carries signed copies of `runnyd` and `runnyctl`. The app
+is non-privileged (ADR-0023): it does **not** install `runnyctl` to a system path.
+Get `runnyctl` on your PATH via the Homebrew tap formula, or run it from inside the bundle
+(`/Applications/Runny.app/Contents/MacOS/runnyctl`) — it is the same build as the
+bundled daemon.
 
-The app can also **install and manage the daemon** as a per-user LaunchAgent —
+The app **installs and manages the daemon** as a per-user LaunchAgent —
 the desktop-GUI install channel. From a copy of Runny in `/Applications`:
 
 - **Settings → Daemon → "Start runnyd at login"** registers the bundled `runnyd`
@@ -214,9 +211,11 @@ is refused, recoverably). **The two channels split by audience:** the app is the
 runnyctl install-daemon` is the **headless-fleet** path (a non-root system
 LaunchDaemon). The app installs its per-user agent only when no system daemon is
 present. If a system LaunchDaemon is already installed, the app observes it (status
-streams normally as a sibling client over the same socket) and the Settings pane
-points to **Settings → System Service** instead of offering the install toggle. A
-hand-run or leftover runnyd converges via the single-instance flock and does not
+streams normally as a sibling client over the same socket) and shows an observer
+banner pointing at `runnyctl uninstall-daemon` instead of offering the install
+toggle. The app is non-privileged — it never installs, updates, or removes the
+system daemon (that is `runnyctl`'s job, raising no admin prompt; see ADR-0023).
+A hand-run or leftover runnyd converges via the single-instance flock and does not
 require manual cleanup. A bundled `runnyctl` on PATH can lag a `brew`-upgraded
 `runnyd`; when it does, `runnyctl` prints a one-line version-skew warning to stderr
 before its output (warn, never refuse).
@@ -297,8 +296,8 @@ checks only, no network) and reads the JSON verdict:
   under launchd KeepAlive.
 
 The daemon never self-upgrades — the restart is launchd's, triggered by the
-operator. brew owns the binary delivery, so there is no re-stage step (unlike the
-app-brokered system daemon, which stages its own copy).
+operator. brew owns the binary delivery, so `upgrade-daemon` only validates and
+reloads — there is no binary re-stage step.
 
 You don't have to remember to check: when the running daemon's version lags the
 installed `runnyctl` (the state a `brew upgrade` leaves until you reload), every

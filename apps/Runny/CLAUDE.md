@@ -113,35 +113,16 @@ bounds) and ADR-0016 (decisions). Sharp edges below.
   the deprecated signing `--deep` the project avoids; don't "consistency-fix" them
   together. `additional_contents` is deliberately **not** used for these — its
   `else`-branch would land `runnyd_signed.bin` at the wrong filename and unsigned.
-- **CLI install: never clobber a foreign file, fail closed from a translocated
-  bundle.** The verdict/result cases live in
-  `Sources/Install/CLIInstallPlan.swift` (pure) — read them there, don't
-  re-enumerate. A regular file or a non-`Runny.app` symlink at
-  `/usr/local/bin/runnyctl` is foreign and is refused, never overwritten; a
-  translocated app (matched by the `…/AppTranslocation/…` path, since the Security
-  SPI isn't Swift-importable) is refused fail-closed. The privileged escalation is
-  one `with administrator privileges` line whose foreign guard re-runs at write
-  time (test-and-create, not `ln -f`); the path is shell-quoted through the
-  AppleScript layer; the app **activates before raising the prompt** (it's
-  `LSUIElement`/accessory, so a prompt can present without focus) and confirms the
-  result by reading the link back from disk, never from the exit code. The menu-bar
-  nudge shows only while the CLI is absent (`.notInstalled`) OR a leftover link
-  dangles (`.orphaned`), so a dev build that carries no bundled `runnyctl` —
-  `refresh()` leaves it `.failed` — never nags.
-- **A foreign conflict names the channel; an orphan reconciles on launch.** A
-  refused foreign owner is classified by `CLIInstall.foreignChannel` into Homebrew
-  (target resolves into a Cellar / brew prefix), a hand-rolled symlink, or a regular
-  file, and the row shows channel-specific remediation (e.g. `brew unlink runny`) —
-  the CLI sibling of the daemon observer banner, NOT just the raw path. A
-  drag-to-trash leaves the link dangling (macOS has no uninstall hook); a later
-  launch surfaces it as `.orphaned` (a Runny-owned link whose target bundle is gone —
-  the pure `restingClassification` keys this on `targetExists`) with a Remove action
-  (`removeOrphan` → `removeOrphanScript` / `removeOrphanUnprivileged`). Those remove a
-  Runny-owned link ONLY when its target is still gone at write time — a reappeared
-  target (remounted volume, relaunched second copy) is left live and the state
-  re-derived, deliberately UNLIKE `installScript` (which removes any Runny link to
-  re-point). It SURFACES, never auto-rewrites on launch (that would re-raise the admin
-  prompt every restart — Docker's mistake) and never clobbers a foreign owner.
+- **The app does not install the CLI, and raises no admin prompt, ever.** The app
+  is non-privileged ([privilege boundary](../../docs/architecture/privilege-boundary.md),
+  ADR-0023): it neither symlinks `runnyctl` into `/usr/local/bin` nor manages a
+  system daemon. `runnyctl` reaches PATH via the Homebrew cask or from inside the
+  bundle; the bundle still *carries* it (signed inside-out, no entitlements). A
+  registered `system/` daemon is **observed** read-only (the unprivileged ownership
+  probe drives the observer banner pointing at `sudo runnyctl uninstall-daemon`), never
+  installed/updated/removed by the app. There is no `with administrator privileges`
+  line, `osascript` broker, or privileged subprocess anywhere in the app target —
+  that absence is the boundary; verify it stays gone in review.
 - **Daemon lifecycle lives in `Sources/Lifecycle/` — read its `CLAUDE.md` for the
   sharp edges, don't duplicate them here.** The load-bearing ones a broad change
   must respect: `SMAppService` success means *requested*, so `installState` is

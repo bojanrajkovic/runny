@@ -93,8 +93,8 @@ inject_launch_agent(
 # The .app carries the same runnyd + runnyctl the brew tarball ships, placed at
 # Contents/MacOS/{runnyd,runnyctl} under their bare names and signed inside-out
 # (the daemon keeps com.apple.security.virtualization; the CLI gets none, asserted
-# at build time). A launchd BundleProgram and the vended-CLI symlink both depend on
-# the exact bare names. The binaries are re-sealed here, so they are NOT byte-
+# at build time). The launchd BundleProgram and running runnyctl from the bundle
+# both depend on the exact bare names. The binaries are re-sealed here, so they are NOT byte-
 # identical to the tarball's _notarized copies (different CDHash) — same source,
 # separately sealed and notarized per container.
 codesign_app(

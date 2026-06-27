@@ -2,6 +2,14 @@
 
 **Status:** Accepted (2026-06-19)
 
+**Superseded in part by [ADR-0023](0023-app-non-privileged-boundary.md)
+(2026-06-26):** the **app path** for installing the system daemon (below: "The app
+shells to the same subcommand") is withdrawn — the app is now non-privileged and
+never installs, updates, or removes the system daemon. Only operator-run `runnyctl
+install-daemon` / `uninstall-daemon` does. The dedicated `_runny` account, the
+`/Library/Application Support/runny` home, the dual ACL, the plist, and the
+delivery-only Homebrew formula all stand unchanged.
+
 Supersedes the networking-contingency framing of
 [ADR-0018](0018-bundled-app-distribution.md) (see its 2026-06-19 amendment): a
 headless, non-root runnyd is viable today, with no change to the network

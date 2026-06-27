@@ -67,9 +67,8 @@ never exercised live in tests.
   transiently translocate even a correctly-installed `/Applications` app on its
   first launch, so the translocated verdict is "re-launch and retry", distinct
   from a non-translocated wrong location ("move to /Applications"). Translocation
-  detection reuses the one safety heuristic in `Install/PrivilegedBroker.swift`
-  (`isTranslocated` — the `…/AppTranslocation/…` / `/private/var/folders/` path
-  match); both surfaces share that single definition rather than drifting copies.
+  detection lives in `Translocation.isTranslocated` (the `…/AppTranslocation/…` /
+  `/private/var/folders/` path match) — a plain, non-privileged path heuristic.
 - **Any `launchctl`/introspection carries a timeout.** There is no
   `bounded.Context` in Swift; a `launchctl print` can hang. A hung introspection
   surfaces "couldn't determine agent state" loudly, never spins. The shared
@@ -117,8 +116,9 @@ never exercised live in tests.
   can't auto-heal (a per-user agent installed over a live system daemon runs orphaned
   while clients keep resolving the system home); every other contender — a hand-run
   dev daemon, a leftover brew/manual install — converges via the single-instance
-  `flock` and is deliberately NOT detected (it reads `unmanaged`). The same probe is
-  used by `SystemDaemonInstaller` to confirm its own install/uninstall.
+  `flock` and is deliberately NOT detected (it reads `unmanaged`). The probe is
+  read-only observation: the app never installs or removes the system daemon (that
+  is `runnyctl`'s; the app is non-privileged — ADR-0023).
 - **The probe is stdout-literal-match, bounded, and reaped.** `LaunchdProbe` runs
   `launchctl print system/<label>` and decides registration by the literal label
   appearing in byte-capped STDOUT — never exit code, never format parsing. A

@@ -228,7 +228,7 @@ final class AgentController {
     var eligibility: LaunchAgentStatus.Eligibility { eligibilityProvider() }
 
     /// The real eligibility read: this bundle's location and translocation. Reuses
-    /// the one translocation heuristic in `CLIInstallModel` (no drifting copy of a
+    /// the one translocation heuristic in `Translocation` (no drifting copy of a
     /// safety check), and strips a trailing slash so a directory-URL path still
     /// matches the canonical `/Applications/Runny.app`.
     nonisolated static func bundleEligibility() -> LaunchAgentStatus.Eligibility {
@@ -236,7 +236,7 @@ final class AgentController {
         if path.count > 1, path.hasSuffix("/") { path.removeLast() }
         return LaunchAgentStatus.eligibility(
             bundlePath: path,
-            translocated: PrivilegedBroker.isTranslocated(path)
+            translocated: Translocation.isTranslocated(path)
         )
     }
 
@@ -715,15 +715,16 @@ extension AgentController {
         case .unmanaged, .selfManaged, .awaitingApproval:
             nil
         case .systemManaged:
-            // The app installs/removes the system daemon via the System Service
-            // settings section (the brokered `runnyctl install-daemon`/`uninstall-daemon`),
-            // so the banner names that as the management surface rather than framing the
-            // daemon as foreign. Status still streams over the shared socket; the per-user
-            // install toggle is hidden because a system daemon outranks a login agent.
+            // The app does not manage the system daemon — it observes it over the shared
+            // socket and never installs a competing login agent. Removal is the operator's
+            // `sudo runnyctl uninstall-daemon` (it requires root), so the banner names that
+            // rather than framing the
+            // daemon as foreign. The per-user install toggle is hidden because a system
+            // daemon outranks a login agent.
             ObserverHint(
                 kind: .systemManaged,
-                message: "Runny manages this as a system-wide LaunchDaemon — it streams status here and "
-                    + "won't install a competing login agent. Remove it in Settings → System Service."
+                message: "A system-wide runnyd LaunchDaemon manages this host — Runny streams its status "
+                    + "here and won't install a competing login agent. Remove it with `sudo runnyctl uninstall-daemon`."
             )
         case .indeterminate:
             ObserverHint(

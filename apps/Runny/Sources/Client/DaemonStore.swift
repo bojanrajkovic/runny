@@ -975,9 +975,7 @@ final class DaemonStore {
         // or ~/Downloads launch is a different (maybe older) build than the one launchd
         // cold-starts. Probing the running instance there could OK a config the respawn
         // binary rejects (crash-loop) or block one it accepts. This mirrors the
-        // reconcile's "never Bundle.main, always canonical" rule — `SystemDaemonInstaller.
-        // bundleRunnydPath` stays Bundle.main-based for the system-daemon *install* (it
-        // copies from the running bundle), which is a different operation.
+        // reconcile's "never Bundle.main, always canonical" rule.
         let runnydPath = LaunchAgentStatus.canonicalAgentProgram
         guard FileManager.default.fileExists(atPath: runnydPath) else {
             return .block("the installed Runny.app has no runnyd to validate the config")

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Asserts the signed Runny.app actually carries runnyd + runnyctl correctly:
-# present under the bare names a launchd BundleProgram and the vended-CLI symlink
-# assume, each independently codesign-valid (the inside-out seal, not just the
+# present under the bare names the launchd BundleProgram and running runnyctl from
+# the bundle assume, each independently codesign-valid (the inside-out seal, not just the
 # outer bundle), the daemon entitled for virtualization and the CLI not, and each
 # genuinely executable. A corrupt or wrong-arch Mach-O passes presence and
 # codesign but fails the exec, so the exec is not redundant. Darwin-only (codesign

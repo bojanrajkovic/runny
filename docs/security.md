@@ -137,23 +137,19 @@ long-lived registration token
 ([ADR-0003](architecture-decisions/0003-jit-runner-config.md)). The JIT config
 is single-use.
 
-## The app's privileged surface
+## The app is non-privileged
 
-The app's only action that escalates to **administrator** is vending the CLI —
-symlinking the bundled `runnyctl` to `/usr/local/bin/runnyctl` (installing the
-daemon agent, below, is user-scoped and never asks for admin). It tries an
-unprivileged `createSymbolicLink` first and escalates only when `/usr/local/bin`
-is not user-writable, through **one** `with administrator privileges` shell line —
-no privileged helper, no `SMJobBless`, no System Extension
-([ADR-0018](architecture-decisions/0018-bundled-app-distribution.md) rejects a
-root helper for this surface). The escalated command is minimal and TOCTOU-safe:
-it re-checks the foreign guard at the moment of mutation (test-and-create, never
-`ln -f`), so a `brew install` landing between the unprivileged plan and the
-privileged write cannot be clobbered, and it re-points only a `Runny.app` symlink,
-never a foreign file. The target is shell-quoted through the AppleScript layer so
-a path with spaces or quotes cannot break out of the command, and the result is
-confirmed by reading the link back from disk, never trusted from the privileged
-step's exit code. The bundled binaries are signed inside-out — the daemon carries
+The app raises **no** `administrator` prompt and runs no privileged helper, ever:
+it owns only the user's `gui/` launchd domain. Installing the system daemon,
+writing any system path, and installing the CLI to `/usr/local/bin` are all
+`runnyctl`'s — the operator's — domain, never the app's
+([privilege-boundary.md](architecture/privilege-boundary.md),
+[ADR-0023](architecture-decisions/0023-app-non-privileged-boundary.md);
+[ADR-0018](architecture-decisions/0018-bundled-app-distribution.md) already
+rejected a root helper for the app surface). The app bundles `runnyd` and
+`runnyctl` but does **not** install the CLI — `runnyctl` reaches the user's PATH
+via the Homebrew tap formula or by running it from inside the bundle. The bundled
+binaries are signed inside-out — the daemon carries
 `com.apple.security.virtualization`, the CLI carries none, both asserted at build
 time, so the CLI can never inherit the VM grant.
 

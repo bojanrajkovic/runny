@@ -5,8 +5,6 @@ import SwiftUI
 struct RunnyApp: App {
     @State private var store = DaemonStore()
     @State private var activation = ActivationCoordinator()
-    @State private var cliInstall = CLIInstallModel()
-    @State private var systemDaemon = SystemDaemonInstaller()
     @State private var agent = AgentController.live()
 
     var body: some Scene {
@@ -14,7 +12,6 @@ struct RunnyApp: App {
             MenuBarView()
                 .environment(store)
                 .environment(activation)
-                .environment(cliInstall)
                 .environment(agent)
         }
         .menuBarExtraStyle(.window)
@@ -39,14 +36,12 @@ struct RunnyApp: App {
         // `.hiddenTitleBar` suppresses `navigationTitle`, which forced the title
         // into a glass-capsuled principal toolbar item that read as a button.
 
-        // The install surface. It earns Settings back after the home-override
-        // form was removed — its onAppear registers the same accessory↔regular
-        // observer the main window does, so closing it never strands the app.
+        // The Settings surface (the per-user daemon's start-at-login row). Its
+        // onAppear registers the same accessory↔regular observer the main window
+        // does, so closing it never strands the app.
         Settings {
             SettingsView()
                 .environment(store)
-                .environment(cliInstall)
-                .environment(systemDaemon)
                 .environment(agent)
                 .environment(activation)
         }

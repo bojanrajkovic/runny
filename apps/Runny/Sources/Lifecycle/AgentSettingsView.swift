@@ -1,9 +1,9 @@
 import ServiceManagement
 import SwiftUI
 
-/// The app's Settings surface. The app is non-privileged (ADR-0023) — it never
-/// installs the CLI or manages a system daemon — so Settings is the per-user
-/// daemon's start-at-login row and nothing else. State is read from
+/// The app's Settings surface. The app is non-privileged — it never installs the
+/// CLI or manages a system daemon (both raise an admin prompt), so Settings is the
+/// per-user daemon's start-at-login row and nothing else. State is read from
 /// `AgentController`, never an action's return.
 struct SettingsView: View {
     @Environment(AgentController.self) private var agent

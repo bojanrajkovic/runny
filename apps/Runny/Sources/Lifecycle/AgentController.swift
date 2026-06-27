@@ -228,7 +228,7 @@ final class AgentController {
     var eligibility: LaunchAgentStatus.Eligibility { eligibilityProvider() }
 
     /// The real eligibility read: this bundle's location and translocation. Reuses
-    /// the one translocation heuristic in `CLIInstallModel` (no drifting copy of a
+    /// the one translocation heuristic in `Translocation` (no drifting copy of a
     /// safety check), and strips a trailing slash so a directory-URL path still
     /// matches the canonical `/Applications/Runny.app`.
     nonisolated static func bundleEligibility() -> LaunchAgentStatus.Eligibility {
@@ -236,7 +236,7 @@ final class AgentController {
         if path.count > 1, path.hasSuffix("/") { path.removeLast() }
         return LaunchAgentStatus.eligibility(
             bundlePath: path,
-            translocated: PrivilegedBroker.isTranslocated(path)
+            translocated: Translocation.isTranslocated(path)
         )
     }
 

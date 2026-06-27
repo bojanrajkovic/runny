@@ -67,9 +67,8 @@ never exercised live in tests.
   transiently translocate even a correctly-installed `/Applications` app on its
   first launch, so the translocated verdict is "re-launch and retry", distinct
   from a non-translocated wrong location ("move to /Applications"). Translocation
-  detection reuses the one safety heuristic in `Install/PrivilegedBroker.swift`
-  (`isTranslocated` — the `…/AppTranslocation/…` / `/private/var/folders/` path
-  match); both surfaces share that single definition rather than drifting copies.
+  detection lives in `Translocation.isTranslocated` (the `…/AppTranslocation/…` /
+  `/private/var/folders/` path match) — a plain, non-privileged path heuristic.
 - **Any `launchctl`/introspection carries a timeout.** There is no
   `bounded.Context` in Swift; a `launchctl print` can hang. A hung introspection
   surfaces "couldn't determine agent state" loudly, never spins. The shared

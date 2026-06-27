@@ -49,7 +49,7 @@ jobs:
           private-key: ${{ secrets.RELEASER_APP_PRIVATE_KEY }}
           # Lockfile push to this repo's Renovate branch only.
           permission-contents: write
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.ref_name }}
           persist-credentials: false

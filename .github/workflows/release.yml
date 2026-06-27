@@ -54,7 +54,7 @@ jobs:
       version: ${{ steps.package.outputs.version }}
       sha256: ${{ steps.package.outputs.sha256 }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
           fetch-depth: 0 # tools/version.sh needs tags
@@ -143,7 +143,7 @@ jobs:
           echo "sha256=$(cut -d' ' -f1 < "runny_${VERSION}_darwin_arm64.tar.gz.sha256")" >> "$GITHUB_OUTPUT"
           cp bazel-bin/apps/Runny/Runny_notarized_dmg.dmg "Runny_${VERSION}.dmg"
           shasum -a 256 "Runny_${VERSION}.dmg" > "Runny_${VERSION}.dmg.sha256"
-      - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
+      - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: |
             runny_*.tar.gz
@@ -167,7 +167,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - name: mint tap token

@@ -26,7 +26,7 @@ jobs:
     # signing credentials). Only jobs declaring this environment can read it.
     environment: releaser-app
     steps:
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app
         with:
           app-id: ${{ vars.RELEASER_APP_ID }}
@@ -35,6 +35,6 @@ jobs:
           # token inherits every permission the App installation has.
           permission-contents: write
           permission-pull-requests: write
-      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           token: ${{ steps.app.outputs.token }}

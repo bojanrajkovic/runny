@@ -32,8 +32,8 @@ the only place a `system/` LaunchDaemon is the right shape — has no desktop
 session to click an admin prompt, so it installs and updates the daemon with
 `runnyctl install-daemon` / `upgrade-daemon` directly; the app's brokered path is
 a worse way to reach the same on-disk result. A **desktop user** needs only the
-per-user LaunchAgent (no prompt) and reaches `runnyctl` through the Homebrew cask
-or the bundle. So every privileged path in the app is either redundant with
+per-user LaunchAgent (no prompt) and reaches `runnyctl` through the Homebrew tap
+formula or the bundle. So every privileged path in the app is either redundant with
 `runnyctl` (system daemon, CLI install) or serves no one (a GUI brokering a
 `sudo` for a headless deployment).
 
@@ -50,7 +50,7 @@ enacting changes:
   `runnyctl install-daemon` / `uninstall-daemon` / `upgrade-daemon`, run by the
   operator.
 - **Remove app CLI-symlink install.** `runnyctl` reaches PATH via the Homebrew
-  cask or by running it from inside the bundle; the app stops vending it.
+  tap formula or by running it from inside the bundle; the app stops vending it.
 - **Delete the privileged broker** (`PrivilegedBroker`) and both installer models
   (`SystemDaemonInstaller`, `CLIInstaller`/`CLIInstallPlan`) with the Settings
   rows and the menu-bar CLI nudge they backed.
@@ -77,7 +77,7 @@ enacting changes:
   `/usr/local/bin` write is the smaller privileged path, but it is still an admin
   prompt and still complexity (foreign-owner channel classification, the
   orphan-on-launch reconcile, the TOCTOU-guarded escalation) for something the
-  Homebrew cask and "run it from the bundle" already cover. Once the boundary is
+  Homebrew tap formula and "run it from the bundle" already cover. Once the boundary is
   "no admin prompt, ever," a single remaining prompt would be the exception that
   keeps the whole broker alive.
 

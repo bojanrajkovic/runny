@@ -25,7 +25,7 @@ preserved as the decision-time record — read it through this banner.
 the **CLI-vending** decision below ("Vend the CLI by symlinking
 `/usr/local/bin/runnyctl` into the bundle") is withdrawn — the app is now
 non-privileged and no longer installs the CLI. `runnyctl` reaches PATH via the
-Homebrew cask or by running it from inside the bundle. The bundling of
+Homebrew tap formula or by running it from inside the bundle. The bundling of
 `runnyd`+`runnyctl`, the per-user `SMAppService` LaunchAgent, the version-lock,
 loud skew, and the *observe-don't-manage* detect-and-defer against a system daemon
 all stand; only the app's privileged CLI install goes.

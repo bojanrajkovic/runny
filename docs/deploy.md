@@ -184,7 +184,7 @@ restart and the ADR-0014 reload depend on.
 
 The `Runny.app` bundle carries signed copies of `runnyd` and `runnyctl`. The app
 is non-privileged (ADR-0023): it does **not** install `runnyctl` to a system path.
-Get `runnyctl` on your PATH via the Homebrew cask, or run it from inside the bundle
+Get `runnyctl` on your PATH via the Homebrew tap formula, or run it from inside the bundle
 (`/Applications/Runny.app/Contents/MacOS/runnyctl`) — it is the same build as the
 bundled daemon.
 

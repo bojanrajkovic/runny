@@ -271,7 +271,7 @@ in-bundle path is the `BundleProgram` the agent's plist names.
 `runnyctl` ships in the bundle too, but **the app does not install it** — the app
 is non-privileged and never writes a system path
 ([privilege boundary](privilege-boundary.md), ADR-0023). `runnyctl` reaches the
-user's PATH through the Homebrew cask or by running it from inside the bundle.
+user's PATH through the Homebrew tap formula or by running it from inside the bundle.
 
 ## Daemon lifecycle (app-managed LaunchAgent)
 

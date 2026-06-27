@@ -148,7 +148,7 @@ writing any system path, and installing the CLI to `/usr/local/bin` are all
 [ADR-0018](architecture-decisions/0018-bundled-app-distribution.md) already
 rejected a root helper for the app surface). The app bundles `runnyd` and
 `runnyctl` but does **not** install the CLI — `runnyctl` reaches the user's PATH
-via the Homebrew cask or by running it from inside the bundle. The bundled
+via the Homebrew tap formula or by running it from inside the bundle. The bundled
 binaries are signed inside-out — the daemon carries
 `com.apple.security.virtualization`, the CLI carries none, both asserted at build
 time, so the CLI can never inherit the VM grant.

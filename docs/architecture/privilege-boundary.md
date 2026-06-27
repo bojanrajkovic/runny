@@ -48,7 +48,7 @@ side of the split, and the boundary deletes them rather than hardening them.
   `runnyctl install-daemon` / `uninstall-daemon` / `upgrade-daemon`, run by the
   operator.
 - Install `runnyctl` to a system path (`/usr/local/bin`). `runnyctl` reaches the
-  user's PATH through the Homebrew cask or by running it from inside the bundle;
+  user's PATH through the Homebrew tap formula or by running it from inside the bundle;
   the app does not vend it.
 
 ## What this is not

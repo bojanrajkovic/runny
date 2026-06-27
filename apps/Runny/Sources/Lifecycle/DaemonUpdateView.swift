@@ -74,7 +74,7 @@ struct DaemonUpdateAffordance: View {
 @MainActor
 func daemonUpdateVerdict(_ store: DaemonStore, _ agent: AgentController) -> DaemonStore.DaemonUpdate {
     store.daemonUpdate(
-        agentInstalled: agent.ownership == .selfManaged && agent.installState == .installed,
+        agentInstalled: agent.isSelfManagedInstalled,
         agentCanonical: agent.reconcileState == .ok,
         runningBundleCanonical: agent.eligibility == .eligible
     )
@@ -132,7 +132,7 @@ func reloadMightUpgrade(_ store: DaemonStore, _ agent: AgentController) -> Bool 
 ///   is the consent. Crucially it never silently drains.
 @MainActor
 func startGatedReload(_ store: DaemonStore, _ agent: AgentController, explicitUpdate: Bool) async {
-    let confirmedOurs = await agent.revalidate(.selfManaged) && agent.installState == .installed
+    let confirmedOurs = await agent.confirmedSelfManaged()
     if explicitUpdate {
         if confirmedOurs { await store.gatedDaemonUpdate(explicitUpdate: true) }
     } else if reloadMightUpgrade(store, agent) {
@@ -199,7 +199,7 @@ func maybeAutoApply(_ store: DaemonStore, _ agent: AgentController, settingOn: B
         update: daemonUpdateVerdict(store, agent),
         attempted: store.daemonUpdateAttempted
     ) else { return }
-    guard await agent.revalidate(.selfManaged), agent.installState == .installed else { return }
+    guard await agent.confirmedSelfManaged() else { return }
     // daemonVersion may be a sha-bearing build label; appVersion is already its bare
     // core (build-stripped), so normalize only the daemon side before the notice.
     let from = DaemonStore.versionCore(store.daemonVersion) ?? store.daemonVersion

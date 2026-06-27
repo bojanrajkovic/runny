@@ -1087,20 +1087,24 @@ final class DaemonStore {
         reloadTask = Task { @MainActor in
             defer { if gen == reloadGeneration { reloadInFlight = false } }
             // The authoritative gate is HERE, at the commit — the one irreversible
-            // point, just before the drain+respawn. Re-probe the bundled (new) runnyd
-            // against the current on-disk config: a hard incompatibility blocks (no
-            // crash-loop into a config the new binary can't load); anything else
-            // proceeds. The daemon's own reload preflight runs the OLD binary, blind
-            // to what the NEW one rejects, so this is the only check that sees it. The
-            // click-time gate is advisory display only (it shows the warnings/block in
-            // the affordance) — this re-probe is what actually decides.
+            // point, just before the drain+respawn — and it RE-probes rather than
+            // trusting a verdict carried from the click site, so the gate holds no
+            // matter how this point was reached (every entry path, now or a future
+            // one) without each caller having to be trusted to have gated. That
+            // caller-independence is the reason it re-probes, NOT a race worry. Re-probe
+            // the bundled (new) runnyd against the current on-disk config: a hard
+            // incompatibility blocks (no crash-loop into a config the new binary can't
+            // load); anything else proceeds. The daemon's own reload preflight runs the
+            // OLD binary, blind to what the NEW one rejects, so this is the only check
+            // that sees it. The click-time gate is advisory display only (it drives the
+            // warnings/block popup before consent); this re-probe is what decides.
             //
-            // A *warning* found here is deliberately NOT re-surfaced: it's non-fatal
-            // (the daemon comes up), and the only way the verdict could differ from
-            // the click is the operator editing config.yaml in the ~2s the confirm
-            // dialog is open — not worth an approval-tracking state machine.
-            // ponytail: accept the dialog-open edit window; Error is the one outcome
-            // we hard-block, a changed Warn just applies.
+            // A *warning* found only here is deliberately NOT re-surfaced: it's
+            // non-fatal (the daemon comes up). Re-probing also happens to close the tiny
+            // window where config.yaml changed since the click — a footnote, not the
+            // reason: Error is the one outcome we hard-block, a changed Warn just applies.
+            // ponytail: the commit re-probe is caller-independent insurance against a
+            // crash-loop drain, not race paranoia; the ~2s config-edit window is incidental.
             //
             // Surface a block through `commandError` (the always-presented "Command
             // failed" alert, same channel as the unreachable case above) — NOT the

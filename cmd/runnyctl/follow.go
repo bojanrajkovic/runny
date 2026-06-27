@@ -420,10 +420,6 @@ func (c *ctl) streamDrain(ctx context.Context, reader *snapshotReader, base base
 			// A non-match is a predecessor the reader prefetched before acceptance
 			// (the launchd-restart race); discard it rather than absorb it as the
 			// respawn — the genuine successor arrives via a reopen or a probe.
-			// Fold this snapshot only when it is the process the reload baselined.
-			// A non-match is a predecessor the reader prefetched before acceptance
-			// (the launchd-restart race); discard it rather than absorb it as the
-			// respawn — the genuine successor arrives via a reopen or a probe.
 			if !base.isSuccessor(m.resp) {
 				c.fold(m.resp, fs, opts)
 			}

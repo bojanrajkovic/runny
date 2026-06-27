@@ -567,14 +567,6 @@ func (s *Slot) currentBackoff() time.Duration {
 	return d
 }
 
-// cycleErr carries the failing state with the error into teardown.
-type cycleErr struct {
-	state State
-	err   error
-}
-
-func (e *cycleErr) Error() string { return fmt.Sprintf("%s: %v", e.state, e.err) }
-
 // runCycle executes states 1..9, always handing off to TEARDOWN, and returns
 // the cycle record (teardown fills the tail), whether teardown wedged
 // (force-stop failed with the guest still running), and whether the cycle

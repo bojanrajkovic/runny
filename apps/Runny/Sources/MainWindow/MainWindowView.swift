@@ -47,7 +47,11 @@ struct MainWindowView: View {
             case .doctor:
                 DoctorPane()
             case .logs:
-                FleetLogsPane()
+                // The daemon's own log. Per-runner output lives on each runner's
+                // Logs tab, so there's no fleet "runner output" mode here — that
+                // was a duplicate of what the runner views already show.
+                LogsTab(slotName: nil, daemon: true)
+                    .navigationTitle("Daemon log")
             case let .slot(name):
                 if let slot = store.slots.first(where: { $0.slot == name }) {
                     SlotDetailView(slot: slot)

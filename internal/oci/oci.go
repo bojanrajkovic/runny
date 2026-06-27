@@ -459,7 +459,7 @@ func (c *Client) pullDiskLayer(ctx context.Context, ref Ref, d descriptor, diskP
 	// layer's slot in disk.img, and the digest (which covers the compressed
 	// stream, not the decoded bytes) cannot catch an overrun into the
 	// neighboring layer or a decode that quietly fell short.
-	body := io.TeeReader(io.TeeReader(io.LimitReader(resp.Body, d.Size), h), c.progressWriter())
+	body := io.TeeReader(io.LimitReader(resp.Body, d.Size), io.MultiWriter(h, c.progressWriter()))
 	written, err := appleLZ4Decode(&boundedWriter{w: f, remain: expected}, body)
 	if err != nil {
 		return fmt.Errorf("disk layer %s: %w", d.Digest, err)

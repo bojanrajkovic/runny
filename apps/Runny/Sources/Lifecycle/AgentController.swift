@@ -315,6 +315,26 @@ final class AgentController {
         return ownership == expected
     }
 
+    /// The app owns an installed agent right now — the predicate the update affordance
+    /// and every act-time drain share. Read CACHED here (the render path can't await);
+    /// `confirmedSelfManaged()` is the act-time form that re-gathers first. The two
+    /// conjuncts guard distinct staleness: `ownership` can lag a teardown the verdict
+    /// didn't re-gather, and `installState` is the authoritative self-status.
+    var isSelfManagedInstalled: Bool {
+        ownership == .selfManaged && installState == .installed
+    }
+
+    /// Re-gather ownership, then confirm the app owns an installed agent — the
+    /// freshness an act-time drain needs, since the render-time verdict can be stale (a
+    /// foreign/system owner may have appeared while the window stayed open). One place
+    /// the "re-gather before you drain" guard lives, so each act site can't drift its
+    /// own copy. Re-gathering publishes the fresh verdict, flipping the surface to the
+    /// observer banner if ownership changed hands.
+    func confirmedSelfManaged() async -> Bool {
+        await refreshOwnership()
+        return isSelfManagedInstalled
+    }
+
     /// Gather the three facts `classify` reduces to a verdict: the `system/`-domain
     /// canonical-label probe (the one foreign-detection axis), the app's own
     /// SMAppService self-status, and whether the home is canonical. Static so both

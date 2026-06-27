@@ -119,7 +119,7 @@ bounds) and ADR-0016 (decisions). Sharp edges below.
   system daemon. `runnyctl` reaches PATH via the Homebrew cask or from inside the
   bundle; the bundle still *carries* it (signed inside-out, no entitlements). A
   registered `system/` daemon is **observed** read-only (the unprivileged ownership
-  probe drives the observer banner pointing at `runnyctl uninstall-daemon`), never
+  probe drives the observer banner pointing at `sudo runnyctl uninstall-daemon`), never
   installed/updated/removed by the app. There is no `with administrator privileges`
   line, `osascript` broker, or privileged subprocess anywhere in the app target —
   that absence is the boundary; verify it stays gone in review.

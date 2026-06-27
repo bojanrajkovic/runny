@@ -717,13 +717,14 @@ extension AgentController {
         case .systemManaged:
             // The app does not manage the system daemon — it observes it over the shared
             // socket and never installs a competing login agent. Removal is the operator's
-            // `runnyctl uninstall-daemon`, so the banner names that rather than framing the
+            // `sudo runnyctl uninstall-daemon` (it requires root), so the banner names that
+            // rather than framing the
             // daemon as foreign. The per-user install toggle is hidden because a system
             // daemon outranks a login agent.
             ObserverHint(
                 kind: .systemManaged,
                 message: "A system-wide runnyd LaunchDaemon manages this host — Runny streams its status "
-                    + "here and won't install a competing login agent. Remove it with `runnyctl uninstall-daemon`."
+                    + "here and won't install a competing login agent. Remove it with `sudo runnyctl uninstall-daemon`."
             )
         case .indeterminate:
             ObserverHint(

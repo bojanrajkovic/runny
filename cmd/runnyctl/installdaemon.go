@@ -24,7 +24,7 @@ func installDaemon(args []string) error {
 	fs.SetOutput(io.Discard)
 	operatorFlag := fs.String("operator", "",
 		"operator account the home's inheriting ACL grants (defaults to $SUDO_USER; required "+
-			"when not run via sudo — the app's brokered install runs as root with no SUDO_USER set)")
+			"when run as root without sudo, where SUDO_USER is unset)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -101,10 +101,10 @@ func requireDarwinRoot(name string) error {
 }
 
 // resolveOperator selects the operator account from the explicit --operator flag
-// or $SUDO_USER. The explicit flag wins: the app's brokered install runs as root
-// via osascript "with administrator privileges", which (unlike sudo) leaves
-// SUDO_USER unset, so the operator can only travel by flag there; the headless
-// `sudo runnyctl install-daemon` path passes no flag and resolves off SUDO_USER.
+// or $SUDO_USER. The explicit flag wins: a root invocation without sudo (e.g. CI,
+// or `su root`) leaves SUDO_USER unset, so the operator can only travel by flag
+// there; the headless `sudo runnyctl install-daemon` path passes no flag and
+// resolves off SUDO_USER.
 // `root` is refused from either source — an ACL grant to root is pointless and
 // signals a non-login invocation. The local-user check lives in Install(), not
 // here, so source selection stays pure and unit-testable.

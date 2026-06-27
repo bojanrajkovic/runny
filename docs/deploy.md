@@ -296,8 +296,8 @@ checks only, no network) and reads the JSON verdict:
   under launchd KeepAlive.
 
 The daemon never self-upgrades — the restart is launchd's, triggered by the
-operator. brew owns the binary delivery, so there is no re-stage step (unlike the
-app-brokered system daemon, which stages its own copy).
+operator. brew owns the binary delivery, so `upgrade-daemon` only validates and
+reloads — there is no binary re-stage step.
 
 You don't have to remember to check: when the running daemon's version lags the
 installed `runnyctl` (the state a `brew upgrade` leaves until you reload), every

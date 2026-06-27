@@ -2,6 +2,14 @@
 
 **Status:** Accepted (2026-06-24)
 
+**Superseded in part by [ADR-0023](0023-app-non-privileged-boundary.md)
+(2026-06-26):** the **app-brokered re-stage** of the system daemon's binary (the
+atomic tmp-write→`rename(2)` under an admin prompt) is withdrawn — the app is now
+non-privileged and never manages the system daemon. The headless, operator-run
+`runnyctl upgrade-daemon` is the only system-daemon update path. The
+config-compat gate (`runnyd -test-config`), the OK/Warn/Error verdict, and the
+per-user agent's auto-apply-on-OK all stand unchanged.
+
 ## Context
 
 A runnyd update is *delivered* but not *applied* until something drains the

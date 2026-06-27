@@ -1,6 +1,39 @@
 import ServiceManagement
 import SwiftUI
 
+/// The app's Settings surface. The app is non-privileged (ADR-0023) — it never
+/// installs the CLI or manages a system daemon — so Settings is the per-user
+/// daemon's start-at-login row and nothing else. State is read from
+/// `AgentController`, never an action's return.
+struct SettingsView: View {
+    @Environment(AgentController.self) private var agent
+    @Environment(ActivationCoordinator.self) private var activation
+
+    var body: some View {
+        Form {
+            Section {
+                AgentInstallRow()
+            } header: {
+                Text("Daemon")
+            } footer: {
+                Text("Installs runnyd as a login agent so it starts with your session and survives "
+                    + "upgrades. Requires Runny in your Applications folder.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 480, height: 320)
+        .onAppear {
+            // Settings is a regular window; keep the accessory↔regular dance sane
+            // (the app is LSUIElement) and refresh the agent row from its source on open.
+            activation.windowAppeared()
+            agent.refresh()
+            Task { await agent.runReconcile() }
+        }
+    }
+}
+
 /// The Settings "Daemon" row: a start-at-login toggle that registers/unregisters
 /// the LaunchAgent, plus a loud status line for every non-installed state. State
 /// is read from `AgentController` (derived from `SMAppService.status`), never an

@@ -182,16 +182,13 @@ restart and the ADR-0014 reload depend on.
 
 ## The Runny app and the command-line tool
 
-The `Runny.app` bundle carries signed copies of `runnyd` and `runnyctl`, and its
-Settings pane can vend the CLI: **Install command-line tool** symlinks the bundled
-`runnyctl` to `/usr/local/bin/runnyctl`, so the app and the CLI it installs are
-always the same build. It tries an unprivileged link first and raises a single
-admin prompt only when `/usr/local/bin` needs it; it refuses to overwrite a
-`brew`-managed `runnyctl` (naming the conflict) and refuses to run from a
-translocated app (move Runny to your Applications folder first). The same pane
-removes the link.
+The `Runny.app` bundle carries signed copies of `runnyd` and `runnyctl`. The app
+is non-privileged (ADR-0023): it does **not** install `runnyctl` to a system path.
+Get `runnyctl` on your PATH via the Homebrew cask, or run it from inside the bundle
+(`/Applications/Runny.app/Contents/MacOS/runnyctl`) — it is the same build as the
+bundled daemon.
 
-The app can also **install and manage the daemon** as a per-user LaunchAgent —
+The app **installs and manages the daemon** as a per-user LaunchAgent —
 the desktop-GUI install channel. From a copy of Runny in `/Applications`:
 
 - **Settings → Daemon → "Start runnyd at login"** registers the bundled `runnyd`

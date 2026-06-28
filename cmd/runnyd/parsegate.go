@@ -80,6 +80,17 @@ func parseableByRespawnTarget(ctx context.Context, plistPath, configPath string,
 // returned "" off the system home): deferral is system-daemon-only, so the
 // original config-parse failure stands unchanged — not the respawn-target-config
 // synthetic, which would point a per-user agent at an irrelevant symlink.
+//
+// ponytail: the respawn target's -test-config gates the LOCAL startup-blockers
+// (localConfigChecks: key parse, guest-cap, namespace, image-ref) but NOT the
+// network ones startup also hard-fails on (runner-perm, image-resolve,
+// disk-headroom). That is deliberate and not a gap to close here: gating a
+// forward-only migration on live GitHub/registry/disk health would let a
+// transient blip refuse the very upgrade meant to fix things, and those failures
+// are not silent — the crash-only FSM meets them loudly at MINT_JIT / ENSURE_IMAGE
+// (backoff, why-visibility, cycle records), so a daemon with dead creds is no more
+// "alive" refused than respawned. The network checks are point-in-time anyway
+// (valid at gate-time, dead at runtime), so the FSM, not the gate, is the real net.
 func parseDeferralCheck(ctx context.Context, configPath, plistPath string, failed []socket.DoctorCheck, deferred bool, test configTester) []socket.DoctorCheck {
 	if !deferred || plistPath == "" || len(failed) != 1 || failed[0].Name != "config-parse" {
 		return failed

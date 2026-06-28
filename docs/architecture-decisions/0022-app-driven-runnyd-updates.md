@@ -245,11 +245,23 @@ the runner-namespace, and the per-pool image-ref parse (all local, no network).
 The exit gate runs `localConfigChecks` directly for a normal drain (the respawn is
 the same binary) and defers to the respawn target's `-test-config` for an
 `UpgradeReload` drain (the respawn is a newer binary, so its verdict is the
-authoritative one). For an `UpgradeReload` drain it re-validates against the
-respawn target whenever the on-disk bytes drift mid-drain (`sha != acceptedSHA`),
-not only when the running binary fails to parse — otherwise a mid-drain edit the
-old binary accepts but the new one rejects would slip past the gate and crash-loop
-the respawn.
+authoritative one). For an `UpgradeReload` drain the respawn target is consulted on
+every exit attempt — never short-circuited on a matching accepted SHA, since a
+plain `Reload` joining the drain can advance the accepted SHA to bytes validated
+only against the old binary — so a mid-drain edit the old binary accepts but the
+new one rejects can't slip past the gate and crash-loop the respawn.
+
+The deferral gates the **local** startup-blocking checks only; the network ones
+startup also hard-fails on (`runner-perm`, `image-resolve`, `disk-headroom`) are
+deliberately not pre-gated for a forward-only migration. Gating them would couple
+a headless upgrade to live GitHub/registry/disk health — letting a transient blip
+refuse the migration meant to recover from it, the same coupling the no-network
+gate rule above rejects. These failures are not silent: the crash-only state
+machine meets them at `MINT_JIT` / `ENSURE_IMAGE` with backoff, why-visibility, and
+cycle records, so the FSM — not a point-in-time startup gate — is the runtime net.
+A daemon whose GitHub credentials are dead is no more functional held on the old
+config (it loops in `BACKOFF` at `MINT_JIT`) than respawned, so refusing the
+upgrade buys no working daemon, only blip-coupling.
 
 ### Rejected alternatives
 

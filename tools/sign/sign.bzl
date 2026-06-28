@@ -514,7 +514,7 @@ ditto -c -k --keepParent "$APP" "$out"
 """,
         arguments = [volatile_path, ctx.file.app_zip.path, out.path],
         mnemonic = "StampBundleMtime",
-        execution_requirements = {"no-sandbox": "1"},
+        execution_requirements = {"no-sandbox": "1"} | ({"no-cache": "1"} if ctx.attr.stamp else {}),
     )
     return [DefaultInfo(files = depset([out]))]
 

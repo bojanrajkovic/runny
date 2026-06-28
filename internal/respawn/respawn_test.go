@@ -101,6 +101,62 @@ func TestTargetVersionQuietCases(t *testing.T) {
 	}
 }
 
+// TargetPath must re-resolve the plist's opt-symlink at read time, not pin the
+// path it was started from — the same guarantee targetVersion needs.
+func TestTargetPathResolvesRepointedSymlink(t *testing.T) {
+	dir := t.TempDir()
+	oldBin := filepath.Join(dir, "old-runnyd")
+	newBin := filepath.Join(dir, "new-runnyd")
+	for _, b := range []string{oldBin, newBin} {
+		if err := os.WriteFile(b, []byte("binary"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(dir, "runnyd")
+	if err := os.Symlink(oldBin, link); err != nil {
+		t.Fatal(err)
+	}
+	plistPath := writePlist(t, dir, link)
+	// brew upgrade: repoint the symlink.
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(newBin, link); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := TargetPath(plistPath)
+	if !ok {
+		t.Fatal("ok=false, want a resolved path")
+	}
+	wantNew, _ := filepath.EvalSymlinks(newBin)
+	if got != wantNew {
+		t.Errorf("TargetPath resolved %q, want the new target %q", got, wantNew)
+	}
+}
+
+func TestTargetPathQuietCases(t *testing.T) {
+	dir := t.TempDir()
+	realBin := filepath.Join(dir, "runnyd")
+	if err := os.WriteFile(realBin, []byte("binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name      string
+		plistPath string
+	}{
+		{"missing plist", filepath.Join(dir, "absent.plist")},
+		{"empty ProgramArguments", writePlist(t, t.TempDir())},
+		{"program does not exist", writePlist(t, t.TempDir(), filepath.Join(dir, "nope"))},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if p, ok := TargetPath(tc.plistPath); ok {
+				t.Errorf("ok=true (%q), want quiet (ok=false)", p)
+			}
+		})
+	}
+}
+
 // A daemon that is not the system daemon (a per-user agent at ~/.runny) has no
 // LaunchDaemon plist to read — out of scope, so it stays quiet without touching
 // the filesystem.

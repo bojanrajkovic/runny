@@ -10,6 +10,11 @@ non-privileged and never manages the system daemon. The headless, operator-run
 config-compat gate (`runnyd -test-config`), the OK/Warn/Error verdict, and the
 per-user agent's auto-apply-on-OK all stand unchanged.
 
+**Amended (2026-06-28):** a dedicated `UpgradeReload` RPC enables the running
+daemon to defer a config-parse failure to the respawn target's own `-test-config`
+for a forward-only config edit (a new or renamed key the *new* runnyd accepts but
+the *old* strict parser rejects). See the Amendment section below.
+
 ## Context
 
 A runnyd update is *delivered* but not *applied* until something drains the
@@ -188,3 +193,49 @@ gated update path.
 - Implementation is a four-epic rollout tracked on the project board — the
   config-compat substrate, the per-user auto-apply, the app-brokered re-stage, and
   the headless CLI path — each a small vertical slice over this design.
+
+## Amendment (2026-06-28): UpgradeReload RPC and parse-deferral
+
+### Problem
+
+A forward-only config edit (a new or renamed key the new `runnyd` accepts but the
+old strict parser rejects) passes the new-binary gate (`runnyd -test-config`) yet
+is refused by the *running* daemon's reload preflight, because the running binary
+is the one parsing it. `runnyctl upgrade-daemon` cannot complete headlessly without
+a manual `launchctl bootout`.
+
+### Decision
+
+Add a dedicated `UpgradeReload` RPC alongside the existing `Reload`. The verb itself
+is the access boundary: `upgrade-daemon` calls `UpgradeReload`; plain `Reload` and
+SIGHUP structurally cannot defer. No boolean flag on `Reload` — a flag can be forged
+by any caller.
+
+**Parse-deferral mechanism.** When the running binary's parser rejects the config on
+an `UpgradeReload`-caused drain, the daemon consults the *respawn target* (`respawn.TargetPath`
+reads `ProgramArguments[0]` from the plist and re-resolves its symlinks NOW, matching
+what launchd would exec). If the target's `-test-config` accepts the file, the drain
+proceeds; if not (stale symlink — the opt-symlink still points to the old binary),
+the drain is refused with a synthetic `respawn-target-config` failure, and no
+crash-loop is possible.
+
+**Cause-gating.** The drainer records whether its drain was caused by
+`UpgradeReload`. The exit gate defers to the respawn target only for that cause.
+Plain-reload and wedge drains are unaffected.
+
+**Pre-feature compatibility.** A running daemon that predates `UpgradeReload` returns
+`Unimplemented`. `upgrade-daemon` catches this and surfaces a clear operator message
+("run `runnyctl reload --wait` instead — config-parse deferral unavailable").
+
+**Scope.** System daemon only. A per-user agent has no plist, so `TargetPath` returns
+`false` and deferral is a no-op (the own-parse-failure is still refused).
+
+### Rejected alternatives
+
+- **A `--defer` flag on `Reload`.** Any caller can set a bool flag; the verb is the
+  boundary that prevents escalation.
+- **Defer unconditionally on plain `Reload`.** Would allow any reload to bypass the
+  running binary's parse guard — the forward-only deferral is an upgrade affordance,
+  not a general override.
+- **`launchctl bootout` operator instruction.** Works, but breaks headless automation
+  and is the failure mode this project exists to make unnecessary.

@@ -255,7 +255,11 @@ func (c *ctl) dispatch(ctx context.Context, args []string) error {
 			return err
 		}
 		if *wait {
-			return c.reloadWait(ctx, *reason, defaultFollowOpts(*respawnTimeout, *timeout))
+			return c.reloadWait(ctx, *reason,
+				func(ctx context.Context, req *runnyv1.ReloadRequest) (*runnyv1.ReloadResponse, error) {
+					return c.client.Reload(ctx, req)
+				},
+				defaultFollowOpts(*respawnTimeout, *timeout))
 		}
 		return c.reload(ctx, *reason)
 	case "upgrade-daemon":

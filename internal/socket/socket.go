@@ -121,6 +121,11 @@ type Server struct {
 	// drain is already active, the verdict matters because the respawn loads
 	// the on-disk file regardless. Nil = Unimplemented (handler unwired).
 	ReloadFn func(ctx context.Context, reason string) ReloadResult
+	// UpgradeReloadFn is the UpgradeReload-verb variant: it may defer a
+	// config-parse failure to the respawn target's -test-config when the
+	// running binary's own parser rejects a forward-only config. The verb is
+	// the access boundary — plain Reload cannot defer. Nil = Unimplemented.
+	UpgradeReloadFn func(ctx context.Context, reason string) ReloadResult
 	// DrainFn reports the structured drain state (reason, held flag, progress
 	// counter) as a unit. Nil = never draining.
 	DrainFn func() DrainState
@@ -491,16 +496,10 @@ func (s *Server) Resume(ctx context.Context, req *runnyv1.ResumeRequest) (*runny
 	return &runnyv1.ResumeResponse{}, nil
 }
 
-func (s *Server) Reload(ctx context.Context, req *runnyv1.ReloadRequest) (*runnyv1.ReloadResponse, error) {
-	if s.ReloadFn == nil {
-		return nil, status.Error(codes.Unimplemented, "reload is not wired on this server")
-	}
-	// No draining gate: the preflight runs (and its verdict is reported)
-	// even mid-drain — the imminent respawn loads the on-disk file whether
-	// or not it was validated, so "refused because already draining" would
-	// invert the operator's reading. The handler never blocks on
-	// convergence; that is observed via status/watch.
-	r := s.ReloadFn(ctx, req.GetReason())
+// reloadResponse builds the proto response from a ReloadResult, stamping the
+// accepting process's boot_id. Shared by Reload and UpgradeReload (same
+// messages, same wire shape, different validation authority).
+func (s *Server) reloadResponse(r ReloadResult) *runnyv1.ReloadResponse {
 	resp := &runnyv1.ReloadResponse{
 		Accepted:            r.Accepted,
 		StartedDrain:        r.StartedDrain,
@@ -519,7 +518,31 @@ func (s *Server) Reload(ctx context.Context, req *runnyv1.ReloadRequest) (*runny
 	for _, c := range r.Warnings {
 		resp.Warnings = append(resp.Warnings, &runnyv1.DoctorCheck{Name: c.Name, Ok: c.OK, Detail: c.Detail})
 	}
-	return resp, nil
+	return resp
+}
+
+func (s *Server) Reload(ctx context.Context, req *runnyv1.ReloadRequest) (*runnyv1.ReloadResponse, error) {
+	if s.ReloadFn == nil {
+		return nil, status.Error(codes.Unimplemented, "reload is not wired on this server")
+	}
+	// No draining gate: the preflight runs (and its verdict is reported)
+	// even mid-drain — the imminent respawn loads the on-disk file whether
+	// or not it was validated, so "refused because already draining" would
+	// invert the operator's reading. The handler never blocks on
+	// convergence; that is observed via status/watch.
+	return s.reloadResponse(s.ReloadFn(ctx, req.GetReason())), nil
+}
+
+// UpgradeReload is the upgrade-daemon verb: it may defer a config-parse failure
+// to the respawn target's -test-config when the running binary's own parser
+// rejects a forward-only config edit. A plain Reload cannot defer — the verb is
+// the access boundary. Pre-feature daemons (< this version) return Unimplemented,
+// which upgrade-daemon catches and surfaces as a clear operator message.
+func (s *Server) UpgradeReload(ctx context.Context, req *runnyv1.ReloadRequest) (*runnyv1.ReloadResponse, error) {
+	if s.UpgradeReloadFn == nil {
+		return nil, status.Error(codes.Unimplemented, "upgrade-reload is not wired on this server")
+	}
+	return s.reloadResponse(s.UpgradeReloadFn(ctx, req.GetReason())), nil
 }
 
 func (s *Server) Why(ctx context.Context, req *runnyv1.WhyRequest) (*runnyv1.WhyResponse, error) {

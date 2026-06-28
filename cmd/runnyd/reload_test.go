@@ -11,6 +11,7 @@ import (
 
 	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/socket"
+	"github.com/bojanrajkovic/runny/internal/sysdaemon"
 )
 
 var hexSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -200,6 +201,142 @@ func TestCheckDiskHeadroomImageAware(t *testing.T) {
 	ok, _ = checkDiskHeadroom(103*GiB, nonAligned)
 	if !ok {
 		t.Error("checkDiskHeadroom(103GiB, 100.5GiB image) = fail, want ok")
+	}
+}
+
+// writeDaemonPlist writes a minimal LaunchDaemon plist pointing program as
+// ProgramArguments[0] and returns the path — the same fixture parseDeferralCheck
+// uses to resolve the respawn target via TargetPath.
+func writeDaemonPlist(t *testing.T, program string) string {
+	t.Helper()
+	dir := t.TempDir()
+	// Write a stub binary so EvalSymlinks succeeds.
+	bin := filepath.Join(dir, "runnyd-stub")
+	if err := os.WriteFile(bin, []byte("stub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "runnyd")
+	if err := os.Symlink(bin, link); err != nil {
+		t.Fatal(err)
+	}
+	// Use the provided program path if set; otherwise use our local stub.
+	target := program
+	if target == "" {
+		target = link
+	}
+	data := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>ProgramArguments</key><array><string>` + target + `</string></array>
+</dict></plist>`)
+	p := filepath.Join(dir, "daemon.plist")
+	if err := os.WriteFile(p, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// parseDeferralCheck pure-function coverage: (own-parse-fails × deferred ×
+// target verdict) → proceed or named refusal.
+func TestParseDeferralCheck(t *testing.T) {
+	configParseFail := []socket.DoctorCheck{{Name: "config-parse", OK: false, Detail: "yaml: error at line 1"}}
+	alwaysOK := configTester(func(_ context.Context, _, _ string) bool { return true })
+	alwaysNo := configTester(func(_ context.Context, _, _ string) bool { return false })
+
+	// A plist that TargetPath can resolve (any existing file as the target).
+	plistPath := writeDaemonPlist(t, "")
+
+	cases := []struct {
+		name     string
+		failed   []socket.DoctorCheck
+		deferred bool
+		test     configTester
+		wantLen  int
+		wantName string
+	}{
+		{
+			name:   "not deferred: config-parse passes through",
+			failed: configParseFail, deferred: false, test: alwaysOK,
+			wantLen: 1, wantName: "config-parse",
+		},
+		{
+			name:   "deferred + target accepts: cleared",
+			failed: configParseFail, deferred: true, test: alwaysOK,
+			wantLen: 0,
+		},
+		{
+			name:   "deferred + target refuses: respawn-target-config",
+			failed: configParseFail, deferred: true, test: alwaysNo,
+			wantLen: 1, wantName: "respawn-target-config",
+		},
+		{
+			name: "deferred but multiple failures: passes through unchanged",
+			failed: []socket.DoctorCheck{
+				{Name: "config-parse", OK: false},
+				{Name: "github-client:mac", OK: false},
+			},
+			deferred: true, test: alwaysOK,
+			wantLen: 2,
+		},
+		{
+			name:     "deferred but not config-parse: passes through",
+			failed:   []socket.DoctorCheck{{Name: "macos-guest-cap", OK: false}},
+			deferred: true, test: alwaysOK,
+			wantLen: 1, wantName: "macos-guest-cap",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseDeferralCheck(context.Background(), "", plistPath, tc.failed, tc.deferred, tc.test)
+			if len(got) != tc.wantLen {
+				t.Fatalf("len(got)=%d, want %d; got=%+v", len(got), tc.wantLen, got)
+			}
+			if tc.wantName != "" && (len(got) == 0 || got[0].Name != tc.wantName) {
+				t.Errorf("got[0].Name=%q, want %q", got[0].Name, tc.wantName)
+			}
+		})
+	}
+}
+
+// When TargetPath can't resolve (no plist), deferred deferral must refuse with
+// respawn-target-config rather than silently accepting — the stale-symlink guard.
+func TestParseDeferralCheckNoResolvedTarget(t *testing.T) {
+	configParseFail := []socket.DoctorCheck{{Name: "config-parse", OK: false, Detail: "yaml: error"}}
+	alwaysOK := configTester(func(_ context.Context, _, _ string) bool { return true })
+	got := parseDeferralCheck(context.Background(), "", "/nonexistent/plist.xml", configParseFail, true, alwaysOK)
+	if len(got) != 1 || got[0].Name != "respawn-target-config" {
+		t.Errorf("unresolvable target: got %+v, want [{Name: respawn-target-config}]", got)
+	}
+}
+
+// An empty plist path is the non-system-daemon signal (deferralPlistPath returns
+// "" off the system home): deferral is system-daemon-only, so the original
+// config-parse failure must stand UNCHANGED — not the misleading
+// respawn-target-config (which would tell the operator to check a symlink that
+// has nothing to do with a per-user agent's bundle-relative respawn).
+func TestParseDeferralCheckNonSystemDaemon(t *testing.T) {
+	configParseFail := []socket.DoctorCheck{{Name: "config-parse", OK: false, Detail: "yaml: error"}}
+	alwaysOK := configTester(func(_ context.Context, _, _ string) bool { return true })
+	got := parseDeferralCheck(context.Background(), "", "", configParseFail, true, alwaysOK)
+	if len(got) != 1 || got[0].Name != "config-parse" {
+		t.Errorf("non-system daemon: got %+v, want the original config-parse failure unchanged", got)
+	}
+}
+
+// deferralPlistPath consults the system LaunchDaemon plist ONLY for the system
+// daemon. A per-user agent (any other home) gets "" so deferral is disabled — it
+// respawns from a bundle-relative BundleProgram, not this plist, and consulting
+// the system plist would test the wrong binary (mirrors respawn.TargetVersion's
+// home guard).
+func TestDeferralPlistPath(t *testing.T) {
+	// The system-daemon path must be the SAME plist respawn.TargetPath then reads;
+	// asserting equality (not just non-empty) catches a drift between the path the
+	// gate hands out and the one launchd actually respawns from.
+	if got, want := deferralPlistPath(home.Dir(home.SystemHomeDir)), sysdaemon.DefaultConfig().PlistPath(); got != want {
+		t.Errorf("system daemon: deferralPlistPath = %q, want %q", got, want)
+	}
+	if got := deferralPlistPath(home.Dir("/Users/someone/.runny")); got != "" {
+		t.Errorf("per-user agent: deferralPlistPath = %q, want empty", got)
 	}
 }
 

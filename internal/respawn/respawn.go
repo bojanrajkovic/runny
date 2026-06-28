@@ -64,7 +64,7 @@ func TargetVersion(ctx context.Context, h home.Dir) (version string, ok bool) {
 }
 
 func targetVersion(ctx context.Context, plistPath string, run Runner) (string, bool) {
-	path, ok := resolveProgramPath(plistPath)
+	path, ok := TargetPath(plistPath)
 	if !ok {
 		return "", false
 	}
@@ -75,14 +75,14 @@ func targetVersion(ctx context.Context, plistPath string, run Runner) (string, b
 	return v, true
 }
 
-// resolveProgramPath reads ProgramArguments[0] from a LaunchDaemon plist and
+// TargetPath reads ProgramArguments[0] from a LaunchDaemon plist and
 // re-resolves its symlinks NOW. The EvalSymlinks is the whole point: the plist
 // names a stable opt-symlink (so `brew upgrade` need not rewrite the plist), and
 // resolving it at read time yields the CURRENTLY-installed binary, which is what
 // launchd would exec on the next cold start. It deliberately does NOT consult
 // os.Executable — that would pin the running (pre-upgrade) path and defeat the
 // detection. ok=false on any failure so the caller stays quiet.
-func resolveProgramPath(plistPath string) (string, bool) {
+func TargetPath(plistPath string) (string, bool) {
 	data, err := os.ReadFile(plistPath)
 	if err != nil {
 		return "", false

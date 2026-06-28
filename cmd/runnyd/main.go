@@ -273,7 +273,12 @@ func run() error {
 	// first), re-issuing commands on every status change so a dropped
 	// command or the backoffWait timer-vs-pause race cannot stall the
 	// drain, then exits for a launchd cold start.
-	d := &drainer{
+	//
+	// Two-step init: the exitGate closure references d.deferConfigParse, so d
+	// must be declared before its struct literal is evaluated (closures capture
+	// variables, not values — the variable must be in scope when the literal runs).
+	var d *drainer
+	d = &drainer{
 		log:  logger,
 		stop: stop,
 		// The local exit gate, shared by both causes: before handing the
@@ -288,6 +293,17 @@ func run() error {
 			// parse while warning about version B's hash (or vice versa).
 			cfg, sha, err := home.LoadConfigSHA(configPath)
 			if err != nil {
+				// The running binary can't parse this config. For an
+				// UpgradeReload-caused drain (deferConfigParse set), consult the
+				// respawn target: a forward-only edit passes the new binary but
+				// not this one. If the target also refuses — stale symlink,
+				// target IS the old binary — keep holding (no crash-loop).
+				if d.deferConfigParse.Load() {
+					if plist := deferralPlistPath(dir); plist != "" && parseableByRespawnTarget(ctx, plist, configPath, execConfigTest) {
+						return true, ""
+					}
+					return false, fmt.Sprintf("config.yaml not accepted by the running binary or the respawn target: %v", err)
+				}
 				return false, fmt.Sprintf("config.yaml no longer parses; the respawn would refuse it: %v", err)
 			}
 			// Re-run the local startup checks the respawn hard-fails on: a
@@ -320,11 +336,22 @@ func run() error {
 	// daemon-owned, never tied to the caller's context — a runnyctl that
 	// disconnects after acceptance cannot orphan it.
 	var reloadMu sync.Mutex
-	requestReload := func(ctx context.Context, source, reason string) socket.ReloadResult {
+	// requestReload is the shared reload entry point for Reload RPC, UpgradeReload
+	// RPC, and SIGHUP. deferToRespawnTarget is the UpgradeReload-only capability:
+	// when true and the running binary's own parser rejects the config, the exit
+	// gate may consult the respawn target's -test-config instead (forward-only
+	// config edits that only the new binary can parse). Plain Reload and SIGHUP
+	// always pass false — the verb is the access boundary; a bool could be forged.
+	requestReload := func(ctx context.Context, source, reason string, deferToRespawnTarget bool) socket.ReloadResult {
 		reloadMu.Lock()
 		defer reloadMu.Unlock()
 		logger.Info("config reload requested", "source", source, "reason", reason)
 		sha, failed, warnings := preflightReload(ctx, dir, configPath)
+		// RPC-gated deferral: on a lone config-parse failure, UpgradeReload may
+		// ask the respawn target whether it accepts the config. If so, clear the
+		// failure and let the drain proceed; if not (stale symlink = target is the
+		// old binary), substitute a synthetic check so the operator knows why.
+		failed = parseDeferralCheck(ctx, configPath, deferralPlistPath(dir), failed, deferToRespawnTarget, execConfigTest)
 		for _, c := range warnings {
 			logger.Warn("reload validation warning (not blocking)", "check", c.Name, "detail", c.Detail)
 		}
@@ -363,6 +390,23 @@ func run() error {
 		if reason != "" {
 			drainReason += ": " + reason
 		}
+		// Cause-gate BEFORE Start: d.Start synchronously rechecks convergence and
+		// can spawn tryExit immediately (an already-stable fleet — operator-paused
+		// slots), whose exit gate reads deferConfigParse. Setting it first closes
+		// that race so an idle-fleet UpgradeReload never refuses on its own parse
+		// before the flag lands. The flag only gates the exit gate, which never
+		// runs until draining, so setting it pre-Start is safe; it also covers the
+		// merge case (a wedge drain a later UpgradeReload joins mid-flight).
+		//
+		// System-daemon-only, same as the preflight deferral: a non-system daemon
+		// (deferralPlistPath == "") respawns from a bundle-relative BundleProgram,
+		// not the system plist, so it can't defer. Gating the flag here keeps the
+		// exit gate consistent with the preflight — both refuse a per-user agent's
+		// unparseable config honestly instead of pointing at a respawn target it
+		// doesn't have.
+		if deferToRespawnTarget && deferralPlistPath(dir) != "" {
+			d.SetDeferConfigParse()
+		}
 		startedDrain := d.Start(drainReason, sha)
 		if !startedDrain {
 			// A drain was already active (wedge, or an earlier reload): the
@@ -388,7 +432,10 @@ func run() error {
 		}
 	}
 	srv.ReloadFn = func(ctx context.Context, reason string) socket.ReloadResult {
-		return requestReload(ctx, "rpc", reason)
+		return requestReload(ctx, "rpc", reason, false)
+	}
+	srv.UpgradeReloadFn = func(ctx context.Context, reason string) socket.ReloadResult {
+		return requestReload(ctx, "rpc/upgrade", reason, true)
 	}
 	srv.DrainFn = d.State
 	// Deliver drain-progress bumps (slot transitions, exit-gate hold flips) to
@@ -452,7 +499,7 @@ func run() error {
 				d.recheck()
 				continue
 			}
-			_ = requestReload(ctx, "SIGHUP", "")
+			_ = requestReload(ctx, "SIGHUP", "", false)
 		}
 	}()
 

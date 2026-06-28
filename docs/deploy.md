@@ -295,6 +295,18 @@ checks only, no network) and reads the JSON verdict:
   the new binary rejects is blocked here instead of crash-looping the respawn
   under launchd KeepAlive.
 
+`upgrade-daemon` uses a dedicated `UpgradeReload` RPC rather than the plain
+`Reload`. This lets the running daemon accept a **forward-only config edit** — a
+new or renamed key the new `runnyd` accepts but the old strict parser rejects.
+When the running binary's own parser refuses the file, `upgrade-daemon` asks the
+respawn target (the binary launchd would actually exec, re-resolved from the
+plist symlink now) whether it accepts the config; if the target accepts, the
+drain proceeds. If the symlink still points at the old binary (i.e. `brew
+upgrade` ran but the symlink wasn't updated), the target also refuses and the
+upgrade is blocked — no crash-loop is possible. A pre-feature running daemon
+returns `Unimplemented`, which `upgrade-daemon` surfaces as a clear message to
+run `runnyctl reload --wait` instead.
+
 The daemon never self-upgrades — the restart is launchd's, triggered by the
 operator. brew owns the binary delivery, so `upgrade-daemon` only validates and
 reloads — there is no binary re-stage step.

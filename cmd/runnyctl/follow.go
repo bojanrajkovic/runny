@@ -92,12 +92,17 @@ func (b baseline) isSuccessor(st *runnyv1.GetStatusResponse) bool {
 // legitimately-long and held cases are ruled out.
 var errStalled = errors.New("daemon stopped making drain progress (no advance within the stall window) and nothing long-running explains it; it may be hung — check `runnyctl status`")
 
-// reloadWait runs the reload and follows it to convergence. Success is never
-// "the socket came back": it is a genuinely new process (a changed boot_id)
-// serving the exact config hash the reload returned. The status stream is opened
-// BEFORE the reload so the early drain is never missed and the first snapshot
-// doubles as the establish check (Clock A) and the pre-2 fallback baseline.
-func (c *ctl) reloadWait(ctx context.Context, reason string, opts followOpts) error {
+// reloadMethod is a gRPC client call matching both Reload and UpgradeReload:
+// both use ReloadRequest / ReloadResponse, so the method is interchangeable.
+type reloadMethod func(context.Context, *runnyv1.ReloadRequest) (*runnyv1.ReloadResponse, error)
+
+// reloadWait runs the reload (via method) and follows it to convergence.
+// Success is never "the socket came back": it is a genuinely new process
+// (a changed boot_id) serving the exact config hash the reload returned. The
+// status stream is opened BEFORE the reload so the early drain is never missed
+// and the first snapshot doubles as the establish check (Clock A) and the
+// pre-2 fallback baseline.
+func (c *ctl) reloadWait(ctx context.Context, reason string, method reloadMethod, opts followOpts) error {
 	if opts.overallTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, opts.overallTimeout)
@@ -121,7 +126,7 @@ func (c *ctl) reloadWait(ctx context.Context, reason string, opts followOpts) er
 
 	fmt.Fprintln(os.Stderr, "validating config against startup checks (network checks may take up to a minute)…")
 	rctx, rcancel := context.WithTimeout(ctx, opts.reloadTimeout)
-	resp, err := c.client.Reload(rctx, &runnyv1.ReloadRequest{Reason: reason})
+	resp, err := method(rctx, &runnyv1.ReloadRequest{Reason: reason})
 	rcancel()
 	if err != nil {
 		if errors.Is(context.Cause(rctx), context.DeadlineExceeded) && ctx.Err() == nil {

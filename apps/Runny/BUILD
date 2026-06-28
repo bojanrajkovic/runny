@@ -9,7 +9,7 @@ load("@rules_apple//apple:macos.bzl", "macos_application", "macos_unit_test")
 load("@rules_apple//apple:versioning.bzl", "apple_bundle_version")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("@rules_swift//swift:swift.bzl", "swift_library")
-load("//tools/sign:sign.bzl", "app_dmg", "codesign_app", "inject_launch_agent", "notarize_app", "notarize_dmg")
+load("//tools/sign:sign.bzl", "app_dmg", "codesign_app", "inject_launch_agent", "notarize_app", "notarize_dmg", "stamp_bundle_mtime")
 
 swift_library(
     name = "RunnyLib",
@@ -77,8 +77,8 @@ macos_application(
 
 # Distribution chain (see tools/sign/sign.bzl): rules_apple's in-rule
 # ad-hoc signature → inject the LaunchAgent plist → re-sign → notarize+staple
-# the .app → dmg → notarize+staple the dmg. Every notarize step is a
-# pass-through copy at the ad-hoc tier.
+# the .app → stamp file mtimes (release only) → dmg → notarize+staple the dmg.
+# Every notarize step and the stamp step are pass-through copies at the ad-hoc tier.
 #
 # The LaunchAgent plist is injected BEFORE signing so it is covered by the
 # bundle signature and the notarization staple — it is the launchd job config
@@ -130,9 +130,24 @@ notarize_app(
     visibility = ["//visibility:public"],
 )
 
+# Set bundle file mtimes to BUILD_TIMESTAMP on release builds so Finder shows a
+# real date instead of the 1980 ZIP-epoch floor. Dev/CI builds use stamp=False
+# (no volatile input) and get a pass-through copy, keeping them byte-identical
+# and cacheable. The stamp rule verifies codesign --deep --strict after touching
+# to assert that mtimes are not part of the CDHash (they are not).
+stamp_bundle_mtime(
+    name = "Runny_stamped",
+    app_zip = ":Runny_notarized_app",
+    stamp = select({
+        "//:release_build": True,
+        "//conditions:default": False,
+    }),
+    target_compatible_with = ["@platforms//os:macos"],
+)
+
 app_dmg(
     name = "Runny_dmg",
-    app_zip = ":Runny_notarized_app",
+    app_zip = ":Runny_stamped",
     dmg_name = "Runny",
     visibility = ["//visibility:public"],
 )

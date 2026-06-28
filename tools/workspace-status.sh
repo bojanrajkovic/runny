@@ -4,3 +4,4 @@
 set -euo pipefail
 echo "STABLE_VERSION $(tools/version.sh)"
 echo "STABLE_GIT_SHA $(git rev-parse HEAD)"
+echo "BUILD_TIMESTAMP $(date +%s)"

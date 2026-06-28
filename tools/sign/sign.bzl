@@ -38,6 +38,16 @@ All targets are Darwin-only. See .bazelrc for --config=developer-id and
 Output files are named <name>.bin / <name>.zip / <name>.dmg to avoid the
 Bazel rule/file label collision that arises when a genrule output shares
 its target name.
+
+Timestamp stamping (stamp_bundle_mtime):
+
+    stamp_bundle_mtime is a rule (not a macro) that sets every file mtime in
+    a .app bundle to BUILD_TIMESTAMP from the volatile workspace-status file.
+    Gate it on stamp = select({"//:release_build": True, ...}) so dev/CI
+    builds stay cacheable (no volatile input → byte-identical output).
+    Insert it between notarize_app and app_dmg:
+
+        :Runny → codesign_app → notarize_app → stamp_bundle_mtime → app_dmg → notarize_dmg
 """
 
 # The notarization credential recipe exists ONCE. Three macros submit three
@@ -463,3 +473,80 @@ def notarize_dmg(name, dmg, **kwargs):
         target_compatible_with = ["@platforms//os:macos"],
         **kwargs
     )
+
+def _stamp_bundle_mtime_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".zip")
+    inputs = [ctx.file.app_zip]
+
+    # Conditionally include the volatile status file so dev builds stay cacheable.
+    # When stamp=False, volatile_path is empty and the script copies unchanged.
+    volatile_path = ""
+    if ctx.attr.stamp:
+        inputs.append(ctx.version_file)
+        volatile_path = ctx.version_file.path
+
+    ctx.actions.run_shell(
+        inputs = inputs,
+        outputs = [out],
+        command = """
+set -euo pipefail
+volatile="$1"
+src="$2"
+out="$3"
+if [ -z "$volatile" ]; then
+    cp "$src" "$out"
+    exit 0
+fi
+TS=$(grep -m1 '^BUILD_TIMESTAMP ' "$volatile" | awk '{print $2}') || true
+if [ -z "$TS" ] || [ "$TS" = "0" ]; then
+    cp "$src" "$out"
+    exit 0
+fi
+TOUCH_TS=$(date -r "$TS" '+%Y%m%d%H%M.%S')
+WORK=$(mktemp -d /tmp/bazel-stamp-mtime.XXXXXX)
+trap 'rm -rf "$WORK"' EXIT
+ditto -x -k "$src" "$WORK/"
+APP=$(echo "$WORK"/*.app)
+[ -d "$APP" ] || { echo "stamp_bundle_mtime: expected one .app in the archive, got: $APP" >&2; exit 1; }
+find "$APP" -exec touch -t "$TOUCH_TS" {} \\;
+codesign --verify --deep --strict "$APP"
+ditto -c -k --keepParent "$APP" "$out"
+""",
+        arguments = [volatile_path, ctx.file.app_zip.path, out.path],
+        mnemonic = "StampBundleMtime",
+        # ponytail: no-cache does not help here — Skyframe's in-memory graph serves
+        # the cached result before the action cache is consulted, so consecutive
+        # local release builds may return a stale zip. Acceptable: shipped artifacts
+        # are always built cold (no Bazel cache in CI). The upgrade path is making
+        # BUILD_TIMESTAMP a STABLE_ key, but that forces all stamped targets to
+        # rebuild on every build — too expensive for this edge case.
+        execution_requirements = {"no-sandbox": "1"},
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+stamp_bundle_mtime = rule(
+    doc = """Set .app bundle file mtimes to BUILD_TIMESTAMP on release builds.
+
+    Uses stamp = select({"//:release_build": True, "//conditions:default": False})
+    at the call site so dev/CI builds produce byte-identical output (no volatile
+    input → Bazel cache hit). When stamp=True the volatile workspace-status file is
+    added as an input (making the action non-cacheable, which is expected for a
+    shipped release artifact) and every file in the bundle is touched to
+    BUILD_TIMESTAMP. The codesign seal is verified afterward — mtimes are not part
+    of the CDHash so the signature must survive unchanged.
+
+    Args:
+        app_zip: Label of a .zip containing the .app at its root (typically
+                 the output of notarize_app).
+        stamp:   Whether to apply the real timestamp. Gate with select() on
+                 //:release_build so dev builds stay cacheable.
+    """,
+    implementation = _stamp_bundle_mtime_impl,
+    attrs = {
+        "app_zip": attr.label(
+            mandatory = True,
+            allow_single_file = [".zip"],
+        ),
+        "stamp": attr.bool(default = False),
+    },
+)

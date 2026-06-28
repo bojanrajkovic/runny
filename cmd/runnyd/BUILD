@@ -138,6 +138,7 @@ go_test(
         "//internal/launchd",
         "//internal/socket",
         "//internal/statemachine",
+        "//internal/sysdaemon",
         "//proto/runny/v1:runny",
     ],
 )

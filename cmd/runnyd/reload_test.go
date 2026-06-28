@@ -2,17 +2,56 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/socket"
 	"github.com/bojanrajkovic/runny/internal/sysdaemon"
 )
+
+// testRSAKeyPath returns the path to a valid PEM-encoded RSA private key. The
+// -test-config gate and startup both read + parse the pool's private key (a
+// local, startup-blocking check), so a config is only "valid" with a parseable
+// key. The key is generated and written ONCE per process to a stable path — a
+// stable path matters because configs that differ only in a comment must stay
+// struct-equal (the config-drift check), which a per-call temp path would break.
+var (
+	testKeyOnce sync.Once
+	testKeyFile string
+)
+
+func testRSAKeyPath(t *testing.T) string {
+	t.Helper()
+	testKeyOnce.Do(func() {
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			panic(err)
+		}
+		pemBytes := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+		f, err := os.CreateTemp("", "runnyd-test-key-*.pem")
+		if err != nil {
+			panic(err)
+		}
+		if _, err := f.Write(pemBytes); err != nil {
+			panic(err)
+		}
+		f.Close()
+		testKeyFile = f.Name()
+	})
+	return testKeyFile
+}
 
 var hexSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
@@ -340,6 +379,87 @@ func TestDeferralPlistPath(t *testing.T) {
 	}
 }
 
+// exitConfigVerdict: the authority is whichever binary respawns. A normal drain
+// runs this binary's local checks; an UpgradeReload drain (deferred) defers to
+// the respawn target, re-validating a mid-drain edit (sha != acceptedSHA) but
+// trusting already-vetted unchanged bytes without a re-exec.
+func TestExitConfigVerdict(t *testing.T) {
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	plist := writeDaemonPlist(t, "") // resolvable respawn target for the deferred cases
+	accept := configTester(func(_ context.Context, _, _ string) bool { return true })
+	refuse := configTester(func(_ context.Context, _, _ string) bool { return false })
+	prefix := home.WorstCasePrefix()
+
+	validPath := writeTestConfigFile(t, validConfigYAML(t, 1, "exit"))
+	_, validSHA, err := home.LoadConfigSHA(validPath)
+	if err != nil {
+		t.Fatalf("valid config did not load: %v", err)
+	}
+	badKeyPath := writeTestConfigFile(t, []byte(`pools:
+  - name: mac
+    os: linux
+    image: ghcr.io/example/img:latest
+    count: 1
+    target:
+      org: example
+    github:
+      app_id: 1
+      private_key_path: /nonexistent/key.pem
+`))
+	unparseablePath := writeTestConfigFile(t, []byte("pools: [\n"))
+
+	t.Run("normal drain, valid config → proceed", func(t *testing.T) {
+		if ok, d := exitConfigVerdict(ctx, log, validPath, prefix, validSHA, false, "", accept); !ok {
+			t.Errorf("want proceed, got hold %q", d)
+		}
+	})
+	t.Run("normal drain, bad key → hold on github-client", func(t *testing.T) {
+		ok, d := exitConfigVerdict(ctx, log, badKeyPath, prefix, "", false, "", accept)
+		if ok || !strings.Contains(d, "github-client") {
+			t.Errorf("want hold naming github-client, got ok=%v detail=%q", ok, d)
+		}
+	})
+	t.Run("normal drain, unparseable → hold", func(t *testing.T) {
+		ok, d := exitConfigVerdict(ctx, log, unparseablePath, prefix, "", false, "", accept)
+		if ok || !strings.Contains(d, "no longer parses") {
+			t.Errorf("want parse hold, got ok=%v detail=%q", ok, d)
+		}
+	})
+	t.Run("deferred, unparseable, target accepts → proceed", func(t *testing.T) {
+		if ok, d := exitConfigVerdict(ctx, log, unparseablePath, prefix, "oldsha", true, plist, accept); !ok {
+			t.Errorf("want proceed when respawn target accepts, got hold %q", d)
+		}
+	})
+	t.Run("deferred, unparseable, target refuses → hold", func(t *testing.T) {
+		ok, d := exitConfigVerdict(ctx, log, unparseablePath, prefix, "oldsha", true, plist, refuse)
+		if ok || !strings.Contains(d, "not accepted") {
+			t.Errorf("want hold, got ok=%v detail=%q", ok, d)
+		}
+	})
+	t.Run("deferred, mid-drain edit, target accepts → proceed", func(t *testing.T) {
+		// sha != acceptedSHA: bytes changed since preflight; the target re-validates.
+		if ok, d := exitConfigVerdict(ctx, log, validPath, prefix, "stalesha", true, plist, accept); !ok {
+			t.Errorf("want proceed on a target-accepted mid-drain edit, got hold %q", d)
+		}
+	})
+	t.Run("deferred, mid-drain edit, target refuses → hold", func(t *testing.T) {
+		ok, d := exitConfigVerdict(ctx, log, validPath, prefix, "stalesha", true, plist, refuse)
+		if ok || !strings.Contains(d, "changed during the drain") {
+			t.Errorf("want mid-drain hold, got ok=%v detail=%q", ok, d)
+		}
+	})
+	t.Run("deferred, unchanged vetted bytes → proceed without re-consulting target", func(t *testing.T) {
+		mustNotCall := configTester(func(_ context.Context, _, _ string) bool {
+			t.Error("respawn target re-consulted for bytes already vetted at preflight")
+			return false
+		})
+		if ok, d := exitConfigVerdict(ctx, log, validPath, prefix, validSHA, true, plist, mustNotCall); !ok {
+			t.Errorf("want proceed (preflight already vetted these bytes), got hold %q", d)
+		}
+	})
+}
+
 // A config that does not parse refuses at config-parse, before any client
 // construction or network check.
 func TestPreflightReloadRefusesUnparseableConfig(t *testing.T) {
@@ -377,7 +497,7 @@ pools:
       org: example
     github:
       app_id: 1
-      private_key_path: /nonexistent/key.pem
+      private_key_path: ` + testRSAKeyPath(t) + `
 `)
 }
 

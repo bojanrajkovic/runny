@@ -288,39 +288,8 @@ func run() error {
 		// socketless one. Local file I/O only: no network work at the exit
 		// seam (a refusal there would have no good answer).
 		exitGate: func(acceptedSHA string) (bool, string) {
-			// One read: the parse check and the hash describe the same bytes,
-			// so a concurrent atomic replace can't make us hold on version A's
-			// parse while warning about version B's hash (or vice versa).
-			cfg, sha, err := home.LoadConfigSHA(configPath)
-			if err != nil {
-				// The running binary can't parse this config. For an
-				// UpgradeReload-caused drain (deferConfigParse set), consult the
-				// respawn target: a forward-only edit passes the new binary but
-				// not this one. If the target also refuses — stale symlink,
-				// target IS the old binary — keep holding (no crash-loop).
-				if d.deferConfigParse.Load() {
-					if plist := deferralPlistPath(dir); plist != "" && parseableByRespawnTarget(ctx, plist, configPath, execConfigTest) {
-						return true, ""
-					}
-					return false, fmt.Sprintf("config.yaml not accepted by the running binary or the respawn target: %v", err)
-				}
-				return false, fmt.Sprintf("config.yaml no longer parses; the respawn would refuse it: %v", err)
-			}
-			// Re-run the local startup checks the respawn hard-fails on: a
-			// mid-drain edit that parses but overflows the darwin guest cap or
-			// the runner-name length would otherwise crash-loop a socketless
-			// respawn. Network checks stay off the exit seam — a refusal there
-			// has no good answer (hold a drained fleet on a GitHub blip?).
-			for _, c := range []socket.DoctorCheck{checkMacOSGuestCap(cfg), checkRunnerNamespace(dir, cfg)} {
-				if !c.OK {
-					return false, fmt.Sprintf("the respawn would refuse %s: %s", c.Name, c.Detail)
-				}
-			}
-			if acceptedSHA != "" && sha != acceptedSHA {
-				logger.Warn("config changed during the drain; the respawn will validate and load the newer file",
-					"accepted_sha256", acceptedSHA, "current_sha256", sha)
-			}
-			return true, ""
+			return exitConfigVerdict(ctx, logger, configPath, prefix, acceptedSHA,
+				d.deferConfigParse.Load(), deferralPlistPath(dir), execConfigTest)
 		},
 	}
 	for _, s := range slots {
@@ -697,6 +666,46 @@ func checkRunnerNamespace(dir home.Dir, cfg *home.Config) socket.DoctorCheck {
 		return socket.DoctorCheck{Name: "runner-namespace", OK: false, Detail: err.Error()}
 	}
 	return socket.DoctorCheck{Name: "runner-namespace", OK: true, Detail: prefix}
+}
+
+// localConfigChecks runs the local, deterministic checks the respawn HARD-FAILS
+// on at cold start and returns the failing ones: GitHub client construction
+// (private-key read + PEM/RSA parse — local, no network), the macOS guest cap,
+// the runner-name namespace, and per-pool image-ref parse. It is the single
+// definition of "would the new binary survive its own local startup
+// validation", consumed by the -test-config gate (testConfigVerdict) and the
+// exit gate, so a check the respawn enforces can never be silently dropped from
+// the gate again — the class of bug that once let a missing private key through.
+// Network checks are deliberately excluded: upgrade-readiness is config-schema
+// compatibility, not live GitHub/registry/disk health, and coupling them would
+// let a transient blip refuse a valid upgrade. prefix is injected so the caller
+// picks namespace resolution — the daemon's persisted prefix, or the gate's
+// conservative worst-case.
+func localConfigChecks(cfg *home.Config, prefix string) []socket.DoctorCheck {
+	var failed []socket.DoctorCheck
+	// github.New reads + parses the private key with no network; startup's
+	// buildClients hard-fails on it, so the gate must mirror it (same reasoning as
+	// the image-ref parse below) or it green-lights a respawn that crash-loops.
+	if _, _, err := buildClients(cfg); err != nil {
+		name := "github-client"
+		var pe *poolClientError
+		if errors.As(err, &pe) {
+			name += ":" + pe.Pool
+		}
+		failed = append(failed, socket.DoctorCheck{Name: name, OK: false, Detail: err.Error()})
+	}
+	if c := checkMacOSGuestCap(cfg); !c.OK {
+		failed = append(failed, c)
+	}
+	if err := home.ValidateRunnerNames(prefix, cfg.Pools); err != nil {
+		failed = append(failed, socket.DoctorCheck{Name: "runner-namespace", OK: false, Detail: err.Error()})
+	}
+	for _, p := range cfg.Pools {
+		if _, err := oci.ParseRef(p.Image); err != nil {
+			failed = append(failed, socket.DoctorCheck{Name: "image-ref:" + p.Name, OK: false, Detail: err.Error()})
+		}
+	}
+	return failed
 }
 
 func runDoctor(doctor func(context.Context) []socket.DoctorCheck) error {

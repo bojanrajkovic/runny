@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/bojanrajkovic/runny/internal/home"
-	"github.com/bojanrajkovic/runny/internal/oci"
 )
 
 // configVerdict is the machine-readable result of `runnyd -test-config`: the
@@ -27,13 +26,18 @@ const (
 	verdictError = "error"
 )
 
-// testConfigVerdict validates a config file with the LOCAL checks only — strict
-// parse + validate (LoadConfig), the macOS guest cap, the runner-name length cap
-// (against the given prefix), and the soft-validation warnings — and returns the
-// verdict. It runs no network checks: upgrade-readiness is a question about
-// config-schema compatibility, not live GitHub/registry/disk health, and a
-// transient blip must never refuse a valid upgrade. The prefix is injected (see
-// gatePrefix) so the verdict is a pure function of its inputs.
+// testConfigVerdict validates a config file with the LOCAL startup-blocking
+// checks the respawn hard-fails on — strict parse + validate (LoadConfig), then
+// the shared localConfigChecks (GitHub private-key parse, the macOS guest cap,
+// the runner-name length cap against the given prefix, per-pool image-ref parse)
+// — plus the soft-validation warnings, and returns the verdict. Sharing
+// localConfigChecks with the daemon's exit gate is what keeps the gate from
+// drifting out of sync with what startup enforces. It runs no network checks:
+// upgrade-readiness is a question about config-schema compatibility, not live
+// GitHub/registry/disk health, and a transient blip must never refuse a valid
+// upgrade — the private-key check is a local file read + PEM/RSA parse, no
+// round-trip. The prefix is injected (see gatePrefix) so the verdict is a pure
+// function of its inputs.
 func testConfigVerdict(configPath, prefix string, host home.HostResources) configVerdict {
 	cfg, err := home.LoadConfig(configPath)
 	if err != nil {
@@ -41,23 +45,8 @@ func testConfigVerdict(configPath, prefix string, host home.HostResources) confi
 	}
 
 	errs := []string{}
-	if c := checkMacOSGuestCap(cfg); !c.OK {
+	for _, c := range localConfigChecks(cfg, prefix) {
 		errs = append(errs, c.Name+": "+c.Detail)
-	}
-	if err := home.ValidateRunnerNames(prefix, cfg.Pools); err != nil {
-		for _, line := range splitLines(err.Error()) {
-			errs = append(errs, "runner-namespace: "+line)
-		}
-	}
-	// Image-reference parse: validate() only checks the image is non-empty, but
-	// startup runs oci.ParseRef on each pool's image and refuses to boot on a
-	// failure (a malformed ref → socketless crash-loop). It's a pure local parse
-	// (no registry round-trip), so the gate must mirror it or it green-lights a
-	// doomed upgrade.
-	for _, p := range cfg.Pools {
-		if _, err := oci.ParseRef(p.Image); err != nil {
-			errs = append(errs, "image-ref: pool "+p.Name+": "+err.Error())
-		}
 	}
 
 	warns := cfg.Warnings(host)

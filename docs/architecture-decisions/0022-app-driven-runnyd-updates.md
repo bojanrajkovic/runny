@@ -52,12 +52,17 @@ gated update path.
 
 - **`runnyd -test-config <path>` runs local checks only and emits JSON.** It loads
   the config and runs the deterministic, local startup checks — strict parse,
-  `validate()`, the macOS guest-cap, the runner-namespace — plus the
-  soft-validations below, and prints `{status: ok|warn|error, errors, warnings}`.
-  It runs **no** network checks: upgrade-readiness is a question about
-  config-schema compatibility, not live GitHub/registry/disk health, and coupling
-  the two would let a transient API blip refuse a valid upgrade. This is distinct
-  from `-doctor`, which runs the full network suite for operational diagnosis.
+  `validate()`, GitHub client construction (the private-key file read + PEM/RSA
+  parse), the macOS guest-cap, the runner-namespace, and the per-pool image-ref
+  parse — plus the soft-validations below, and prints
+  `{status: ok|warn|error, errors, warnings}`. It runs **no** network checks:
+  upgrade-readiness is a question about config-schema compatibility, not live
+  GitHub/registry/disk health, and coupling the two would let a transient API
+  blip refuse a valid upgrade. The private-key parse is local (no round-trip), so
+  it belongs in the gate: startup hard-fails on a missing/malformed key, so a
+  gate that skipped it would green-light a respawn that crash-loops. This is
+  distinct from `-doctor`, which runs the full network suite for operational
+  diagnosis.
 
 - **The verdict is three-way: OK / Warn / Error.** OK applies the update; Warn
   surfaces the warnings and drops to a manual confirmation; Error blocks and names
@@ -229,6 +234,22 @@ Plain-reload and wedge drains are unaffected.
 
 **Scope.** System daemon only. A per-user agent has no plist, so `TargetPath` returns
 `false` and deferral is a no-op (the own-parse-failure is still refused).
+
+**One verdict, run by whichever binary respawns.** The deferral's authority is the
+binary launchd will actually exec, and `runnyd -test-config` (the `testConfigVerdict`
+gate) is that binary's "would my local startup-blocking checks pass" verdict. To
+keep it from drifting out of sync with what startup enforces — the bug class that
+once let a missing private key through — the gate and the daemon's exit gate share
+one definition, `localConfigChecks`: GitHub private-key parse, the macOS guest-cap,
+the runner-namespace, and the per-pool image-ref parse (all local, no network).
+The exit gate runs `localConfigChecks` directly for a normal drain (the respawn is
+the same binary) and defers to the respawn target's `-test-config` for an
+`UpgradeReload` drain (the respawn is a newer binary, so its verdict is the
+authoritative one). For an `UpgradeReload` drain it re-validates against the
+respawn target whenever the on-disk bytes drift mid-drain (`sha != acceptedSHA`),
+not only when the running binary fails to parse — otherwise a mid-drain edit the
+old binary accepts but the new one rejects would slip past the gate and crash-loop
+the respawn.
 
 ### Rejected alternatives
 

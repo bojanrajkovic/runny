@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"os/exec"
 	"time"
 
@@ -90,4 +92,46 @@ func parseDeferralCheck(ctx context.Context, configPath, plistPath string, faile
 		Detail: "config not accepted by the running binary or the respawn target; " +
 			"verify the upgraded binary is staged and the opt-symlink resolves to it",
 	}}
+}
+
+// exitConfigVerdict is the exit gate: before the drained daemon hands off to
+// launchd, prove the on-disk config the respawn will load is one the RESPAWN
+// TARGET accepts. Returns (ok, holdDetail); ok=false HOLDS the drained daemon
+// rather than crash-loop a socketless respawn.
+//
+// The authority is whichever binary will actually respawn:
+//   - Normal drain (not deferred): the respawn is THIS binary, so run its local
+//     startup-blocking checks directly (localConfigChecks) — no network at the
+//     exit seam, where a refusal would have no good answer.
+//   - UpgradeReload drain (deferred): the respawn is a NEWER binary, so its
+//     -test-config is authoritative, not this binary's parse or local checks.
+//     Bytes already vetted against it at preflight (parseable here AND unchanged)
+//     need no re-exec; a parse failure or a mid-drain edit (sha != acceptedSHA)
+//     is (re)validated against it — without this, an edit the old binary parses
+//     but the new one rejects would slip through and crash-loop the respawn.
+func exitConfigVerdict(ctx context.Context, log *slog.Logger, configPath, prefix, acceptedSHA string, deferred bool, plistPath string, test configTester) (bool, string) {
+	cfg, sha, err := home.LoadConfigSHA(configPath)
+	if deferred {
+		if err == nil && acceptedSHA != "" && sha == acceptedSHA {
+			return true, "" // these exact bytes were vetted against the target at preflight
+		}
+		if parseableByRespawnTarget(ctx, plistPath, configPath, test) {
+			return true, ""
+		}
+		if err != nil {
+			return false, fmt.Sprintf("config.yaml not accepted by the running binary or the respawn target: %v", err)
+		}
+		return false, "config.yaml changed during the drain and the respawn target rejects it"
+	}
+	if err != nil {
+		return false, fmt.Sprintf("config.yaml no longer parses; the respawn would refuse it: %v", err)
+	}
+	if failed := localConfigChecks(cfg, prefix); len(failed) > 0 {
+		return false, fmt.Sprintf("the respawn would refuse %s: %s", failed[0].Name, failed[0].Detail)
+	}
+	if acceptedSHA != "" && sha != acceptedSHA {
+		log.Warn("config changed during the drain; the respawn will validate and load the newer file",
+			"accepted_sha256", acceptedSHA, "current_sha256", sha)
+	}
+	return true, ""
 }

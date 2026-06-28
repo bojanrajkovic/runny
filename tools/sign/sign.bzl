@@ -482,8 +482,8 @@ def _stamp_bundle_mtime_impl(ctx):
     # When stamp=False, volatile_path is empty and the script copies unchanged.
     volatile_path = ""
     if ctx.attr.stamp:
-        inputs.append(ctx.info_file)
-        volatile_path = ctx.info_file.path
+        inputs.append(ctx.version_file)
+        volatile_path = ctx.version_file.path
 
     ctx.actions.run_shell(
         inputs = inputs,
@@ -497,7 +497,7 @@ if [ -z "$volatile" ]; then
     cp "$src" "$out"
     exit 0
 fi
-TS=$(grep -m1 '^BUILD_TIMESTAMP ' "$volatile" | awk '{print $2}')
+TS=$(grep -m1 '^BUILD_TIMESTAMP ' "$volatile" | awk '{print $2}') || true
 if [ -z "$TS" ] || [ "$TS" = "0" ]; then
     cp "$src" "$out"
     exit 0

@@ -162,6 +162,26 @@ gated update path.
 
 - `runnyctl` gains an `upgrade-daemon` subcommand and a doctor/skew line naming it.
 
+- **The daemon-side skew log reads the respawn target from its own LaunchDaemon
+  plist, not `os.Executable`.** A system daemon logs the same "a newer runnyd is
+  available" hint when its running version core trails the binary launchd would
+  respawn it as. `os.Executable()` on the running process returns the path it was
+  *started* from — after a `brew upgrade` that is the old Cellar binary, while the
+  stable opt-symlink now points at the new one — so it can never see a newer
+  on-disk binary. The daemon instead reads `ProgramArguments[0]` from its own
+  plist and re-resolves symlinks at read time (the opt-symlink → the currently
+  installed Cellar binary), then execs that path's side-effect-free `-version`
+  under a deadline. One path covers however the operator installed it (the
+  resolve is a no-op for a non-symlink path); the check fails *quiet* on any
+  unresolved case (no plist, unreadable, vanished target, failed exec), since a
+  false "you're behind" is worse than silence. It logs only on the transition
+  into "behind" and when the target version changes, never every check, and never
+  self-respawns — log-only, per the headless-path decision above. Scope is the
+  system daemon; a per-user agent (a different bundle-relative `BundleProgram`,
+  with a GUI already surfacing skew) stays quiet. The version-core comparison is
+  the one shared with `runnyctl`'s skew check, so the two can never disagree on
+  what "behind" means.
+
 - The deprecation-warning channel is reserved: the Warn tier ships with the two
   soft-validations above, and a real schema deprecation populates it later.
 

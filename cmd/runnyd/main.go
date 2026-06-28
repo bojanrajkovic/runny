@@ -27,10 +27,12 @@ import (
 	"github.com/bojanrajkovic/runny/internal/images"
 	"github.com/bojanrajkovic/runny/internal/logring"
 	"github.com/bojanrajkovic/runny/internal/oci"
+	"github.com/bojanrajkovic/runny/internal/respawn"
 	"github.com/bojanrajkovic/runny/internal/socket"
 	"github.com/bojanrajkovic/runny/internal/sshx"
 	"github.com/bojanrajkovic/runny/internal/statemachine"
 	"github.com/bojanrajkovic/runny/internal/tart"
+	"github.com/bojanrajkovic/runny/internal/versioncore"
 )
 
 var version = "dev"
@@ -405,6 +407,30 @@ func run() error {
 		sampler := &localNetworkSampler{onChange: srv.NotifyProgress}
 		srv.LocalNetworkGrantFn = sampler.read
 		go sampler.run(ctx)
+	}
+
+	// A system daemon also logs when it falls behind the binary launchd would
+	// respawn it as, so a headless operator reading logs — not running runnyctl —
+	// sees the same upgrade hint the CLI prints. The target is read from the
+	// daemon's own LaunchDaemon plist, re-resolving symlinks now (a brew upgrade
+	// repoints the opt-symlink without rewriting the plist); never from
+	// os.Executable, which would always report the running version and so could
+	// never detect a newer on-disk binary. Log-only — the daemon never respawns
+	// itself. Only the system daemon has a plist to read; a per-user agent stays
+	// quiet.
+	if dir.String() == home.SystemHomeDir {
+		notice := &upgradeNotice{
+			log:     logger,
+			running: versioncore.Core(version),
+			resolve: func(ctx context.Context) string {
+				v, ok := respawn.TargetVersion(ctx, dir)
+				if !ok {
+					return ""
+				}
+				return versioncore.Core(v)
+			},
+		}
+		go notice.run(ctx)
 	}
 
 	// SIGHUP maps to the same validated reload path; the channel was claimed

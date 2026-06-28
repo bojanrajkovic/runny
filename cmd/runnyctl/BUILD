@@ -19,6 +19,7 @@ go_library(
         "//internal/home",
         "//internal/launchd",
         "//internal/sysdaemon",
+        "//internal/versioncore",
         "//proto/runny/v1:runny",
         "@com_github_rivo_uniseg//:uniseg",
         "@org_golang_google_grpc//:grpc",

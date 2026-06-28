@@ -83,25 +83,6 @@ func TestVersionSkew(t *testing.T) {
 	}
 }
 
-func TestVersionCore(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"0.6.0-beta.abc12345", "0.6.0"},
-		{"0.6.0", "0.6.0"},
-		{"12.34.56-rc.1", "12.34.56"},
-		{"", ""},
-		{"dev", ""},
-		// Anchored at the start (mirroring the build's re.match): a triple that
-		// isn't the leading token must not be mis-extracted from the middle.
-		{"v0.6.0", ""},
-		{"ci-2024.01.15-0.6.0", ""},
-	}
-	for _, tc := range cases {
-		if got := versionCore(tc.in); got != tc.want {
-			t.Errorf("versionCore(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
 // fakeStatusClient stubs GetStatus to drive the warnSkew wiring without a daemon.
 type fakeStatusClient struct {
 	runnyv1.RunnyServiceClient

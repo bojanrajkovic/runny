@@ -41,14 +41,41 @@ func errorsContain(errs []string, sub string) bool {
 }
 
 func TestTestConfigVerdictOK(t *testing.T) {
-	// A valid config carrying a fake app_id and a NONEXISTENT key path returns ok —
-	// proof the gate touches no network and reads no key, or this would not pass.
+	// A valid config with a real, parseable private key returns ok — the gate runs
+	// the local startup-blocking checks (key parse, guest-cap, namespace,
+	// image-ref) but no network, so a well-formed config with a readable key is
+	// clean.
 	v := verdictFor(t, validConfigYAML(t, 1, "ok"), bigHost)
 	if v.Status != "ok" {
 		t.Fatalf("status = %q, want ok; errors=%v warnings=%v", v.Status, v.Errors, v.Warnings)
 	}
 	if len(v.Errors) != 0 || len(v.Warnings) != 0 {
 		t.Errorf("ok verdict should be empty: errors=%v warnings=%v", v.Errors, v.Warnings)
+	}
+}
+
+func TestTestConfigVerdictErrorMissingKey(t *testing.T) {
+	// The private key is a local, startup-blocking input: startup's buildClients
+	// reads + PEM/RSA-parses it and the respawn crash-loops if it's missing or
+	// malformed, so the gate must catch it (same reasoning as the image-ref parse).
+	// No network is involved — this is a local file read.
+	body := []byte(`pools:
+  - name: mac
+    os: linux
+    image: ghcr.io/example/img:latest
+    count: 1
+    target:
+      org: example
+    github:
+      app_id: 1
+      private_key_path: /nonexistent/key.pem
+`)
+	v := verdictFor(t, body, bigHost)
+	if v.Status != "error" {
+		t.Fatalf("status = %q, want error; %+v", v.Status, v)
+	}
+	if !errorsContain(v.Errors, "github-client") {
+		t.Errorf("errors should name github-client (the key parse): %v", v.Errors)
 	}
 }
 
@@ -79,7 +106,7 @@ func TestTestConfigVerdictWarnOvercommit(t *testing.T) {
       org: example
     github:
       app_id: 1
-      private_key_path: /nonexistent/key.pem
+      private_key_path: ` + testRSAKeyPath(t) + `
 `)
 	v := verdictFor(t, body, bigHost)
 	if v.Status != "warn" {
@@ -111,7 +138,7 @@ func TestTestConfigVerdictErrorOverGuestCap(t *testing.T) {
 func TestTestConfigVerdictErrorRunnerNamespace(t *testing.T) {
 	// A 60-char pool name overflows GitHub's 64-char runner-name cap regardless of
 	// the prefix. Linux avoids the guest-cap interfering.
-	v := verdictFor(t, longPoolConfig(strings.Repeat("a", 60)), bigHost)
+	v := verdictFor(t, longPoolConfig(t, strings.Repeat("a", 60)), bigHost)
 	if v.Status != "error" {
 		t.Fatalf("status = %q, want error; %+v", v.Status, v)
 	}
@@ -132,7 +159,7 @@ func TestTestConfigVerdictErrorBadImageRef(t *testing.T) {
       org: example
     github:
       app_id: 1
-      private_key_path: /nonexistent/key.pem
+      private_key_path: ` + testRSAKeyPath(t) + `
 `)
 	v := verdictFor(t, body, bigHost)
 	if v.Status != "error" {
@@ -147,7 +174,7 @@ func TestTestConfigVerdictUsesConservativePrefix(t *testing.T) {
 	// The gate must never UNDER-estimate the prefix into a false OK: a host renamed
 	// since first run keeps its longer persisted prefix. A pool name that fits under
 	// a short prefix but overflows under the worst-case prefix must be REFUSED.
-	body := longPoolConfig(strings.Repeat("p", 30))
+	body := longPoolConfig(t, strings.Repeat("p", 30))
 	path := writeTestConfigFile(t, body)
 	// Short prefix: 12 + 1 + 30 + 1 + 1 + 1 + 8 = 54 ≤ 64 → ok.
 	if v := testConfigVerdict(path, "mac-00000000", bigHost); v.Status != "ok" {
@@ -184,8 +211,10 @@ func TestTestConfigVerdictJSONIsStableContract(t *testing.T) {
 }
 
 // longPoolConfig is a single-linux-pool config with the given pool name, for
-// exercising the runner-name length cap.
-func longPoolConfig(name string) []byte {
+// exercising the runner-name length cap. It carries a real private key so the
+// namespace failure is isolated from the github-client (key-parse) check.
+func longPoolConfig(t *testing.T, name string) []byte {
+	t.Helper()
 	return []byte(`pools:
   - name: ` + name + `
     os: linux
@@ -195,6 +224,6 @@ func longPoolConfig(name string) []byte {
       org: example
     github:
       app_id: 1
-      private_key_path: /nonexistent/key.pem
+      private_key_path: ` + testRSAKeyPath(t) + `
 `)
 }

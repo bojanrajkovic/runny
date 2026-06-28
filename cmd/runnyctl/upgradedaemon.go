@@ -9,8 +9,12 @@ import (
 	"os/exec"
 	"strings"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/sysdaemon"
+	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
 // configVerdict mirrors runnyd -test-config's JSON contract — the gate the new
@@ -113,5 +117,17 @@ func (c *ctl) upgradeDaemon(ctx context.Context, force bool, opts followOpts) er
 	// Narration goes to stderr — stdout is reloadWait's contract (the -json reload
 	// document must not be preceded by prose).
 	fmt.Fprintln(c.err, "config accepted by the new runnyd — draining and respawning onto it…")
-	return c.reloadWait(ctx, "runnyctl upgrade-daemon", opts)
+	// Use UpgradeReload so the daemon can defer a config-parse failure to the
+	// respawn target when the config contains a forward-only edit (a new key the
+	// new binary accepts but the running binary's strict parser rejects). A
+	// pre-feature daemon returns Unimplemented; catch it and tell the operator.
+	upgradeReload := func(ctx context.Context, req *runnyv1.ReloadRequest) (*runnyv1.ReloadResponse, error) {
+		resp, err := c.client.UpgradeReload(ctx, req)
+		if status.Code(err) == codes.Unimplemented {
+			return nil, fmt.Errorf("the running daemon predates upgrade-reload; " +
+				"run `runnyctl reload --wait` instead (config-parse deferral unavailable)")
+		}
+		return resp, err
+	}
+	return c.reloadWait(ctx, "runnyctl upgrade-daemon", upgradeReload, opts)
 }

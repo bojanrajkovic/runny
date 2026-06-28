@@ -10,6 +10,11 @@ non-privileged and never manages the system daemon. The headless, operator-run
 config-compat gate (`runnyd -test-config`), the OK/Warn/Error verdict, and the
 per-user agent's auto-apply-on-OK all stand unchanged.
 
+**Amended (2026-06-28):** a dedicated `UpgradeReload` RPC enables the running
+daemon to defer a config-parse failure to the respawn target's own `-test-config`
+for a forward-only config edit (a new or renamed key the *new* runnyd accepts but
+the *old* strict parser rejects). See the Amendment section below.
+
 ## Context
 
 A runnyd update is *delivered* but not *applied* until something drains the
@@ -47,12 +52,17 @@ gated update path.
 
 - **`runnyd -test-config <path>` runs local checks only and emits JSON.** It loads
   the config and runs the deterministic, local startup checks — strict parse,
-  `validate()`, the macOS guest-cap, the runner-namespace — plus the
-  soft-validations below, and prints `{status: ok|warn|error, errors, warnings}`.
-  It runs **no** network checks: upgrade-readiness is a question about
-  config-schema compatibility, not live GitHub/registry/disk health, and coupling
-  the two would let a transient API blip refuse a valid upgrade. This is distinct
-  from `-doctor`, which runs the full network suite for operational diagnosis.
+  `validate()`, GitHub client construction (the private-key file read + PEM/RSA
+  parse), the macOS guest-cap, the runner-namespace, and the per-pool image-ref
+  parse — plus the soft-validations below, and prints
+  `{status: ok|warn|error, errors, warnings}`. It runs **no** network checks:
+  upgrade-readiness is a question about config-schema compatibility, not live
+  GitHub/registry/disk health, and coupling the two would let a transient API
+  blip refuse a valid upgrade. The private-key parse is local (no round-trip), so
+  it belongs in the gate: startup hard-fails on a missing/malformed key, so a
+  gate that skipped it would green-light a respawn that crash-loops. This is
+  distinct from `-doctor`, which runs the full network suite for operational
+  diagnosis.
 
 - **The verdict is three-way: OK / Warn / Error.** OK applies the update; Warn
   surfaces the warnings and drops to a manual confirmation; Error blocks and names
@@ -188,3 +198,77 @@ gated update path.
 - Implementation is a four-epic rollout tracked on the project board — the
   config-compat substrate, the per-user auto-apply, the app-brokered re-stage, and
   the headless CLI path — each a small vertical slice over this design.
+
+## Amendment (2026-06-28): UpgradeReload RPC and parse-deferral
+
+### Problem
+
+A forward-only config edit (a new or renamed key the new `runnyd` accepts but the
+old strict parser rejects) passes the new-binary gate (`runnyd -test-config`) yet
+is refused by the *running* daemon's reload preflight, because the running binary
+is the one parsing it. `runnyctl upgrade-daemon` cannot complete headlessly without
+a manual `launchctl bootout`.
+
+### Decision
+
+Add a dedicated `UpgradeReload` RPC alongside the existing `Reload`. The verb itself
+is the access boundary: `upgrade-daemon` calls `UpgradeReload`; plain `Reload` and
+SIGHUP structurally cannot defer. No boolean flag on `Reload` — a flag can be forged
+by any caller.
+
+**Parse-deferral mechanism.** When the running binary's parser rejects the config on
+an `UpgradeReload`-caused drain, the daemon consults the *respawn target* (`respawn.TargetPath`
+reads `ProgramArguments[0]` from the plist and re-resolves its symlinks NOW, matching
+what launchd would exec). If the target's `-test-config` accepts the file, the drain
+proceeds; if not (stale symlink — the opt-symlink still points to the old binary),
+the drain is refused with a synthetic `respawn-target-config` failure, and no
+crash-loop is possible.
+
+**Cause-gating.** The drainer records whether its drain was caused by
+`UpgradeReload`. The exit gate defers to the respawn target only for that cause.
+Plain-reload and wedge drains are unaffected.
+
+**Pre-feature compatibility.** A running daemon that predates `UpgradeReload` returns
+`Unimplemented`. `upgrade-daemon` catches this and surfaces a clear operator message
+("run `runnyctl reload --wait` instead — config-parse deferral unavailable").
+
+**Scope.** System daemon only. A per-user agent has no plist, so `TargetPath` returns
+`false` and deferral is a no-op (the own-parse-failure is still refused).
+
+**One verdict, run by whichever binary respawns.** The deferral's authority is the
+binary launchd will actually exec, and `runnyd -test-config` (the `testConfigVerdict`
+gate) is that binary's "would my local startup-blocking checks pass" verdict. To
+keep it from drifting out of sync with what startup enforces — the bug class that
+once let a missing private key through — the gate and the daemon's exit gate share
+one definition, `localConfigChecks`: GitHub private-key parse, the macOS guest-cap,
+the runner-namespace, and the per-pool image-ref parse (all local, no network).
+The exit gate runs `localConfigChecks` directly for a normal drain (the respawn is
+the same binary) and defers to the respawn target's `-test-config` for an
+`UpgradeReload` drain (the respawn is a newer binary, so its verdict is the
+authoritative one). For an `UpgradeReload` drain the respawn target is consulted on
+every exit attempt — never short-circuited on a matching accepted SHA, since a
+plain `Reload` joining the drain can advance the accepted SHA to bytes validated
+only against the old binary — so a mid-drain edit the old binary accepts but the
+new one rejects can't slip past the gate and crash-loop the respawn.
+
+The deferral gates the **local** startup-blocking checks only; the network ones
+startup also hard-fails on (`runner-perm`, `image-resolve`, `disk-headroom`) are
+deliberately not pre-gated for a forward-only migration. Gating them would couple
+a headless upgrade to live GitHub/registry/disk health — letting a transient blip
+refuse the migration meant to recover from it, the same coupling the no-network
+gate rule above rejects. These failures are not silent: the crash-only state
+machine meets them at `MINT_JIT` / `ENSURE_IMAGE` with backoff, why-visibility, and
+cycle records, so the FSM — not a point-in-time startup gate — is the runtime net.
+A daemon whose GitHub credentials are dead is no more functional held on the old
+config (it loops in `BACKOFF` at `MINT_JIT`) than respawned, so refusing the
+upgrade buys no working daemon, only blip-coupling.
+
+### Rejected alternatives
+
+- **A `--defer` flag on `Reload`.** Any caller can set a bool flag; the verb is the
+  boundary that prevents escalation.
+- **Defer unconditionally on plain `Reload`.** Would allow any reload to bypass the
+  running binary's parse guard — the forward-only deferral is an upgrade affordance,
+  not a general override.
+- **`launchctl bootout` operator instruction.** Works, but breaks headless automation
+  and is the failure mode this project exists to make unnecessary.

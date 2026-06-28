@@ -17,6 +17,7 @@ go_library(
         "localnet.go",
         "lock.go",
         "main.go",
+        "parsegate.go",
         "platform_darwin.go",
         "platform_other.go",
         "rotate.go",
@@ -137,6 +138,7 @@ go_test(
         "//internal/launchd",
         "//internal/socket",
         "//internal/statemachine",
+        "//internal/sysdaemon",
         "//proto/runny/v1:runny",
     ],
 )

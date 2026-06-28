@@ -34,6 +34,13 @@ service RunnyService {
   // even while a drain is already in progress: the imminent respawn loads
   // the on-disk file regardless, so the verdict matters most then.
   rpc Reload(ReloadRequest) returns (ReloadResponse);
+  // Like Reload, but may defer a config-parse failure to the respawn
+  // target's -test-config when the running binary's own parser rejects a
+  // forward-only config edit (a new or renamed key the new runnyd accepts
+  // but the old strict parser does not). Used exclusively by
+  // `runnyctl upgrade-daemon`; a plain Reload cannot defer — the verb is
+  // the access boundary. Pre-feature daemons return Unimplemented.
+  rpc UpgradeReload(ReloadRequest) returns (ReloadResponse);
   // Inject an operator public key into a slot's live guest. In LISTENING:
   // freeze the slot in DEBUG (runner verifiably killed, no jobs, no
   // max-idle). In JOB: install the key immediately (the job is untouched)

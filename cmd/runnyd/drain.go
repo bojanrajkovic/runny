@@ -54,6 +54,10 @@ type drainer struct {
 	// heartbeats is the signal of a stalled drain. Atomic: read off the RPC
 	// path, written from FSM goroutines.
 	seq atomic.Uint64
+	// deferConfigParse is set by an UpgradeReload-caused drain; the exit gate
+	// reads it to decide whether a config-parse failure may be deferred to the
+	// respawn target's -test-config (a forward-only edit the old binary rejects).
+	deferConfigParse atomic.Bool
 
 	mu          sync.Mutex // control-plane frequency; a mutex beats CAS choreography
 	reason      string     // empty = not draining; feeds GetStatus `draining`
@@ -110,6 +114,17 @@ func (d *drainer) Start(reason, configSHA string) bool {
 	d.log.Error("draining fleet to idle, then restarting", "reason", reason)
 	d.recheck()
 	return true
+}
+
+// SetDeferConfigParse marks this drain as UpgradeReload-caused so the exit gate
+// may defer a config-parse failure to the respawn target's -test-config. Call it
+// BEFORE Start: Start rechecks convergence synchronously and can spawn tryExit
+// (whose exit gate reads this flag) before Start returns, so setting it after
+// would race an already-stable fleet. Setting it pre-Start is safe — the flag
+// only gates the exit gate, which never runs until draining — and still covers
+// the merge case (a wedge drain a later UpgradeReload joins mid-flight).
+func (d *drainer) SetDeferConfigParse() {
+	d.deferConfigParse.Store(true)
 }
 
 // UpdateAcceptedSHA records a newly-validated config hash onto an

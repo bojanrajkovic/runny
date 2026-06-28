@@ -104,24 +104,22 @@ func parseDeferralCheck(ctx context.Context, configPath, plistPath string, faile
 //     startup-blocking checks directly (localConfigChecks) — no network at the
 //     exit seam, where a refusal would have no good answer.
 //   - UpgradeReload drain (deferred): the respawn is a NEWER binary, so its
-//     -test-config is authoritative, not this binary's parse or local checks.
-//     Bytes already vetted against it at preflight (parseable here AND unchanged)
-//     need no re-exec; a parse failure or a mid-drain edit (sha != acceptedSHA)
-//     is (re)validated against it — without this, an edit the old binary parses
-//     but the new one rejects would slip through and crash-loop the respawn.
+//     -test-config is authoritative, not this binary's parse or local checks. It
+//     is consulted on EVERY exit attempt, never short-circuited on acceptedSHA:
+//     a plain Reload joining the drain advances acceptedSHA to bytes validated
+//     only against the OLD binary (UpdateAcceptedSHA), so a SHA match is not
+//     proof the target vetted them — and an edit the old binary parses but the
+//     new one rejects would otherwise slip through and crash-loop the respawn.
 func exitConfigVerdict(ctx context.Context, log *slog.Logger, configPath, prefix, acceptedSHA string, deferred bool, plistPath string, test configTester) (bool, string) {
 	cfg, sha, err := home.LoadConfigSHA(configPath)
 	if deferred {
-		if err == nil && acceptedSHA != "" && sha == acceptedSHA {
-			return true, "" // these exact bytes were vetted against the target at preflight
-		}
 		if parseableByRespawnTarget(ctx, plistPath, configPath, test) {
 			return true, ""
 		}
 		if err != nil {
 			return false, fmt.Sprintf("config.yaml not accepted by the running binary or the respawn target: %v", err)
 		}
-		return false, "config.yaml changed during the drain and the respawn target rejects it"
+		return false, "config.yaml not accepted by the respawn target"
 	}
 	if err != nil {
 		return false, fmt.Sprintf("config.yaml no longer parses; the respawn would refuse it: %v", err)

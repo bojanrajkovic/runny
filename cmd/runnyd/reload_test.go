@@ -437,25 +437,24 @@ func TestExitConfigVerdict(t *testing.T) {
 			t.Errorf("want hold, got ok=%v detail=%q", ok, d)
 		}
 	})
-	t.Run("deferred, mid-drain edit, target accepts → proceed", func(t *testing.T) {
-		// sha != acceptedSHA: bytes changed since preflight; the target re-validates.
+	t.Run("deferred, parseable config, target accepts → proceed", func(t *testing.T) {
 		if ok, d := exitConfigVerdict(ctx, log, validPath, prefix, "stalesha", true, plist, accept); !ok {
-			t.Errorf("want proceed on a target-accepted mid-drain edit, got hold %q", d)
+			t.Errorf("want proceed when the respawn target accepts, got hold %q", d)
 		}
 	})
-	t.Run("deferred, mid-drain edit, target refuses → hold", func(t *testing.T) {
+	t.Run("deferred, parseable config, target refuses → hold", func(t *testing.T) {
 		ok, d := exitConfigVerdict(ctx, log, validPath, prefix, "stalesha", true, plist, refuse)
-		if ok || !strings.Contains(d, "changed during the drain") {
-			t.Errorf("want mid-drain hold, got ok=%v detail=%q", ok, d)
+		if ok || !strings.Contains(d, "not accepted by the respawn target") {
+			t.Errorf("want hold, got ok=%v detail=%q", ok, d)
 		}
 	})
-	t.Run("deferred, unchanged vetted bytes → proceed without re-consulting target", func(t *testing.T) {
-		mustNotCall := configTester(func(_ context.Context, _, _ string) bool {
-			t.Error("respawn target re-consulted for bytes already vetted at preflight")
-			return false
-		})
-		if ok, d := exitConfigVerdict(ctx, log, validPath, prefix, validSHA, true, plist, mustNotCall); !ok {
-			t.Errorf("want proceed (preflight already vetted these bytes), got hold %q", d)
+	t.Run("deferred always consults the target, even when sha == acceptedSHA", func(t *testing.T) {
+		// No acceptedSHA short-circuit: a plain Reload joining the drain can advance
+		// acceptedSHA to bytes vetted only against the OLD binary, so a SHA match is
+		// not proof the target accepts. The target's refusal must still hold the exit.
+		ok, d := exitConfigVerdict(ctx, log, validPath, prefix, validSHA, true, plist, refuse)
+		if ok || !strings.Contains(d, "not accepted by the respawn target") {
+			t.Errorf("want hold (target consulted despite sha match), got ok=%v detail=%q", ok, d)
 		}
 	})
 }

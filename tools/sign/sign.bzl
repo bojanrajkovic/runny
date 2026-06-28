@@ -514,7 +514,13 @@ ditto -c -k --keepParent "$APP" "$out"
 """,
         arguments = [volatile_path, ctx.file.app_zip.path, out.path],
         mnemonic = "StampBundleMtime",
-        execution_requirements = {"no-sandbox": "1"} | ({"no-cache": "1"} if ctx.attr.stamp else {}),
+        # ponytail: no-cache does not help here — Skyframe's in-memory graph serves
+        # the cached result before the action cache is consulted, so consecutive
+        # local release builds may return a stale zip. Acceptable: shipped artifacts
+        # are always built cold (no Bazel cache in CI). The upgrade path is making
+        # BUILD_TIMESTAMP a STABLE_ key, but that forces all stamped targets to
+        # rebuild on every build — too expensive for this edge case.
+        execution_requirements = {"no-sandbox": "1"},
     )
     return [DefaultInfo(files = depset([out]))]
 

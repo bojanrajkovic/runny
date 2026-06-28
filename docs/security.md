@@ -15,7 +15,9 @@ the decision or rule behind it. Other docs point here rather than restating.
   the pins current.
 - **Release artifacts build cold** — no Bazel or tool cache feeds the artifact
   job, so a poisoned cache cannot reach a deployable binary — and every build
-  carries a **provenance attestation**.
+  carries a **provenance attestation**. The Homebrew cask (`runny-app`) is
+  rendered in the same release job from `tools/deploy/runny-app.rb.tmpl`,
+  pointing at the same attested, notarized `.dmg`; no new signing posture.
 - **Checkouts never persist credentials**; workflow permissions are
   least-privilege, declared per job, and GitHub App tokens declare explicit
   `permission-*` scopes rather than inheriting the installation's full rights.
@@ -148,7 +150,7 @@ writing any system path, and installing the CLI to `/usr/local/bin` are all
 [ADR-0018](architecture-decisions/0018-bundled-app-distribution.md) already
 rejected a root helper for the app surface). The app bundles `runnyd` and
 `runnyctl` but does **not** install the CLI — `runnyctl` reaches the user's PATH
-via the Homebrew tap formula or by running it from inside the bundle. The bundled
+via the Homebrew tap formula, the Homebrew cask, or by running it from inside the bundle. The bundled
 binaries are signed inside-out — the daemon carries
 `com.apple.security.virtualization`, the CLI carries none, both asserted at build
 time, so the CLI can never inherit the VM grant.

@@ -108,12 +108,20 @@ brew install bojanrajkovic/tap/runny
 sudo runnyctl install-daemon   # register the non-root system LaunchDaemon
 ```
 
-For a **desktop, per-user** install instead, download `Runny.app` (the `.dmg` on
-the [Releases](https://github.com/bojanrajkovic/runny/releases) page) and use its
-**Settings → Daemon → "Start runnyd at login"** toggle — see "The Runny app and
-the command-line tool" below. These are the two supported shapes, split by
-audience: the system LaunchDaemon (`sudo runnyctl install-daemon`) is the
-headless-fleet path; the app is the desktop path.
+For a **desktop, per-user** install instead, use the Homebrew cask or drag
+`Runny.app` from the `.dmg` on the [Releases](https://github.com/bojanrajkovic/runny/releases) page:
+
+```sh
+brew install --cask bojanrajkovic/tap/runny-app
+```
+
+Then use **Settings → Daemon → "Start runnyd at login"** — see "The Runny app and
+the command-line tool" below. The cask and formula are mutually exclusive; if
+`brew install --cask runny-app` fails with a `runnyctl` symlink collision (the
+formula is present), run `brew uninstall bojanrajkovic/tap/runny` first. These are
+the two supported shapes, split by audience: the system LaunchDaemon
+(`sudo runnyctl install-daemon`) is the headless-fleet path; the app is the
+desktop path.
 
 The release workflow regenerates the formula from `tools/deploy/runny.rb.tmpl`
 on every release and pushes it to the tap, authenticating as the **release
@@ -184,7 +192,8 @@ restart and the ADR-0014 reload depend on.
 
 The `Runny.app` bundle carries signed copies of `runnyd` and `runnyctl`. The app
 is non-privileged (ADR-0023): it does **not** install `runnyctl` to a system path.
-Get `runnyctl` on your PATH via the Homebrew tap formula, or run it from inside the bundle
+Get `runnyctl` on your PATH via the Homebrew tap formula, the Homebrew cask
+(`brew install --cask bojanrajkovic/tap/runny-app`), or run it from inside the bundle
 (`/Applications/Runny.app/Contents/MacOS/runnyctl`) — it is the same build as the
 bundled daemon.
 

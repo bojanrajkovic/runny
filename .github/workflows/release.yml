@@ -53,6 +53,7 @@ jobs:
     outputs:
       version: ${{ steps.package.outputs.version }}
       sha256: ${{ steps.package.outputs.sha256 }}
+      dmg_sha256: ${{ steps.package.outputs.dmg_sha256 }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -143,6 +144,7 @@ jobs:
           echo "sha256=$(cut -d' ' -f1 < "runny_${VERSION}_darwin_arm64.tar.gz.sha256")" >> "$GITHUB_OUTPUT"
           cp bazel-bin/apps/Runny/Runny_notarized_dmg.dmg "Runny_${VERSION}.dmg"
           shasum -a 256 "Runny_${VERSION}.dmg" > "Runny_${VERSION}.dmg.sha256"
+          echo "dmg_sha256=$(cut -d' ' -f1 < "Runny_${VERSION}.dmg.sha256")" >> "$GITHUB_OUTPUT"
       - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: |
@@ -181,8 +183,8 @@ jobs:
           private-key: ${{ secrets.RELEASER_APP_PRIVATE_KEY }}
           owner: bojanrajkovic
           repositories: homebrew-tap
-          # Formula push only — without this the token inherits every
-          # permission the App installation has.
+          # tap repo contents write (formula + cask) — without this the token
+          # inherits every permission the App installation has.
           permission-contents: write
       - name: update tap formula
         if: ${{ steps.tap-token.outputs.token != '' }}
@@ -192,15 +194,18 @@ jobs:
           REPO: ${{ github.repository }}
           VERSION: ${{ needs.artifacts.outputs.version }}
           SHA: ${{ needs.artifacts.outputs.sha256 }}
+          DMG_SHA: ${{ needs.artifacts.outputs.dmg_sha256 }}
         run: |
           export URL="https://github.com/${REPO}/releases/download/${TAG}/runny_${VERSION}_darwin_arm64.tar.gz"
+          export DMG_URL="https://github.com/${REPO}/releases/download/${TAG}/Runny_${VERSION}.dmg"
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/bojanrajkovic/homebrew-tap.git" tap
-          mkdir -p tap/Formula
-          # Render the reviewed template; only these three vars are substituted
+          mkdir -p tap/Formula tap/Casks
+          # Render the reviewed templates; only the listed vars are substituted per template
           # so Ruby's own #{...} interpolations pass through untouched.
           envsubst '${VERSION} ${URL} ${SHA}' < tools/deploy/runny.rb.tmpl > tap/Formula/runny.rb
+          envsubst '${VERSION} ${DMG_URL} ${DMG_SHA}' < tools/deploy/runny-app.rb.tmpl > tap/Casks/runny-app.rb
           cd tap
-          git add Formula/runny.rb
+          git add Formula/runny.rb Casks/runny-app.rb
           git -c user.name="runny-release[bot]" -c user.email="noreply@coderinserepeat.com" \
             commit -m "runny ${VERSION}"
           # Explicit target: cloning an empty tap can leave the local branch

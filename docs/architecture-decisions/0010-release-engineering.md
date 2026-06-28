@@ -33,12 +33,14 @@ from conventional commits) + goreleaser (build, package, publish, brew tap).
   artifact-producing job, release and branch alike.
 - **Homebrew tap** (`bojanrajkovic/homebrew-tap`): the release workflow
   renders the formula from `tools/deploy/runny.rb.tmpl` (version + url + sha256)
-  and pushes it — the same work goreleaser's brew publisher would run. It
-  authenticates as the **release bot App** (a GitHub App installation token
-  scoped to `homebrew-tap`, `RELEASER_APP_ID` var, `RELEASER_APP_PRIVATE_KEY` secret), kept
-  distinct from the runtime runner-registration App so CI and prod-host
-  credentials don't share a blast radius. Skipped gracefully when those
-  secrets are absent.
+  and pushes it — the same work goreleaser's brew publisher would run. The tap
+  also ships a cask (`runny-app`) for the GUI app, rendered the same way from
+  `tools/deploy/runny-app.rb.tmpl`; the mutual-exclusion constraint lives
+  formula-side (`conflicts_with cask: "runny-app"`). It authenticates as the
+  **release bot App** (a GitHub App installation token scoped to `homebrew-tap`,
+  `RELEASER_APP_ID` var, `RELEASER_APP_PRIVATE_KEY` secret), kept distinct from
+  the runtime runner-registration App so CI and prod-host credentials don't share
+  a blast radius. Skipped gracefully when those secrets are absent.
 - Artifact-producing jobs stay **cold** (no Bazel or tool caches) per the CI
   security posture.
 

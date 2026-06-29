@@ -526,6 +526,35 @@ func (h *harness) records(t *testing.T) []*cycle.Record {
 
 // ---- tests -------------------------------------------------------------------
 
+// TestRecordOperatorKeyNotifiesWatchers pins that recording an operator debug
+// key pushes the updated audit to StreamStatus subscribers. The ambiguous
+// install-failure path records the (possibly-installed) key and then only
+// rewrites the cycle sidecar — without a notify here, a watching client never
+// sees that a privileged key may be live on the guest until some unrelated
+// status change happens to fire. A silently-withheld security fact is exactly
+// the failure mode this project exists to kill.
+func TestRecordOperatorKeyNotifiesWatchers(t *testing.T) {
+	job := &cycle.JobInfo{Name: "build"}
+	rec := &cycle.Record{Job: job}
+	s := &Slot{}
+	s.status.Job = job
+
+	got := make(chan Status, 4)
+	s.OnChange(func(st Status) { got <- st })
+
+	const fp = "SHA256:operator-key"
+	s.recordOperatorKey(rec, fp)
+
+	select {
+	case st := <-got:
+		if st.Job == nil || !slices.Contains(st.Job.OperatorKeys, fp) {
+			t.Fatalf("watcher snapshot Job = %+v, want OperatorKeys to contain %q", st.Job, fp)
+		}
+	default:
+		t.Fatalf("recordOperatorKey did not notify watchers; operator key %q is invisible to StreamStatus", fp)
+	}
+}
+
 func TestHappyCycleThroughJob(t *testing.T) {
 	h := newHarness(t, nil)
 	cancel := h.start(t)

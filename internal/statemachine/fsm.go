@@ -1215,14 +1215,21 @@ func (s *Slot) auditDisarm(rec *cycle.Record, cause string, level slog.Level) {
 // (a torn read of the slice header, or a read of a reallocated backing array).
 // Replacing the JobInfo with a fresh copy + fresh slice leaves every snapshot a
 // reader already holds immutable, and never mutates a slice another goroutine
-// is reading.
+// is reading. It then notifies watchers (like clearArmedStatus/setArmedStatus):
+// the ambiguous install-failure caller records the possibly-live key and only
+// rewrites the cycle sidecar afterward, so without a push here the fact that a
+// privileged key may be on the guest stays invisible to StreamStatus until some
+// unrelated status change fires.
 func (s *Slot) recordOperatorKey(rec *cycle.Record, fp string) {
 	s.mu.Lock()
 	j := *rec.Job
 	j.OperatorKeys = append(append([]string(nil), rec.Job.OperatorKeys...), fp)
 	rec.Job = &j
 	s.status.Job = &j
+	snap := s.status
+	fns := slices.Clone(s.onChange)
 	s.mu.Unlock()
+	s.notify(fns, snap)
 }
 
 func (s *Slot) clearArmedStatus(arm *debugArm, detail string) {

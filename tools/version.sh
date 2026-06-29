@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Derives runny's version (ADR-0010): svu computes the conventional-commit
-# implied next version (--v0: breaking bumps minor while pre-1.0, matching
-# release-please's bump-minor-pre-major); this wrapper only decides clean
-# release (exactly on the tag) vs -beta.<shortsha> pre-release.
+# implied next version; this wrapper only decides clean release (exactly on
+# the tag) vs -beta.<shortsha> pre-release.
 set -euo pipefail
 
-next=$(svu next --v0)
+next=$(svu next)
 current=$(svu current 2>/dev/null || echo v0.0.0)
 
 if [ "$next" = "$current" ] &&

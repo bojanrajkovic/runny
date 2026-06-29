@@ -11,6 +11,7 @@ package diskfree
 /*
 #cgo LDFLAGS: -framework CoreFoundation
 #include <CoreFoundation/CoreFoundation.h>
+#include <sys/mount.h>
 #include <string.h>
 
 long long available_bytes_for_important_usage(const char *path) {
@@ -29,6 +30,18 @@ long long available_bytes_for_important_usage(const char *path) {
 		CFNumberGetValue((CFNumberRef)value, kCFNumberLongLongType, &result);
 	}
 	CFRelease(value);
+
+	// kCFURLVolumeAvailableCapacityForImportantUsageKey returns 0 in GUI-session-
+	// less launchd daemon contexts (no windowserver) on macOS Sequoia. Fall back
+	// to statfs(2) — a pure kernel call with no session dependency — which gives
+	// the correct f_bavail reading in all launch contexts.
+	if (result == 0) {
+		struct statfs st;
+		if (statfs(path, &st) == 0) {
+			result = (long long)st.f_bavail * (long long)st.f_bsize;
+		}
+	}
+
 	return result;
 }
 */

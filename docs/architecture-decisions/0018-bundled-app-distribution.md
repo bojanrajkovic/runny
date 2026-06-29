@@ -38,6 +38,20 @@ or operator-driven `runnyctl upgrade-daemon` on a headless host — each gated o
 the new binary validating the in-place config. The bundling, version-lock, and
 loud-skew decisions here stand; only the no-system-daemon-update stance changes.
 
+**Amended (2026-06-28):** the app now surfaces a **notify-only** update check
+for the direct-`.dmg` channel. "The `.dmg` is installed independently of
+`brew`, so an operator can upgrade one channel and not the other" (Consequences
+below) now has an in-app signal: the app polls `api.github.com/.../releases/latest`
+at launch and every 24 h, and shows a dismissible banner when a newer release is
+available — linking to the release page and naming `brew upgrade --cask runny-app`
+as the fast path. The app **never downloads or replaces itself**; brew/cask remains
+the actual updater. Sparkle was weighed and rejected: ~4–6 engineering days plus a
+third signing key, a hosted feed, and a per-release publish-and-validate step,
+buying only true one-click self-update for the direct-`.dmg` holdout; that does not
+clear the bar when the cask already provides auto-update. The full analysis is in
+the [design doc](https://outline.gaur-kardashev.ts.net/doc/142-app-update-notify-brew-is-the-updater-no-sparkle-hE03z9db65).
+Closes [#142](https://github.com/bojanrajkovic/runny/issues/142).
+
 ## Context
 
 A release stamps all three artifacts — `Runny.app`, `runnyd`, `runnyctl` — at

@@ -8,6 +8,7 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AgentController.self) private var agent
     @Environment(ActivationCoordinator.self) private var activation
+    @AppStorage(Prefs.checkForAppUpdates) private var checkForAppUpdates = true
 
     var body: some View {
         Form {
@@ -21,9 +22,20 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Section {
+                Toggle("Check for app updates", isOn: $checkForAppUpdates)
+                Text("Checks GitHub for a newer Runny release on launch and every 24 hours. "
+                    + "A notification appears in the menu-bar popover; "
+                    + "brew users update automatically with `brew upgrade --cask runny-app`.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } header: {
+                Text("Updates")
+            }
         }
         .formStyle(.grouped)
-        .frame(width: 480, height: 320)
+        .frame(width: 480, height: 380)
         .onAppear {
             // Settings is a regular window; keep the accessory↔regular dance sane
             // (the app is LSUIElement) and refresh the agent row from its source on open.

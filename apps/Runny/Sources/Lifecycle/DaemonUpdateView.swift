@@ -6,6 +6,9 @@ enum Prefs {
     /// Default-on "automatically apply runnyd upgrades". Read by the surface-driven
     /// auto-apply trigger and bound by the Settings toggle.
     static let autoApplyDaemonUpdates = "autoApplyDaemonUpdates"
+    /// Default-on "check GitHub for a newer Runny release". Read by the 24h update
+    /// check loop in DaemonStore; settable via Settings → Updates.
+    static let checkForAppUpdates = "checkForAppUpdates"
 }
 
 /// The post-upgrade daemon-update affordance for the menu bar and main window.

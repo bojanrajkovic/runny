@@ -139,6 +139,28 @@ long-lived registration token
 ([ADR-0003](architecture-decisions/0003-jit-runner-config.md)). The JIT config
 is single-use.
 
+## App update check (outbound network call)
+
+The Runny app makes one **first-party** outbound HTTPS call: the self-update
+notify check (`AppUpdateChecker`) hits
+`api.github.com/repos/bojanrajkovic/runny/releases/latest` — unauthenticated,
+with a 10s timeout and no body upload. This is the **only** outbound call the
+app initiates. Its security posture:
+
+- **No credentials sent.** The request carries no token; GitHub's public
+  `/releases/latest` endpoint requires none. Rate-limit (60/hr/IP, unauthenticated)
+  is handled by returning `nil` on a non-200 — no retry storm, no backoff loop.
+- **Fail-quiet by default.** Every failure condition — non-200, network error,
+  unparseable tag, 0.0.0 unstamped build — returns `nil` silently. The check
+  never surfaces a network error to the operator.
+- **Bounded.** The `URLRequest` carries a `timeoutInterval: 10`; there is no
+  retry. A hung or slow GitHub API stops the check, not the app.
+- **Toggleable.** `Prefs.checkForAppUpdates` (default on) disables the check
+  entirely via **Settings → Updates**. Off means zero outbound calls.
+- **Notify only.** The app **never downloads, replaces, or patches itself**. The
+  banner links to the GitHub releases page; actual upgrade goes through brew or a
+  manual `.dmg` install.
+
 ## The app is non-privileged
 
 The app raises **no** `administrator` prompt and runs no privileged helper, ever:

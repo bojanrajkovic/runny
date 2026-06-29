@@ -123,6 +123,13 @@ the two supported shapes, split by audience: the system LaunchDaemon
 (`sudo runnyctl install-daemon`) is the headless-fleet path; the app is the
 desktop path.
 
+**Update channels:** the Homebrew cask auto-updates with `brew upgrade --cask
+runny-app`. The direct-`.dmg` install has no self-updater; instead, the app
+surfaces a dismissible **"Runny vX.Y.Z available"** banner in the popover when a
+newer release is detected — linking to the GitHub releases page. The banner
+checks on launch and every 24 hours (toggleable in **Settings → Updates**) and
+can be triggered manually via **Runny menu → Check for Updates…**.
+
 The release workflow regenerates the formula from `tools/deploy/runny.rb.tmpl`
 on every release and pushes it to the tap, authenticating as the **release
 bot App** (the `RELEASER_APP_ID` variable + `RELEASER_APP_PRIVATE_KEY` secret) with a

@@ -220,6 +220,11 @@ write-ahead audit sidecar, written before any byte reaches the guest and
 surfaced in `runnyctl why` even after a daemon crash that left no cycle.json
 (ADR-0014).
 
+The whole tree must live on a single APFS volume: cloning is `clonefile(2)`,
+which fails `EXDEV` across volumes, and both the bundle clone (`images/` →
+`vms/`) and the runner-tarball clone (`cache/` → `vms/`) depend on it. Relocating
+one subdirectory onto another disk breaks the clone, not just the disk math.
+
 ## Commands during a cycle
 
 Operator commands (`recycle`, `pause`, `resume`, `debug`) ride one buffered

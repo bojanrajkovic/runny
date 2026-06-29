@@ -234,6 +234,19 @@ ACEs are therefore load-bearing: a group-writable home or an over-broad ACE
 would widen who can drive the daemon, and a missing `_runny` read ACE would
 leave the daemon unable to read its own config and key.
 
+Two operator-trust assumptions underlie this, stated here so "true" and
+"stated" do not drift apart:
+
+- **The home's safety rests on `/Library/Application Support` staying
+  root-owned.** runny owns and locks down its own `runny/` subdirectory, but
+  the standard macOS ownership of the parent is what stops a non-root principal
+  from pre-creating or swapping the home out from under the installer.
+- **`config.yaml` and `private_key_path` are operator-trust surfaces.** The
+  daemon reads whatever path the operator configures — symlinks included — and
+  does not constrain it to the home. This is consistent with the model: the
+  operator who edits the config already holds the App key and can disable
+  hardening, so a path that operator controls is not a new trust boundary.
+
 The operator's grant is **write** (connecting to the control socket requires
 write on the socket file, and that same inherited ACE covers every file under the
 home), so the operator can also modify or delete the daemon-written audit records

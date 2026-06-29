@@ -198,8 +198,38 @@ func (c *Client) newSession() (*ssh.Session, error) {
 	return c.c.NewSession()
 }
 
-// Output runs cmd and captures combined stdout+stderr, bounded by ctx. Used
-// for short provisioning steps and post-mortem pulls.
+// maxOutput caps the bytes Output buffers from one command. Output reads the
+// full combined stdout+stderr, bounded by the per-call deadline and the
+// teardown socket-cut — but not by bytes: a guest controlling how many
+// _diag/*.log files exist (PullDiag) could force a large transient allocation
+// on every failure teardown. Sized well above any healthy Output — PullDiag,
+// the largest caller, tails 32 KB from a handful of files (a few hundred KB).
+const maxOutput = 4 << 20
+
+// capBuf collects up to max bytes of combined output and silently discards the
+// rest. It always reports a full write so the session's stdout/stderr io.Copy
+// is never short-write errored — the goal is to bound the buffer, not to
+// backpressure the guest. The mutex guards concurrent stdout+stderr writes
+// (the session pumps them from separate goroutines), exactly as x/crypto/ssh's
+// own CombinedOutput buffer does.
+type capBuf struct {
+	mu  sync.Mutex
+	b   bytes.Buffer
+	max int
+}
+
+func (c *capBuf) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if room := c.max - c.b.Len(); room > 0 {
+		c.b.Write(p[:min(len(p), room)])
+	}
+	return len(p), nil
+}
+
+// Output runs cmd and captures combined stdout+stderr, bounded by ctx and
+// capped at maxOutput bytes. Used for short provisioning steps and post-mortem
+// pulls.
 func (c *Client) Output(ctx bounded.Context, cmd string) ([]byte, int, error) {
 	sess, err := c.newSession()
 	if err != nil {
@@ -216,9 +246,11 @@ func (c *Client) Output(ctx bounded.Context, cmd string) ([]byte, int, error) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		out, err := sess.CombinedOutput(cmd)
+		buf := capBuf{max: maxOutput}
+		sess.Stdout, sess.Stderr = &buf, &buf
+		err := sess.Run(cmd)
 		_ = sess.Close()
-		done <- result{out, exitCode(err), err}
+		done <- result{buf.b.Bytes(), exitCode(err), err}
 	}()
 	select {
 	case <-ctx.Done():
@@ -226,10 +258,12 @@ func (c *Client) Output(ctx bounded.Context, cmd string) ([]byte, int, error) {
 		// here it can block forever — detach it. The worker unblocks when
 		// the close lands or when Client.Close cuts the socket.
 		go func() { _ = sess.Close() }()
-		return nil, -1, fmt.Errorf("ssh command %q: %w", cmd, ctx.Err())
+		// Never echo cmd: it may carry a secret (the JIT registration blob
+		// rides inside the provision script). The caller knows which step ran.
+		return nil, -1, fmt.Errorf("ssh command timed out: %w", ctx.Err())
 	case r := <-done:
 		if r.err != nil && r.code < 0 {
-			return r.out, r.code, fmt.Errorf("ssh command %q: %w", cmd, r.err)
+			return r.out, r.code, fmt.Errorf("ssh command failed: %w", r.err)
 		}
 		return r.out, r.code, nil
 	}
@@ -267,11 +301,17 @@ func (p *Proc) end() {
 // daemon shutdown — one leaked watcher per cycle was an unbounded leak in a
 // daemon that cycles every few minutes for weeks.
 //
+// stdin, when non-nil, is fed to the remote command's standard input. It is the
+// channel for input that must stay OUT of cmd — notably a secret like the JIT
+// config: x/crypto folds cmd into its exec error on a server-side reject, and
+// that error reaches cycle.json and the gRPC surface, so a secret in cmd would
+// leak there. The invariant: secrets travel over stdin, never the command.
+//
 // Start deliberately takes a plain context (not bounded.Context): the ctx is
 // the proc's LIFETIME — run.sh must outlive the caller's state deadline —
 // not an operation bound. Establishment is bounded internally by the socket
 // deadline below.
-func (c *Client) Start(ctx context.Context, cmd string) (*Proc, error) {
+func (c *Client) Start(ctx context.Context, cmd string, stdin io.Reader) (*Proc, error) {
 	// One deadline bracket covers the whole establishment — channel open,
 	// pipes, exec request, and the error-path closes, which are writes a
 	// wedged transport would otherwise block forever. Cleared on return;
@@ -281,6 +321,9 @@ func (c *Client) Start(ctx context.Context, cmd string) (*Proc, error) {
 	sess, err := c.c.NewSession()
 	if err != nil {
 		return nil, fmt.Errorf("ssh session: %w", err)
+	}
+	if stdin != nil {
+		sess.Stdin = stdin
 	}
 	stdout, err := sess.StdoutPipe()
 	if err != nil {
@@ -294,7 +337,9 @@ func (c *Client) Start(ctx context.Context, cmd string) (*Proc, error) {
 	}
 	if err := sess.Start(cmd); err != nil {
 		_ = sess.Close()
-		return nil, fmt.Errorf("ssh start %q: %w", cmd, err)
+		// Never echo cmd: it may carry a secret (the JIT registration blob
+		// rides inside the provision script). The caller knows which step ran.
+		return nil, fmt.Errorf("ssh start failed: %w", err)
 	}
 
 	lines := make(chan string, 64)

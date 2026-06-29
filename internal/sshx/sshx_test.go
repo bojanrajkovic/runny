@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"runtime"
 	"strings"
@@ -127,6 +128,14 @@ func handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 			fmt.Fprintf(ch, "%s\n", strings.Repeat("x", 3<<20))
 			fmt.Fprintln(ch, "marker after long line")
 			exit(0)
+		case payload.Cmd == "flood":
+			// Far more than the client's Output byte cap, then exit cleanly: the
+			// cap must bound the buffer even when the command completes normally.
+			chunk := strings.Repeat("x", 1<<20)
+			for range 8 { // 8 MiB total
+				fmt.Fprint(ch, chunk)
+			}
+			exit(0)
 		case payload.Cmd == "spew":
 			// Far more output than the client's Lines buffer, then hang:
 			// a chatty runner whose consumer has stopped draining.
@@ -134,6 +143,11 @@ func handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 				fmt.Fprintf(ch, "spew %d\n", i)
 			}
 			select {} // never exits; the client must Kill it
+		case payload.Cmd == "catstdin":
+			// Echo the channel's stdin (what the client sent via Session.Stdin)
+			// back as stdout, until the client closes its write side (EOF).
+			_, _ = io.Copy(ch, ch)
+			exit(0)
 		case strings.HasPrefix(payload.Cmd, "hang"):
 			select {} // never exits; the client must bound it
 		default:
@@ -255,7 +269,7 @@ func TestStartStreams(t *testing.T) {
 	}
 	defer c.Close()
 
-	p, err := c.Start(t.Context(), "stream")
+	p, err := c.Start(t.Context(), "stream", nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -280,7 +294,7 @@ func TestStartKilledByContext(t *testing.T) {
 	defer c.Close()
 	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
-	p, err := c.Start(ctx, "hang")
+	p, err := c.Start(ctx, "hang", nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -363,12 +377,56 @@ func TestStartBoundedOnWedgedChannelOpen(t *testing.T) {
 	}
 	defer c.Close()
 	start := time.Now()
-	_, err = c.Start(t.Context(), "hello")
+	_, err = c.Start(t.Context(), "hello", nil)
 	if err == nil {
 		t.Fatal("want session failure against a wedged guest")
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Errorf("Start took %v; the deadline did not bound establishment", elapsed)
+	}
+}
+
+// Start feeds its stdin arg to the remote command — the channel for input that
+// must stay OUT of the command string (the JIT config). Round-trip a payload
+// through a guest that echoes its stdin to stdout.
+func TestStartDeliversStdin(t *testing.T) {
+	c, err := Dial(testCtx(t), testServer(t), testCfg)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+	const payload = "JITSECRET-deadbeef"
+	p, err := c.Start(t.Context(), "catstdin", strings.NewReader(payload+"\n"))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	var got strings.Builder
+	for line := range p.Lines {
+		got.WriteString(line)
+	}
+	if code, err := p.Wait(); err != nil || code != 0 {
+		t.Fatalf("Wait: %d, %v", code, err)
+	}
+	if got.String() != payload {
+		t.Errorf("stdin not delivered to the command: got %q, want %q", got.String(), payload)
+	}
+}
+
+// Output reads the full combined output; a guest controlling how many
+// _diag/*.log files exist (PullDiag) could otherwise force an unbounded
+// transient allocation. The byte cap must bound the buffer.
+func TestOutputByteCapped(t *testing.T) {
+	c, err := Dial(testCtx(t), testServer(t), testCfg)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+	out, code, err := c.Output(testCtx(t), "flood")
+	if err != nil || code != 0 {
+		t.Fatalf("Output: code %d, err %v", code, err)
+	}
+	if len(out) > maxOutput {
+		t.Errorf("Output not byte-capped: %d bytes (want <= %d)", len(out), maxOutput)
 	}
 }
 
@@ -381,7 +439,7 @@ func TestStartSurvivesOversizedLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	p, err := c.Start(t.Context(), "longline")
+	p, err := c.Start(t.Context(), "longline", nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -412,7 +470,7 @@ func TestKillUnblocksWedgedReaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	p, err := c.Start(t.Context(), "spew")
+	p, err := c.Start(t.Context(), "spew", nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -443,7 +501,7 @@ func TestStartGoroutinesEndAtTeardown(t *testing.T) {
 
 	base := runtime.NumGoroutine()
 	for range 10 {
-		p, err := c.Start(t.Context(), "stream")
+		p, err := c.Start(t.Context(), "stream", nil)
 		if err != nil {
 			t.Fatal(err)
 		}

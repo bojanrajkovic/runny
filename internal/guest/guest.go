@@ -260,7 +260,7 @@ if [ -z "$TARBALL" ]; then echo "runny: no actions-runner tarball in cache share
 RUNNER_DIR="$HOME/runny-runner"
 rm -rf "$RUNNER_DIR" && mkdir -p "$RUNNER_DIR" && cd "$RUNNER_DIR"
 tar -xzf "$TARBALL"
-exec ./run.sh --jitconfig '%s'
+exec ./run.sh --jitconfig "$(cat)"
 `
 
 // linux: explicit virtiofs mount; installdependencies.sh covers images
@@ -275,16 +275,24 @@ RUNNER_DIR="$HOME/runny-runner"
 rm -rf "$RUNNER_DIR" && mkdir -p "$RUNNER_DIR" && cd "$RUNNER_DIR"
 tar -xzf "$TARBALL"
 sudo ./bin/installdependencies.sh >/dev/null 2>&1 || true
-exec ./run.sh --jitconfig '%s'
+exec ./run.sh --jitconfig "$(cat)"
 `
 
-// StartRunner stages and launches the runner for the pool's guest OS.
+// StartRunner stages and launches the runner for the pool's guest OS. The JIT
+// config is handed to run.sh over the SSH session's stdin — the script reads it
+// with `$(cat)` — and is NEVER interpolated into the command string. x/crypto
+// folds cmd into its exec error on a server-side reject, and that error is
+// recorded to cycle.json and served over the gRPC surface, so a secret inside
+// cmd would leak to disk and the wire (the failure mode F1 exists to kill). The
+// blob still ends up in the runner's argv on the guest (the shell expands
+// `$(cat)` before exec) — that is the kill-marker StopRunner greps, unchanged;
+// only the host-visible command string is now secret-free.
 func (g *Guest) StartRunner(ctx context.Context, jit, goos string) (statemachine.Proc, error) {
 	script := provisionScriptDarwin
 	if goos == "linux" {
 		script = provisionScriptLinux
 	}
-	p, err := g.c.Start(ctx, fmt.Sprintf(script, jit))
+	p, err := g.c.Start(ctx, script, strings.NewReader(jit))
 	if err != nil {
 		return nil, fmt.Errorf("starting runner: %w", err)
 	}

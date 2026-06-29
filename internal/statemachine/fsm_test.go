@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
 	"github.com/bojanrajkovic/runny/internal/cycle"
@@ -2274,5 +2275,31 @@ func TestMidJobInstallFailureDoesNotCountStreak(t *testing.T) {
 	// The contamination is still on the record.
 	if rec.Job == nil || len(rec.Job.OperatorKeys) != 1 {
 		t.Errorf("attempted mid-job contamination missing from Job.OperatorKeys: %+v", rec.Job)
+	}
+}
+
+func TestJobNameFromMarker(t *testing.T) {
+	for _, tt := range []struct{ name, line, want string }{
+		{"plain", "Running job: build (1)", "build (1)"},
+		{"trims surrounding space", "2026-01-01 Running job:   deploy  ", "deploy"},
+		{"empty after marker", "Running job:", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := jobNameFromMarker(tt.line); got != tt.want {
+				t.Errorf("jobNameFromMarker(%q) = %q, want %q", tt.line, got, tt.want)
+			}
+		})
+	}
+
+	// A guest controls the marker line; without a cap a 1 MB name lands in
+	// cycle.json and live Status.Job. The cap must hold AND keep valid UTF-8 —
+	// a naive byte slice would split a multibyte rune into a U+FFFD.
+	huge := "Running job: " + strings.Repeat("世", 500_000) // 3 bytes/rune, well over the cap
+	got := jobNameFromMarker(huge)
+	if len(got) > maxJobName {
+		t.Errorf("job name not capped: %d bytes (want <= %d)", len(got), maxJobName)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("capped job name is not valid UTF-8: %q", got)
 	}
 }

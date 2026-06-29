@@ -819,8 +819,13 @@ func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*gi
 			if err != nil {
 				add(name, false, err.Error())
 			} else {
-				add(name, true, fmt.Sprintf("%s → %s (%s uncompressed)", ref, short(digest), oci.HumanBytes(diskBytes)))
-				if diskBytes > maxImageBytes {
+				cached := tart.Bundle(dir.ImageBundleDir(ref.String(), digest)).Verify() == nil
+				cacheNote := ""
+				if cached {
+					cacheNote = " (cached)"
+				}
+				add(name, true, fmt.Sprintf("%s → %s (%s uncompressed%s)", ref, short(digest), oci.HumanBytes(diskBytes), cacheNote))
+				if !cached && diskBytes > maxImageBytes {
 					maxImageBytes = diskBytes
 				}
 			}

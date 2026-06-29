@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/bojanrajkovic/runny/compare/v1.0.1...v1.0.2) (2026-06-29)
+
+
+### Bug Fixes
+
+* **diskfree:** fall back to statfs(2) when CF API returns 0 ([#199](https://github.com/bojanrajkovic/runny/issues/199)) ([12a986a](https://github.com/bojanrajkovic/runny/commit/12a986a0cc8a49c250c101aec876f85e3e087fb6))
+
 ## [1.0.1](https://github.com/bojanrajkovic/runny/compare/v1.0.0...v1.0.1) (2026-06-29)
 
 

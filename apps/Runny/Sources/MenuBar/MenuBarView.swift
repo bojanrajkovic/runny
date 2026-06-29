@@ -41,7 +41,7 @@ struct MenuBarView: View {
             // dismissing "v0.7.0" stays quiet until "v0.7.1" arrives as new news.
             if let update = store.shownUpdate {
                 AppUpdateBanner(update: update) {
-                    store.dismissedUpdate = store.shownUpdate
+                    store.dismissedUpdate = update
                 }
             }
             Divider()

@@ -394,6 +394,7 @@ final class DaemonStore {
     private var attemptLastMessage: Date?
     private var failedAttemptsSinceConnected = 0
     private var wakeObserver: NSObjectProtocol?
+    private var checkForUpdatesObserver: NSObjectProtocol?
     private var socketWatch: DispatchSourceFileSystemObject?
 
     static let establishmentBound: TimeInterval = 5
@@ -465,7 +466,7 @@ final class DaemonStore {
         // menu item trigger an immediate check without threading the store
         // into the command infrastructure.
         if updateCheckTask == nil {
-            NotificationCenter.default.addObserver(
+            checkForUpdatesObserver = NotificationCenter.default.addObserver(
                 forName: .runnyCheckForAppUpdates, object: nil, queue: .main
             ) { [weak self] _ in
                 Task { @MainActor in await self?.runUpdateCheck() }
@@ -1451,10 +1452,12 @@ final class DaemonStore {
         }
     }
 
-    func runUpdateCheck() async {
+    private func runUpdateCheck() async {
         let enabled = UserDefaults.standard.object(forKey: Prefs.checkForAppUpdates) as? Bool ?? true
         guard enabled else { return }
-        availableUpdate = await AppUpdateChecker.fetch(appVersion: Self.appVersion)
+        if let result = await AppUpdateChecker.fetch(appVersion: Self.appVersion) {
+            availableUpdate = result
+        }
     }
 
     // MARK: - Version skew (warn, never refuse)

@@ -4,20 +4,11 @@ go_library(
     name = "tart",
     srcs = [
         "bundle.go",
-        "clone_darwin.go",
-        "clone_other.go",
+        "clone.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/tart",
     visibility = ["//:__subpackages__"],
-    deps = select({
-        "@rules_go//go/platform:darwin": [
-            "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:ios": [
-            "@org_golang_x_sys//unix",
-        ],
-        "//conditions:default": [],
-    }),
+    deps = ["//internal/clonefile"],
 )
 
 go_test(

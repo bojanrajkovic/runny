@@ -96,14 +96,14 @@ type fakeVM struct {
 	machine      *fakeMachine
 	bootErr      error
 	boots        int
-	lastCacheDir string // BootOptions.RunnerCacheDir from the most recent Boot
+	lastCacheDir string // BootOptions.RunnerShareDir from the most recent Boot
 	mu           sync.Mutex
 }
 
 func (f *fakeVM) Boot(ctx bounded.Context, b tart.Bundle, o vm.BootOptions) (vm.Machine, error) {
 	f.mu.Lock()
 	f.boots++
-	f.lastCacheDir = o.RunnerCacheDir
+	f.lastCacheDir = o.RunnerShareDir
 	f.mu.Unlock()
 	if f.bootErr != nil {
 		return nil, f.bootErr
@@ -892,9 +892,6 @@ func teardownRecord(t *testing.T, r *cycle.Record) cycle.StateRecord {
 func TestTeardownRecordsFailedCleanupsAsWarn(t *testing.T) {
 	h := newHarness(t, nil)
 	h.gh.deleteErr = errors.New("github 500")
-	orig := removeAll
-	removeAll = func(string) error { return errors.New("clone busy") }
-	t.Cleanup(func() { removeAll = orig })
 
 	cancel := h.start(t)
 	_ = cancel
@@ -902,6 +899,14 @@ func TestTeardownRecordsFailedCleanupsAsWarn(t *testing.T) {
 	h.waitState(t, StateProvision)
 	h.proc.say(markerListening)
 	h.waitState(t, StateListening)
+
+	// Fail the clone deletion, but only now — CLONE's pre-clone cleanup of
+	// vms/<slot>/ routes through the same removeAll seam and has already run by
+	// LISTENING, so injecting earlier would fail the cycle at CLONE instead of
+	// exercising teardown's best-effort path.
+	orig := removeAll
+	removeAll = func(string) error { return errors.New("clone busy") }
+	t.Cleanup(func() { removeAll = orig })
 
 	// No job ran, but a runner is registered → teardown deregisters (and fails).
 	if !h.slot.Command(Command{Kind: CmdRecycle, Reason: "image bump"}) {
@@ -1313,6 +1318,30 @@ func TestRunnerTarballClonedIntoPerSlotMount(t *testing.T) {
 	want := [2]string{filepath.Join(h.dir.RunnerCacheDir(), tarball), filepath.Join(mount, tarball)}
 	if len(calls) != 1 || calls[0] != want {
 		t.Errorf("CloneFile calls = %v, want exactly [{%q %q}]", calls, want[0], want[1])
+	}
+}
+
+// CLONE must self-heal a vms/<slot>/ left dirty by a prior cycle's best-effort
+// teardown cleanup: it clears the dir before cloning, so a stale file can't make
+// clonefile(2) fail EEXIST and wedge the slot in a CLONE→BACKOFF loop until a
+// cold start.
+func TestCloneClearsStaleVMDir(t *testing.T) {
+	h := newHarness(t, nil)
+	vmDir := h.dir.VMDir("runner-1")
+	if err := os.MkdirAll(vmDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(vmDir, "leftover-from-failed-teardown")
+	if err := os.WriteFile(stale, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	h.start(t)
+	h.proc.say(markerListening)
+	h.waitState(t, StateListening) // reached LISTENING ⇒ the stale file didn't wedge CLONE
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("CLONE left a stale vms/<slot>/ file in place (stat err=%v); it must clear the dir before cloning", err)
 	}
 }
 

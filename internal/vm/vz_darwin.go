@@ -160,12 +160,12 @@ func finishBoot(ctx context.Context, vmc *vz.VirtualMachineConfiguration, bundle
 	netDev.SetMACAddress(mac)
 	vmc.SetNetworkDevicesVirtualMachineConfiguration([]*vz.VirtioNetworkDeviceConfiguration{netDev})
 
-	if opts.RunnerCacheDir != "" {
+	if opts.RunnerShareDir != "" {
 		fs, err := vz.NewVirtioFileSystemDeviceConfiguration(ShareTag)
 		if err != nil {
 			return nil, fmt.Errorf("virtiofs device: %w", err)
 		}
-		dir, err := vz.NewSharedDirectory(opts.RunnerCacheDir, true)
+		dir, err := vz.NewSharedDirectory(opts.RunnerShareDir, true)
 		if err != nil {
 			return nil, fmt.Errorf("shared directory: %w", err)
 		}

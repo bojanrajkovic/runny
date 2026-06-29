@@ -18,10 +18,13 @@ var ErrUnsupportedPlatform = errors.New("vm boot requires darwin/arm64 (see -doc
 
 // BootOptions configures one guest boot.
 type BootOptions struct {
-	// RunnerCacheDir, when set, is shared read-only into the guest as a
-	// virtiofs device tagged "runny-cache" — the actions-runner tarball
-	// cache, downloaded once per version on the host.
-	RunnerCacheDir string
+	// RunnerShareDir, when set, is shared read-only into the guest as a
+	// virtiofs device tagged "runny-cache". It is the cycle's OWN per-slot
+	// directory holding the single actions-runner tarball it cloned before
+	// boot — never the shared download store, which is never mounted into a
+	// guest (mounting one shared dir into every guest is the concurrent-delete
+	// race the per-cycle clone exists to remove).
+	RunnerShareDir string
 	// CPUCount and MemorySize override the guest's sizing. Zero means "use
 	// the bundle's baked config.json value". MemorySize is bytes. A request
 	// below the bundle's recorded minimum is rejected, not clamped.

@@ -187,6 +187,49 @@ after the popover's nag is silenced. Dismissal is keyed on the whole verdict
 value, so a worsening or different-axis skew on the same version string
 re-surfaces as new news rather than staying hidden.
 
+## Self-update notify
+
+The Homebrew cask (`brew upgrade --cask runny-app`) is the auto-update channel.
+The direct-`.dmg` install has no self-updater — the app surfaces a
+**notify-only** check: a dismissible banner in the popover when a newer release
+is detected. See [ADR-0018 (amended)](../architecture-decisions/0018-bundled-app-distribution.md)
+for the decision and the Sparkle rejection rationale.
+
+**Checker** — `AppUpdateChecker.fetch(appVersion:)` is a `nonisolated static`
+async function (cooperative thread pool, no `@MainActor` capture): it hits
+`api.github.com/repos/bojanrajkovic/runny/releases/latest` with a 10s timeout
+and returns `nil` on any failure (non-200, network error, 403 rate-limit,
+unparseable tag). A false "you're behind" banner is worse than silence, so
+every non-actionable condition returns `nil`.
+
+**Version gating** — `DaemonStore.releaseNewerThanApp(appVersion:latestTag:)` is
+a `nonisolated static` pure function shared with the test suite. It strips the
+leading `v`, anchors `versionCore()` at the start (so `v0.7.0-beta.abc123`
+parses to `0.7.0`), and is quiet for: an equal or older tag, an unstamped app
+(`0.0.0`), and a malformed tag. Numeric semver compare (`semverGreater`) prevents
+the `0.9` vs `0.10` lexical trap.
+
+**Trigger** — checked on first `start()` call, every 24 hours, and on a
+manual "Check for Updates…" command (app menu, `CommandGroup(after: .appInfo)`).
+The 24h loop runs inside `updateCheckTask`, which mirrors the `wakeObserver`
+nil-guard: it is initialized once in `start()` and survives `restart()` (which
+is connection-scoped). The menu-item → store bridge goes through
+`NotificationCenter` (`NSNotification.Name.runnyCheckForAppUpdates`) — the
+commands scene has no `@Environment` access path to `DaemonStore`.
+
+**Pref** — `Prefs.checkForAppUpdates` (default-on) is read by `runUpdateCheck()`
+from `UserDefaults.standard` each time it fires; a disabled check returns early.
+The toggle lives in **Settings → Updates**.
+
+**Dismissal** — `DaemonStore.shownUpdate` is `availableUpdate` minus the
+`dismissedUpdate` version: dismissing "v0.7.0" stays quiet until "v0.7.1"
+arrives as new news (same keying as `shownSkew` / `dismissedSkew`).
+
+**Banner** — `AppUpdateBanner` in `MenuBarView.swift` is distinct from
+`StatusBanner` because it needs a clickable `Link` to the release page plus
+`textSelection`-enabled brew-upgrade command text, which the plain-text banner
+shape can't carry without restructuring it.
+
 ## Reload
 
 A Reload control in the popover footer and on the main-window daemon card

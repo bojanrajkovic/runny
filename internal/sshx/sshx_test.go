@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"runtime"
 	"strings"
@@ -142,6 +143,11 @@ func handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 				fmt.Fprintf(ch, "spew %d\n", i)
 			}
 			select {} // never exits; the client must Kill it
+		case payload.Cmd == "catstdin":
+			// Echo the channel's stdin (what the client sent via Session.Stdin)
+			// back as stdout, until the client closes its write side (EOF).
+			_, _ = io.Copy(ch, ch)
+			exit(0)
 		case strings.HasPrefix(payload.Cmd, "hang"):
 			select {} // never exits; the client must bound it
 		default:
@@ -263,7 +269,7 @@ func TestStartStreams(t *testing.T) {
 	}
 	defer c.Close()
 
-	p, err := c.Start(t.Context(), "stream")
+	p, err := c.Start(t.Context(), "stream", nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -288,7 +294,7 @@ func TestStartKilledByContext(t *testing.T) {
 	defer c.Close()
 	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
-	p, err := c.Start(ctx, "hang")
+	p, err := c.Start(ctx, "hang", nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -371,7 +377,7 @@ func TestStartBoundedOnWedgedChannelOpen(t *testing.T) {
 	}
 	defer c.Close()
 	start := time.Now()
-	_, err = c.Start(t.Context(), "hello")
+	_, err = c.Start(t.Context(), "hello", nil)
 	if err == nil {
 		t.Fatal("want session failure against a wedged guest")
 	}
@@ -380,85 +386,29 @@ func TestStartBoundedOnWedgedChannelOpen(t *testing.T) {
 	}
 }
 
-// execRejectingServer accepts the session channel but rejects the exec
-// request (reply false) — the sshd ForceCommand / exec-disabled / MaxSessions
-// class. sess.Start then fails with the exec never having reached the guest.
-func execRejectingServer(t *testing.T) string {
-	t.Helper()
-	conf := &ssh.ServerConfig{
-		PasswordCallback: func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) { return nil, nil },
-	}
-	conf.AddHostKey(newTestSigner(t))
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				sc, chans, reqs, err := ssh.NewServerConn(conn, conf)
-				if err != nil {
-					return
-				}
-				defer sc.Close()
-				go ssh.DiscardRequests(reqs)
-				for newCh := range chans {
-					ch, chReqs, err := newCh.Accept()
-					if err != nil {
-						continue
-					}
-					go func() {
-						for req := range chReqs {
-							_ = req.Reply(false, nil) // reject exec (and everything else)
-						}
-					}()
-					_ = ch.Close()
-				}
-			}()
-		}
-	}()
-	return ln.Addr().String()
-}
-
-// A command body may carry a secret — the GitHub JIT registration blob rides
-// inside the provision script, a baked password could ride a future one. When
-// the exec request is rejected, sshx must not fold the command (and thus the
-// secret) into its error, where it would reach cycle.json and the gRPC surface.
-func TestStartErrorOmitsCommand(t *testing.T) {
-	c, err := Dial(testCtx(t), execRejectingServer(t), testCfg)
+// Start feeds its stdin arg to the remote command — the channel for input that
+// must stay OUT of the command string (the JIT config). Round-trip a payload
+// through a guest that echoes its stdin to stdout.
+func TestStartDeliversStdin(t *testing.T) {
+	c, err := Dial(testCtx(t), testServer(t), testCfg)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer c.Close()
-	const secret = "JITSECRET-deadbeef"
-	_, err = c.Start(t.Context(), "./run.sh --jitconfig '"+secret+"'")
-	if err == nil {
-		t.Fatal("want exec-reject error")
-	}
-	if strings.Contains(err.Error(), secret) {
-		t.Errorf("Start error leaked the command/secret: %v", err)
-	}
-}
-
-// Output shares the seam: its error must not echo the command either.
-func TestOutputErrorOmitsCommand(t *testing.T) {
-	c, err := Dial(testCtx(t), execRejectingServer(t), testCfg)
+	const payload = "JITSECRET-deadbeef"
+	p, err := c.Start(t.Context(), "catstdin", strings.NewReader(payload+"\n"))
 	if err != nil {
-		t.Fatalf("Dial: %v", err)
+		t.Fatalf("Start: %v", err)
 	}
-	defer c.Close()
-	const secret = "JITSECRET-deadbeef"
-	_, _, err = c.Output(testCtx(t), "./run.sh --jitconfig '"+secret+"'")
-	if err == nil {
-		t.Fatal("want exec-reject error")
+	var got strings.Builder
+	for line := range p.Lines {
+		got.WriteString(line)
 	}
-	if strings.Contains(err.Error(), secret) {
-		t.Errorf("Output error leaked the command/secret: %v", err)
+	if code, err := p.Wait(); err != nil || code != 0 {
+		t.Fatalf("Wait: %d, %v", code, err)
+	}
+	if got.String() != payload {
+		t.Errorf("stdin not delivered to the command: got %q, want %q", got.String(), payload)
 	}
 }
 
@@ -489,7 +439,7 @@ func TestStartSurvivesOversizedLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	p, err := c.Start(t.Context(), "longline")
+	p, err := c.Start(t.Context(), "longline", nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -520,7 +470,7 @@ func TestKillUnblocksWedgedReaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	p, err := c.Start(t.Context(), "spew")
+	p, err := c.Start(t.Context(), "spew", nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -551,7 +501,7 @@ func TestStartGoroutinesEndAtTeardown(t *testing.T) {
 
 	base := runtime.NumGoroutine()
 	for range 10 {
-		p, err := c.Start(t.Context(), "stream")
+		p, err := c.Start(t.Context(), "stream", nil)
 		if err != nil {
 			t.Fatal(err)
 		}

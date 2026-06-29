@@ -301,11 +301,17 @@ func (p *Proc) end() {
 // daemon shutdown — one leaked watcher per cycle was an unbounded leak in a
 // daemon that cycles every few minutes for weeks.
 //
+// stdin, when non-nil, is fed to the remote command's standard input. It is the
+// channel for input that must stay OUT of cmd — notably a secret like the JIT
+// config: x/crypto folds cmd into its exec error on a server-side reject, and
+// that error reaches cycle.json and the gRPC surface, so a secret in cmd would
+// leak there. The invariant: secrets travel over stdin, never the command.
+//
 // Start deliberately takes a plain context (not bounded.Context): the ctx is
 // the proc's LIFETIME — run.sh must outlive the caller's state deadline —
 // not an operation bound. Establishment is bounded internally by the socket
 // deadline below.
-func (c *Client) Start(ctx context.Context, cmd string) (*Proc, error) {
+func (c *Client) Start(ctx context.Context, cmd string, stdin io.Reader) (*Proc, error) {
 	// One deadline bracket covers the whole establishment — channel open,
 	// pipes, exec request, and the error-path closes, which are writes a
 	// wedged transport would otherwise block forever. Cleared on return;
@@ -315,6 +321,9 @@ func (c *Client) Start(ctx context.Context, cmd string) (*Proc, error) {
 	sess, err := c.c.NewSession()
 	if err != nil {
 		return nil, fmt.Errorf("ssh session: %w", err)
+	}
+	if stdin != nil {
+		sess.Stdin = stdin
 	}
 	stdout, err := sess.StdoutPipe()
 	if err != nil {

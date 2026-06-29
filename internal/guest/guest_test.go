@@ -27,6 +27,27 @@ func TestProvisionScriptDarwinPrimesPATH(t *testing.T) {
 	}
 }
 
+// The JIT config is a secret: it must reach run.sh over stdin (`$(cat)`), never
+// be interpolated into the command string, where x/crypto would fold it into
+// the exec error on a server-side reject and leak it to cycle.json and the
+// gRPC surface. Guard both: the scripts read the JIT from stdin, and they carry
+// no `%s` format verb that StartRunner could fill with the blob.
+func TestProvisionScriptsKeepJITOutOfCommand(t *testing.T) {
+	for _, s := range []struct {
+		name, script string
+	}{
+		{"darwin", provisionScriptDarwin},
+		{"linux", provisionScriptLinux},
+	} {
+		if !strings.Contains(s.script, `--jitconfig "$(cat)"`) {
+			t.Errorf("%s provision script must read the JIT from stdin via $(cat)", s.name)
+		}
+		if strings.Contains(s.script, "%s") {
+			t.Errorf("%s provision script must not carry a %%s verb — the JIT must never be formatted into the command", s.name)
+		}
+	}
+}
+
 // rotateServer is an in-process SSH "guest" that behaves like a real one
 // under rotation: password auth works until the rotate script lands, the
 // capture exec serves its real host key, and the install exec mutates the

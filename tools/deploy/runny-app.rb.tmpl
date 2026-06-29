@@ -22,10 +22,11 @@ cask "runny-app" do
 
   # No conflicts_with formula: here — brew PR #20499 deprecated cask→formula conflicts
   # with no replacement. The mutual-exclusion constraint lives in Formula/runny.rb instead
-  # (conflicts_with cask: "runny-app"). Adding conflicts_with formula: here emits a
-  # persistent deprecation warning; don't. The reverse direction is backstopped by the
-  # runnyctl symlink collision (brew install --cask runny-app fails loud when the formula
-  # is present — uninstall it first).
+  # (conflicts_with cask: "runny-app"). The reverse direction (formula present → cask
+  # install blocked) is enforced by the preflight below.
+  preflight do
+    odie "The `runny` formula is already installed. Run 'brew uninstall runny' first." if (HOMEBREW_PREFIX/"bin/runnyd").exist?
+  end
 
   uninstall quit:      "com.coderinserepeat.runny",      # app bundle id
             launchctl: "com.coderinserepeat.runnyd"      # per-user LaunchAgent label

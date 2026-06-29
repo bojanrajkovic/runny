@@ -194,23 +194,22 @@ func (s *Server) NotifyProgress() { s.notify() }
 // handler panics, and this socket is the unprivileged, every-client-equal
 // control surface — one handler bug must not become a fleet-wide DoS that kills
 // every slot's in-flight job. Visible-not-silent: the panic + stack is logged.
+// Both share recoverPanic so the unary and stream paths can never diverge in
+// what they log or return.
+func recoverPanic(method string, errp *error) {
+	if r := recover(); r != nil {
+		slog.Error("recovered panic in gRPC handler", "method", method, "panic", r, "stack", string(debug.Stack()))
+		*errp = status.Errorf(codes.Internal, "internal error")
+	}
+}
+
 func recoveryUnary(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("recovered panic in gRPC handler", "method", info.FullMethod, "panic", r, "stack", string(debug.Stack()))
-			err = status.Errorf(codes.Internal, "internal error")
-		}
-	}()
+	defer recoverPanic(info.FullMethod, &err)
 	return handler(ctx, req)
 }
 
 func recoveryStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("recovered panic in gRPC stream handler", "method", info.FullMethod, "panic", r, "stack", string(debug.Stack()))
-			err = status.Errorf(codes.Internal, "internal error")
-		}
-	}()
+	defer recoverPanic(info.FullMethod, &err)
 	return handler(srv, ss)
 }
 

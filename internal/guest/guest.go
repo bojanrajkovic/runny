@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"regexp"
 	"strings"
 	"time"
 
@@ -233,7 +234,16 @@ func parseHostKeys(out []byte) ([]ssh.PublicKey, error) {
 // (a bundled v2.332.0 got "deprecated and cannot receive messages" from the
 // broker), and JIT runners cannot self-update. Never trust the image's copy.
 //
-// Exit 78 (EX_CONFIG) = cache share missing the tarball — a host-side
+// The script stages the EXACT tarball this cycle resolved (its basename
+// substituted for __RUNNER_TARBALL__), not a glob of the share — the share is
+// shared across slots and can hold more than one same-flavor tarball whenever a
+// version rollover overlaps a cycle (a slot caches its version at ENSURE_IMAGE
+// and does not stage it until PROVISION, a whole boot later), and a
+// `ls | head -1` glob is a lexical pick that could stage a version other than
+// the one recorded as this cycle's RunnerVersion. Staging by exact name keeps
+// the on-disk record honest.
+//
+// Exit 78 (EX_CONFIG) = cache share missing this tarball — a host-side
 // problem the post-mortem will show verbatim.
 
 // darwin: the share appears at the automount path (macOS automounts tagged
@@ -255,8 +265,8 @@ if [ ! -d "$CACHE" ]; then
   sudo mount_virtiofs runny-cache /Volumes/runny-cache 2>/dev/null || true
   CACHE="/Volumes/runny-cache"
 fi
-TARBALL="$(ls "$CACHE"/actions-runner-osx-arm64-*.tar.gz 2>/dev/null | head -1)"
-if [ -z "$TARBALL" ]; then echo "runny: no actions-runner tarball in cache share $CACHE" >&2; exit 78; fi
+TARBALL="$CACHE/__RUNNER_TARBALL__"
+if [ ! -f "$TARBALL" ]; then echo "runny: runner tarball __RUNNER_TARBALL__ not in cache share $CACHE" >&2; exit 78; fi
 RUNNER_DIR="$HOME/runny-runner"
 rm -rf "$RUNNER_DIR" && mkdir -p "$RUNNER_DIR" && cd "$RUNNER_DIR"
 tar -xzf "$TARBALL"
@@ -269,8 +279,8 @@ const provisionScriptLinux = `set -e
 CACHE=/mnt/runny-cache
 sudo mkdir -p "$CACHE"
 mountpoint -q "$CACHE" || sudo mount -t virtiofs runny-cache "$CACHE"
-TARBALL="$(ls "$CACHE"/actions-runner-linux-arm64-*.tar.gz 2>/dev/null | head -1)"
-if [ -z "$TARBALL" ]; then echo "runny: no actions-runner tarball in cache share $CACHE" >&2; exit 78; fi
+TARBALL="$CACHE/__RUNNER_TARBALL__"
+if [ ! -f "$TARBALL" ]; then echo "runny: runner tarball __RUNNER_TARBALL__ not in cache share $CACHE" >&2; exit 78; fi
 RUNNER_DIR="$HOME/runny-runner"
 rm -rf "$RUNNER_DIR" && mkdir -p "$RUNNER_DIR" && cd "$RUNNER_DIR"
 tar -xzf "$TARBALL"
@@ -287,16 +297,40 @@ exec ./run.sh --jitconfig "$(cat)"
 // blob still ends up in the runner's argv on the guest (the shell expands
 // `$(cat)` before exec) — that is the kill-marker StopRunner greps, unchanged;
 // only the host-visible command string is now secret-free.
-func (g *Guest) StartRunner(ctx context.Context, jit, goos string) (statemachine.Proc, error) {
-	script := provisionScriptDarwin
-	if goos == "linux" {
-		script = provisionScriptLinux
+func (g *Guest) StartRunner(ctx context.Context, jit, goos, runnerTarball string) (statemachine.Proc, error) {
+	script, err := provisionScript(goos, runnerTarball)
+	if err != nil {
+		return nil, err
 	}
 	p, err := g.c.Start(ctx, script, strings.NewReader(jit))
 	if err != nil {
 		return nil, fmt.Errorf("starting runner: %w", err)
 	}
 	return proc{p}, nil
+}
+
+const runnerTarballPlaceholder = "__RUNNER_TARBALL__"
+
+// runnerTarballRE constrains the tarball basename the daemon substitutes into
+// the provision script. The name is daemon-resolved (GitHub's asset filename),
+// not client input, but it crosses into a shell command string, so this is a
+// trust-boundary guard: the charset carries no shell metacharacter and no `/`,
+// so the validated name is inert inside the script's double-quoted "$CACHE/…".
+var runnerTarballRE = regexp.MustCompile(`^[A-Za-z0-9._-]+\.tar\.gz$`)
+
+// provisionScript renders the per-OS provision script for the exact tarball
+// this cycle resolved. It refuses a name that does not match runnerTarballRE
+// rather than risk staging a glob (silent wrong-version) or interpolating an
+// unexpected string into the command — fail the cycle loudly instead.
+func provisionScript(goos, runnerTarball string) (string, error) {
+	if !runnerTarballRE.MatchString(runnerTarball) {
+		return "", fmt.Errorf("refusing to stage runner tarball with an unexpected name %q", runnerTarball)
+	}
+	script := provisionScriptDarwin
+	if goos == "linux" {
+		script = provisionScriptLinux
+	}
+	return strings.ReplaceAll(script, runnerTarballPlaceholder, runnerTarball), nil
 }
 
 // PullDiag fetches the tail of the runner's diagnostic logs — the

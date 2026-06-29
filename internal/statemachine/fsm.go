@@ -128,12 +128,14 @@ type Proc interface {
 // Guest is an authenticated session into a booted VM.
 type Guest interface {
 	// StartRunner stages the actions runner from the cache share and launches
-	// run.sh with the JIT config; goos selects the per-OS provision path.
-	// It deliberately takes a plain context: the ctx is the proc's LIFETIME
-	// — the whole cycle, outliving PROVISION's deadline, cancelled by
-	// operator recycle or daemon shutdown — not an operation bound; session
-	// establishment is bounded internally by sshx's socket deadlines.
-	StartRunner(ctx context.Context, jit, goos string) (Proc, error)
+	// run.sh with the JIT config; goos selects the per-OS provision path and
+	// runnerTarball is the exact tarball basename to stage (this cycle's
+	// resolved RunnerVersion), not a glob. It deliberately takes a plain
+	// context: the ctx is the proc's LIFETIME — the whole cycle, outliving
+	// PROVISION's deadline, cancelled by operator recycle or daemon shutdown —
+	// not an operation bound; session establishment is bounded internally by
+	// sshx's socket deadlines.
+	StartRunner(ctx context.Context, jit, goos, runnerTarball string) (Proc, error)
 	// PullDiag fetches the tail of the runner's _diag logs (post-mortem).
 	PullDiag(ctx bounded.Context) ([]byte, error)
 	// StopRunner kills the runner listener tree and PROVES it dead (a pgrep
@@ -806,7 +808,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 		ok = enter(StateProvision, cfg.Deadlines.Provision.D(), func(c bounded.Context) error {
 			// The proc must outlive this state's deadline: start it under the
 			// cycle ctx, but bound the wait-for-listening here.
-			p, err := guest.StartRunner(cctx, jit.EncodedJITConfig, s.deps.Pool.OS)
+			p, err := guest.StartRunner(cctx, jit.EncodedJITConfig, s.deps.Pool.OS, rec.RunnerVersion)
 			if err != nil {
 				return err
 			}

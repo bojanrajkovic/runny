@@ -163,6 +163,7 @@ type fakeGuest struct {
 	diagBlock bool // PullDiag blocks until ctx expires (a wedged guest)
 	pulled    bool
 	goos      string
+	runnerTar string // the tarball basename StartRunner was handed
 
 	// Debug-key injection seam (issue #39).
 	hostKeys      []string
@@ -181,12 +182,13 @@ type fakeGuest struct {
 	mu sync.Mutex
 }
 
-func (g *fakeGuest) StartRunner(ctx context.Context, jit, goos string) (Proc, error) {
+func (g *fakeGuest) StartRunner(ctx context.Context, jit, goos, runnerTarball string) (Proc, error) {
 	if g.startErr != nil {
 		return nil, g.startErr
 	}
 	g.mu.Lock()
 	g.goos = goos
+	g.runnerTar = runnerTarball
 	g.mu.Unlock()
 	return g.proc, nil
 }

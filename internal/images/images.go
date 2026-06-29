@@ -250,15 +250,20 @@ var tarballLocks sync.Map // filename -> chan struct{} (capacity-1 semaphore)
 // supersededTarballs returns the full paths of cached runner tarballs that
 // EnsureRunnerTarball should drop when staging assetName: same-flavor builds
 // (the actions-runner-<os>-arm64 prefix) that are STRICTLY OLDER than
-// assetName. It deliberately never returns a newer-or-equal sibling — a
-// concurrent slot resolving a NEWER version shares this prefix but holds a
-// different per-assetName lock and may have just renamed its tarball in;
-// deleting it would empty the cache out from under that slot's guest, which
-// then stages nothing. assetName is GitHub's filename verbatim, so the shape
-// is guarded (an unguarded [:4] would panic the whole daemon on a renamed
-// asset, not fail one cycle); an unparseable version on either side is left
-// alone rather than guessed at. .partial temps belong to whichever slot is
-// mid-download and are skipped.
+// assetName. Guests stage their cycle's exact tarball by name (see
+// guest.provisionScript), so this is disk GC, not correctness — but it still
+// must not delete a tarball a concurrent slot is using. It deliberately never
+// returns a newer-or-equal sibling: a concurrent slot resolving a NEWER version
+// shares this prefix but holds a different per-assetName lock and may have just
+// renamed its tarball in; deleting it would pull that slot's tarball out from
+// under its guest. The residual it does NOT close — dropping an OLDER sibling a
+// slow concurrent slot is still staging — is a rare rollover race whose worst
+// case is one loud exit-78 cycle that crash-only recycles, not a silent
+// mismatch. assetName is GitHub's filename verbatim, so the shape is guarded
+// (an unguarded [:4] would panic the whole daemon on a renamed asset, not fail
+// one cycle); an unparseable version on either side is left alone rather than
+// guessed at. .partial temps belong to whichever slot is mid-download and are
+// skipped.
 func supersededTarballs(cacheDir, assetName string) []string {
 	parts := strings.Split(assetName, "-")
 	if len(parts) < 4 {

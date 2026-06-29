@@ -162,7 +162,7 @@ struct StatusBanner: View {
 /// standard banner's text-only shape can't carry those without restructuring it.
 struct AppUpdateBanner: View {
     let update: DaemonStore.AppUpdate
-    var dismiss: () -> Void
+    let dismiss: () -> Void
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {

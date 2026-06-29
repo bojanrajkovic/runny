@@ -143,9 +143,7 @@ final class DaemonStore {
     /// The banner to show: `availableUpdate` minus what was dismissed. A
     /// dismissed "v0.7.0" stays gone until a "v0.7.1" check arrives.
     var shownUpdate: AppUpdate? {
-        guard let update = availableUpdate, update.version != dismissedUpdate?.version
-        else { return nil }
-        return update
+        availableUpdate.flatMap { $0.version == dismissedUpdate?.version ? nil : $0 }
     }
 
     /// The live skew — gated on a healthy connection only. The main-window card

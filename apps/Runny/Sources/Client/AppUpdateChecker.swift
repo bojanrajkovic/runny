@@ -39,7 +39,5 @@ enum AppUpdateChecker {
 extension NSNotification.Name {
     /// Posted by the "Check for Updates…" menu command to trigger an
     /// immediate check outside the 24h timer cycle.
-    static let runnyCheckForAppUpdates = NSNotification.Name(
-        "com.coderinserepeat.runny.checkForAppUpdates"
-    )
+    static let runnyCheckForAppUpdates = NSNotification.Name("com.coderinserepeat.runny.checkForAppUpdates")
 }

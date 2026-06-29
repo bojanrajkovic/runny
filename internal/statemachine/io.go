@@ -1,6 +1,7 @@
 package statemachine
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -11,6 +12,19 @@ func writeFile(dir, name string, data []byte) error {
 	// 0o600: post-mortem artifacts include runner _diag tails, which can
 	// carry unmasked job secrets on verbose runs.
 	return os.WriteFile(filepath.Join(dir, name), data, 0o600)
+}
+
+// cloneRunnerTarball CoW-clones this cycle's resolved runner tarball (basename
+// tarball) from the shared download store into the slot's own mount dir, which
+// is then mounted read-only into the guest. The cycle owns the clone end to
+// end: no concurrent slot or store GC can pull it out from under the guest, and
+// the mount holds exactly one tarball. 0o700 mount dir — the tree is owner-only
+// throughout (it sits under the owner-only vms/).
+func cloneRunnerTarball(cloneFile FileCloner, storeDir, mountDir, tarball string) error {
+	if err := os.MkdirAll(mountDir, 0o700); err != nil {
+		return fmt.Errorf("creating runner mount dir: %w", err)
+	}
+	return cloneFile(filepath.Join(storeDir, tarball), filepath.Join(mountDir, tarball))
 }
 
 // removeAll is a var so teardown's best-effort clone deletion can be made to

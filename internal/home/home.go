@@ -98,10 +98,23 @@ func (d Dir) ImagesDir() string  { return filepath.Join(string(d), "images") }
 func (d Dir) VMsDir() string     { return filepath.Join(string(d), "vms") }
 func (d Dir) CyclesDir() string  { return filepath.Join(string(d), "cycles") }
 
-// RunnerCacheDir holds actions-runner tarballs, shared read-only into guests
-// via virtiofs so the download happens once per version, not once per cycle.
+// RunnerCacheDir is the shared download store for actions-runner tarballs: the
+// download happens once per version, not once per cycle, and fails fast before a
+// boot. It is NOT mounted into a guest — each cycle CoW-clones its resolved
+// tarball from here into its own SlotRunnerMountDir and mounts that. GC'd at
+// cold start (images.PruneRunnerCache).
 func (d Dir) RunnerCacheDir() string {
 	return filepath.Join(string(d), "cache", "actions-runner")
+}
+
+// SlotRunnerMountDir is the per-slot virtiofs share: a subdir of the slot's
+// ephemeral VMDir holding this cycle's single runner-tarball clone, mounted
+// read-only into the guest. Nesting it under VMDir means the vms/ sweep and
+// teardown's clone deletion reclaim it for free, and the cycle owns its tarball
+// end to end — no other slot or store GC can touch it. Recreated each cycle
+// (VMDir is); always deletable.
+func (d Dir) SlotRunnerMountDir(slot string) string {
+	return filepath.Join(d.VMDir(slot), "runner")
 }
 
 // ImageBundleDir is the cache location for one pulled image, keyed by

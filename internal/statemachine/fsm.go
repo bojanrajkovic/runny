@@ -109,6 +109,10 @@ type ImageEnsurer interface {
 // Cloner clones a bundle (tart.Clone's seam).
 type Cloner func(src tart.Bundle, dst string) error
 
+// FileCloner CoW-clones a single file (clonefile.Clone's seam): the per-cycle
+// runner-tarball clone from the shared store into the slot's own mount.
+type FileCloner func(src, dst string) error
+
 // GitHub is the slice of internal/github the FSM needs. Every method takes
 // bounded.Context: these are network calls, and an unbounded call site is a
 // compile error.
@@ -183,6 +187,7 @@ type Deps struct {
 	VM             vm.Manager
 	Images         ImageEnsurer
 	Clone          Cloner
+	CloneFile      FileCloner
 	GitHub         GitHub
 	Dial           Dialer
 	Log            *slog.Logger
@@ -727,15 +732,32 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	})
 
 	vmDir := s.deps.Home.VMDir(s.name)
+	runnerMount := s.deps.Home.SlotRunnerMountDir(s.name)
 	if ok {
 		ok = enter(StateClone, cfg.Deadlines.Clone.D(), func(c bounded.Context) error {
-			return s.deps.Clone(srcBundle, vmDir)
+			if err := s.deps.Clone(srcBundle, vmDir); err != nil {
+				return err
+			}
+			// Give the cycle its own runner tarball: clone this cycle's
+			// resolved version out of the shared store into the slot's mount.
+			// From here the shared store is never read again, so no slot or GC
+			// can disturb what this guest boots with.
+			if rec.RunnerVersion != "" {
+				return cloneRunnerTarball(s.deps.CloneFile, s.deps.Home.RunnerCacheDir(), runnerMount, rec.RunnerVersion)
+			}
+			return nil
 		})
 	}
 	if ok {
+		// Mount the slot's OWN runner dir, not the shared store; empty when no
+		// tarball was resolved (no runner resolver) so no share is attached.
+		bootCache := ""
+		if rec.RunnerVersion != "" {
+			bootCache = runnerMount
+		}
 		ok = enter(StateBoot, cfg.Deadlines.Boot.D(), func(c bounded.Context) error {
 			m, err := s.deps.VM.Boot(c, tart.Bundle(vmDir), vm.BootOptions{
-				RunnerCacheDir: s.deps.Home.RunnerCacheDir(),
+				RunnerCacheDir: bootCache,
 				CPUCount:       s.deps.Pool.CPUCores,
 				MemorySize:     uint64(s.deps.Pool.RAMGB) << 30, // GiB → bytes; 0 keeps the image's
 			})

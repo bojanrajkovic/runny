@@ -29,6 +29,7 @@ go_library(
     visibility = ["//visibility:private"],
     deps = [
         "//internal/bounded",
+        "//internal/clonefile",
         "//internal/cycle",
         "//internal/diskfree",
         "//internal/github",

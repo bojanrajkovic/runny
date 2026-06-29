@@ -93,20 +93,28 @@ func (m *fakeMachine) Stop(bounded.Context, time.Duration) error {
 func (m *fakeMachine) Done() <-chan struct{} { return m.done }
 
 type fakeVM struct {
-	machine *fakeMachine
-	bootErr error
-	boots   int
-	mu      sync.Mutex
+	machine      *fakeMachine
+	bootErr      error
+	boots        int
+	lastCacheDir string // BootOptions.RunnerCacheDir from the most recent Boot
+	mu           sync.Mutex
 }
 
 func (f *fakeVM) Boot(ctx bounded.Context, b tart.Bundle, o vm.BootOptions) (vm.Machine, error) {
 	f.mu.Lock()
 	f.boots++
+	f.lastCacheDir = o.RunnerCacheDir
 	f.mu.Unlock()
 	if f.bootErr != nil {
 		return nil, f.bootErr
 	}
 	return f.machine, nil
+}
+
+func (f *fakeVM) lastRunnerCacheDir() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastCacheDir
 }
 
 type fakeProc struct {
@@ -392,6 +400,15 @@ type harness struct {
 
 	linesMu     sync.Mutex
 	runnerLines []string // "slot cycle line" per OnRunnerLine call
+
+	cloneMu    sync.Mutex
+	cloneFiles [][2]string // {src, dst} per CloneFile call
+}
+
+func (h *harness) cloneFileCalls() [][2]string {
+	h.cloneMu.Lock()
+	defer h.cloneMu.Unlock()
+	return slices.Clone(h.cloneFiles)
 }
 
 // start launches the slot and registers a cleanup that waits for Run to
@@ -482,6 +499,12 @@ func newHarnessPool(t *testing.T, mutate func(*home.Config), mutatePool func(*ho
 		Images:         h.images,
 		Clone: func(src tart.Bundle, dst string) error {
 			return os.MkdirAll(dst, 0o755)
+		},
+		CloneFile: func(src, dst string) error {
+			h.cloneMu.Lock()
+			h.cloneFiles = append(h.cloneFiles, [2]string{src, dst})
+			h.cloneMu.Unlock()
+			return os.WriteFile(dst, nil, 0o600) // dir is created by cloneRunnerTarball
 		},
 		GitHub: h.gh,
 		Dial:   h.dialer,
@@ -1261,6 +1284,35 @@ func TestEnsureFailureExposesNoDigestButRecordsRef(t *testing.T) {
 		if rec.ImageDigest != "" {
 			t.Errorf("record ImageDigest = %q, want empty: nothing resolved", rec.ImageDigest)
 		}
+	}
+}
+
+// The runner tarball must be cloned per-cycle into the slot's OWN mount dir and
+// THAT dir mounted into the guest — never the shared download store. This is the
+// cache collapse: the cycle owns its tarball end to end, so no concurrent slot
+// or store GC can disturb what the guest boots with.
+func TestRunnerTarballClonedIntoPerSlotMount(t *testing.T) {
+	h := newHarness(t, nil)
+	h.start(t)
+
+	// Drive to LISTENING so both CLONE and BOOT have run.
+	h.proc.say(markerListening)
+	h.waitState(t, StateListening)
+
+	const tarball = "actions-runner-osx-arm64-2.320.0.tar.gz" // fakeImages' RunnerVersion
+	mount := h.dir.SlotRunnerMountDir("runner-1")
+
+	// BOOT mounted the per-slot dir, not the shared store.
+	if got := h.vmF.lastRunnerCacheDir(); got != mount {
+		t.Errorf("BOOT mounted %q, want the per-slot mount %q (not the shared store %q)",
+			got, mount, h.dir.RunnerCacheDir())
+	}
+
+	// CLONE cloned the resolved tarball from the store into that mount, exactly once.
+	calls := h.cloneFileCalls()
+	want := [2]string{filepath.Join(h.dir.RunnerCacheDir(), tarball), filepath.Join(mount, tarball)}
+	if len(calls) != 1 || calls[0] != want {
+		t.Errorf("CloneFile calls = %v, want exactly [{%q %q}]", calls, want[0], want[1])
 	}
 }
 

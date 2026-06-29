@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
+	"github.com/bojanrajkovic/runny/internal/clonefile"
 	"github.com/bojanrajkovic/runny/internal/cycle"
 	"github.com/bojanrajkovic/runny/internal/diskfree"
 	"github.com/bojanrajkovic/runny/internal/github"
@@ -247,7 +248,8 @@ func run() error {
 				_, err := tart.Clone(src, tart.Bundle(dst))
 				return err
 			},
-			GitHub: gh,
+			CloneFile: clonefile.Clone,
+			GitHub:    gh,
 			Dial: guest.Dialer{SSH: sshx.Config{
 				User:     p.SSHUser,
 				Password: p.SSHPassword,

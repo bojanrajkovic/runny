@@ -234,16 +234,14 @@ func parseHostKeys(out []byte) ([]ssh.PublicKey, error) {
 // (a bundled v2.332.0 got "deprecated and cannot receive messages" from the
 // broker), and JIT runners cannot self-update. Never trust the image's copy.
 //
-// The script stages the EXACT tarball this cycle resolved (its basename
-// substituted for __RUNNER_TARBALL__), not a glob of the share — the share is
-// shared across slots and can hold more than one same-flavor tarball whenever a
-// version rollover overlaps a cycle (a slot caches its version at ENSURE_IMAGE
-// and does not stage it until PROVISION, a whole boot later), and a
-// `ls | head -1` glob is a lexical pick that could stage a version other than
-// the one recorded as this cycle's RunnerVersion. Staging by exact name keeps
-// the on-disk record honest.
+// The share is this cycle's own per-slot mount, holding exactly the one tarball
+// it cloned before boot. The script still stages that EXACT tarball by basename
+// (substituted for __RUNNER_TARBALL__), not a `ls | head -1` glob: defense in
+// depth that keeps the on-disk record honest (the staged version matches the
+// RunnerVersion recorded for the cycle) and the cache-miss diagnostic precise,
+// rather than a lexical pick.
 //
-// Exit 78 (EX_CONFIG) = cache share missing this tarball — a host-side
+// Exit 78 (EX_CONFIG) = the mount is missing this tarball — a host-side
 // problem the post-mortem will show verbatim.
 
 // darwin: the share appears at the automount path (macOS automounts tagged

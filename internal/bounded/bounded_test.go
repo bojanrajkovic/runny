@@ -81,3 +81,17 @@ func TestStallWatchFiresWithoutFirstByte(t *testing.T) {
 		t.Fatal("stall did not fire when no byte ever arrived")
 	}
 }
+
+func TestTickerInterval(t *testing.T) {
+	// window/4 floors to 0 for window in [1ns, 3ns]; time.NewTicker(0) panics in
+	// Watch's goroutine with no recover. The interval must never be < 1ns.
+	for _, w := range []time.Duration{1, 2, 3} {
+		if got := tickerInterval(w * time.Nanosecond); got <= 0 {
+			t.Errorf("tickerInterval(%dns) = %v, want > 0 (NewTicker panics on 0)", w, got)
+		}
+	}
+	// Normal windows still poll at a quarter.
+	if got := tickerInterval(4 * time.Second); got != time.Second {
+		t.Errorf("tickerInterval(4s) = %v, want 1s", got)
+	}
+}

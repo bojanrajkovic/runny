@@ -6,9 +6,11 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -187,6 +189,31 @@ func (s *Server) notify() {
 // the heartbeat. Same non-blocking fan-out as notify(), safe from an FSM goroutine.
 func (s *Server) NotifyProgress() { s.notify() }
 
+// recoveryUnary / recoveryStream convert a panicking handler into a recorded
+// codes.Internal instead of crashing the daemon. grpc-go does not recover
+// handler panics, and this socket is the unprivileged, every-client-equal
+// control surface — one handler bug must not become a fleet-wide DoS that kills
+// every slot's in-flight job. Visible-not-silent: the panic + stack is logged.
+func recoveryUnary(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("recovered panic in gRPC handler", "method", info.FullMethod, "panic", r, "stack", string(debug.Stack()))
+			err = status.Errorf(codes.Internal, "internal error")
+		}
+	}()
+	return handler(ctx, req)
+}
+
+func recoveryStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("recovered panic in gRPC stream handler", "method", info.FullMethod, "panic", r, "stack", string(debug.Stack()))
+			err = status.Errorf(codes.Internal, "internal error")
+		}
+	}()
+	return handler(srv, ss)
+}
+
 // Serve listens on the unix socket (owner-only) until ctx ends.
 func (s *Server) Serve(ctx context.Context, socketPath string) error {
 	_ = os.Remove(socketPath) // stale socket from a previous run
@@ -197,7 +224,10 @@ func (s *Server) Serve(ctx context.Context, socketPath string) error {
 	if err := os.Chmod(socketPath, 0o600); err != nil {
 		return fmt.Errorf("restricting socket perms: %w", err)
 	}
-	g := grpc.NewServer()
+	g := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(recoveryUnary),
+		grpc.ChainStreamInterceptor(recoveryStream),
+	)
 	runnyv1.RegisterRunnyServiceServer(g, s)
 	go func() {
 		<-ctx.Done()

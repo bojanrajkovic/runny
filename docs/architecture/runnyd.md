@@ -47,7 +47,7 @@ stateDiagram-v2
     [*] --> BACKOFF: startup sweep done
     BACKOFF --> ENSURE_IMAGE: backoff elapsed
     ENSURE_IMAGE --> CLONE: image cached (digest)
-    CLONE --> BOOT: clonefile × 3
+    CLONE --> BOOT: clonefile × 3 + runner tarball
     BOOT --> AWAIT_IP: vz state Running
     AWAIT_IP --> AWAIT_SSH: dhcpd lease for our MAC
     AWAIT_SSH --> SECURE_SSH: authed session (ssh_hardening rotate)
@@ -85,6 +85,25 @@ failure broadcasts immediately so each slot retries on its own. The decision and
 its rejected alternatives are
 [ADR-0021](../architecture-decisions/0021-shared-image-pull.md).
 
+The actions-runner tarball follows the same download-once shape but with
+per-cycle ownership. ENSURE_IMAGE downloads the service-blessed build into a
+shared store (`cache/actions-runner/`) — fail-fast on a bad download before a VM
+boots, and dedup across slots — but CLONE then copy-on-write-clones this cycle's
+resolved tarball (`clonefile(2)`, near-instant) out of the store into the slot's
+own mount (`vms/<slot>/runner/`), and BOOT mounts *that*, not the store.
+
+Per-cycle ownership is what keeps staging safe. The cycle owns its tarball from
+CLONE to TEARDOWN, so no concurrent slot can delete a version another is still
+staging (a slot resolves its version at ENSURE_IMAGE but doesn't stage it until
+PROVISION, a whole boot later), the cold-start store prune never touches a live
+cycle, and the mount holds exactly one tarball — staging it by exact name, never
+a glob, keeps the on-disk record honest and the cache-miss diagnostic precise.
+Mounting one shared store into every guest would carry all three of those races;
+cloning removes them by construction, which is why the mount is per-slot rather
+than the store. The store is then pure download cache, pruned to the newest few
+versions per flavor at cold start — where no cycle is live, so the prune is
+race-free without a careful never-touch rule.
+
 ## Package map
 
 | Package | Owns |
@@ -92,10 +111,11 @@ its rejected alternatives are
 | `internal/bounded` | `bounded.Context` — the no-unbounded-operations invariant as a type (ADR-0011); wall-clock and progress-stall bounds |
 | `internal/home` | the `~/.runny` layout and the config schema (parse/default/validate once, at the boundary); a non-fatal warnings channel (`Config.Warnings`) runs local soft-validations feeding the config-compat gate (ADR-0022) |
 | `internal/cycle` | cycle.json records: write/read/prune, retention |
-| `internal/tart` | tart bundle format: config.json parse, validation, clonefile |
+| `internal/clonefile` | the APFS clonefile(2) wrapper: single-file copy-on-write clone (darwin); home of the darwin/non-darwin split both clone callers share |
+| `internal/tart` | tart bundle format: config.json parse, validation, bundle clone (per file via `internal/clonefile`) |
 | `internal/oci` | tart-format image pull: registry auth, manifest, Apple-LZ4 disk assembly; declared sizes enforced on every blob and decode |
 | `internal/sshx` | the only constructor of SSH clients (deadline recipe) |
-| `internal/guest` | what to *do* over SSH: stage runner from the virtiofs share, run.sh, diag pull |
+| `internal/guest` | what to *do* over SSH: stage runner from the per-slot virtiofs share, run.sh, diag pull |
 | `internal/github` | App JWT → installation token → JIT config; list/delete for reconcile |
 | `internal/vm` | Virtualization.framework boot (darwin), dhcpd-lease IP resolution |
 | `internal/statemachine` | the FSM; depends only on the seams above |
@@ -189,7 +209,10 @@ from `-doctor`, which runs the full network suite for operational diagnosis.
 
 `internal/home` is the authority. Shape: `config.yaml`, `runnyd.sock` (0600),
 `logs/runnyd.log`, `images/<ref>/<digest>/` (immutable cache),
-`vms/<slot>/` (ephemeral, swept), `cache/actions-runner/` (virtiofs share),
+`vms/<slot>/` (ephemeral, swept) — including `vms/<slot>/runner/`, the cycle's
+own per-slot virtiofs mount holding its single cloned runner tarball —
+`cache/actions-runner/` (the runner-tarball download store, cold-start pruned;
+never mounted into a guest),
 `cycles/<slot>/<started>-<id>/cycle.json` (+ post-mortem artifacts on
 failure cycles; success cycles keep only the record). A cycle that saw an
 operator debug-key attempt also carries `operator-access.json` — the
@@ -247,9 +270,10 @@ that can hold a guest services it (ADR-0015):
 - **Never trust the image's bundled runner**: cirruslabs images preinstall
   `~/actions-runner`, which rots into broker-rejected versions ("deprecated
   and cannot receive messages") that JIT runners cannot self-update out of.
-  The provision script always stages from the cache share, which is itself
-  sourced from the repo's `/actions/runners/downloads` endpoint — the
-  service's own answer to "which build works".
+  The provision script always stages from the per-slot mount (a clone of the
+  shared store, which is itself sourced from the repo's
+  `/actions/runners/downloads` endpoint — the service's own answer to "which
+  build works"), by the exact tarball name this cycle resolved, never a glob.
 - **Seed the image cache from tart's** when migrating a host: the bundles are
   clonefile-compatible (`cp -c` the four files into
   `images/<ref>/<digest>/`), avoiding an 80GB+ re-pull.

@@ -1,42 +1,77 @@
-# runny 🏃
+<img src="apps/Runny/Resources/AppIcon.xcassets/AppIcon.appiconset/icon_128.png" width="128" align="right">
 
-An observable macOS GitHub Actions runner daemon: crash-only ephemeral runner
-VMs on Apple's Virtualization.framework, fully compatible with
+# runny
+
+An observable macOS GitHub Actions runner daemon: ephemeral single-use VMs on
+Apple's Virtualization.framework, fully compatible with
 [tart](https://github.com/cirruslabs/tart)'s bundle and OCI image format — with
 no tart binary at runtime.
 
-Three artifacts, one contract:
+**Design rule: no operation is ever unbounded, and no failure is ever silent.**
+Built because the predecessor converted every transient failure into a permanent
+silent outage.
 
-- **`runnyd`** — the daemon. One deadline-bounded state machine per runner
-  slot: pull image → clonefile → boot (in-process via
-  [vz](https://github.com/Code-Hex/vz)) → SSH provision → JIT-register →
-  listen → run one job → destroy → repeat. Every failure converges to
-  destroy-and-recycle with capped backoff; every cycle writes a
-  machine-readable post-mortem.
-- **`runnyctl`** — the CLI over a unix socket: live status and runner logs,
-  recycle/pause, per-cycle post-mortems (`why`), environment checks
-  (`doctor`).
-- **`Runny`** — a SwiftUI app (menu-bar popover + main window), a sibling
-  client of the same protobuf contract.
+## Install
 
-Built because the predecessor converted every transient failure into a
-permanent silent outage. runny's design rule: **no operation is ever
-unbounded, and no failure is ever silent.**
+Requires **macOS Sequoia (15.0+)** on **Apple Silicon** and a GitHub App with
+the runner-administration permission. See [docs/deploy.md](docs/deploy.md) for
+GitHub App setup and `config.yaml` authoring.
 
-## Status
+**Desktop — Runny.app (menu-bar status + daemon manager):**
 
-Pre-1.0, under active construction. See `docs/architecture-decisions/` for the
-decision record and the GitHub issues for what's in flight.
-
-## Building
-
+```sh
+brew install --cask bojanrajkovic/tap/runny-app
 ```
+
+Open Runny.app and toggle Settings → Daemon → "Start runnyd at login" to
+install the per-user LaunchAgent. The one-time Local Network prompt will appear
+the first time a guest boots.
+
+**Headless — non-root system LaunchDaemon:**
+
+```sh
+brew install bojanrajkovic/tap/runny
+sudo runnyctl install-daemon
+```
+
+Place your config at `/Library/Application Support/runny/config.yaml` before
+running `install-daemon`. See [docs/deploy.md](docs/deploy.md).
+
+## What's in the box
+
+**`runnyd`** — the daemon. One deadline-bounded state machine per runner slot:
+pull image → clonefile → boot (in-process via
+[vz](https://github.com/Code-Hex/vz)) → SSH provision → JIT-register → run one
+job → destroy → repeat. Every failure converges to destroy-and-recycle with
+capped backoff; every cycle writes a machine-readable post-mortem.
+
+**`runnyctl`** — the operator CLI over a unix socket: live status and runner
+logs, recycle/pause slots, per-cycle post-mortems (`why`), environment checks
+(`doctor`), version-gated daemon upgrades (`upgrade-daemon`).
+
+**`Runny`** — a SwiftUI menu-bar app: slot health at a glance, live runner logs,
+daemon lifecycle management, and in-app update notifications when a new release
+lands in the Homebrew tap.
+
+## Building from source
+
+```sh
 mise install
 bazel build //...
 ```
 
-Pure-Go packages build and test anywhere; the daemon binary and app require a
-macOS arm64 host (see `CONTRIBUTING.md` for the dev loop and codesigning).
+Pure-Go packages build and test anywhere; the daemon binary and Runny.app
+require macOS arm64. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full dev
+loop, codesigning tiers, and the CI setup.
+
+## Docs
+
+| Topic | |
+|---|---|
+| Install, config, GitHub App setup, migration | [docs/deploy.md](docs/deploy.md) |
+| How it works | [docs/architecture/](docs/architecture/) |
+| Why it works that way | [docs/architecture-decisions/](docs/architecture-decisions/) |
+| Security posture | [docs/security.md](docs/security.md) |
 
 ## License
 

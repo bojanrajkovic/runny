@@ -209,7 +209,7 @@ GUI.
   of the plist alone, since a bootout would evict our own agent off the shared label.
 - Detection covers only the `gui/<uid>` domain. A `system/`-domain LaunchDaemon —
   a `sudo brew services` root daemon today, or the dedicated non-root headless
-  daemon planned for fleet hosts (#76) — is NOT detected, yet it is fully
+  daemon for fleet hosts (ADR-0020) — is NOT detected, yet it is fully
   functional: macOS auto-allows local network access to any launchd-started daemon
   regardless of uid (TN3179), so the app could install a competing per-user agent
   over a working system daemon. A real limitation, not a moot one — extending the

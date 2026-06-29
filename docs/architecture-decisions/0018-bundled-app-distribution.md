@@ -113,10 +113,9 @@ residual skew is **made loud**.
   Network grant only a GUI-session process can hold ([`deploy.md`](../deploy.md)
   "Why this is not just `launchctl load`",
   [ADR-0008](0008-native-virtualization-framework.md)); a system daemon of any
-  uid is silently denied. A future userspace network stack would lift that gate
-  and admit a headless, non-root LaunchDaemon — the deliberate not-yet fork in
-  [#76](https://github.com/bojanrajkovic/runny/issues/76) (see Consequences).
-  Until then, per-user is the only configuration that reaches its guests at all.
+  uid is silently denied. (This premise was overturned — see the amendment at
+  the top of this ADR; a headless non-root system LaunchDaemon is shipped in
+  [ADR-0020](0020-headless-system-daemon.md).)
 
 - **Point the agent at the `runnyd` inside the app bundle — the native
   `SMAppService` shape.** The agent's plist ships at
@@ -260,16 +259,13 @@ residual skew is **made loud**.
   plus TCC grant is the entire privileged surface — smaller than the container
   tools' root helpers.
 - **The per-user agent is contingent, not axiomatic.** `SMAppService.agent` is
-  correct only while guests ride vmnet and its GUI-session Local Network gate. A
-  future move to a userspace network stack (`VZFileHandleNetworkDeviceAttachment`
-  + e.g. gvisor-tap-vsock) would lift the gate and admit a **headless,
-  dedicated-non-root LaunchDaemon** (`SMAppService.daemon` + `UserName`), removing
-  the auto-login requirement on fleet hosts — a substantial research fork that
-  revisits ADR-0008 and is out of scope here
-  ([#76](https://github.com/bojanrajkovic/runny/issues/76)). If it lands, the
-  bundling, version-locking, CLI-vending, and detect-and-defer decisions above
-  survive unchanged; only the registration call and the home-as-GUI-session
-  assumption shift.
+  correct only while guests ride vmnet and its GUI-session Local Network gate.
+  A headless non-root system LaunchDaemon (`runnyctl install-daemon`) is shipped
+  in [ADR-0020](0020-headless-system-daemon.md) for fleet hosts that have no GUI
+  session. The bundling, version-locking, CLI-vending, and detect-and-defer
+  decisions above survive unchanged for the app-managed path; the optional
+  userspace-network-stack hardening ([#84](https://github.com/bojanrajkovic/runny/issues/84))
+  remains a future hedge.
 - CLI vending targets `/usr/local/bin`, which on an Apple-Silicon host may not
   exist or be writable without an admin prompt; the create-and-symlink step is an
   implementation detail tracked in #62.

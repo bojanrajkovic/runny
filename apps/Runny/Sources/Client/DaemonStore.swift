@@ -132,6 +132,22 @@ final class DaemonStore {
     /// control.
     var dismissedSkew: SkewVerdict?
 
+    /// The latest Runny release newer than this app's stamped version, or nil
+    /// when the app is current, no check has run yet, or the check failed
+    /// (fail-quiet — silence is better than a false "you're behind" banner).
+    /// Set by the 24h timer + launch + manual "Check for Updates…" check.
+    private(set) var availableUpdate: AppUpdate?
+    /// The update the operator dismissed — keyed on the version string so a
+    /// re-check of the same release stays quiet, but a newer release is new news.
+    var dismissedUpdate: AppUpdate?
+    /// The banner to show: `availableUpdate` minus what was dismissed. A
+    /// dismissed "v0.7.0" stays gone until a "v0.7.1" check arrives.
+    var shownUpdate: AppUpdate? {
+        guard let update = availableUpdate, update.version != dismissedUpdate?.version
+        else { return nil }
+        return update
+    }
+
     /// The live skew — gated on a healthy connection only. The main-window card
     /// reads this and renders it as an always-on status row, like the draining
     /// line: the card is the authoritative status surface, so it keeps telling the
@@ -358,11 +374,21 @@ final class DaemonStore {
         let text: String
     }
 
+    /// A newer Runny app release detected by the GitHub releases/latest poll —
+    /// the third version axis, kept distinct from `SkewVerdict` (daemon ↔ app)
+    /// so neither surface can confuse the two. `Sendable` so the fetch result
+    /// can cross actor boundaries without a copy.
+    struct AppUpdate: Equatable, Sendable {
+        let version: String
+        let url: URL
+    }
+
     /// The client of the current healthy stream; log/timeline views borrow
     /// it. nil while unreachable — actions fail fast instead of hanging.
     private(set) var client: RunnyClient?
 
     private var supervisor: Task<Void, Never>?
+    private var updateCheckTask: Task<Void, Never>?
     private var sleepTask: Task<Void, Never>?
     private var retryNow = false
     private var attemptLastMessage: Date?
@@ -433,6 +459,19 @@ final class DaemonStore {
         }
         watchHomeDirectory()
         supervisor = Task { await superviseForever() }
+        // App-update check: fires on launch, then every 24h, and on the
+        // "Check for Updates…" menu command. App-lifetime — NOT cancelled by
+        // restart(), which is connection-scoped. The notification lets the
+        // menu item trigger an immediate check without threading the store
+        // into the command infrastructure.
+        if updateCheckTask == nil {
+            NotificationCenter.default.addObserver(
+                forName: .runnyCheckForAppUpdates, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in await self?.runUpdateCheck() }
+            }
+            updateCheckTask = Task { await updateCheckLoop() }
+        }
     }
 
     /// Manual re-dial: tear down the supervisor and socket watch, then start()
@@ -1401,6 +1440,23 @@ final class DaemonStore {
         s.count > 12 ? String(s.prefix(12)) : s
     }
 
+    // MARK: - App-update notify (fetch GitHub releases/latest, fail-quiet)
+
+    private func updateCheckLoop() async {
+        await runUpdateCheck()
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(86400))
+            if Task.isCancelled { return }
+            await runUpdateCheck()
+        }
+    }
+
+    func runUpdateCheck() async {
+        let enabled = UserDefaults.standard.object(forKey: Prefs.checkForAppUpdates) as? Bool ?? true
+        guard enabled else { return }
+        availableUpdate = await AppUpdateChecker.fetch(appVersion: Self.appVersion)
+    }
+
     // MARK: - Version skew (warn, never refuse)
 
     /// The `x.y.z` core of a version string — the leading `\d+.\d+.\d+`, or nil if
@@ -1416,6 +1472,21 @@ final class DaemonStore {
         guard let range = s.range(of: #"^\d+\.\d+\.\d+"#, options: .regularExpression)
         else { return nil }
         return String(s[range])
+    }
+
+    /// Pure: is `latestTag` (the GitHub API's `tag_name`, e.g. `"v0.7.0"`) a
+    /// release strictly newer than `appVersion`? Returns the normalized `x.y.z`
+    /// core of the release if it is, nil otherwise. Fail-quiet: an unstamped app
+    /// (`0.0.0`), an unparseable tag, or an equal/older release all return nil.
+    /// Strips a leading `v` before normalizing; handles `-beta.<sha>` suffixes via
+    /// `versionCore`'s anchored match — the same normalization the skew detector uses.
+    nonisolated static func releaseNewerThanApp(appVersion: String, latestTag: String) -> String? {
+        let tag = latestTag.hasPrefix("v") ? String(latestTag.dropFirst()) : latestTag
+        guard
+            let latestCore = versionCore(tag),
+            let appCore = versionCore(appVersion), appCore != unstampedVersion
+        else { return nil }
+        return semverGreater(latestCore, appCore) ? latestCore : nil
     }
 
     /// Pure: the version-skew verdict between this app and the daemon it watches,

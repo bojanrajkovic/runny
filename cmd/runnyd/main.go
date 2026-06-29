@@ -156,6 +156,13 @@ func run() error {
 			return err
 		}
 		logger.Info("swept vms dir")
+		// Reap stale runner tarballs from the shared download store, keeping
+		// the newest few per flavor. Safe here and only here: cold start has no
+		// live cycle, so nothing holds a clone of an about-to-be-deleted
+		// version. Best-effort — disk hygiene must never refuse startup.
+		if err := images.PruneRunnerCache(dir.RunnerCacheDir(), runnerCacheKeep); err != nil {
+			logger.Warn("pruning runner cache failed; stale tarballs may linger", "err", err)
+		}
 	}
 
 	clients, distinctClients, err := buildClients(cfg)
@@ -858,6 +865,13 @@ func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*gi
 // sweepBudget bounds the whole startup registration sweep. Best-effort by
 // design: anything the budget cuts off is retried on the next cold start.
 const sweepBudget = time.Minute
+
+// runnerCacheKeep is how many runner-tarball versions per flavor the cold-start
+// prune retains in the shared download store. Two, not one: it covers a version
+// rollover straddling a restart (the current build plus the one it just
+// replaced) so neither is re-downloaded, while keeping the store tiny. Live
+// cycles read their own clones, so this bounds only the download cache.
+const runnerCacheKeep = 2
 
 func sweepRegistrations(ctx context.Context, log *slog.Logger, gh *github.Client, prefix string) {
 	// Self-bounded: this runs under the un-deadlined signal context at

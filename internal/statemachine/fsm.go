@@ -58,6 +58,23 @@ const (
 	markerJobCompleted = "completed with result:"
 )
 
+// maxJobName caps the guest-controlled job name. The name is sliced from the
+// "Running job:" marker line, which is attacker-controlled and bounded only by
+// maxLine (1 MB) at the reader; without this cap a 1 MB job name would land
+// verbatim in cycle.json and in every WatchStatus snapshot's live Status.Job.
+const maxJobName = 256
+
+// jobNameFromMarker extracts the job name following the "Running job:" marker,
+// trimmed and capped at maxJobName bytes on a valid-UTF-8 boundary (a naive
+// byte slice could split a multibyte rune and write U+FFFD to disk/the wire).
+func jobNameFromMarker(markerLine string) string {
+	name := strings.TrimSpace(markerLine[strings.Index(markerLine, markerJobStarted)+len(markerJobStarted):])
+	if len(name) > maxJobName {
+		name = strings.ToValidUTF8(name[:maxJobName], "")
+	}
+	return name
+}
+
 // errOperatorRecycle marks a cycle ended on purpose by `runnyctl recycle`.
 // Cycles it ends are recorded as failures (the timeline is truthful) but are
 // benign for backoff accounting: an operator action is not a health signal.
@@ -983,7 +1000,7 @@ func (s *Slot) listenAndRunJob(ctx context.Context, rec *cycle.Record, proc Proc
 // operator's mid-job work (§3).
 func (s *Slot) runJob(ctx context.Context, rec *cycle.Record, proc Proc, guest Guest, markerLine string) (bool, State, error) {
 	cfg := s.deps.Config
-	jobName := strings.TrimSpace(markerLine[strings.Index(markerLine, markerJobStarted)+len(markerJobStarted):])
+	jobName := jobNameFromMarker(markerLine)
 	job := &cycle.JobInfo{Name: jobName, Started: time.Now()}
 	rec.Job = job
 	completedBeforeJob := slices.Clone(rec.States)

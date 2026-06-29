@@ -14,12 +14,16 @@ go_library(
         "//internal/home",
         "//internal/oci",
         "//internal/tart",
+        "//internal/versioncore",
     ],
 )
 
 go_test(
     name = "images_test",
-    srcs = ["puller_test.go"],
+    srcs = [
+        "puller_test.go",
+        "tarball_test.go",
+    ],
     embed = [":images"],
     deps = ["//internal/oci"],
 )

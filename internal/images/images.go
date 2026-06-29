@@ -21,6 +21,7 @@ import (
 	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/oci"
 	"github.com/bojanrajkovic/runny/internal/tart"
+	"github.com/bojanrajkovic/runny/internal/versioncore"
 )
 
 // defaultResolveTimeout is the fallback bound for the quick metadata
@@ -246,6 +247,48 @@ type RunnerResolver func(ctx bounded.Context) (filename, url, sha256 string, err
 // download (a wait on a peer's already-bounded operation is itself bounded).
 var tarballLocks sync.Map // filename -> chan struct{} (capacity-1 semaphore)
 
+// supersededTarballs returns the full paths of cached runner tarballs that
+// EnsureRunnerTarball should drop when staging assetName: same-flavor builds
+// (the actions-runner-<os>-arm64 prefix) that are STRICTLY OLDER than
+// assetName. It deliberately never returns a newer-or-equal sibling — a
+// concurrent slot resolving a NEWER version shares this prefix but holds a
+// different per-assetName lock and may have just renamed its tarball in;
+// deleting it would empty the cache out from under that slot's guest, which
+// then stages nothing. assetName is GitHub's filename verbatim, so the shape
+// is guarded (an unguarded [:4] would panic the whole daemon on a renamed
+// asset, not fail one cycle); an unparseable version on either side is left
+// alone rather than guessed at. .partial temps belong to whichever slot is
+// mid-download and are skipped.
+func supersededTarballs(cacheDir, assetName string) []string {
+	parts := strings.Split(assetName, "-")
+	if len(parts) < 4 {
+		return nil
+	}
+	prefix := strings.Join(parts[:4], "-") // actions-runner-<os>-arm64
+	myVer := versioncore.Core(strings.TrimPrefix(assetName, prefix+"-"))
+	if myVer == "" {
+		return nil // can't tell what's older than a version we can't parse
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		return nil
+	}
+	var stale []string
+	for _, e := range entries {
+		name := e.Name()
+		if name == assetName || !strings.HasPrefix(name, prefix) ||
+			strings.HasSuffix(name, ".partial") {
+			continue
+		}
+		theirVer := versioncore.Core(strings.TrimPrefix(name, prefix+"-"))
+		if theirVer == "" || versioncore.Compare(theirVer, myVer) >= 0 {
+			continue // unparseable, or newer-or-equal: keep it
+		}
+		stale = append(stale, filepath.Join(cacheDir, name))
+	}
+	return stale
+}
+
 // EnsureRunnerTarball makes sure the service-current actions-runner tarball
 // sits in cacheDir (the virtiofs share). Returns the tarball path and the
 // asset filename (the version identifier, e.g. "actions-runner-osx-arm64-2.320.0.tar.gz").
@@ -284,22 +327,8 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 	if _, err := os.Stat(dest); err == nil {
 		return dest, assetName, nil // already cached
 	}
-	// Drop superseded tarballs of the same flavor (osx vs linux prefix).
-	// assetName is GitHub's filename verbatim, so guard the shape — an
-	// unguarded [:4] would panic the whole daemon on a renamed asset, not
-	// fail one cycle. Skip .partial temps: they belong to whichever slot is
-	// mid-download (locks are per-assetName, so a sibling downloading a
-	// NEWER version shares this prefix but not this lock).
-	if parts := strings.Split(assetName, "-"); len(parts) >= 4 {
-		prefix := strings.Join(parts[:4], "-") // actions-runner-<os>-arm64
-		if entries, err := os.ReadDir(cacheDir); err == nil {
-			for _, e := range entries {
-				if strings.HasPrefix(e.Name(), prefix) && e.Name() != assetName &&
-					!strings.HasSuffix(e.Name(), ".partial") {
-					_ = os.Remove(filepath.Join(cacheDir, e.Name()))
-				}
-			}
-		}
+	for _, p := range supersededTarballs(cacheDir, assetName) {
+		_ = os.Remove(p)
 	}
 
 	if log != nil {

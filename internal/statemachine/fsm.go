@@ -109,6 +109,10 @@ type ImageEnsurer interface {
 // Cloner clones a bundle (tart.Clone's seam).
 type Cloner func(src tart.Bundle, dst string) error
 
+// FileCloner CoW-clones a single file (clonefile.Clone's seam): the per-cycle
+// runner-tarball clone from the shared store into the slot's own mount.
+type FileCloner func(src, dst string) error
+
 // GitHub is the slice of internal/github the FSM needs. Every method takes
 // bounded.Context: these are network calls, and an unbounded call site is a
 // compile error.
@@ -183,6 +187,7 @@ type Deps struct {
 	VM             vm.Manager
 	Images         ImageEnsurer
 	Clone          Cloner
+	CloneFile      FileCloner
 	GitHub         GitHub
 	Dial           Dialer
 	Log            *slog.Logger
@@ -727,15 +732,43 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	})
 
 	vmDir := s.deps.Home.VMDir(s.name)
+	// runnerMount is the slot's own mount, or "" when this cycle resolved no
+	// runner tarball (no resolver configured). One value drives both states:
+	// CLONE populates it iff non-empty, BOOT mounts it iff non-empty (an empty
+	// share dir attaches nothing), so the two can't disagree about whether a
+	// tarball exists.
+	var runnerMount string
+	if rec.RunnerVersion != "" {
+		runnerMount = s.deps.Home.SlotRunnerMountDir(s.name)
+	}
 	if ok {
 		ok = enter(StateClone, cfg.Deadlines.Clone.D(), func(c bounded.Context) error {
-			return s.deps.Clone(srcBundle, vmDir)
+			// A prior cycle's teardown removes vmDir best-effort; if that ever
+			// failed, a surviving clone file (a bundle file or the runner
+			// tarball) would make clonefile(2) below fail EEXIST every cycle,
+			// wedging the slot in a CLONE→BACKOFF loop until a cold start. Clear
+			// it first so CLONE is self-healing. Safe: no live guest owns vmDir
+			// here — a wedged cycle parks the slot and never re-enters CLONE.
+			if err := removeAll(vmDir); err != nil {
+				return fmt.Errorf("clearing stale clone dir: %w", err)
+			}
+			if err := s.deps.Clone(srcBundle, vmDir); err != nil {
+				return err
+			}
+			if runnerMount == "" {
+				return nil
+			}
+			// Give the cycle its own runner tarball: clone this cycle's
+			// resolved version out of the shared store into the slot's mount.
+			// From here the shared store is never read again, so no slot or GC
+			// can disturb what this guest boots with.
+			return cloneRunnerTarball(s.deps.CloneFile, s.deps.Home.RunnerCacheDir(), runnerMount, rec.RunnerVersion)
 		})
 	}
 	if ok {
 		ok = enter(StateBoot, cfg.Deadlines.Boot.D(), func(c bounded.Context) error {
 			m, err := s.deps.VM.Boot(c, tart.Bundle(vmDir), vm.BootOptions{
-				RunnerCacheDir: s.deps.Home.RunnerCacheDir(),
+				RunnerShareDir: runnerMount, // the slot's OWN mount, not the shared store
 				CPUCount:       s.deps.Pool.CPUCores,
 				MemorySize:     uint64(s.deps.Pool.RAMGB) << 30, // GiB → bytes; 0 keeps the image's
 			})

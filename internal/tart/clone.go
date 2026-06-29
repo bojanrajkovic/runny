@@ -1,5 +1,3 @@
-//go:build darwin
-
 package tart
 
 import (
@@ -8,12 +6,14 @@ import (
 	"path/filepath"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/bojanrajkovic/runny/internal/clonefile"
 )
 
 // Clone copy-on-write clones a bundle via APFS clonefile: near-instant
 // regardless of disk.img size (measured 957µs for a 120GB bundle). The
-// destination directory is created; existing contents cause an error.
+// destination directory is created; existing bundle files cause an error
+// (clonefile(2) refuses to overwrite). The per-file CoW primitive — and the
+// darwin-only build constraint that comes with it — lives in internal/clonefile.
 func Clone(src, dst Bundle) (time.Duration, error) {
 	if err := src.Verify(); err != nil {
 		return 0, err
@@ -23,8 +23,8 @@ func Clone(src, dst Bundle) (time.Duration, error) {
 	}
 	start := time.Now()
 	for _, f := range BundleFiles {
-		if err := unix.Clonefile(filepath.Join(string(src), f), filepath.Join(string(dst), f), 0); err != nil {
-			return 0, fmt.Errorf("clonefile %s: %w", f, err)
+		if err := clonefile.Clone(filepath.Join(string(src), f), filepath.Join(string(dst), f)); err != nil {
+			return 0, err
 		}
 	}
 	return time.Since(start), nil

@@ -7,12 +7,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -247,51 +249,68 @@ type RunnerResolver func(ctx bounded.Context) (filename, url, sha256 string, err
 // download (a wait on a peer's already-bounded operation is itself bounded).
 var tarballLocks sync.Map // filename -> chan struct{} (capacity-1 semaphore)
 
-// supersededTarballs returns the full paths of cached runner tarballs that
-// EnsureRunnerTarball should drop when staging assetName: same-flavor builds
-// (the actions-runner-<os>-arm64 prefix) that are STRICTLY OLDER than
-// assetName. Guests stage their cycle's exact tarball by name (see
-// guest.provisionScript), so this is disk GC, not correctness — but it still
-// must not delete a tarball a concurrent slot is using. It deliberately never
-// returns a newer-or-equal sibling: a concurrent slot resolving a NEWER version
-// shares this prefix but holds a different per-assetName lock and may have just
-// renamed its tarball in; deleting it would pull that slot's tarball out from
-// under its guest. The residual it does NOT close — dropping an OLDER sibling a
-// slow concurrent slot is still staging — is a rare rollover race whose worst
-// case is one loud exit-78 cycle that crash-only recycles, not a silent
-// mismatch. assetName is GitHub's filename verbatim, so the shape is guarded
-// (an unguarded [:4] would panic the whole daemon on a renamed asset, not fail
-// one cycle); an unparseable version on either side is left alone rather than
-// guessed at. .partial temps belong to whichever slot is mid-download and are
-// skipped.
-func supersededTarballs(cacheDir, assetName string) []string {
-	parts := strings.Split(assetName, "-")
-	if len(parts) < 4 {
+// PruneRunnerCache keeps the `keep` newest tarball versions PER OS/arch flavor
+// (the actions-runner-<os>-arm64 prefix) in cacheDir and deletes the rest. It is
+// pure disk hygiene: every live cycle CoW-clones its resolved tarball into its
+// own per-slot mount before boot (see the state machine's CLONE state), so
+// nothing reads this shared store after CLONE and a prune here can never pull a
+// tarball out from under a running guest.
+//
+// Call it only when no cycle is live — at cold start, beside the vms/ sweep —
+// where that "no live reader" precondition holds by construction (a mid-run
+// prune could still drop a version a slot resolved-but-not-yet-cloned). Grouping
+// by flavor is load-bearing: a host with both darwin and linux pools must not
+// lose one flavor's current tarball to the other flavor's churn. Unparseable
+// names are left untouched, but a .partial temp is reaped: at the cold start
+// where this runs no download is in flight, so any leftover is from a process
+// that died mid-download. A missing cacheDir is not an error (a daemon that
+// never downloaded one). keep < 1 is refused as a no-op rather than wiping the
+// store — the sole caller passes a sane constant, but the exported contract must
+// not silently delete everything (or panic on a negative slice index).
+func PruneRunnerCache(cacheDir string, keep int) error {
+	if keep < 1 {
 		return nil
-	}
-	prefix := strings.Join(parts[:4], "-") // actions-runner-<os>-arm64
-	myVer := versioncore.Core(strings.TrimPrefix(assetName, prefix+"-"))
-	if myVer == "" {
-		return nil // can't tell what's older than a version we can't parse
 	}
 	entries, err := os.ReadDir(cacheDir)
 	if err != nil {
-		return nil
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
-	var stale []string
+	var errs []error
+	type tarball struct{ name, version string }
+	groups := map[string][]tarball{}
 	for _, e := range entries {
 		name := e.Name()
-		if name == assetName || !strings.HasPrefix(name, prefix) ||
-			strings.HasSuffix(name, ".partial") {
+		if e.IsDir() {
 			continue
 		}
-		theirVer := versioncore.Core(strings.TrimPrefix(name, prefix+"-"))
-		if theirVer == "" || versioncore.Compare(theirVer, myVer) >= 0 {
-			continue // unparseable, or newer-or-equal: keep it
+		if strings.HasSuffix(name, ".partial") {
+			errs = append(errs, os.Remove(filepath.Join(cacheDir, name))) // dead temp; no live download at cold start
+			continue
 		}
-		stale = append(stale, filepath.Join(cacheDir, name))
+		parts := strings.Split(name, "-")
+		if len(parts) < 4 {
+			continue
+		}
+		prefix := strings.Join(parts[:4], "-") // actions-runner-<os>-arm64
+		v := versioncore.Core(strings.TrimPrefix(name, prefix+"-"))
+		if v == "" {
+			continue // unparseable: leave it alone rather than guess its age
+		}
+		groups[prefix] = append(groups[prefix], tarball{name, v})
 	}
-	return stale
+	for _, vs := range groups {
+		if len(vs) <= keep {
+			continue
+		}
+		slices.SortFunc(vs, func(a, b tarball) int { return versioncore.Compare(b.version, a.version) }) // newest first
+		for _, t := range vs[keep:] {
+			errs = append(errs, os.Remove(filepath.Join(cacheDir, t.name)))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // EnsureRunnerTarball makes sure the service-current actions-runner tarball
@@ -299,8 +318,9 @@ func supersededTarballs(cacheDir, assetName string) []string {
 // asset filename (the version identifier, e.g. "actions-runner-osx-arm64-2.320.0.tar.gz").
 // The download is stall-watched and progress-reported — no unbounded silent
 // network reads anywhere (a startup-time version of this dead-stalled on a
-// hung GitHub download with no timeout). Superseded same-OS tarballs are
-// removed so guests (which pick by name) never stage a deprecated build.
+// hung GitHub download with no timeout). Old versions accumulate in the shared
+// store and are reaped at cold start by PruneRunnerCache, not here: each cycle
+// clones its own tarball before boot, so this store has no live readers to race.
 func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerResolver, resolveBudget, stallBudget time.Duration, report func(string), log *slog.Logger) (string, string, error) {
 	if resolveBudget <= 0 {
 		resolveBudget = defaultResolveTimeout
@@ -331,9 +351,6 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 	dest := filepath.Join(cacheDir, assetName)
 	if _, err := os.Stat(dest); err == nil {
 		return dest, assetName, nil // already cached
-	}
-	for _, p := range supersededTarballs(cacheDir, assetName) {
-		_ = os.Remove(p)
 	}
 
 	if log != nil {

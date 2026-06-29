@@ -7,22 +7,22 @@ import (
 	"testing"
 )
 
-// TestSupersededTarballs pins the version-aware supersede rule: only STRICTLY
-// OLDER same-flavor tarballs are dropped. The regression it guards is a slot
-// staging version N deleting a concurrent slot's freshly-downloaded version
-// N+1 (same prefix, different per-assetName lock) — which would leave that
-// slot's guest with nothing to stage.
-func TestSupersededTarballs(t *testing.T) {
+// TestPruneRunnerCache pins the cold-start GC: keep the `keep` newest versions
+// PER OS/arch flavor, drop the rest. Grouping by flavor is load-bearing — a host
+// with both darwin and linux pools must not lose one flavor's current tarball
+// just because the other flavor has more recent versions. Unparseable names are
+// left untouched; a dead .partial temp is reaped (no download is in flight at
+// the cold start where this runs).
+func TestPruneRunnerCache(t *testing.T) {
 	dir := t.TempDir()
-	const self = "actions-runner-osx-arm64-2.320.0.tar.gz"
 	files := []string{
-		self,
-		"actions-runner-osx-arm64-2.319.0.tar.gz",         // older  → drop
-		"actions-runner-osx-arm64-2.300.5.tar.gz",         // older  → drop
-		"actions-runner-osx-arm64-2.321.0.tar.gz",         // newer  → KEEP (the bug)
-		"actions-runner-osx-arm64-2.320.0.tar.gz.partial", // temp   → keep
-		"actions-runner-linux-arm64-2.100.0.tar.gz",       // flavor → keep
-		"actions-runner-osx-arm64-dev.tar.gz",             // unparseable → keep
+		"actions-runner-osx-arm64-2.321.0.tar.gz",         // osx newest      → keep
+		"actions-runner-osx-arm64-2.320.0.tar.gz",         // osx 2nd-newest  → keep
+		"actions-runner-osx-arm64-2.319.0.tar.gz",         // osx older       → DROP
+		"actions-runner-osx-arm64-2.300.5.tar.gz",         // osx oldest      → DROP
+		"actions-runner-linux-arm64-2.100.0.tar.gz",       // linux, lone     → keep (own group)
+		"actions-runner-osx-arm64-2.322.0.tar.gz.partial", // dead temp       → REAP
+		"actions-runner-osx-arm64-dev.tar.gz",             // unparseable     → keep
 	}
 	for _, f := range files {
 		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o600); err != nil {
@@ -30,31 +30,73 @@ func TestSupersededTarballs(t *testing.T) {
 		}
 	}
 
-	got := supersededTarballs(dir, self)
-	want := []string{
-		filepath.Join(dir, "actions-runner-osx-arm64-2.300.5.tar.gz"),
-		filepath.Join(dir, "actions-runner-osx-arm64-2.319.0.tar.gz"),
+	if err := PruneRunnerCache(dir, 2); err != nil {
+		t.Fatalf("PruneRunnerCache: %v", err)
 	}
-	slices.Sort(got)
-	if !slices.Equal(got, want) {
-		t.Errorf("supersededTarballs dropped %v, want exactly %v", got, want)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var left []string
+	for _, e := range entries {
+		left = append(left, e.Name())
+	}
+	slices.Sort(left)
+	want := []string{
+		"actions-runner-linux-arm64-2.100.0.tar.gz",
+		"actions-runner-osx-arm64-2.320.0.tar.gz",
+		"actions-runner-osx-arm64-2.321.0.tar.gz",
+		"actions-runner-osx-arm64-dev.tar.gz",
+	}
+	if !slices.Equal(left, want) {
+		t.Errorf("after prune dir holds %v, want %v", left, want)
 	}
 }
 
-// TestSupersededTarballsGuards covers the shape guards: a renamed asset whose
-// name has fewer than four dash segments, or no parseable version, drops
-// nothing rather than panicking or guessing.
-func TestSupersededTarballsGuards(t *testing.T) {
+// TestPruneRunnerCacheRefusesNonPositiveKeep: keep<1 would otherwise delete the
+// whole store (vs[0:] is everything), so the exported contract refuses it as a
+// no-op rather than wiping every flavor.
+func TestPruneRunnerCacheRefusesNonPositiveKeep(t *testing.T) {
 	dir := t.TempDir()
-	for _, f := range []string{"weird.tar.gz", "actions-runner-osx-arm64-2.319.0.tar.gz"} {
+	files := []string{
+		"actions-runner-osx-arm64-2.321.0.tar.gz",
+		"actions-runner-osx-arm64-2.320.0.tar.gz",
+	}
+	for _, f := range files {
 		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if got := supersededTarballs(dir, "weird.tar.gz"); got != nil {
-		t.Errorf("malformed assetName: got %v, want nil", got)
+	if err := PruneRunnerCache(dir, 0); err != nil {
+		t.Fatalf("PruneRunnerCache(0): %v", err)
 	}
-	if got := supersededTarballs(dir, "actions-runner-osx-arm64-dev.tar.gz"); got != nil {
-		t.Errorf("unparseable version: got %v, want nil", got)
+	if entries, _ := os.ReadDir(dir); len(entries) != 2 {
+		t.Fatalf("keep=0 wiped the store: %d left, want 2 (no-op on invalid keep)", len(entries))
+	}
+}
+
+// TestPruneRunnerCacheNoops: a flavor at or under the keep count is untouched,
+// and a missing cache dir is not an error (a daemon that never downloaded one).
+func TestPruneRunnerCacheNoops(t *testing.T) {
+	dir := t.TempDir()
+	keep := []string{
+		"actions-runner-osx-arm64-2.321.0.tar.gz",
+		"actions-runner-osx-arm64-2.320.0.tar.gz",
+	}
+	for _, f := range keep {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := PruneRunnerCache(dir, 2); err != nil {
+		t.Fatalf("PruneRunnerCache: %v", err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 2 {
+		t.Errorf("prune dropped a tarball at the keep boundary: %d left, want 2", len(entries))
+	}
+
+	if err := PruneRunnerCache(filepath.Join(dir, "nonexistent"), 2); err != nil {
+		t.Errorf("missing cache dir: got %v, want nil", err)
 	}
 }

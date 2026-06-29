@@ -48,6 +48,51 @@ func TestProvisionScriptsKeepJITOutOfCommand(t *testing.T) {
 	}
 }
 
+// provisionScript stages the EXACT resolved tarball, not a lexical glob of the
+// shared cache — so the staged runner can't drift from the version recorded as
+// the cycle's RunnerVersion when the share briefly holds more than one.
+func TestProvisionScriptStagesExactTarball(t *testing.T) {
+	for _, tc := range []struct{ goos, name string }{
+		{"darwin", "actions-runner-osx-arm64-2.320.0.tar.gz"},
+		{"linux", "actions-runner-linux-arm64-2.320.0.tar.gz"},
+	} {
+		script, err := provisionScript(tc.goos, tc.name)
+		if err != nil {
+			t.Fatalf("%s: provisionScript(%q): %v", tc.goos, tc.name, err)
+		}
+		if !strings.Contains(script, `TARBALL="$CACHE/`+tc.name+`"`) {
+			t.Errorf("%s: script does not stage the exact tarball %q:\n%s", tc.goos, tc.name, script)
+		}
+		if strings.Contains(script, "ls ") || strings.Contains(script, "head -1") {
+			t.Errorf("%s: script still globs the cache instead of staging by name", tc.goos)
+		}
+		if strings.Contains(script, runnerTarballPlaceholder) {
+			t.Errorf("%s: script left the %s placeholder unsubstituted", tc.goos, runnerTarballPlaceholder)
+		}
+		if !strings.Contains(script, `--jitconfig "$(cat)"`) {
+			t.Errorf("%s: script must still read the JIT from stdin", tc.goos)
+		}
+	}
+}
+
+// A tarball name that does not match the strict pattern (it crosses into a
+// shell command string) is refused loudly, not staged. Empty, shell
+// metacharacters, path separators, and a missing .tar.gz all fail.
+func TestProvisionScriptRejectsBadName(t *testing.T) {
+	for _, bad := range []string{
+		"",
+		"actions-runner-osx-arm64-2.320.0.tar.gz; rm -rf /",
+		"../../etc/passwd",
+		"actions-runner-osx-arm64-$(whoami).tar.gz",
+		"actions-runner-osx-arm64-2.320.0", // no .tar.gz
+		"foo bar.tar.gz",
+	} {
+		if _, err := provisionScript("darwin", bad); err == nil {
+			t.Errorf("provisionScript accepted an unsafe tarball name %q", bad)
+		}
+	}
+}
+
 // rotateServer is an in-process SSH "guest" that behaves like a real one
 // under rotation: password auth works until the rotate script lands, the
 // capture exec serves its real host key, and the install exec mutates the

@@ -19,6 +19,17 @@ type Stall struct {
 
 func NewStall() *Stall { return &Stall{last: time.Now()} }
 
+// tickerInterval is the stall poll interval: window/4, but never zero. For a
+// window in [1ns, 3ns] the integer division floors to 0, and time.NewTicker(0)
+// panics — in Watch's watcher goroutine, with no recover, crashing the daemon.
+// The window>0 guard in Watch does not catch this (1ns is positive); this does.
+func tickerInterval(window time.Duration) time.Duration {
+	if iv := window / 4; iv > 0 {
+		return iv
+	}
+	return window // window is positive (Watch guards window>0) but < 4ns
+}
+
 func (s *Stall) Feed(int64) {
 	s.mu.Lock()
 	s.last = time.Now()
@@ -38,7 +49,7 @@ func (s *Stall) Watch(ctx context.Context, window time.Duration) (Context, conte
 		return Context{ctx: wctx}, func() { cancel(nil) }
 	}
 	go func() {
-		t := time.NewTicker(window / 4)
+		t := time.NewTicker(tickerInterval(window))
 		defer t.Stop()
 		for {
 			select {

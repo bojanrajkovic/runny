@@ -128,12 +128,14 @@ type Proc interface {
 // Guest is an authenticated session into a booted VM.
 type Guest interface {
 	// StartRunner stages the actions runner from the cache share and launches
-	// run.sh with the JIT config; goos selects the per-OS provision path.
-	// It deliberately takes a plain context: the ctx is the proc's LIFETIME
-	// — the whole cycle, outliving PROVISION's deadline, cancelled by
-	// operator recycle or daemon shutdown — not an operation bound; session
-	// establishment is bounded internally by sshx's socket deadlines.
-	StartRunner(ctx context.Context, jit, goos string) (Proc, error)
+	// run.sh with the JIT config; goos selects the per-OS provision path and
+	// runnerTarball is the exact tarball basename to stage (this cycle's
+	// resolved RunnerVersion), not a glob. It deliberately takes a plain
+	// context: the ctx is the proc's LIFETIME — the whole cycle, outliving
+	// PROVISION's deadline, cancelled by operator recycle or daemon shutdown —
+	// not an operation bound; session establishment is bounded internally by
+	// sshx's socket deadlines.
+	StartRunner(ctx context.Context, jit, goos, runnerTarball string) (Proc, error)
 	// PullDiag fetches the tail of the runner's _diag logs (post-mortem).
 	PullDiag(ctx bounded.Context) ([]byte, error)
 	// StopRunner kills the runner listener tree and PROVES it dead (a pgrep
@@ -806,7 +808,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 		ok = enter(StateProvision, cfg.Deadlines.Provision.D(), func(c bounded.Context) error {
 			// The proc must outlive this state's deadline: start it under the
 			// cycle ctx, but bound the wait-for-listening here.
-			p, err := guest.StartRunner(cctx, jit.EncodedJITConfig, s.deps.Pool.OS)
+			p, err := guest.StartRunner(cctx, jit.EncodedJITConfig, s.deps.Pool.OS, rec.RunnerVersion)
 			if err != nil {
 				return err
 			}
@@ -1215,14 +1217,21 @@ func (s *Slot) auditDisarm(rec *cycle.Record, cause string, level slog.Level) {
 // (a torn read of the slice header, or a read of a reallocated backing array).
 // Replacing the JobInfo with a fresh copy + fresh slice leaves every snapshot a
 // reader already holds immutable, and never mutates a slice another goroutine
-// is reading.
+// is reading. It then notifies watchers (like clearArmedStatus/setArmedStatus):
+// the ambiguous install-failure caller records the possibly-live key and only
+// rewrites the cycle sidecar afterward, so without a push here the fact that a
+// privileged key may be on the guest stays invisible to StreamStatus until some
+// unrelated status change fires.
 func (s *Slot) recordOperatorKey(rec *cycle.Record, fp string) {
 	s.mu.Lock()
 	j := *rec.Job
 	j.OperatorKeys = append(append([]string(nil), rec.Job.OperatorKeys...), fp)
 	rec.Job = &j
 	s.status.Job = &j
+	snap := s.status
+	fns := slices.Clone(s.onChange)
 	s.mu.Unlock()
+	s.notify(fns, snap)
 }
 
 func (s *Slot) clearArmedStatus(arm *debugArm, detail string) {

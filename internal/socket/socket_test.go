@@ -779,3 +779,21 @@ func TestResumeDrainRaceIsRefused(t *testing.T) {
 		t.Errorf("Resume mid-drain race: code = %v, want FailedPrecondition", status.Code(err))
 	}
 }
+
+func TestRecoveryUnaryConvertsPanicToInternal(t *testing.T) {
+	_, err := recoveryUnary(context.Background(), nil,
+		&grpc.UnaryServerInfo{FullMethod: "/runny.v1.RunnyService/Test"},
+		func(context.Context, any) (any, error) { panic("boom") })
+	if status.Code(err) != codes.Internal {
+		t.Errorf("panicking unary handler must surface codes.Internal, got %v", err)
+	}
+}
+
+func TestRecoveryStreamConvertsPanicToInternal(t *testing.T) {
+	err := recoveryStream(nil, nil,
+		&grpc.StreamServerInfo{FullMethod: "/runny.v1.RunnyService/TestStream"},
+		func(any, grpc.ServerStream) error { panic("boom") })
+	if status.Code(err) != codes.Internal {
+		t.Errorf("panicking stream handler must surface codes.Internal, got %v", err)
+	}
+}

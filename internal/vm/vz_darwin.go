@@ -184,8 +184,7 @@ func finishBoot(ctx context.Context, vmc *vz.VirtualMachineConfiguration, bundle
 	if err != nil {
 		return nil, err
 	}
-	started := make(chan error, 1)
-	go func() { started <- machine.Start() }()
+	started := runAsync(func() error { return machine.Start() })
 	select {
 	case err := <-started:
 		if err != nil {
@@ -194,14 +193,22 @@ func finishBoot(ctx context.Context, vmc *vz.VirtualMachineConfiguration, bundle
 	case <-ctx.Done():
 		// The BOOT deadline fired mid-start. The machine was never returned,
 		// so the FSM's teardown cannot own it — hand it a detached best-effort
-		// force stop once Start finally returns. Best-effort is the floor
-		// here, but never silent: a stop failure means a leaked guest holding
-		// a guest-cap slot until the daemon restarts.
+		// force stop once Start finally returns. Best-effort is the floor here,
+		// but never silent: the force stop is the same blocking cgo call the
+		// teardown path bounds, so bound it the same way (runAsync) and log
+		// whether it failed OR never returned — either way the guest may hold a
+		// guest-cap slot until the daemon restarts.
 		go func() {
-			if err := <-started; err == nil {
-				if serr := machine.Stop(); serr != nil {
+			if err := <-started; err != nil {
+				return // never started; nothing to stop
+			}
+			select {
+			case serr := <-runAsync(machine.Stop):
+				if serr != nil {
 					slog.Error("abandoned boot: force stop failed; guest may hold a guest-cap slot until restart", "err", serr)
 				}
+			case <-time.After(abandonedStopTimeout):
+				slog.Error("abandoned boot: force stop did not return; guest may hold a guest-cap slot until restart")
 			}
 		}()
 		return nil, fmt.Errorf("vm start: %w", context.Cause(ctx))
@@ -252,37 +259,15 @@ func (m *vzMachine) WaitIP(ctx bounded.Context) (string, error) {
 	}
 }
 
-// Stop: RequestStop (graceful, often stalls on vanilla images — spike-
-// verified) bounded by grace, then force Stop(). Force is the floor; this
-// method only errors if even force-stop failed AND the guest still runs.
+// Stop runs the bounded stop sequence (graceful RequestStop, then a force
+// kill) shared by every platform; see stopMachine. RequestStop is graceful but
+// often stalls on vanilla images (spike-verified), so force is the floor.
 func (m *vzMachine) Stop(ctx bounded.Context, grace time.Duration) error {
-	select {
-	case <-m.done:
-		return nil // already stopped
-	default:
-	}
-	if ok, err := m.vm.RequestStop(); ok && err == nil {
-		select {
-		case <-m.done:
-			return nil
-		case <-time.After(grace):
-		case <-ctx.Done():
-		}
-	}
-	if err := m.vm.Stop(); err != nil {
-		select {
-		case <-m.done:
-			return nil
-		default:
-			return fmt.Errorf("force stop failed with guest still running: %w", err)
-		}
-	}
-	select {
-	case <-m.done:
-		return nil
-	case <-time.After(10 * time.Second):
-		return fmt.Errorf("guest did not reach stopped state after force stop")
-	case <-ctx.Done():
-		return fmt.Errorf("guest stop: %w", context.Cause(ctx))
-	}
+	return stopMachine(ctx, grace, m.done, m)
 }
+
+// requestStop / forceStop are the cgo stop primitives stopMachine sequences.
+// forceStop blocks until Virtualization.framework's completion handler fires,
+// so stopMachine runs it off-goroutine and bounds the wait.
+func (m *vzMachine) requestStop() (bool, error) { return m.vm.RequestStop() }
+func (m *vzMachine) forceStop() error           { return m.vm.Stop() }

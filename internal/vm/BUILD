@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "leases.go",
         "sizing.go",
+        "stop.go",
         "vm.go",
         "vz_darwin.go",
     ],
@@ -29,7 +30,11 @@ go_test(
     srcs = [
         "leases_test.go",
         "sizing_test.go",
+        "stop_test.go",
     ],
     embed = [":vm"],
-    deps = ["//internal/tart"],
+    deps = [
+        "//internal/bounded",
+        "//internal/tart",
+    ],
 )

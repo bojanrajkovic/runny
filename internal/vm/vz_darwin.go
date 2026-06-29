@@ -184,8 +184,7 @@ func finishBoot(ctx context.Context, vmc *vz.VirtualMachineConfiguration, bundle
 	if err != nil {
 		return nil, err
 	}
-	started := make(chan error, 1)
-	go func() { started <- machine.Start() }()
+	started := runAsync(func() error { return machine.Start() })
 	select {
 	case err := <-started:
 		if err != nil {
@@ -194,14 +193,22 @@ func finishBoot(ctx context.Context, vmc *vz.VirtualMachineConfiguration, bundle
 	case <-ctx.Done():
 		// The BOOT deadline fired mid-start. The machine was never returned,
 		// so the FSM's teardown cannot own it — hand it a detached best-effort
-		// force stop once Start finally returns. Best-effort is the floor
-		// here, but never silent: a stop failure means a leaked guest holding
-		// a guest-cap slot until the daemon restarts.
+		// force stop once Start finally returns. Best-effort is the floor here,
+		// but never silent: the force stop is the same blocking cgo call the
+		// teardown path bounds, so bound it the same way (runAsync) and log
+		// whether it failed OR never returned — either way the guest may hold a
+		// guest-cap slot until the daemon restarts.
 		go func() {
-			if err := <-started; err == nil {
-				if serr := machine.Stop(); serr != nil {
+			if err := <-started; err != nil {
+				return // never started; nothing to stop
+			}
+			select {
+			case serr := <-runAsync(machine.Stop):
+				if serr != nil {
 					slog.Error("abandoned boot: force stop failed; guest may hold a guest-cap slot until restart", "err", serr)
 				}
+			case <-time.After(abandonedStopTimeout):
+				slog.Error("abandoned boot: force stop did not return; guest may hold a guest-cap slot until restart")
 			}
 		}()
 		return nil, fmt.Errorf("vm start: %w", context.Cause(ctx))

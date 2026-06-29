@@ -65,8 +65,8 @@ func bg(t *testing.T, d time.Duration) bounded.Context {
 	return ctx
 }
 
-// TestStopMachineForceStopHangBounded is R7: a force stop that never returns
-// (a wedged hypervisor) must not hang teardown — the bounded ctx escapes it.
+// TestStopMachineForceStopHangBounded: a force stop that never returns (a
+// wedged hypervisor) must not hang teardown — the bounded ctx escapes it.
 func TestStopMachineForceStopHangBounded(t *testing.T) {
 	block := make(chan struct{})
 	t.Cleanup(func() { close(block) }) // release the goroutine at test end
@@ -79,10 +79,10 @@ func TestStopMachineForceStopHangBounded(t *testing.T) {
 	}
 }
 
-// TestStopMachineForceErrorRacesTerminalState is R8: force stop returns an
-// error, but the guest reaches its terminal state moments later (the Error
-// transition closes done on the watch goroutine). That must read as stopped,
-// not a false "still running" wedge.
+// TestStopMachineForceErrorRacesTerminalState: force stop returns an error, but
+// the guest reaches its terminal state moments later (the Error transition
+// closes done on the watch goroutine). That must read as stopped, not a false
+// "still running" wedge.
 func TestStopMachineForceErrorRacesTerminalState(t *testing.T) {
 	shortSettle(t, time.Second)
 	ops := &fakeStopOps{forceErr: errors.New("stop boom")}
@@ -107,6 +107,21 @@ func TestStopMachineForceErrorStillRunning(t *testing.T) {
 	err := run(t, bg(t, 5*time.Second), time.Millisecond, done, ops, 2*time.Second)
 	if err == nil || !strings.Contains(err.Error(), "still running") {
 		t.Fatalf("genuinely wedged guest: got err=%v, want a \"still running\" error", err)
+	}
+}
+
+// TestStopMachineForceCleanNoTerminalState: force stop returns clean but the
+// guest never reaches a terminal state (watchState never closes done). The
+// nil-error settle arm must surface a bounded "did not reach stopped state"
+// error rather than hang or report success.
+func TestStopMachineForceCleanNoTerminalState(t *testing.T) {
+	shortSettle(t, 100*time.Millisecond)
+	ops := &fakeStopOps{}       // forceStop returns nil
+	done := make(chan struct{}) // never closes
+
+	err := run(t, bg(t, 5*time.Second), time.Millisecond, done, ops, 2*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "did not reach stopped state") {
+		t.Fatalf("clean force but no terminal state: got err=%v, want a bounded \"did not reach stopped state\" error", err)
 	}
 }
 

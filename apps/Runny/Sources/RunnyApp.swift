@@ -35,6 +35,19 @@ struct RunnyApp: App {
         // title, never a stranded "Runny". The title bar must stay visible —
         // `.hiddenTitleBar` suppresses `navigationTitle`, which forced the title
         // into a glass-capsuled principal toolbar item that read as a button.
+        .commands {
+            // "Check for Updates…" in the app menu. Posts a notification that
+            // DaemonStore's observer picks up and runs an immediate check,
+            // bypassing the 24h timer. NotificationCenter avoids threading the
+            // store through the commands scene (which has no @Environment path).
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    NotificationCenter.default.post(
+                        name: .runnyCheckForAppUpdates, object: nil
+                    )
+                }
+            }
+        }
 
         // The Settings surface (the per-user daemon's start-at-login row). Its
         // onAppear registers the same accessory↔regular observer the main window

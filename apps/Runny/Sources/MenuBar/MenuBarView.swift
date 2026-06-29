@@ -37,6 +37,13 @@ struct MenuBarView: View {
                 StatusBanner(text: skew.text, systemImage: "exclamationmark.triangle",
                              tint: .orange) { store.dismissedSkew = skew }
             }
+            // App-update notify: a newer Runny shipped. Keyed on version string so
+            // dismissing "v0.7.0" stays quiet until "v0.7.1" arrives as new news.
+            if let update = store.shownUpdate {
+                AppUpdateBanner(update: update) {
+                    store.dismissedUpdate = store.shownUpdate
+                }
+            }
             Divider()
             if store.slots.isEmpty {
                 emptyState
@@ -147,6 +154,39 @@ struct StatusBanner: View {
         .padding(.horizontal, Metrics.pad)
         .padding(.vertical, 6)
         .background(tint.opacity(0.08))
+    }
+}
+
+/// The app-update notify banner. Distinct from `StatusBanner` because it needs
+/// a clickable release-page link and a copyable brew-upgrade command — the
+/// standard banner's text-only shape can't carry those without restructuring it.
+struct AppUpdateBanner: View {
+    let update: DaemonStore.AppUpdate
+    var dismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "arrow.down.circle")
+                .foregroundStyle(Color.blue)
+                .font(.caption)
+            VStack(alignment: .leading, spacing: 2) {
+                Link("Runny \(update.version) available", destination: update.url)
+                    .font(.caption)
+                Text("brew upgrade --cask runny-app")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            Spacer(minLength: 4)
+            Button(action: dismiss) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, Metrics.pad)
+        .padding(.vertical, 6)
+        .background(Color.blue.opacity(0.08))
     }
 }
 

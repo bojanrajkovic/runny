@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -260,9 +261,16 @@ var tarballLocks sync.Map // filename -> chan struct{} (capacity-1 semaphore)
 // prune could still drop a version a slot resolved-but-not-yet-cloned). Grouping
 // by flavor is load-bearing: a host with both darwin and linux pools must not
 // lose one flavor's current tarball to the other flavor's churn. Unparseable
-// names and .partial temps are left untouched; a missing cacheDir is not an
-// error (a daemon that never downloaded one).
+// names are left untouched, but a .partial temp is reaped: at the cold start
+// where this runs no download is in flight, so any leftover is from a process
+// that died mid-download. A missing cacheDir is not an error (a daemon that
+// never downloaded one). keep < 1 is refused as a no-op rather than wiping the
+// store — the sole caller passes a sane constant, but the exported contract must
+// not silently delete everything (or panic on a negative slice index).
 func PruneRunnerCache(cacheDir string, keep int) error {
+	if keep < 1 {
+		return nil
+	}
 	entries, err := os.ReadDir(cacheDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -270,11 +278,16 @@ func PruneRunnerCache(cacheDir string, keep int) error {
 		}
 		return err
 	}
+	var errs []error
 	type tarball struct{ name, version string }
 	groups := map[string][]tarball{}
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || strings.HasSuffix(name, ".partial") {
+		if e.IsDir() {
+			continue
+		}
+		if strings.HasSuffix(name, ".partial") {
+			errs = append(errs, os.Remove(filepath.Join(cacheDir, name))) // dead temp; no live download at cold start
 			continue
 		}
 		parts := strings.Split(name, "-")
@@ -288,19 +301,16 @@ func PruneRunnerCache(cacheDir string, keep int) error {
 		}
 		groups[prefix] = append(groups[prefix], tarball{name, v})
 	}
-	var firstErr error
 	for _, vs := range groups {
 		if len(vs) <= keep {
 			continue
 		}
 		slices.SortFunc(vs, func(a, b tarball) int { return versioncore.Compare(b.version, a.version) }) // newest first
 		for _, t := range vs[keep:] {
-			if err := os.Remove(filepath.Join(cacheDir, t.name)); err != nil && firstErr == nil {
-				firstErr = err
-			}
+			errs = append(errs, os.Remove(filepath.Join(cacheDir, t.name)))
 		}
 	}
-	return firstErr
+	return errors.Join(errs...)
 }
 
 // EnsureRunnerTarball makes sure the service-current actions-runner tarball

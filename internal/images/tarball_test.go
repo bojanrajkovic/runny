@@ -10,8 +10,9 @@ import (
 // TestPruneRunnerCache pins the cold-start GC: keep the `keep` newest versions
 // PER OS/arch flavor, drop the rest. Grouping by flavor is load-bearing — a host
 // with both darwin and linux pools must not lose one flavor's current tarball
-// just because the other flavor has more recent versions. Unparseable names and
-// .partial temps are left untouched.
+// just because the other flavor has more recent versions. Unparseable names are
+// left untouched; a dead .partial temp is reaped (no download is in flight at
+// the cold start where this runs).
 func TestPruneRunnerCache(t *testing.T) {
 	dir := t.TempDir()
 	files := []string{
@@ -20,7 +21,7 @@ func TestPruneRunnerCache(t *testing.T) {
 		"actions-runner-osx-arm64-2.319.0.tar.gz",         // osx older       → DROP
 		"actions-runner-osx-arm64-2.300.5.tar.gz",         // osx oldest      → DROP
 		"actions-runner-linux-arm64-2.100.0.tar.gz",       // linux, lone     → keep (own group)
-		"actions-runner-osx-arm64-2.322.0.tar.gz.partial", // temp            → keep
+		"actions-runner-osx-arm64-2.322.0.tar.gz.partial", // dead temp       → REAP
 		"actions-runner-osx-arm64-dev.tar.gz",             // unparseable     → keep
 	}
 	for _, f := range files {
@@ -46,11 +47,32 @@ func TestPruneRunnerCache(t *testing.T) {
 		"actions-runner-linux-arm64-2.100.0.tar.gz",
 		"actions-runner-osx-arm64-2.320.0.tar.gz",
 		"actions-runner-osx-arm64-2.321.0.tar.gz",
-		"actions-runner-osx-arm64-2.322.0.tar.gz.partial",
 		"actions-runner-osx-arm64-dev.tar.gz",
 	}
 	if !slices.Equal(left, want) {
 		t.Errorf("after prune dir holds %v, want %v", left, want)
+	}
+}
+
+// TestPruneRunnerCacheRefusesNonPositiveKeep: keep<1 would otherwise delete the
+// whole store (vs[0:] is everything), so the exported contract refuses it as a
+// no-op rather than wiping every flavor.
+func TestPruneRunnerCacheRefusesNonPositiveKeep(t *testing.T) {
+	dir := t.TempDir()
+	files := []string{
+		"actions-runner-osx-arm64-2.321.0.tar.gz",
+		"actions-runner-osx-arm64-2.320.0.tar.gz",
+	}
+	for _, f := range files {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := PruneRunnerCache(dir, 0); err != nil {
+		t.Fatalf("PruneRunnerCache(0): %v", err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 2 {
+		t.Fatalf("keep=0 wiped the store: %d left, want 2 (no-op on invalid keep)", len(entries))
 	}
 }
 

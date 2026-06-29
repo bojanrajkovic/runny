@@ -372,6 +372,88 @@ func TestStartBoundedOnWedgedChannelOpen(t *testing.T) {
 	}
 }
 
+// execRejectingServer accepts the session channel but rejects the exec
+// request (reply false) — the sshd ForceCommand / exec-disabled / MaxSessions
+// class. sess.Start then fails with the exec never having reached the guest.
+func execRejectingServer(t *testing.T) string {
+	t.Helper()
+	conf := &ssh.ServerConfig{
+		PasswordCallback: func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) { return nil, nil },
+	}
+	conf.AddHostKey(newTestSigner(t))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				sc, chans, reqs, err := ssh.NewServerConn(conn, conf)
+				if err != nil {
+					return
+				}
+				defer sc.Close()
+				go ssh.DiscardRequests(reqs)
+				for newCh := range chans {
+					ch, chReqs, err := newCh.Accept()
+					if err != nil {
+						continue
+					}
+					go func() {
+						for req := range chReqs {
+							_ = req.Reply(false, nil) // reject exec (and everything else)
+						}
+					}()
+					_ = ch.Close()
+				}
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// A command body may carry a secret — the GitHub JIT registration blob rides
+// inside the provision script, a baked password could ride a future one. When
+// the exec request is rejected, sshx must not fold the command (and thus the
+// secret) into its error, where it would reach cycle.json and the gRPC surface.
+func TestStartErrorOmitsCommand(t *testing.T) {
+	c, err := Dial(testCtx(t), execRejectingServer(t), testCfg)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+	const secret = "JITSECRET-deadbeef"
+	_, err = c.Start(t.Context(), "./run.sh --jitconfig '"+secret+"'")
+	if err == nil {
+		t.Fatal("want exec-reject error")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("Start error leaked the command/secret: %v", err)
+	}
+}
+
+// Output shares the seam: its error must not echo the command either.
+func TestOutputErrorOmitsCommand(t *testing.T) {
+	c, err := Dial(testCtx(t), execRejectingServer(t), testCfg)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+	const secret = "JITSECRET-deadbeef"
+	_, _, err = c.Output(testCtx(t), "./run.sh --jitconfig '"+secret+"'")
+	if err == nil {
+		t.Fatal("want exec-reject error")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("Output error leaked the command/secret: %v", err)
+	}
+}
+
 // A single oversized output line must not kill the readers: bufio.Scanner's
 // ErrTooLong once silently ended scanning, so every later line — including
 // the completion markers the FSM watches for — was lost.

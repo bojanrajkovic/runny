@@ -226,10 +226,12 @@ func (c *Client) Output(ctx bounded.Context, cmd string) ([]byte, int, error) {
 		// here it can block forever — detach it. The worker unblocks when
 		// the close lands or when Client.Close cuts the socket.
 		go func() { _ = sess.Close() }()
-		return nil, -1, fmt.Errorf("ssh command %q: %w", cmd, ctx.Err())
+		// Never echo cmd: it may carry a secret (the JIT registration blob
+		// rides inside the provision script). The caller knows which step ran.
+		return nil, -1, fmt.Errorf("ssh command timed out: %w", ctx.Err())
 	case r := <-done:
 		if r.err != nil && r.code < 0 {
-			return r.out, r.code, fmt.Errorf("ssh command %q: %w", cmd, r.err)
+			return r.out, r.code, fmt.Errorf("ssh command failed: %w", r.err)
 		}
 		return r.out, r.code, nil
 	}
@@ -294,7 +296,9 @@ func (c *Client) Start(ctx context.Context, cmd string) (*Proc, error) {
 	}
 	if err := sess.Start(cmd); err != nil {
 		_ = sess.Close()
-		return nil, fmt.Errorf("ssh start %q: %w", cmd, err)
+		// Never echo cmd: it may carry a secret (the JIT registration blob
+		// rides inside the provision script). The caller knows which step ran.
+		return nil, fmt.Errorf("ssh start failed: %w", err)
 	}
 
 	lines := make(chan string, 64)

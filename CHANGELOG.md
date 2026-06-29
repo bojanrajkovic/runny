@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/bojanrajkovic/runny/compare/v1.0.0...v1.0.1) (2026-06-29)
+
+
+### Bug Fixes
+
+* **doctor:** skip disk-headroom for already-cached images ([#197](https://github.com/bojanrajkovic/runny/issues/197)) ([f7eca3b](https://github.com/bojanrajkovic/runny/commit/f7eca3b5b97be6040640b9b7af5f65b5e48f99be))
+
 ## [1.0.0](https://github.com/bojanrajkovic/runny/compare/v0.3.0...v1.0.0) (2026-06-29)
 
 

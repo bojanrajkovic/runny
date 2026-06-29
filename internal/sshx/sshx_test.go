@@ -127,6 +127,14 @@ func handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 			fmt.Fprintf(ch, "%s\n", strings.Repeat("x", 3<<20))
 			fmt.Fprintln(ch, "marker after long line")
 			exit(0)
+		case payload.Cmd == "flood":
+			// Far more than the client's Output byte cap, then exit cleanly: the
+			// cap must bound the buffer even when the command completes normally.
+			chunk := strings.Repeat("x", 1<<20)
+			for range 8 { // 8 MiB total
+				fmt.Fprint(ch, chunk)
+			}
+			exit(0)
 		case payload.Cmd == "spew":
 			// Far more output than the client's Lines buffer, then hang:
 			// a chatty runner whose consumer has stopped draining.
@@ -451,6 +459,24 @@ func TestOutputErrorOmitsCommand(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), secret) {
 		t.Errorf("Output error leaked the command/secret: %v", err)
+	}
+}
+
+// Output reads the full combined output; a guest controlling how many
+// _diag/*.log files exist (PullDiag) could otherwise force an unbounded
+// transient allocation. The byte cap must bound the buffer.
+func TestOutputByteCapped(t *testing.T) {
+	c, err := Dial(testCtx(t), testServer(t), testCfg)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+	out, code, err := c.Output(testCtx(t), "flood")
+	if err != nil || code != 0 {
+		t.Fatalf("Output: code %d, err %v", code, err)
+	}
+	if len(out) > maxOutput {
+		t.Errorf("Output not byte-capped: %d bytes (want <= %d)", len(out), maxOutput)
 	}
 }
 

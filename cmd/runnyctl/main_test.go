@@ -1079,12 +1079,13 @@ func TestExecSSHNoExecReturnsNil(t *testing.T) {
 // prune must return a non-nil error (exit 1) when the daemon reports scan or
 // apply errors so that scripts and CI pipelines can detect an incomplete prune.
 func TestPruneExitsNonZeroOnErrors(t *testing.T) {
-	var buf bytes.Buffer
-	c := &ctl{out: &buf, client: &fakeClient{pruneResp: &runnyv1.PruneResponse{
-		Errors: []string{"image-bundle scan: permission denied"},
-	}}}
-	if err := c.prune(context.Background(), false); err == nil {
-		t.Fatal("expected error when daemon reports errors, got nil")
+	resp := &runnyv1.PruneResponse{Errors: []string{"image-bundle scan: permission denied"}}
+	for _, json := range []bool{false, true} {
+		var buf bytes.Buffer
+		c := &ctl{out: &buf, json: json, client: &fakeClient{pruneResp: resp}}
+		if err := c.prune(context.Background(), false); err == nil {
+			t.Errorf("json=%v: expected error when daemon reports errors, got nil", json)
+		}
 	}
 }
 

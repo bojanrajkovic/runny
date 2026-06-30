@@ -924,7 +924,13 @@ func (c *ctl) prune(ctx context.Context, apply bool) error {
 		return err
 	}
 	if c.json {
-		return c.emit(resp)
+		if err := c.emit(resp); err != nil {
+			return err
+		}
+		if len(resp.GetErrors()) > 0 {
+			return fmt.Errorf("prune completed with errors")
+		}
+		return nil
 	}
 	items := resp.GetItems()
 	if len(items) == 0 && len(resp.GetSkips()) == 0 && len(resp.GetErrors()) == 0 {

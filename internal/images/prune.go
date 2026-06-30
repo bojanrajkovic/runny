@@ -50,10 +50,10 @@ func PlanRunnerCachePrune(cacheDir string, keep int, protect map[string]bool) ([
 			continue
 		}
 		if strings.HasSuffix(name, ".partial") {
-			// Skip if EnsureRunnerTarball holds the semaphore for the
-			// destination file — the download is live and the Rename that
-			// follows it would fail with ENOENT if we unlink first.
-			if _, active := tarballLocks.Load(strings.TrimSuffix(name, ".partial")); active {
+			// Skip only if the semaphore is currently held (download in
+			// flight). A map entry without a held semaphore means the download
+			// finished (or failed) and the .partial is now a dead orphan.
+			if val, ok := tarballLocks.Load(strings.TrimSuffix(name, ".partial")); ok && len(val.(chan struct{})) > 0 {
 				continue
 			}
 			items = append(items, PlanItem{

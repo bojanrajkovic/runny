@@ -167,8 +167,8 @@ func TestPlanRunnerCachePrunePartialIsReaped(t *testing.T) {
 	}
 }
 
-// TestPlanRunnerCachePruneSkipsActivePartial: a .partial file whose base name
-// has a live tarballLocks entry is not planned for deletion.
+// TestPlanRunnerCachePruneSkipsActivePartial: a .partial file whose semaphore
+// is currently held (download in flight) must not be planned for deletion.
 func TestPlanRunnerCachePruneSkipsActivePartial(t *testing.T) {
 	dir := t.TempDir()
 	base := "actions-runner-osx-arm64-2.321.0.tar.gz"
@@ -177,7 +177,33 @@ func TestPlanRunnerCachePruneSkipsActivePartial(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Simulate an active download by inserting a semaphore entry.
+	// Simulate an active download: entry exists AND semaphore is held.
+	sem := make(chan struct{}, 1)
+	sem <- struct{}{} // hold it
+	tarballLocks.Store(base, sem)
+	t.Cleanup(func() { <-sem; tarballLocks.Delete(base) })
+
+	items, err := PlanRunnerCachePrune(dir, 2, nil)
+	if err != nil {
+		t.Fatalf("PlanRunnerCachePrune: %v", err)
+	}
+	if len(items) != 0 {
+		t.Errorf("expected 0 items (active download protected); got %v", items)
+	}
+}
+
+// TestPlanRunnerCachePrunePlansReleasedPartial: a .partial file whose map
+// entry exists but whose semaphore is NOT held (download finished or failed)
+// must be planned for deletion — the entry check must not act as a permanent skip.
+func TestPlanRunnerCachePrunePlansReleasedPartial(t *testing.T) {
+	dir := t.TempDir()
+	base := "actions-runner-osx-arm64-2.321.0.tar.gz"
+	partial := base + ".partial"
+	if err := os.WriteFile(filepath.Join(dir, partial), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Entry exists (from a prior download) but semaphore is empty (released).
 	sem := make(chan struct{}, 1)
 	tarballLocks.Store(base, sem)
 	t.Cleanup(func() { tarballLocks.Delete(base) })
@@ -186,8 +212,8 @@ func TestPlanRunnerCachePruneSkipsActivePartial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PlanRunnerCachePrune: %v", err)
 	}
-	if len(items) != 0 {
-		t.Errorf("expected 0 items (active download protected); got %v", items)
+	if len(items) != 1 {
+		t.Errorf("expected 1 item (stale .partial should be planned); got %v", items)
 	}
 }
 

@@ -475,7 +475,7 @@ func run() error {
 			plan.Errors = append(plan.Errors, "image-bundle scan: "+bundleErr.Error())
 		}
 		if apply {
-			plan.ApplyErr = images.ApplyPrune(combined)
+			plan.ReclaimedBytes, plan.ApplyErr = images.ApplyPrune(combined)
 		}
 		return plan
 	}

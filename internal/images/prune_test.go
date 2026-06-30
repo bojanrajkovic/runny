@@ -75,8 +75,8 @@ func TestPlanImageBundlePruneSuperseded(t *testing.T) {
 	if items[0].Reason != "superseded" {
 		t.Errorf("item reason = %s, want superseded", items[0].Reason)
 	}
-	if items[0].Bytes != 1024 {
-		t.Errorf("item bytes = %d, want 1024", items[0].Bytes)
+	if want := diskBytes(filepath.Join(oldBundle, "disk.img")); items[0].Bytes != want {
+		t.Errorf("item bytes = %d, want %d", items[0].Bytes, want)
 	}
 }
 

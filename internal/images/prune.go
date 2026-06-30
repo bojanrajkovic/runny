@@ -161,15 +161,21 @@ func PlanImageBundlePrune(imagesDir string, keepPaths, protectRefDirNames map[st
 }
 
 // ApplyPrune deletes every path in the plan. Best-effort: one failure does not
-// stop the rest. For image-bundle items it also attempts to remove the parent
-// ref dir once all its bundles are gone (best-effort; noop if non-empty).
-func ApplyPrune(items []PlanItem) error { return applyPrune(items) }
+// stop the rest. Returns the bytes actually freed (only items that succeeded)
+// and a joined error for any failures. For image-bundle items it also attempts
+// to remove the parent ref dir once all its bundles are gone.
+func ApplyPrune(items []PlanItem) (int64, error) { return applyPrune(items) }
 
-func applyPrune(items []PlanItem) error {
+func applyPrune(items []PlanItem) (int64, error) {
+	var freed int64
 	var errs []error
 	refDirs := map[string]bool{}
 	for _, item := range items {
-		errs = append(errs, os.RemoveAll(item.Path))
+		if err := os.RemoveAll(item.Path); err != nil {
+			errs = append(errs, err)
+		} else {
+			freed += item.Bytes
+		}
 		if item.Kind == "image-bundle" {
 			refDirs[filepath.Dir(item.Path)] = true
 		}
@@ -177,7 +183,7 @@ func applyPrune(items []PlanItem) error {
 	for dir := range refDirs {
 		_ = os.Remove(dir) // noop if non-empty or already gone
 	}
-	return errors.Join(errs...)
+	return freed, errors.Join(errs...)
 }
 
 // PruneRunnerCache keeps the `keep` newest tarball versions per OS/arch
@@ -188,28 +194,21 @@ func PruneRunnerCache(cacheDir string, keep int) error {
 	if err != nil {
 		return err
 	}
-	return applyPrune(items)
+	_, err = applyPrune(items)
+	return err
 }
 
 // ---- helpers -----------------------------------------------------------------
 
-func fileSize(path string) int64 {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return 0
-	}
-	return fi.Size()
-}
+func fileSize(path string) int64 { return diskBytes(path) }
 
 func dirSize(path string) int64 {
 	var total int64
-	_ = filepath.WalkDir(path, func(_ string, d fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		if fi, err := d.Info(); err == nil {
-			total += fi.Size()
-		}
+		total += diskBytes(p)
 		return nil
 	})
 	return total

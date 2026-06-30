@@ -117,11 +117,12 @@ type PruneSkip struct {
 // applied, any skips (refs whose digest could not be resolved), non-fatal
 // scan errors, and a best-effort apply error.
 type PrunePlan struct {
-	Items    []PruneItem
-	Applied  bool
-	Skips    []PruneSkip
-	Errors   []string // non-fatal scan/plan errors surfaced to the caller
-	ApplyErr error
+	Items          []PruneItem
+	Applied        bool
+	Skips          []PruneSkip
+	Errors         []string // non-fatal scan/plan errors surfaced to the caller
+	ReclaimedBytes int64    // bytes actually freed; only meaningful when Applied=true
+	ApplyErr       error
 }
 
 // Server implements runny.v1.RunnyService.
@@ -710,11 +711,16 @@ func (s *Server) Prune(ctx context.Context, req *runnyv1.PruneRequest) (*runnyv1
 	plan := s.PruneFn(ctx, req.GetApply())
 	resp := &runnyv1.PruneResponse{Applied: plan.Applied}
 	for _, item := range plan.Items {
-		resp.ReclaimedBytes += item.Bytes
+		if !plan.Applied {
+			resp.ReclaimedBytes += item.Bytes // dry-run: estimate from plan
+		}
 		resp.Items = append(resp.Items, &runnyv1.ReclaimItem{
 			Path: item.Path, Bytes: item.Bytes,
 			Kind: item.Kind, Reason: item.Reason, Label: item.Label,
 		})
+	}
+	if plan.Applied {
+		resp.ReclaimedBytes = plan.ReclaimedBytes // actual: only successfully removed items
 	}
 	for _, skip := range plan.Skips {
 		resp.Skips = append(resp.Skips, &runnyv1.PruneSkip{Ref: skip.Ref, Reason: skip.Reason})

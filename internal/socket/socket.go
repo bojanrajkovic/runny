@@ -97,6 +97,32 @@ func validateCommandID(id string) error {
 	return nil
 }
 
+// PruneItem is one artifact the prune planner has identified for reclaim.
+type PruneItem struct {
+	Path   string
+	Bytes  int64
+	Kind   string // "runner-tarball" | "image-bundle"
+	Reason string // "superseded" | "removed pool" | "dead .partial"
+	Label  string
+}
+
+// PruneSkip records a configured image ref that was left intact because its
+// registry digest could not be resolved.
+type PruneSkip struct {
+	Ref    string
+	Reason string
+}
+
+// PrunePlan is the result returned by PruneFn: the item list, whether it was
+// applied, any skips (refs whose digest could not be resolved), and a
+// best-effort apply error (nil when not applied or apply succeeded).
+type PrunePlan struct {
+	Items    []PruneItem
+	Applied  bool
+	Skips    []PruneSkip
+	ApplyErr error
+}
+
 // Server implements runny.v1.RunnyService.
 type Server struct {
 	runnyv1.UnimplementedRunnyServiceServer
@@ -139,6 +165,9 @@ type Server struct {
 	// Config carries the limits InjectDebugKey validates against (hold cap,
 	// the queue/service bounds for the synchronous wait).
 	Config *home.Config
+	// PruneFn builds a reclaim plan for stale image bundles and runner tarballs.
+	// apply=true also deletes them. Nil = Unimplemented.
+	PruneFn func(ctx context.Context, apply bool) PrunePlan
 
 	// watch fan-out
 	mu      sync.Mutex
@@ -671,6 +700,28 @@ func (s *Server) InjectDebugKey(ctx context.Context, req *runnyv1.InjectDebugKey
 		}
 		return resp, nil
 	}
+}
+
+func (s *Server) Prune(ctx context.Context, req *runnyv1.PruneRequest) (*runnyv1.PruneResponse, error) {
+	if s.PruneFn == nil {
+		return nil, status.Error(codes.Unimplemented, "prune is not wired on this server")
+	}
+	plan := s.PruneFn(ctx, req.GetApply())
+	resp := &runnyv1.PruneResponse{Applied: plan.Applied}
+	for _, item := range plan.Items {
+		resp.ReclaimedBytes += item.Bytes
+		resp.Items = append(resp.Items, &runnyv1.ReclaimItem{
+			Path: item.Path, Bytes: item.Bytes,
+			Kind: item.Kind, Reason: item.Reason, Label: item.Label,
+		})
+	}
+	for _, skip := range plan.Skips {
+		resp.Skips = append(resp.Skips, &runnyv1.PruneSkip{Ref: skip.Ref, Reason: skip.Reason})
+	}
+	if plan.ApplyErr != nil {
+		resp.Errors = append(resp.Errors, plan.ApplyErr.Error())
+	}
+	return resp, nil
 }
 
 // ---- proto conversion --------------------------------------------------------

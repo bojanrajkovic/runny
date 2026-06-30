@@ -963,6 +963,9 @@ func (c *ctl) prune(ctx context.Context, apply bool) error {
 	for _, e := range resp.GetErrors() {
 		fmt.Fprintf(c.out, "error: %s\n", e)
 	}
+	if len(resp.GetErrors()) > 0 {
+		return fmt.Errorf("prune completed with errors")
+	}
 	return nil
 }
 

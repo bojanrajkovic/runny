@@ -307,3 +307,25 @@ func TestApplyPruneGuard(t *testing.T) {
 		t.Errorf("freed = %d, want 1 (only the deleted item)", freed)
 	}
 }
+
+// TestPlanImageBundlePruneUnreadableRefDir: a ref dir that cannot be read
+// (permissions error) must surface an error rather than silently skipping.
+func TestPlanImageBundlePruneUnreadableRefDir(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses permission checks")
+	}
+	imagesDir := t.TempDir()
+	refDir := filepath.Join(imagesDir, "ghcr.io_foo_bar")
+	if err := os.Mkdir(refDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(refDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(refDir, 0o755) })
+
+	_, err := PlanImageBundlePrune(imagesDir, nil, nil, map[string]string{"ghcr.io_foo_bar": "ghcr.io/foo/bar"})
+	if err == nil {
+		t.Fatal("expected error for unreadable ref dir, got nil")
+	}
+}

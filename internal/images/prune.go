@@ -120,6 +120,7 @@ func PlanImageBundlePrune(imagesDir string, keepPaths, protectRefDirNames map[st
 	}
 
 	var items []PlanItem
+	var scanErrs []error
 	for _, refEntry := range refEntries {
 		if !refEntry.IsDir() {
 			continue
@@ -139,6 +140,7 @@ func PlanImageBundlePrune(imagesDir string, keepPaths, protectRefDirNames map[st
 		refDirPath := filepath.Join(imagesDir, refDirName)
 		bundleEntries, err := os.ReadDir(refDirPath)
 		if err != nil {
+			scanErrs = append(scanErrs, err)
 			continue
 		}
 		for _, bundleEntry := range bundleEntries {
@@ -177,7 +179,7 @@ func PlanImageBundlePrune(imagesDir string, keepPaths, protectRefDirNames map[st
 			})
 		}
 	}
-	return items, nil
+	return items, errors.Join(scanErrs...)
 }
 
 // ApplyPrune deletes every path in the plan. Best-effort: one failure does not

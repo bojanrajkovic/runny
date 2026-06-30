@@ -750,10 +750,16 @@ func TestRenderReloadRefusedWhileDraining(t *testing.T) {
 type fakeClient struct {
 	runnyv1.RunnyServiceClient
 	pauseResp *runnyv1.PauseResponse
+	pruneResp *runnyv1.PruneResponse
+	pruneErr  error
 }
 
 func (f *fakeClient) Pause(ctx context.Context, in *runnyv1.PauseRequest, opts ...grpc.CallOption) (*runnyv1.PauseResponse, error) {
 	return f.pauseResp, nil
+}
+
+func (f *fakeClient) Prune(ctx context.Context, in *runnyv1.PruneRequest, opts ...grpc.CallOption) (*runnyv1.PruneResponse, error) {
+	return f.pruneResp, f.pruneErr
 }
 
 func TestPausePrintsNote(t *testing.T) {
@@ -1067,6 +1073,18 @@ func TestExecSSHNoExecReturnsNil(t *testing.T) {
 	}
 	if err := c.execSSH(resp, true); err != nil {
 		t.Errorf("execSSH with noExec=true should return nil, got: %v", err)
+	}
+}
+
+// prune must return a non-nil error (exit 1) when the daemon reports scan or
+// apply errors so that scripts and CI pipelines can detect an incomplete prune.
+func TestPruneExitsNonZeroOnErrors(t *testing.T) {
+	var buf bytes.Buffer
+	c := &ctl{out: &buf, client: &fakeClient{pruneResp: &runnyv1.PruneResponse{
+		Errors: []string{"image-bundle scan: permission denied"},
+	}}}
+	if err := c.prune(context.Background(), false); err == nil {
+		t.Fatal("expected error when daemon reports errors, got nil")
 	}
 }
 

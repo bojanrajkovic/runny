@@ -436,15 +436,19 @@ func run() error {
 		var skips []socket.PruneSkip
 		ociClient := oci.NewClient()
 		for _, pool := range cfg.Pools {
+			refDirName := filepath.Base(dir.ImageRefDir(pool.Image))
 			ref, err := oci.ParseRef(pool.Image)
 			if err != nil {
-				continue // unparseable: leave the ref dir alone
+				// Image ref unparseable — protect the ref dir rather than
+				// letting PlanImageBundlePrune classify it as "removed pool".
+				protectRefDirNames[refDirName] = true
+				skips = append(skips, socket.PruneSkip{Ref: pool.Image, Reason: "image ref parse failed: " + err.Error()})
+				continue
 			}
 			displayRef := pool.Image
 			if i := strings.IndexByte(displayRef, '@'); i >= 0 {
 				displayRef = displayRef[:i]
 			}
-			refDirName := filepath.Base(dir.ImageRefDir(pool.Image))
 			configuredRefs[refDirName] = displayRef
 			rctx, cancel := bounded.WithTimeout(ctx, checkBudget)
 			digest, resolveErr := ociClient.Resolve(rctx, ref)
@@ -456,16 +460,22 @@ func run() error {
 			}
 			keepPaths[dir.ImageBundleDir(ref.String(), digest)] = true
 		}
-		tarballItems, _ := images.PlanRunnerCachePrune(dir.RunnerCacheDir(), runnerCacheKeep, protectTarballs)
-		bundleItems, _ := images.PlanImageBundlePrune(dir.ImagesDir(), keepPaths, protectRefDirNames, configuredRefs)
-		allItems := make([]socket.PruneItem, 0, len(tarballItems)+len(bundleItems))
-		for _, it := range append(tarballItems, bundleItems...) {
-			allItems = append(allItems, socket.PruneItem{Path: it.Path, Bytes: it.Bytes, Kind: it.Kind, Reason: it.Reason, Label: it.Label})
+		tarballItems, tarballErr := images.PlanRunnerCachePrune(dir.RunnerCacheDir(), runnerCacheKeep, protectTarballs)
+		bundleItems, bundleErr := images.PlanImageBundlePrune(dir.ImagesDir(), keepPaths, protectRefDirNames, configuredRefs)
+		combined := append(tarballItems, bundleItems...)
+		allItems := make([]socket.PruneItem, len(combined))
+		for i, it := range combined {
+			allItems[i] = socket.PruneItem{Path: it.Path, Bytes: it.Bytes, Kind: it.Kind, Reason: it.Reason, Label: it.Label}
 		}
 		plan := socket.PrunePlan{Items: allItems, Applied: apply, Skips: skips}
+		if tarballErr != nil {
+			plan.Errors = append(plan.Errors, "runner-cache scan: "+tarballErr.Error())
+		}
+		if bundleErr != nil {
+			plan.Errors = append(plan.Errors, "image-bundle scan: "+bundleErr.Error())
+		}
 		if apply {
-			allPlanItems := append(tarballItems, bundleItems...)
-			plan.ApplyErr = images.ApplyPrune(allPlanItems)
+			plan.ApplyErr = images.ApplyPrune(combined)
 		}
 		return plan
 	}

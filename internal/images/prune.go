@@ -49,6 +49,12 @@ func PlanRunnerCachePrune(cacheDir string, keep int, protect map[string]bool) ([
 			continue
 		}
 		if strings.HasSuffix(name, ".partial") {
+			// Skip if EnsureRunnerTarball holds the semaphore for the
+			// destination file — the download is live and the Rename that
+			// follows it would fail with ENOENT if we unlink first.
+			if _, active := tarballLocks.Load(strings.TrimSuffix(name, ".partial")); active {
+				continue
+			}
 			items = append(items, PlanItem{
 				Path:   filepath.Join(cacheDir, name),
 				Bytes:  fileSize(filepath.Join(cacheDir, name)),

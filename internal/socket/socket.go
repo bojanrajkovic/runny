@@ -114,12 +114,13 @@ type PruneSkip struct {
 }
 
 // PrunePlan is the result returned by PruneFn: the item list, whether it was
-// applied, any skips (refs whose digest could not be resolved), and a
-// best-effort apply error (nil when not applied or apply succeeded).
+// applied, any skips (refs whose digest could not be resolved), non-fatal
+// scan errors, and a best-effort apply error.
 type PrunePlan struct {
 	Items    []PruneItem
 	Applied  bool
 	Skips    []PruneSkip
+	Errors   []string // non-fatal scan/plan errors surfaced to the caller
 	ApplyErr error
 }
 
@@ -718,6 +719,7 @@ func (s *Server) Prune(ctx context.Context, req *runnyv1.PruneRequest) (*runnyv1
 	for _, skip := range plan.Skips {
 		resp.Skips = append(resp.Skips, &runnyv1.PruneSkip{Ref: skip.Ref, Reason: skip.Reason})
 	}
+	resp.Errors = append(resp.Errors, plan.Errors...)
 	if plan.ApplyErr != nil {
 		resp.Errors = append(resp.Errors, plan.ApplyErr.Error())
 	}

@@ -147,8 +147,7 @@ func TestPlanImageBundlePruneProtectRefDir(t *testing.T) {
 	}
 }
 
-// TestPlanRunnerCachePrunePartialIsReaped: a .partial temp always goes into
-// the plan regardless of the protect set.
+// TestPlanRunnerCachePrunePartialIsReaped: an idle .partial temp is planned.
 func TestPlanRunnerCachePrunePartialIsReaped(t *testing.T) {
 	dir := t.TempDir()
 	partial := "actions-runner-osx-arm64-2.321.0.tar.gz.partial"
@@ -165,6 +164,30 @@ func TestPlanRunnerCachePrunePartialIsReaped(t *testing.T) {
 	}
 	if items[0].Reason != "dead .partial" {
 		t.Errorf("item reason = %s, want dead .partial", items[0].Reason)
+	}
+}
+
+// TestPlanRunnerCachePruneSkipsActivePartial: a .partial file whose base name
+// has a live tarballLocks entry is not planned for deletion.
+func TestPlanRunnerCachePruneSkipsActivePartial(t *testing.T) {
+	dir := t.TempDir()
+	base := "actions-runner-osx-arm64-2.321.0.tar.gz"
+	partial := base + ".partial"
+	if err := os.WriteFile(filepath.Join(dir, partial), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate an active download by inserting a semaphore entry.
+	sem := make(chan struct{}, 1)
+	tarballLocks.Store(base, sem)
+	t.Cleanup(func() { tarballLocks.Delete(base) })
+
+	items, err := PlanRunnerCachePrune(dir, 2, nil)
+	if err != nil {
+		t.Fatalf("PlanRunnerCachePrune: %v", err)
+	}
+	if len(items) != 0 {
+		t.Errorf("expected 0 items (active download protected); got %v", items)
 	}
 }
 

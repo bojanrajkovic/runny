@@ -44,4 +44,3 @@ func cloneRunnerTarball(cloneFile FileCloner, storeDir, mountDir, tarball string
 	}
 	return cloneFile(filepath.Join(storeDir, tarball), filepath.Join(mountDir, tarball))
 }
-

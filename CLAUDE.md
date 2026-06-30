@@ -25,7 +25,7 @@ Go 1.26 (mise-managed) for daemon + CLI; cgo to Virtualization.framework via `Co
 - `internal/tart` — the tart bundle format: config.json parsing, validation, bundle clone (delegates per file to `internal/clonefile`).
 - `internal/vm` — Virtualization.framework lifecycle via vz (darwin-tagged; ADR-0008) + guest sizing.
 - `internal/oci` — tart-format image pull (non-standard OCI layout, LZ4 layers).
-- `internal/images` — the ENSURE_IMAGE ensurer: image + runner-tarball caching (the tarball download store, cold-start pruned; each cycle clones its own copy before boot), stall watching, pull progress; the shared image-puller actor that lets concurrent slots share one pull and its outcome, incl. a bounded hold on a deterministic disk-headroom failure (ADR-0021). Also `PlanRunnerCachePrune` / `PlanImageBundlePrune` / `ApplyPrune` for on-demand disk reclaim via `runnyctl prune`.
+- `internal/images` — the ENSURE_IMAGE ensurer: image + runner-tarball caching (the tarball download store, cold-start pruned; each cycle clones its own copy before boot), stall watching, pull progress; the shared image-puller actor that lets concurrent slots share one pull and its outcome, incl. a bounded hold on a deterministic disk-headroom failure (ADR-0021). Also the on-demand disk reclaim planner used by `runnyctl prune` (see `prune.go`).
 - `internal/sshx` — the only package allowed to construct SSH clients (deadline recipe, ADR-0002).
 - `internal/guest` — what to do over SSH: provision scripts, runner launch, diag pull.
 - `internal/github` — App JWT → installation token → JIT config; runner list/delete (ADR-0003).

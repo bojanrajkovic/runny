@@ -278,3 +278,32 @@ func TestProtectActiveTarballs(t *testing.T) {
 		t.Fatalf("tarballReserved: ProtectActiveTarballs missed %s", assetName)
 	}
 }
+
+// TestApplyPruneGuard: items rejected by the guard are not deleted.
+func TestApplyPruneGuard(t *testing.T) {
+	dir := t.TempDir()
+	keep := filepath.Join(dir, "keep.tar.gz")
+	del := filepath.Join(dir, "delete.tar.gz")
+	for _, p := range []string{keep, del} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items := []PlanItem{
+		{Path: keep, Bytes: 1, Kind: "runner-tarball"},
+		{Path: del, Bytes: 1, Kind: "runner-tarball"},
+	}
+	freed, err := ApplyPrune(items, func(it PlanItem) bool { return it.Path != keep })
+	if err != nil {
+		t.Fatalf("ApplyPrune: %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("guard: keep file was deleted")
+	}
+	if _, err := os.Stat(del); !os.IsNotExist(err) {
+		t.Errorf("guard: delete file was not removed")
+	}
+	if freed != 1 {
+		t.Errorf("freed = %d, want 1 (only the deleted item)", freed)
+	}
+}

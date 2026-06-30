@@ -480,7 +480,30 @@ func run() error {
 			plan.Errors = append(plan.Errors, "image-bundle scan: "+bundleErr.Error())
 		}
 		if apply {
-			plan.ReclaimedBytes, plan.ApplyErr = images.ApplyPrune(combined)
+			// Re-snapshot live slot state immediately before deleting to
+			// protect artifacts adopted by slots that left BACKOFF during the
+			// potentially-slow plan phase (registry resolves + dir walks).
+			liveKeep := map[string]bool{}
+			liveTarball := map[string]bool{}
+			for _, slot := range slots {
+				st := slot.Status()
+				if st.ImageDigest != "" {
+					liveKeep[dir.ImageBundleDir(st.Image, st.ImageDigest)] = true
+				}
+				if st.RunnerVersion != "" {
+					liveTarball[st.RunnerVersion] = true
+				}
+			}
+			images.ProtectActiveTarballs(liveTarball)
+			plan.ReclaimedBytes, plan.ApplyErr = images.ApplyPrune(combined, func(it images.PlanItem) bool {
+				switch it.Kind {
+				case "image-bundle":
+					return !liveKeep[it.Path]
+				case "runner-tarball":
+					return !liveTarball[filepath.Base(it.Path)]
+				}
+				return true
+			})
 		}
 		return plan
 	}

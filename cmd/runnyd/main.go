@@ -504,7 +504,7 @@ func run() error {
 				case "image-bundle":
 					return !liveKeep[it.Path]
 				case "runner-tarball":
-					return !liveTarball[filepath.Base(it.Path)]
+					return !liveTarball[strings.TrimSuffix(filepath.Base(it.Path), ".partial")]
 				}
 				return true
 			})

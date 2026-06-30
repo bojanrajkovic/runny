@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
@@ -416,6 +417,100 @@ func run() error {
 		return requestReload(ctx, "rpc/upgrade", reason, true)
 	}
 	srv.DrainFn = d.State
+	srv.PruneFn = func(ctx context.Context, apply bool) socket.PrunePlan {
+		// Build the keep-set from live slot statuses.
+		keepPaths := map[string]bool{}
+		protectTarballs := map[string]bool{}
+		for _, slot := range slots {
+			st := slot.Status()
+			if st.ImageDigest != "" {
+				keepPaths[dir.ImageBundleDir(st.Image, st.ImageDigest)] = true
+			}
+			if st.RunnerVersion != "" {
+				protectTarballs[st.RunnerVersion] = true
+			}
+		}
+		// Protect tarballs whose download is in flight but whose RunnerVersion
+		// has not been published to slot status yet (EnsureRunnerTarball
+		// completes before Ensure returns, so there is a window where the
+		// tarball is cached but the slot still shows RunnerVersion="").
+		images.ProtectActiveTarballs(protectTarballs)
+		// Resolve current digest for each configured pool ref.
+		protectRefDirNames := map[string]bool{}
+		configuredRefs := map[string]string{}
+		var skips []socket.PruneSkip
+		ociClient := oci.NewClient()
+		for _, pool := range cfg.Pools {
+			ref, err := oci.ParseRef(pool.Image)
+			if err != nil {
+				// Image ref unparseable — protect the ref dir rather than
+				// letting PlanImageBundlePrune classify it as "removed pool".
+				// Use pool.Image directly: if parsing fails we can't canonicalize.
+				protectRefDirNames[filepath.Base(dir.ImageRefDir(pool.Image))] = true
+				skips = append(skips, socket.PruneSkip{Ref: pool.Image, Reason: "image ref parse failed: " + err.Error()})
+				continue
+			}
+			// Use ref.String() (canonical, tag-free for digest-pinned refs) so
+			// refDirName matches the on-disk path, not pool.Image which may carry
+			// a tag that sanitizeRef fails to strip when a digest is also present.
+			refDirName := filepath.Base(dir.ImageRefDir(ref.String()))
+			displayRef := pool.Image
+			if i := strings.IndexByte(displayRef, '@'); i >= 0 {
+				displayRef = displayRef[:i]
+			}
+			configuredRefs[refDirName] = displayRef
+			rctx, cancel := bounded.WithTimeout(ctx, checkBudget)
+			digest, resolveErr := ociClient.Resolve(rctx, ref)
+			cancel()
+			if resolveErr != nil {
+				protectRefDirNames[refDirName] = true
+				skips = append(skips, socket.PruneSkip{Ref: pool.Image, Reason: resolveErr.Error()})
+				continue
+			}
+			keepPaths[dir.ImageBundleDir(ref.String(), digest)] = true
+		}
+		tarballItems, tarballErr := images.PlanRunnerCachePrune(dir.RunnerCacheDir(), runnerCacheKeep, protectTarballs)
+		bundleItems, bundleErr := images.PlanImageBundlePrune(dir.ImagesDir(), keepPaths, protectRefDirNames, configuredRefs)
+		combined := append(tarballItems, bundleItems...)
+		allItems := make([]socket.PruneItem, len(combined))
+		for i, it := range combined {
+			allItems[i] = socket.PruneItem{Path: it.Path, Bytes: it.Bytes, Kind: it.Kind, Reason: it.Reason, Label: it.Label}
+		}
+		plan := socket.PrunePlan{Items: allItems, Applied: apply, Skips: skips}
+		if tarballErr != nil {
+			plan.Errors = append(plan.Errors, "runner-cache scan: "+tarballErr.Error())
+		}
+		if bundleErr != nil {
+			plan.Errors = append(plan.Errors, "image-bundle scan: "+bundleErr.Error())
+		}
+		if apply {
+			// Re-snapshot live slot state immediately before deleting to
+			// protect artifacts adopted by slots that left BACKOFF during the
+			// potentially-slow plan phase (registry resolves + dir walks).
+			liveKeep := map[string]bool{}
+			liveTarball := map[string]bool{}
+			for _, slot := range slots {
+				st := slot.Status()
+				if st.ImageDigest != "" {
+					liveKeep[dir.ImageBundleDir(st.Image, st.ImageDigest)] = true
+				}
+				if st.RunnerVersion != "" {
+					liveTarball[st.RunnerVersion] = true
+				}
+			}
+			images.ProtectActiveTarballs(liveTarball)
+			plan.ReclaimedBytes, plan.ApplyErr = images.ApplyPrune(combined, func(it images.PlanItem) bool {
+				switch it.Kind {
+				case "image-bundle":
+					return !liveKeep[it.Path]
+				case "runner-tarball":
+					return !liveTarball[strings.TrimSuffix(filepath.Base(it.Path), ".partial")]
+				}
+				return true
+			})
+		}
+		return plan
+	}
 	// Deliver drain-progress bumps (slot transitions, exit-gate hold flips) to
 	// watchers immediately, so a follower's stall timer tracks real progress
 	// rather than the 30s heartbeat.

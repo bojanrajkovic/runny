@@ -797,3 +797,40 @@ func TestRecoveryStreamConvertsPanicToInternal(t *testing.T) {
 		t.Errorf("panicking stream handler must surface codes.Internal, got %v", err)
 	}
 }
+
+func TestPruneUnimplementedWhenUnwired(t *testing.T) {
+	srv := newTestServer(nil, nil, nil, nil) // PruneFn not set
+	c := dial(t, srv)
+	_, err := c.Prune(t.Context(), &runnyv1.PruneRequest{})
+	if status.Code(err) != codes.Unimplemented {
+		t.Errorf("Prune without PruneFn: got %v, want Unimplemented", err)
+	}
+}
+
+func TestPruneDryRunDeletesNothing(t *testing.T) {
+	srv := newTestServer(nil, nil, nil, nil)
+	called := false
+	srv.PruneFn = func(_ context.Context, apply bool) PrunePlan {
+		called = true
+		if apply {
+			t.Error("dry run called PruneFn with apply=true")
+		}
+		return PrunePlan{
+			Items: []PruneItem{{Path: "/fake/path", Bytes: 1024, Kind: "runner-tarball", Reason: "superseded", Label: "foo.tar.gz"}},
+		}
+	}
+	c := dial(t, srv)
+	resp, err := c.Prune(t.Context(), &runnyv1.PruneRequest{Apply: false})
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if !called {
+		t.Error("PruneFn was not called")
+	}
+	if resp.GetApplied() {
+		t.Error("applied=true on dry run")
+	}
+	if len(resp.GetItems()) != 1 || resp.GetReclaimedBytes() != 1024 {
+		t.Errorf("expected 1 item and 1024 reclaimed_bytes, got %d items / %d bytes", len(resp.GetItems()), resp.GetReclaimedBytes())
+	}
+}

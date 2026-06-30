@@ -47,6 +47,11 @@ service RunnyService {
   // and arm a DEBUG hold for job end. In DEBUG: extend the hold / add a
   // key. Per-guest, per-cycle: the key dies at teardown.
   rpc InjectDebugKey(InjectDebugKeyRequest) returns (InjectDebugKeyResponse);
+  // Plan (and optionally apply) a prune of stale image bundles and runner
+  // tarballs. Safe to call while the daemon is running: bundles whose digest
+  // is held by a live slot are never removed. Defaults to dry-run (apply=false).
+  // Pre-feature daemons return Unimplemented.
+  rpc Prune(PruneRequest) returns (PruneResponse);
 }
 
 // SlotState mirrors internal/statemachine; the FSM is the authority (ADR-0004).
@@ -482,6 +487,45 @@ message InjectDebugKeyRequest {
   google.protobuf.Duration hold = 3;  // 0 = limits.max_debug_hold; negative or
                                       // greater than the cap is REJECTED, not clamped
   string reason = 4;                  // audit note
+}
+
+message PruneRequest {
+  // When false (the default), plan only — nothing is deleted. Set true to
+  // perform the deletions after planning. Dry-run is the wire default so the
+  // safe outcome is one bit-flip away, never one fat-fingered invocation away.
+  bool apply = 1;
+}
+
+message PruneResponse {
+  // Every artifact that would be (dry-run) or was (applied) reclaimed.
+  repeated ReclaimItem items = 1;
+  // Sum of item.bytes across all items.
+  int64 reclaimed_bytes = 2;
+  // True when this response reflects a real deletion (apply=true was set).
+  bool applied = 3;
+  // Refs left entirely intact because their digest could not be resolved;
+  // the daemon fails safe rather than deleting a bundle it couldn't confirm.
+  repeated PruneSkip skips = 4;
+  // Non-fatal errors from the apply step (best-effort: one failure does not
+  // stop the rest). Empty on dry-run and on a fully successful apply.
+  repeated string errors = 5;
+}
+
+message ReclaimItem {
+  string path = 1;    // absolute path on the daemon's disk
+  int64 bytes = 2;
+  // "runner-tarball" | "image-bundle"
+  string kind = 3;
+  // "superseded" | "removed pool" | "dead .partial"
+  string reason = 4;
+  // Human-readable display: "<ref> @ sha256:<short-hex>" (image bundle) or
+  // the asset filename (runner tarball).
+  string label = 5;
+}
+
+message PruneSkip {
+  string ref = 1;     // the configured image ref that could not be resolved
+  string reason = 2;  // the resolve error
 }
 
 message InjectDebugKeyResponse {

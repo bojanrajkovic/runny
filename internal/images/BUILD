@@ -3,7 +3,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "images",
     srcs = [
+        "disk_darwin.go",
+        "disk_linux.go",
         "images.go",
+        "prune.go",
         "puller.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/images",
@@ -21,6 +24,7 @@ go_library(
 go_test(
     name = "images_test",
     srcs = [
+        "prune_test.go",
         "puller_test.go",
         "tarball_test.go",
     ],

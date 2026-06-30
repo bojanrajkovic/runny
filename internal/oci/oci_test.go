@@ -574,3 +574,27 @@ func TestPullToWaitInterruptible(t *testing.T) {
 		t.Fatalf("want interruptible-wait error, got %v", err)
 	}
 }
+
+// TestPullInProgress: reports true while a pull holds the semaphore, false
+// once released.
+func TestPullInProgress(t *testing.T) {
+	dest := t.TempDir()
+	if PullInProgress(dest) {
+		t.Fatal("PullInProgress returned true before any lock acquired")
+	}
+	sem := make(chan struct{}, 1)
+	pullLocks.Store(dest, sem)
+	t.Cleanup(func() { pullLocks.Delete(dest) })
+
+	if PullInProgress(dest) {
+		t.Fatal("PullInProgress returned true with semaphore empty (no pull in flight)")
+	}
+	sem <- struct{}{} // simulate pull acquiring the lock
+	if !PullInProgress(dest) {
+		t.Fatal("PullInProgress returned false while semaphore is held")
+	}
+	<-sem // release
+	if PullInProgress(dest) {
+		t.Fatal("PullInProgress returned true after semaphore released")
+	}
+}

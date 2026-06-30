@@ -45,11 +45,3 @@ func cloneRunnerTarball(cloneFile FileCloner, storeDir, mountDir, tarball string
 	return cloneFile(filepath.Join(storeDir, tarball), filepath.Join(mountDir, tarball))
 }
 
-// removeAll is a var so teardown's best-effort clone deletion can be made to
-// fail in tests (the cleanup-failure-is-recorded path).
-var removeAll = func(path string) error {
-	if path == "" {
-		return nil
-	}
-	return os.RemoveAll(path)
-}

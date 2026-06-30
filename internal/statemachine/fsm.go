@@ -191,6 +191,7 @@ type Deps struct {
 	Images         ImageEnsurer
 	Clone          Cloner
 	CloneFile      FileCloner
+	RemoveAll      func(string) error
 	GitHub         GitHub
 	Dial           Dialer
 	Log            *slog.Logger
@@ -752,7 +753,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 			// wedging the slot in a CLONE→BACKOFF loop until a cold start. Clear
 			// it first so CLONE is self-healing. Safe: no live guest owns vmDir
 			// here — a wedged cycle parks the slot and never re-enters CLONE.
-			if err := removeAll(vmDir); err != nil {
+			if err := s.deps.RemoveAll(vmDir); err != nil {
 				return fmt.Errorf("clearing stale clone dir: %w", err)
 			}
 			if err := s.deps.Clone(srcBundle, vmDir); err != nil {
@@ -1837,7 +1838,7 @@ func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInput
 	// Deleting the disk out from under a live guest destroys the evidence
 	// and frees nothing that matters (the guest-cap slot stays occupied).
 	if !wedged {
-		if err := removeAll(in.vmDir); err != nil {
+		if err := s.deps.RemoveAll(in.vmDir); err != nil {
 			s.deps.Log.Error("removing vm dir", "err", err)
 			cleanupWarns = append(cleanupWarns, fmt.Sprintf("remove clone: %v", err))
 		}

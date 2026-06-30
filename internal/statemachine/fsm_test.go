@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -421,6 +422,16 @@ type harness struct {
 
 	cloneMu    sync.Mutex
 	cloneFiles [][2]string // {src, dst} per CloneFile call
+
+	// removeAllFn is the injectable RemoveAll seam; swap via setRemoveAll.
+	removeAllFn atomic.Pointer[func(string) error]
+}
+
+// setRemoveAll swaps the RemoveAll seam for the harness's slot. The swap is
+// atomic so it can race safely against the FSM goroutine calling RemoveAll.
+// Restoring the original is the caller's responsibility (via t.Cleanup).
+func (h *harness) setRemoveAll(fn func(string) error) {
+	h.removeAllFn.Store(&fn)
 }
 
 func (h *harness) cloneFileCalls() [][2]string {
@@ -507,6 +518,8 @@ func newHarnessPool(t *testing.T, mutate func(*home.Config), mutatePool func(*ho
 		dir:    dir,
 		states: make(chan Status, 256),
 	}
+	defaultRemoveAll := func(path string) error { return os.RemoveAll(path) }
+	h.removeAllFn.Store(&defaultRemoveAll)
 	h.dialer = &fakeDialer{guest: h.guest}
 	deps := Deps{
 		Home:           dir,
@@ -524,8 +537,9 @@ func newHarnessPool(t *testing.T, mutate func(*home.Config), mutatePool func(*ho
 			h.cloneMu.Unlock()
 			return os.WriteFile(dst, nil, 0o600) // dir is created by cloneRunnerTarball
 		},
-		GitHub: h.gh,
-		Dial:   h.dialer,
+		RemoveAll: func(path string) error { return (*h.removeAllFn.Load())(path) },
+		GitHub:    h.gh,
+		Dial:      h.dialer,
 		OnRunnerLine: func(slot, cycleID, line string) {
 			h.linesMu.Lock()
 			h.runnerLines = append(h.runnerLines, slot+" "+cycleID+" "+line)
@@ -922,9 +936,8 @@ func TestTeardownRecordsFailedCleanupsAsWarn(t *testing.T) {
 	// vms/<slot>/ routes through the same removeAll seam and has already run by
 	// LISTENING, so injecting earlier would fail the cycle at CLONE instead of
 	// exercising teardown's best-effort path.
-	orig := removeAll
-	removeAll = func(string) error { return errors.New("clone busy") }
-	t.Cleanup(func() { removeAll = orig })
+	h.setRemoveAll(func(string) error { return errors.New("clone busy") })
+	t.Cleanup(func() { h.setRemoveAll(os.RemoveAll) })
 
 	// No job ran, but a runner is registered → teardown deregisters (and fails).
 	if !h.slot.Command(Command{Kind: CmdRecycle, Reason: "image bump"}) {

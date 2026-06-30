@@ -245,10 +245,12 @@ func TestPlanImageBundlePruneOrphanedPartialIsPlanned(t *testing.T) {
 	}
 }
 
-// TestProtectActiveTarballs: filenames whose tarball semaphore is held are
-// added to the protect set.
+// TestProtectActiveTarballs: covers both protection paths — tarballLocks
+// (active download) and tarballReserved (post-download, pre-status window).
 func TestProtectActiveTarballs(t *testing.T) {
 	assetName := "actions-runner-osx-arm64-2.321.0.tar.gz"
+
+	// tarballLocks path: idle semaphore → not protected; held → protected.
 	sem := make(chan struct{}, 1)
 	tarballLocks.Store(assetName, sem)
 	t.Cleanup(func() { tarballLocks.Delete(assetName) })
@@ -256,7 +258,7 @@ func TestProtectActiveTarballs(t *testing.T) {
 	protect := map[string]bool{}
 	ProtectActiveTarballs(protect)
 	if protect[assetName] {
-		t.Fatal("ProtectActiveTarballs added an idle tarball to the protect set")
+		t.Fatal("idle semaphore: ProtectActiveTarballs should not protect")
 	}
 
 	sem <- struct{}{} // simulate active download
@@ -264,6 +266,15 @@ func TestProtectActiveTarballs(t *testing.T) {
 	ProtectActiveTarballs(protect)
 	<-sem
 	if !protect[assetName] {
-		t.Fatalf("ProtectActiveTarballs missed active tarball %s", assetName)
+		t.Fatalf("held semaphore: ProtectActiveTarballs missed %s", assetName)
+	}
+
+	// tarballReserved path: entry present → protected regardless of semaphore.
+	tarballReserved.Store(assetName, struct{}{})
+	t.Cleanup(func() { tarballReserved.Delete(assetName) })
+	protect = map[string]bool{}
+	ProtectActiveTarballs(protect)
+	if !protect[assetName] {
+		t.Fatalf("tarballReserved: ProtectActiveTarballs missed %s", assetName)
 	}
 }

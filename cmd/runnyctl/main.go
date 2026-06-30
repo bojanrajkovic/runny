@@ -924,7 +924,7 @@ func (c *ctl) prune(ctx context.Context, apply bool) error {
 		return c.emit(resp)
 	}
 	items := resp.GetItems()
-	if len(items) == 0 && len(resp.GetSkips()) == 0 {
+	if len(items) == 0 && len(resp.GetSkips()) == 0 && len(resp.GetErrors()) == 0 {
 		fmt.Fprintln(c.out, "nothing to reclaim")
 		return nil
 	}

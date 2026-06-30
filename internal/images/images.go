@@ -62,6 +62,12 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string), onDigestResol
 		if err != nil {
 			return "", "", "", fmt.Errorf("ensuring runner tarball: %w", err)
 		}
+		// Reserve the tarball until Ensure returns: after EnsureRunnerTarball
+		// the semaphore is released but the FSM hasn't published RunnerVersion
+		// yet. Without this, on-demand prune can delete the tarball during the
+		// image pull that follows, causing CLONE to fail.
+		tarballReserved.Store(runnerVersion, struct{}{})
+		defer tarballReserved.Delete(runnerVersion)
 	}
 
 	client := oci.NewClient()
@@ -246,16 +252,27 @@ type RunnerResolver func(ctx bounded.Context) (filename, url, sha256 string, err
 // download (a wait on a peer's already-bounded operation is itself bounded).
 var tarballLocks sync.Map // filename -> chan struct{} (capacity-1 semaphore)
 
-// ProtectActiveTarballs adds the asset filename of every tarball whose
-// download is currently in flight to protect. PruneFn calls this after
-// building the status-based protect set so that a tarball downloaded but not
-// yet published via slot.Status().RunnerVersion is not deleted before CLONE
-// tries to copy it.
+// tarballReserved tracks tarballs that Ensure() has resolved and downloaded
+// but whose RunnerVersion has not yet been published to slot status (the FSM
+// sets it only after Ensure returns). Ensure() stores the filename right after
+// EnsureRunnerTarball returns and defers a delete so the reservation covers
+// the full image-resolve/pull window that follows the download.
+var tarballReserved sync.Map // filename -> struct{}
+
+// ProtectActiveTarballs adds the asset filename of every tarball that is
+// either being downloaded (tarballLocks) or has been resolved but not yet
+// published to slot status (tarballReserved) to protect. PruneFn calls this
+// so that a tarball in use by an ENSURE_IMAGE slot — at any point from first
+// download through slot-status publication — is never deleted.
 func ProtectActiveTarballs(protect map[string]bool) {
 	tarballLocks.Range(func(k, v any) bool {
 		if len(v.(chan struct{})) > 0 {
 			protect[k.(string)] = true
 		}
+		return true
+	})
+	tarballReserved.Range(func(k, _ any) bool {
+		protect[k.(string)] = true
 		return true
 	})
 }

@@ -123,6 +123,13 @@ func (d Dir) ImageBundleDir(ref, digest string) string {
 	return filepath.Join(d.ImagesDir(), sanitizeRef(ref), strings.ReplaceAll(digest, ":", "-"))
 }
 
+// ImageRefDir is the per-ref subdirectory of the image cache (the parent
+// of all digest bundles for one ref). Used by the prune planner to compute
+// the sanitized-ref key from a configured image ref.
+func (d Dir) ImageRefDir(ref string) string {
+	return filepath.Join(d.ImagesDir(), sanitizeRef(ref))
+}
+
 // VMDir is the ephemeral clone bundle for one slot. Always deletable.
 func (d Dir) VMDir(slot string) string { return filepath.Join(d.VMsDir(), slot) }
 

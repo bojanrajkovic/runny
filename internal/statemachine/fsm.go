@@ -1788,7 +1788,7 @@ func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInput
 		pctx, pcancel := bounded.WithTimeout(tctx, 15*time.Second)
 		if session, err := in.guest.PullDebugSession(pctx); err == nil && len(session) > 0 {
 			if dir, derr := store.Dir(rec); derr == nil {
-				if werr := writeFile(dir, "debug-session.log", session); werr == nil {
+				if werr := writeFile(dir, "debug-session.log", stripTerminalCodes(session)); werr == nil {
 					rec.Artifacts = append(rec.Artifacts, "debug-session.log")
 				}
 			}

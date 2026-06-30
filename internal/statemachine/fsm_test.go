@@ -2295,12 +2295,33 @@ func TestDebugHeldAfterJobOKResetsStreak(t *testing.T) {
 
 // --- debug session recording (issue #207) ---
 
+// TestStripTerminalCodes: ANSI sequences and CR+LF are removed; plain text is
+// preserved.
+func TestStripTerminalCodes(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"\x1b[31mred\x1b[0m", "red"},               // SGR color
+		{"\x1b[2J", ""},                              // CSI erase-screen
+		{"\x1b[?25h", ""},                            // CSI private mode
+		{"\x1bM", ""},                                // standalone ESC sequence
+		{"hello\r\nworld\r\n", "hello\nworld\n"},     // CRLF normalization
+		{"\x1b[32mok\x1b[0m\r\n", "ok\n"},           // both combined
+		{"plain text\n", "plain text\n"},             // untouched
+	}
+	for _, tc := range tests {
+		got := string(stripTerminalCodes([]byte(tc.in)))
+		if got != tc.want {
+			t.Errorf("stripTerminalCodes(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // TestDebugSessionPulledWhenKeyLanded: a cycle that entered DEBUG via a landed
 // key and has a non-empty session log produces a debug-session.log artifact.
 func TestDebugSessionPulledWhenKeyLanded(t *testing.T) {
 	h := newHarness(t, nil)
 	h.images.maxCalls = 1
-	h.guest.sessionLog = []byte("operator ran some commands")
+	// Return raw terminal output; the artifact on disk must have codes stripped.
+	h.guest.sessionLog = []byte("\x1b[32moperator ran some commands\x1b[0m\r\n")
 	cancel := h.reachListening(t)
 	defer cancel()
 
@@ -2319,6 +2340,14 @@ func TestDebugSessionPulledWhenKeyLanded(t *testing.T) {
 	}
 	if !h.guest.sessionPulledOnce() {
 		t.Error("PullDebugSession was not called")
+	}
+	dir, _ := (cycle.Store{SlotDir: h.dir.SlotCyclesDir("runner-1")}).Dir(rec)
+	got, err := os.ReadFile(filepath.Join(dir, "debug-session.log"))
+	if err != nil {
+		t.Fatalf("reading debug-session.log: %v", err)
+	}
+	if want := "operator ran some commands\n"; string(got) != want {
+		t.Errorf("debug-session.log content = %q, want %q (ANSI codes not stripped?)", got, want)
 	}
 }
 

@@ -1,10 +1,25 @@
 package statemachine
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 )
+
+// ansiRE matches ANSI/VT escape sequences found in script(1) recordings:
+// CSI sequences (ESC [ ... letter) and standalone ESC sequences (ESC + non-[).
+// Both forms appear in interactive terminal sessions; stripping them yields a
+// plain-text log that can be read with cat or grep without a PTY emulator.
+var ansiRE = regexp.MustCompile(`\x1b(?:\[[0-9;?]*[A-Za-z]|[^[])`)
+
+// stripTerminalCodes removes ANSI escape sequences and normalizes the \r\n
+// line endings that PTY/script output produces.
+func stripTerminalCodes(b []byte) []byte {
+	b = ansiRE.ReplaceAll(b, nil)
+	return bytes.ReplaceAll(b, []byte{'\r', '\n'}, []byte{'\n'})
+}
 
 // Small fs helpers kept separate so fsm.go stays pure control flow.
 

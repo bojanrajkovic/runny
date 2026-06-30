@@ -653,10 +653,21 @@ func TestInstallDebugKeyRecorderPerOS(t *testing.T) {
 	if strings.Contains(debugRecorderLinux, `/bin/sh -c "$SSH_ORIGINAL_COMMAND"`) {
 		t.Error("linux recorder must not use BSD positional form")
 	}
+	// Linux only: -f flushes after each write so in-progress teardown reads
+	// get the latest data (util-linux only; BSD script has no -f flag).
+	if !strings.Contains(debugRecorderLinux, " -f ") {
+		t.Error("linux recorder must use -f (flush) for in-progress session reads")
+	}
+	if strings.Contains(debugRecorderDarwin, " -f ") {
+		t.Error("darwin recorder must not use -f (BSD script has no flush flag)")
+	}
 	// Both: append mode and quiet mode on every exec.
 	for name, r := range map[string]string{"darwin": debugRecorderDarwin, "linux": debugRecorderLinux} {
-		if !strings.Contains(r, "script -q -a") {
-			t.Errorf("%s recorder must use -q (quiet) and -a (append)", name)
+		if !strings.Contains(r, " -q ") {
+			t.Errorf("%s recorder must use -q (quiet)", name)
+		}
+		if !strings.Contains(r, " -a") {
+			t.Errorf("%s recorder must use -a (append)", name)
 		}
 		// Fallback when script is absent.
 		if !strings.Contains(r, "command -v script") {

@@ -360,7 +360,7 @@ func (g *Guest) PullDebugSession(ctx bounded.Context) ([]byte, error) {
 		return nil, fmt.Errorf("debug session pull: %w: %w", statemachine.ErrGuestUnreachable, err)
 	}
 	defer func() { _ = c.Close() }()
-	out, _, err := c.Output(ctx, "cat "+debugSessionLogFile+" 2>/dev/null || true")
+	out, _, err := c.Output(ctx, "tail -c 1048576 "+debugSessionLogFile+" 2>/dev/null || true")
 	if err != nil {
 		return nil, err
 	}
@@ -422,9 +422,9 @@ const debugRecorderDarwin = "#!/bin/sh\n" +
 const debugRecorderLinux = "#!/bin/sh\n" +
 	"if ! command -v script >/dev/null 2>&1; then exec \"${SHELL:-/bin/sh}\"; fi\n" +
 	"if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then\n" +
-	"  exec script -q -a -c \"$SSH_ORIGINAL_COMMAND\" -e " + debugSessionLogFile + "\n" +
+	"  exec script -q -f -a -c \"$SSH_ORIGINAL_COMMAND\" -e " + debugSessionLogFile + "\n" +
 	"else\n" +
-	"  exec script -q -a " + debugSessionLogFile + "\n" +
+	"  exec script -q -f -a " + debugSessionLogFile + "\n" +
 	"fi\n"
 
 // installDebugKeyScript writes the per-OS session recorder to /tmp/runny-record,

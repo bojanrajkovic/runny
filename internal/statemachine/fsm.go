@@ -1781,6 +1781,7 @@ func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInput
 	// 1. Post-mortem while the guest still exists (failure cycles only).
 	if in.failed && in.guest != nil {
 		pctx, pcancel := bounded.WithTimeout(tctx, 15*time.Second)
+		defer pcancel()
 		if diag, err := in.guest.PullDiag(pctx); err == nil && len(diag) > 0 {
 			if dir, derr := store.Dir(rec); derr == nil {
 				if werr := writeFile(dir, "runner-diag.log", diag); werr == nil {
@@ -1790,23 +1791,26 @@ func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInput
 		} else if err != nil {
 			s.deps.Log.Debug("post-mortem pull failed", "err", err)
 		}
-		pcancel()
 	}
 
 	// 1b. Debug session recording (if a debug key landed this cycle).
 	// Gated on debug key landing, not on failure: a DEBUG hold expiry is benign.
 	if in.debugKeyLanded && in.guest != nil {
-		pctx, pcancel := bounded.WithTimeout(tctx, 15*time.Second)
+		pctx, pcancel := bounded.WithTimeout(tctx, 5*time.Second)
+		defer pcancel()
 		if session, err := in.guest.PullDebugSession(pctx); err == nil && len(session) > 0 {
 			if dir, derr := store.Dir(rec); derr == nil {
 				if werr := writeFile(dir, "debug-session.log", stripTerminalCodes(session)); werr == nil {
 					rec.Artifacts = append(rec.Artifacts, "debug-session.log")
+				} else {
+					s.deps.Log.Debug("debug session write failed", "err", werr)
 				}
+			} else {
+				s.deps.Log.Debug("debug session dir lookup failed", "err", derr)
 			}
 		} else if err != nil {
 			s.deps.Log.Debug("debug session pull failed", "err", err)
 		}
-		pcancel()
 	}
 
 	// 2. Kill the runner proc and close the session.

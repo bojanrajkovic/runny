@@ -2312,18 +2312,19 @@ func TestDebugHeldAfterJobOKResetsStreak(t *testing.T) {
 // preserved.
 func TestStripTerminalCodes(t *testing.T) {
 	tests := []struct{ in, want string }{
-		{"\x1b[31mred\x1b[0m", "red"},                         // SGR color
-		{"\x1b[2J", ""},                                        // CSI erase-screen
-		{"\x1b[?25h", ""},                                      // CSI private mode
-		{"\x1bM", ""},                                          // 2-char standalone ESC sequence
-		{"\x1b(B", ""},                                         // 3-char designator: US-ASCII (vim)
-		{"\x1b(0", ""},                                         // 3-char designator: DEC line drawing (ncurses)
-		{"hello\r\nworld\r\n", "hello\nworld\n"},               // CRLF: \r stripped, \n preserved
-		{"\x1b[32mok\x1b[0m\r\n", "ok\n"},                     // ANSI stripped + CRLF normalized
-		{"plain text\n", "plain text\n"},                       // untouched
-		{"\x1b]0;My Title\x07prompt$ ", "prompt$ "},            // OSC BEL-terminated (macOS Terminal)
-		{"\x1b]0;My Title\x1b\\prompt$ ", "prompt$ "},         // OSC ST-terminated
-		{"overwrite\rprogress", "overwriteprogress"},           // bare \r (curl/npm progress bars)
+		{"\x1b[31mred\x1b[0m", "red"},                 // SGR color
+		{"\x1b[2J", ""},                               // CSI erase-screen
+		{"\x1b[?25h", ""},                             // CSI private mode
+		{"\x1b[3~", ""},                               // CSI ~ terminator (Delete key)
+		{"\x1bM", ""},                                 // 2-char standalone ESC sequence
+		{"\x1b(B", ""},                                // 3-char designator: US-ASCII (vim)
+		{"\x1b(0", ""},                                // 3-char designator: DEC line drawing (ncurses)
+		{"hello\r\nworld\r\n", "hello\nworld\n"},      // CRLF: \r stripped, \n preserved
+		{"\x1b[32mok\x1b[0m\r\n", "ok\n"},             // ANSI stripped + CRLF normalized
+		{"plain text\n", "plain text\n"},              // untouched
+		{"\x1b]0;My Title\x07prompt$ ", "prompt$ "},   // OSC BEL-terminated (macOS Terminal)
+		{"\x1b]0;My Title\x1b\\prompt$ ", "prompt$ "}, // OSC ST-terminated
+		{"overwrite\rprogress", "overwriteprogress"},  // bare \r (curl/npm progress bars)
 	}
 	for _, tc := range tests {
 		got := string(stripTerminalCodes([]byte(tc.in)))

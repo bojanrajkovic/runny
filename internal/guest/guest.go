@@ -52,7 +52,7 @@ type Guest struct {
 	addr     string
 	cfg      sshx.Config
 	interval time.Duration
-	// goos is the guest OS; set by Rotate (empty on the unhardened path).
+	// goos is the guest OS; set by Rotate and WaitFor.
 	// InstallAuthorizedKey uses it to select the per-OS session recorder.
 	goos string
 }
@@ -348,8 +348,19 @@ func (g *Guest) PullDiag(ctx bounded.Context) ([]byte, error) {
 // PullDebugSession fetches the operator's session recording at teardown.
 // Empty output (operator never connected) is returned as nil — the caller
 // skips the artifact.
+//
+// Uses a fresh connection for the same reason InstallAuthorizedKey does: the
+// supervision client g.c carries the live runner Proc, and newSession sets a
+// deadline on the SHARED net.Conn. Pulling over g.c during a forced teardown
+// (stuck job, proc still alive) would fire that deadline on the runner's
+// channel before proc.Kill() in step 2.
 func (g *Guest) PullDebugSession(ctx bounded.Context) ([]byte, error) {
-	out, _, err := g.c.Output(ctx, `cat /tmp/runny-debug-session.log 2>/dev/null || true`)
+	c, err := sshx.WaitFor(ctx, g.addr, g.cfg, g.interval)
+	if err != nil {
+		return nil, fmt.Errorf("debug session pull: %w: %w", statemachine.ErrGuestUnreachable, err)
+	}
+	defer func() { _ = c.Close() }()
+	out, _, err := c.Output(ctx, "cat "+debugSessionLogFile+" 2>/dev/null || true")
 	if err != nil {
 		return nil, err
 	}
@@ -385,41 +396,45 @@ while alive; do
 done
 `
 
+// debugSessionLogFile is the path on the guest where the recorder writes and
+// teardown reads back the operator's session log. A single constant keeps the
+// recorder scripts and PullDebugSession in sync.
+const debugSessionLogFile = "/tmp/runny-debug-session.log"
+
 // debugRecorderDarwin / debugRecorderLinux are the /tmp/runny-record wrapper
 // scripts written alongside an operator debug key. The wrapper forces every
 // use of that key (interactive shell, non-interactive command, and direct
 // reconnects after runnyctl debug exits) through script(1), appending all
-// output to /tmp/runny-debug-session.log for teardown to pull.
+// output to debugSessionLogFile for teardown to pull.
 //
 // The split mirrors provisionScriptDarwin / provisionScriptLinux: BSD script(1)
 // uses a positional command form; util-linux uses -c. The fallback ensures an
 // operator is never locked out when script is absent — record nothing rather
 // than deny access.
-const debugRecorderDarwin = `#!/bin/sh
-if ! command -v script >/dev/null 2>&1; then exec "${SHELL:-/bin/sh}"; fi
-if [ -n "$SSH_ORIGINAL_COMMAND" ]; then
-  exec script -q -a /tmp/runny-debug-session.log /bin/sh -c "$SSH_ORIGINAL_COMMAND"
-else
-  exec script -q -a /tmp/runny-debug-session.log
-fi
-`
+const debugRecorderDarwin = "#!/bin/sh\n" +
+	"if ! command -v script >/dev/null 2>&1; then exec \"${SHELL:-/bin/sh}\"; fi\n" +
+	"if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then\n" +
+	"  exec script -q -a " + debugSessionLogFile + " /bin/sh -c \"$SSH_ORIGINAL_COMMAND\"\n" +
+	"else\n" +
+	"  exec script -q -a " + debugSessionLogFile + "\n" +
+	"fi\n"
 
-const debugRecorderLinux = `#!/bin/sh
-if ! command -v script >/dev/null 2>&1; then exec "${SHELL:-/bin/sh}"; fi
-if [ -n "$SSH_ORIGINAL_COMMAND" ]; then
-  exec script -q -a -c "$SSH_ORIGINAL_COMMAND" -e /tmp/runny-debug-session.log
-else
-  exec script -q -a /tmp/runny-debug-session.log
-fi
-`
+const debugRecorderLinux = "#!/bin/sh\n" +
+	"if ! command -v script >/dev/null 2>&1; then exec \"${SHELL:-/bin/sh}\"; fi\n" +
+	"if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then\n" +
+	"  exec script -q -a -c \"$SSH_ORIGINAL_COMMAND\" -e " + debugSessionLogFile + "\n" +
+	"else\n" +
+	"  exec script -q -a " + debugSessionLogFile + "\n" +
+	"fi\n"
 
 // installDebugKeyScript writes the per-OS session recorder to /tmp/runny-record,
-// then appends a command=-wrapped authorized_keys line and greps it back to
-// prove it landed. The command= option forces every operator SSH session through
-// the recorder regardless of what the client requests. restrict denies
-// forwarding/X11/agent; pty re-grants the PTY restrict would otherwise deny
-// (which script(1) needs). The daemon's own cycle key is a separate, unwrapped
-// line, so daemon operations are unaffected.
+// then appends a command=-wrapped authorized_keys line and greps back the full
+// wrapped line to prove the command= wrapper landed (not just the bare key).
+// The command= option forces every operator SSH session through the recorder
+// regardless of what the client requests. restrict denies forwarding/X11/agent;
+// pty re-grants the PTY restrict would otherwise deny (which script(1) needs).
+// The daemon's own cycle key is a separate, unwrapped line, so daemon
+// operations are unaffected.
 //
 // Format args: recorder-script-content, key-line, key-line.
 const installDebugKeyScript = `set -e
@@ -428,7 +443,7 @@ mkdir -p "$HOME/.ssh"
 printf '%%s' '%s' > /tmp/runny-record
 chmod 0755 /tmp/runny-record
 printf '%%s\n' 'command="exec /tmp/runny-record",restrict,pty %s' >> "$HOME/.ssh/authorized_keys"
-grep -qF -- '%s' "$HOME/.ssh/authorized_keys"
+grep -qF -- 'command="exec /tmp/runny-record",restrict,pty %s' "$HOME/.ssh/authorized_keys"
 `
 
 // StopRunner kills the runner listener tree and PROVES it dead (issue #39).

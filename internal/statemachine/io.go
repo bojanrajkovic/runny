@@ -13,7 +13,7 @@ import (
 //   - OSC  ESC ] … BEL|ST            (window titles — macOS Terminal emits these on every prompt)
 //   - Designator  ESC ( ) * + final  (3-byte character-set sequences; ncurses uses ESC(B and ESC(0)
 //   - Simple  ESC <any other byte>    (ESC M reverse-index, ESC = alt-keypad, …)
-var ansiRE = regexp.MustCompile(`\x1b(?:\[[0-9;?]*[A-Za-z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()*+][0-9A-Za-z]|[^[\]()*+])`)
+var ansiRE = regexp.MustCompile(`\x1b(?:\[[0-9;?]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()*+][0-9A-Za-z]|[^[\]()*+])`)
 
 // stripTerminalCodes removes ANSI/VT escape sequences and all carriage returns
 // from PTY/script output, yielding plain text. Stripping \r handles both

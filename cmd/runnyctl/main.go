@@ -75,6 +75,8 @@ commands:
                       over a hard error)
   why SLOT [-cycles N]
                       render SLOT's recent cycle timelines
+  prune [-apply]      show stale image bundles and runner tarballs that
+                      can be reclaimed (dry run by default); -apply deletes them
 
 SLOT accepts the bare slot name (mac-1) or a full runner name as shown
 by status and the GitHub runners page (<prefix>-mac-1-<cycle>).
@@ -285,6 +287,13 @@ func (c *ctl) dispatch(ctx context.Context, args []string) error {
 			return err
 		}
 		return c.doctor(ctx)
+	case "prune":
+		fs, j := subFlags("prune")
+		apply := fs.Bool("apply", false, "delete the reclaimable items (default: dry run)")
+		if err := c.parseNoArgs(fs, j, rest); err != nil {
+			return err
+		}
+		return c.prune(ctx, *apply)
 	default:
 		flag.Usage()
 		return fmt.Errorf("unknown command %q", cmd)
@@ -904,6 +913,68 @@ func (c *ctl) renderChecks(checks []*runnyv1.DoctorCheck) int {
 		fmt.Fprintf(c.out, "%-28s %s %s\n", ch.GetName(), mark, ch.GetDetail())
 	}
 	return bad
+}
+
+func (c *ctl) prune(ctx context.Context, apply bool) error {
+	resp, err := c.client.Prune(ctx, &runnyv1.PruneRequest{Apply: apply})
+	if err != nil {
+		return err
+	}
+	if c.json {
+		return c.emit(resp)
+	}
+	items := resp.GetItems()
+	if len(items) == 0 && len(resp.GetSkips()) == 0 {
+		fmt.Fprintln(c.out, "nothing to reclaim")
+		return nil
+	}
+	// Group items by kind for a two-section display.
+	var bundles, tarballs []*runnyv1.ReclaimItem
+	for _, it := range items {
+		if it.GetKind() == "image-bundle" {
+			bundles = append(bundles, it)
+		} else {
+			tarballs = append(tarballs, it)
+		}
+	}
+	verb := "would reclaim"
+	if apply {
+		verb = "reclaimed"
+	}
+	if len(bundles) > 0 {
+		fmt.Fprintln(c.out, "image bundles:")
+		for _, it := range bundles {
+			fmt.Fprintf(c.out, "  %-12s  %s  (%s)\n", formatBytes(it.GetBytes()), it.GetLabel(), it.GetReason())
+		}
+	}
+	if len(tarballs) > 0 {
+		fmt.Fprintln(c.out, "runner tarballs:")
+		for _, it := range tarballs {
+			fmt.Fprintf(c.out, "  %-12s  %s  (%s)\n", formatBytes(it.GetBytes()), it.GetLabel(), it.GetReason())
+		}
+	}
+	fmt.Fprintf(c.out, "%s %s\n", verb, formatBytes(resp.GetReclaimedBytes()))
+	for _, sk := range resp.GetSkips() {
+		fmt.Fprintf(c.out, "skip: %s — %s (kept intact)\n", sk.GetRef(), sk.GetReason())
+	}
+	for _, e := range resp.GetErrors() {
+		fmt.Fprintf(c.out, "error: %s\n", e)
+	}
+	return nil
+}
+
+// formatBytes renders a byte count as a human-readable string (GiB > MiB > KiB > B).
+func formatBytes(b int64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.1f GiB", float64(b)/float64(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(b)/float64(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.1f KiB", float64(b)/float64(1<<10))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
 }
 
 func (c *ctl) pause(ctx context.Context, slot string) error {

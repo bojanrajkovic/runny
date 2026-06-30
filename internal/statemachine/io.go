@@ -9,10 +9,10 @@ import (
 )
 
 // ansiRE matches ANSI/VT escape sequences found in script(1) recordings:
-// CSI sequences (ESC [ ... letter) and standalone ESC sequences (ESC + non-[).
-// Both forms appear in interactive terminal sessions; stripping them yields a
-// plain-text log that can be read with cat or grep without a PTY emulator.
-var ansiRE = regexp.MustCompile(`\x1b(?:\[[0-9;?]*[A-Za-z]|[^[])`)
+// CSI sequences (ESC [ ... letter), OSC sequences (ESC ] ... BEL or ST), and
+// standalone ESC sequences. OSC is required for macOS Terminal, which emits
+// window-title sequences (ESC ] 0 ; title BEL) on every prompt.
+var ansiRE = regexp.MustCompile(`\x1b(?:\[[0-9;?]*[A-Za-z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[^[\]])`)
 
 // stripTerminalCodes removes ANSI escape sequences and normalizes the \r\n
 // line endings that PTY/script output produces.

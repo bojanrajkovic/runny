@@ -2299,13 +2299,15 @@ func TestDebugHeldAfterJobOKResetsStreak(t *testing.T) {
 // preserved.
 func TestStripTerminalCodes(t *testing.T) {
 	tests := []struct{ in, want string }{
-		{"\x1b[31mred\x1b[0m", "red"},               // SGR color
-		{"\x1b[2J", ""},                              // CSI erase-screen
-		{"\x1b[?25h", ""},                            // CSI private mode
-		{"\x1bM", ""},                                // standalone ESC sequence
-		{"hello\r\nworld\r\n", "hello\nworld\n"},     // CRLF normalization
-		{"\x1b[32mok\x1b[0m\r\n", "ok\n"},           // both combined
-		{"plain text\n", "plain text\n"},             // untouched
+		{"\x1b[31mred\x1b[0m", "red"},                        // SGR color
+		{"\x1b[2J", ""},                                       // CSI erase-screen
+		{"\x1b[?25h", ""},                                     // CSI private mode
+		{"\x1bM", ""},                                         // standalone ESC sequence
+		{"hello\r\nworld\r\n", "hello\nworld\n"},              // CRLF normalization
+		{"\x1b[32mok\x1b[0m\r\n", "ok\n"},                    // both combined
+		{"plain text\n", "plain text\n"},                      // untouched
+		{"\x1b]0;My Title\x07prompt$ ", "prompt$ "},           // OSC BEL-terminated (macOS Terminal)
+		{"\x1b]0;My Title\x1b\\prompt$ ", "prompt$ "},        // OSC ST-terminated
 	}
 	for _, tc := range tests {
 		got := string(stripTerminalCodes([]byte(tc.in)))

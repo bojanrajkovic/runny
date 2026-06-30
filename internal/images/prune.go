@@ -154,9 +154,11 @@ func PlanImageBundlePrune(imagesDir string, keepPaths, protectRefDirNames map[st
 	return items, nil
 }
 
-// applyPrune deletes every path in the plan. Best-effort: one failure does not
+// ApplyPrune deletes every path in the plan. Best-effort: one failure does not
 // stop the rest. For image-bundle items it also attempts to remove the parent
 // ref dir once all its bundles are gone (best-effort; noop if non-empty).
+func ApplyPrune(items []PlanItem) error { return applyPrune(items) }
+
 func applyPrune(items []PlanItem) error {
 	var errs []error
 	refDirs := map[string]bool{}

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
@@ -416,6 +417,58 @@ func run() error {
 		return requestReload(ctx, "rpc/upgrade", reason, true)
 	}
 	srv.DrainFn = d.State
+	srv.PruneFn = func(ctx context.Context, apply bool) socket.PrunePlan {
+		// Build the keep-set from live slot statuses.
+		keepPaths := map[string]bool{}
+		protectTarballs := map[string]bool{}
+		for _, slot := range slots {
+			st := slot.Status()
+			if st.ImageDigest != "" {
+				keepPaths[dir.ImageBundleDir(st.Image, st.ImageDigest)] = true
+			}
+			if st.RunnerVersion != "" {
+				protectTarballs[st.RunnerVersion] = true
+			}
+		}
+		// Resolve current digest for each configured pool ref.
+		protectRefDirNames := map[string]bool{}
+		configuredRefs := map[string]string{}
+		var skips []socket.PruneSkip
+		ociClient := oci.NewClient()
+		for _, pool := range cfg.Pools {
+			ref, err := oci.ParseRef(pool.Image)
+			if err != nil {
+				continue // unparseable: leave the ref dir alone
+			}
+			displayRef := pool.Image
+			if i := strings.IndexByte(displayRef, '@'); i >= 0 {
+				displayRef = displayRef[:i]
+			}
+			refDirName := filepath.Base(dir.ImageRefDir(pool.Image))
+			configuredRefs[refDirName] = displayRef
+			rctx, cancel := bounded.WithTimeout(ctx, checkBudget)
+			digest, resolveErr := ociClient.Resolve(rctx, ref)
+			cancel()
+			if resolveErr != nil {
+				protectRefDirNames[refDirName] = true
+				skips = append(skips, socket.PruneSkip{Ref: pool.Image, Reason: resolveErr.Error()})
+				continue
+			}
+			keepPaths[dir.ImageBundleDir(ref.String(), digest)] = true
+		}
+		tarballItems, _ := images.PlanRunnerCachePrune(dir.RunnerCacheDir(), runnerCacheKeep, protectTarballs)
+		bundleItems, _ := images.PlanImageBundlePrune(dir.ImagesDir(), keepPaths, protectRefDirNames, configuredRefs)
+		allItems := make([]socket.PruneItem, 0, len(tarballItems)+len(bundleItems))
+		for _, it := range append(tarballItems, bundleItems...) {
+			allItems = append(allItems, socket.PruneItem{Path: it.Path, Bytes: it.Bytes, Kind: it.Kind, Reason: it.Reason, Label: it.Label})
+		}
+		plan := socket.PrunePlan{Items: allItems, Applied: apply, Skips: skips}
+		if apply {
+			allPlanItems := append(tarballItems, bundleItems...)
+			plan.ApplyErr = images.ApplyPrune(allPlanItems)
+		}
+		return plan
+	}
 	// Deliver drain-progress bumps (slot transitions, exit-gate hold flips) to
 	// watchers immediately, so a follower's stall timer tracks real progress
 	// rather than the 30s heartbeat.

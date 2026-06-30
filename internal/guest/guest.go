@@ -428,9 +428,9 @@ const debugRecorderLinux = "#!/bin/sh\n" +
 	"  exec \"${SHELL:-/bin/sh}\"\n" +
 	"fi\n" +
 	"if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then\n" +
-	"  exec script -q -f -a --output-limit 10m -c \"$SSH_ORIGINAL_COMMAND\" -e " + debugSessionLogFile + "\n" +
+	"  exec script -q -f -a -c \"$SSH_ORIGINAL_COMMAND\" -e " + debugSessionLogFile + "\n" +
 	"else\n" +
-	"  exec script -q -f -a --output-limit 10m " + debugSessionLogFile + "\n" +
+	"  exec script -q -f -a " + debugSessionLogFile + "\n" +
 	"fi\n"
 
 // installDebugKeyScript writes the per-OS session recorder to /tmp/runny-record,

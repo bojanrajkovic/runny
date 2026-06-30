@@ -301,6 +301,17 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 // Never deleted; bounded by the number of distinct images.
 var pullLocks sync.Map // destDir -> chan struct{} (capacity-1 semaphore)
 
+// PullInProgress reports whether a PullTo call for destDir is currently in
+// flight. The prune planner uses this to distinguish a live .partial-* temp
+// dir (skip it) from an orphan left by a prior crash (safe to delete).
+func PullInProgress(destDir string) bool {
+	semAny, ok := pullLocks.Load(destDir)
+	if !ok {
+		return false
+	}
+	return len(semAny.(chan struct{})) > 0
+}
+
 // PullTo pulls into a sibling temp dir and renames into place, so destDir
 // either exists complete or not at all — ENSURE_IMAGE's idempotence depends
 // on this. The bounded.Context is typically stall-bounded (Stall.Watch):

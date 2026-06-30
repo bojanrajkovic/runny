@@ -246,6 +246,20 @@ type RunnerResolver func(ctx bounded.Context) (filename, url, sha256 string, err
 // download (a wait on a peer's already-bounded operation is itself bounded).
 var tarballLocks sync.Map // filename -> chan struct{} (capacity-1 semaphore)
 
+// ProtectActiveTarballs adds the asset filename of every tarball whose
+// download is currently in flight to protect. PruneFn calls this after
+// building the status-based protect set so that a tarball downloaded but not
+// yet published via slot.Status().RunnerVersion is not deleted before CLONE
+// tries to copy it.
+func ProtectActiveTarballs(protect map[string]bool) {
+	tarballLocks.Range(func(k, v any) bool {
+		if len(v.(chan struct{})) > 0 {
+			protect[k.(string)] = true
+		}
+		return true
+	})
+}
+
 // EnsureRunnerTarball makes sure the service-current actions-runner tarball
 // sits in cacheDir (the virtiofs share). Returns the tarball path and the
 // asset filename (the version identifier, e.g. "actions-runner-osx-arm64-2.320.0.tar.gz").

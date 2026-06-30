@@ -430,6 +430,11 @@ func run() error {
 				protectTarballs[st.RunnerVersion] = true
 			}
 		}
+		// Protect tarballs whose download is in flight but whose RunnerVersion
+		// has not been published to slot status yet (EnsureRunnerTarball
+		// completes before Ensure returns, so there is a window where the
+		// tarball is cached but the slot still shows RunnerVersion="").
+		images.ProtectActiveTarballs(protectTarballs)
 		// Resolve current digest for each configured pool ref.
 		protectRefDirNames := map[string]bool{}
 		configuredRefs := map[string]string{}

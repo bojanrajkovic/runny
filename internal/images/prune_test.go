@@ -213,3 +213,57 @@ func TestPruneRunnerCacheBackwardCompat(t *testing.T) {
 		t.Errorf("expected 2 files after prune, got %d", len(entries))
 	}
 }
+
+// TestPlanImageBundlePruneOrphanedPartialIsPlanned: a .partial-* dir with no
+// active pullLock is an orphan from a prior crash and must appear in the plan
+// with reason "dead .partial".
+func TestPlanImageBundlePruneOrphanedPartialIsPlanned(t *testing.T) {
+	imagesDir := t.TempDir()
+	ref := "ghcr.io_foo_bar"
+	refDir := filepath.Join(imagesDir, ref)
+	if err := os.MkdirAll(refDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	partialDir := filepath.Join(refDir, "sha256-abc123def456.partial-xy9z")
+	if err := os.MkdirAll(partialDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	configuredRefs := map[string]string{ref: "ghcr.io/foo/bar:latest"}
+	items, err := PlanImageBundlePrune(imagesDir, nil, nil, configuredRefs)
+	if err != nil {
+		t.Fatalf("PlanImageBundlePrune: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d: %v", len(items), items)
+	}
+	if items[0].Path != partialDir {
+		t.Errorf("item path = %s, want %s", items[0].Path, partialDir)
+	}
+	if items[0].Reason != "dead .partial" {
+		t.Errorf("item reason = %q, want \"dead .partial\"", items[0].Reason)
+	}
+}
+
+// TestProtectActiveTarballs: filenames whose tarball semaphore is held are
+// added to the protect set.
+func TestProtectActiveTarballs(t *testing.T) {
+	assetName := "actions-runner-osx-arm64-2.321.0.tar.gz"
+	sem := make(chan struct{}, 1)
+	tarballLocks.Store(assetName, sem)
+	t.Cleanup(func() { tarballLocks.Delete(assetName) })
+
+	protect := map[string]bool{}
+	ProtectActiveTarballs(protect)
+	if protect[assetName] {
+		t.Fatal("ProtectActiveTarballs added an idle tarball to the protect set")
+	}
+
+	sem <- struct{}{} // simulate active download
+	protect = map[string]bool{}
+	ProtectActiveTarballs(protect)
+	<-sem
+	if !protect[assetName] {
+		t.Fatalf("ProtectActiveTarballs missed active tarball %s", assetName)
+	}
+}

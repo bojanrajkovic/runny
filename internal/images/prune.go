@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/bojanrajkovic/runny/internal/oci"
 	"github.com/bojanrajkovic/runny/internal/versioncore"
 )
 
@@ -144,7 +145,26 @@ func PlanImageBundlePrune(imagesDir string, keepPaths, protectRefDirNames map[st
 			if !bundleEntry.IsDir() {
 				continue
 			}
-			bundlePath := filepath.Join(refDirPath, bundleEntry.Name())
+			name := bundleEntry.Name()
+			bundlePath := filepath.Join(refDirPath, name)
+
+			// OCI pull temp dirs are named "<digest>.partial-<random>". A live
+			// pull owns the dir; an orphan from a prior crash is safe to remove.
+			if idx := strings.Index(name, ".partial-"); idx >= 0 {
+				destDir := filepath.Join(refDirPath, name[:idx])
+				if oci.PullInProgress(destDir) {
+					continue // live pull; leave it alone
+				}
+				items = append(items, PlanItem{
+					Path:   bundlePath,
+					Bytes:  dirSize(bundlePath),
+					Kind:   "image-bundle",
+					Reason: "dead .partial",
+					Label:  displayRef + " @ " + name,
+				})
+				continue
+			}
+
 			if keepPaths[bundlePath] {
 				continue
 			}
@@ -153,7 +173,7 @@ func PlanImageBundlePrune(imagesDir string, keepPaths, protectRefDirNames map[st
 				Bytes:  dirSize(bundlePath),
 				Kind:   "image-bundle",
 				Reason: reason,
-				Label:  displayRef + " @ " + digestLabel(bundleEntry.Name()),
+				Label:  displayRef + " @ " + digestLabel(name),
 			})
 		}
 	}

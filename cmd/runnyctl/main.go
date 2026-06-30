@@ -918,6 +918,9 @@ func (c *ctl) renderChecks(checks []*runnyv1.DoctorCheck) int {
 func (c *ctl) prune(ctx context.Context, apply bool) error {
 	resp, err := c.client.Prune(ctx, &runnyv1.PruneRequest{Apply: apply})
 	if err != nil {
+		if status.Code(err) == codes.Unimplemented {
+			return fmt.Errorf("daemon does not support prune — restart runnyd to pick up the new version")
+		}
 		return err
 	}
 	if c.json {

@@ -441,15 +441,19 @@ func run() error {
 		var skips []socket.PruneSkip
 		ociClient := oci.NewClient()
 		for _, pool := range cfg.Pools {
-			refDirName := filepath.Base(dir.ImageRefDir(pool.Image))
 			ref, err := oci.ParseRef(pool.Image)
 			if err != nil {
 				// Image ref unparseable — protect the ref dir rather than
 				// letting PlanImageBundlePrune classify it as "removed pool".
-				protectRefDirNames[refDirName] = true
+				// Use pool.Image directly: if parsing fails we can't canonicalize.
+				protectRefDirNames[filepath.Base(dir.ImageRefDir(pool.Image))] = true
 				skips = append(skips, socket.PruneSkip{Ref: pool.Image, Reason: "image ref parse failed: " + err.Error()})
 				continue
 			}
+			// Use ref.String() (canonical, tag-free for digest-pinned refs) so
+			// refDirName matches the on-disk path, not pool.Image which may carry
+			// a tag that sanitizeRef fails to strip when a digest is also present.
+			refDirName := filepath.Base(dir.ImageRefDir(ref.String()))
 			displayRef := pool.Image
 			if i := strings.IndexByte(displayRef, '@'); i >= 0 {
 				displayRef = displayRef[:i]

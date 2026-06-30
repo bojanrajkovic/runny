@@ -165,7 +165,7 @@ type Guest interface {
 
 // Dialer establishes Guest sessions (sshx's seam).
 type Dialer interface {
-	WaitFor(ctx bounded.Context, addr string) (Guest, error)
+	WaitFor(ctx bounded.Context, addr, goos string) (Guest, error)
 	// Rotate hardens an authenticated session (the SECURE_SSH
 	// state): mint a per-cycle key, install it in the guest, disable
 	// password auth, reconnect keyed with host keys pinned. Returns the new
@@ -803,7 +803,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	}
 	if ok {
 		ok = enter(StateAwaitSSH, cfg.Deadlines.AwaitSSH.D(), func(c bounded.Context) error {
-			g, err := s.deps.Dial.WaitFor(c, ip+":22")
+			g, err := s.deps.Dial.WaitFor(c, ip+":22", s.deps.Pool.OS)
 			if err != nil {
 				return err
 			}
@@ -1632,7 +1632,7 @@ func (s *Slot) debugReArm(ctx context.Context, rec *cycle.Record, guest Guest, c
 // entry this cycle — the DEBUG re-arm consults outcomes, not raw membership.
 func (s *Slot) keyInstalledThisCycle(rec *cycle.Record, fp string) bool {
 	for _, k := range rec.InjectedKeys {
-		if k.Fingerprint == fp && (k.Outcome == "ok" || k.Outcome == "armed" || k.Outcome == "re-armed") {
+		if k.Fingerprint == fp && keyOutcomeLanded(k.Outcome) {
 			return true
 		}
 	}
@@ -1739,12 +1739,22 @@ type teardownInputs struct {
 	debugKeyLanded bool // a debug key was proven-installed this cycle
 }
 
-// anyKeyLanded reports whether any InjectedKeys entry this cycle landed with
-// outcome "ok", "armed", or "re-armed" — meaning a debug key actually reached
-// the guest and a session recording may exist.
+// keyOutcomeLanded reports whether outcome means the key provably reached the
+// guest. Used by keyInstalledThisCycle (exact match) and anyKeyLanded (below).
+func keyOutcomeLanded(outcome string) bool {
+	return outcome == "ok" || outcome == "armed" || outcome == "re-armed"
+}
+
+// anyKeyLanded reports whether a debug key may have landed this cycle —
+// either proven (ok/armed/re-armed) or ambiguous (error: transport dropped
+// after the authorized_keys write but before the grep read-back). The
+// ambiguous case is included because PullDebugSession is safe to call when no
+// file exists (the 2>/dev/null || true shell guard returns empty, which the
+// len==0 check skips), so false negatives lose recordings and false positives
+// cost one no-op SSH command.
 func anyKeyLanded(rec *cycle.Record) bool {
 	for _, k := range rec.InjectedKeys {
-		if k.Outcome == "ok" || k.Outcome == "armed" || k.Outcome == "re-armed" {
+		if keyOutcomeLanded(k.Outcome) || k.Outcome == "error" {
 			return true
 		}
 	}

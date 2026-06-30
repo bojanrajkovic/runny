@@ -351,7 +351,7 @@ func TestRotateChoreography(t *testing.T) {
 	srv := newRotateServer(t)
 	d := testDialer()
 
-	g, err := d.WaitFor(testCtx(t), srv.addr)
+	g, err := d.WaitFor(testCtx(t), srv.addr, "darwin")
 	if err != nil {
 		t.Fatalf("WaitFor: %v", err)
 	}
@@ -394,7 +394,7 @@ func TestRotateInstallFailureKeepsPasswordSession(t *testing.T) {
 	srv.mu.Unlock()
 	d := testDialer()
 
-	g, err := d.WaitFor(testCtx(t), srv.addr)
+	g, err := d.WaitFor(testCtx(t), srv.addr, "darwin")
 	if err != nil {
 		t.Fatalf("WaitFor: %v", err)
 	}
@@ -463,7 +463,7 @@ func TestRotateFailsLoudWhenPasswordSurvives(t *testing.T) {
 	srv.mu.Unlock()
 	d := testDialer()
 
-	g, err := d.WaitFor(testCtx(t), srv.addr)
+	g, err := d.WaitFor(testCtx(t), srv.addr, "darwin")
 	if err != nil {
 		t.Fatalf("WaitFor: %v", err)
 	}
@@ -494,7 +494,7 @@ func TestRotateRedialFailureKeepsPasswordSession(t *testing.T) {
 	srv.mu.Unlock()
 	d := testDialer()
 
-	g, err := d.WaitFor(testCtx(t), srv.addr)
+	g, err := d.WaitFor(testCtx(t), srv.addr, "darwin")
 	if err != nil {
 		t.Fatalf("WaitFor: %v", err)
 	}
@@ -536,7 +536,7 @@ func TestParseHostKeysLoudFailures(t *testing.T) {
 func TestStopRunner(t *testing.T) {
 	srv := newRotateServer(t)
 	d := testDialer()
-	g, err := d.WaitFor(testCtx(t), srv.addr)
+	g, err := d.WaitFor(testCtx(t), srv.addr, "darwin")
 	if err != nil {
 		t.Fatalf("WaitFor: %v", err)
 	}
@@ -567,7 +567,7 @@ func TestStopRunnerPatternIsSelfExcluding(t *testing.T) {
 func TestInstallAuthorizedKey(t *testing.T) {
 	srv := newRotateServer(t)
 	d := testDialer()
-	g, err := d.WaitFor(testCtx(t), srv.addr)
+	g, err := d.WaitFor(testCtx(t), srv.addr, "darwin")
 	if err != nil {
 		t.Fatalf("WaitFor: %v", err)
 	}
@@ -586,7 +586,7 @@ func TestInstallAuthorizedKey(t *testing.T) {
 func TestHostKeysKnownHostsForm(t *testing.T) {
 	srv := newRotateServer(t)
 	d := testDialer()
-	g, err := d.WaitFor(testCtx(t), srv.addr)
+	g, err := d.WaitFor(testCtx(t), srv.addr, "darwin")
 	if err != nil {
 		t.Fatalf("WaitFor: %v", err)
 	}
@@ -615,7 +615,7 @@ func TestHostKeysKnownHostsForm(t *testing.T) {
 func TestInstallDebugKeyLineHasCommandWrapper(t *testing.T) {
 	srv := newRotateServer(t)
 	d := testDialer()
-	g, err := d.WaitFor(testCtx(t), srv.addr)
+	g, err := d.WaitFor(testCtx(t), srv.addr, "darwin")
 	if err != nil {
 		t.Fatalf("WaitFor: %v", err)
 	}
@@ -668,11 +668,33 @@ func TestInstallDebugKeyRecorderPerOS(t *testing.T) {
 	}
 }
 
+// The linux recorder (util-linux script -c form) is selected when WaitFor
+// receives goos="linux", even on the unhardened path where Rotate is never
+// called.
+func TestInstallDebugKeyUsesLinuxRecorderOnLinuxGuest(t *testing.T) {
+	srv := newRotateServer(t)
+	d := testDialer()
+	g, err := d.WaitFor(testCtx(t), srv.addr, "linux")
+	if err != nil {
+		t.Fatalf("WaitFor: %v", err)
+	}
+	if err := g.(*Guest).InstallAuthorizedKey(testCtx(t), "ssh-ed25519 AAAAOPKEY op@host"); err != nil {
+		t.Fatalf("InstallAuthorizedKey: %v", err)
+	}
+	script := srv.lastInstall(t)
+	if strings.Contains(script, `/bin/sh -c "$SSH_ORIGINAL_COMMAND"`) {
+		t.Errorf("linux guest got Darwin (BSD positional) recorder\nscript: %q", script)
+	}
+	if !strings.Contains(script, `-c "$SSH_ORIGINAL_COMMAND" -e`) {
+		t.Errorf("linux guest missing util-linux -c flag form\nscript: %q", script)
+	}
+}
+
 // Redial re-establishes the keyed session against the retained config.
 func TestRedialSwapsClient(t *testing.T) {
 	srv := newRotateServer(t)
 	d := testDialer()
-	g, err := d.WaitFor(testCtx(t), srv.addr)
+	g, err := d.WaitFor(testCtx(t), srv.addr, "darwin")
 	if err != nil {
 		t.Fatalf("WaitFor: %v", err)
 	}

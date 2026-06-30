@@ -123,8 +123,7 @@ well-known default password and `admin` holds sudo, so the operator who can run
 `runnyctl debug` can already reach root. Operators who need enforced capture
 should build a **custom guest image** with `ForceCommand`/auditd baked into
 `sshd_config` at image-build time, where the recording is root-owned and the
-operator cannot edit it. A future opt-in could scramble the guest password to
-support true-rootless runners (tracked separately).
+operator cannot edit it.
 
 Authorization is the socket itself: the `0600` `runnyd.sock` is the sole gate,
 deliberately — whoever can open it already transitively holds everything

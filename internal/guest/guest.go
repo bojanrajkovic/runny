@@ -35,12 +35,12 @@ func (d Dialer) interval() time.Duration {
 	return 2 * time.Second
 }
 
-func (d Dialer) WaitFor(ctx bounded.Context, addr string) (statemachine.Guest, error) {
+func (d Dialer) WaitFor(ctx bounded.Context, addr, goos string) (statemachine.Guest, error) {
 	c, err := sshx.WaitFor(ctx, addr, d.SSH, d.interval())
 	if err != nil {
 		return nil, err
 	}
-	return &Guest{c: c, addr: addr, cfg: d.SSH, interval: d.interval()}, nil
+	return &Guest{c: c, addr: addr, cfg: d.SSH, interval: d.interval(), goos: goos}, nil
 }
 
 // Guest is one authenticated session into a booted runner VM. It retains the
@@ -345,11 +345,11 @@ func (g *Guest) PullDiag(ctx bounded.Context) ([]byte, error) {
 	return out, nil
 }
 
-// PullDebugSession fetches the tail of the operator's session recording at
-// teardown. Empty output (operator never connected) is returned as nil — the
-// caller skips the artifact. Size-bounded like PullDiag.
+// PullDebugSession fetches the operator's session recording at teardown.
+// Empty output (operator never connected) is returned as nil — the caller
+// skips the artifact.
 func (g *Guest) PullDebugSession(ctx bounded.Context) ([]byte, error) {
-	out, _, err := g.c.Output(ctx, `tail -c 1048576 /tmp/runny-debug-session.log 2>/dev/null || true`)
+	out, _, err := g.c.Output(ctx, `cat /tmp/runny-debug-session.log 2>/dev/null || true`)
 	if err != nil {
 		return nil, err
 	}

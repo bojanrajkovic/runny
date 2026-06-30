@@ -187,7 +187,7 @@ type fakeGuest struct {
 	redialErr     error
 	redialCalls   int
 
-	// Debug session recording seam (issue #207).
+	// PullDebugSession seam.
 	sessionLog    []byte
 	sessionErr    error
 	sessionPulled bool
@@ -320,7 +320,7 @@ type fakeDialer struct {
 	rotateGoos  string
 }
 
-func (d *fakeDialer) WaitFor(ctx bounded.Context, addr string) (Guest, error) {
+func (d *fakeDialer) WaitFor(ctx bounded.Context, addr, goos string) (Guest, error) {
 	if d.err != nil {
 		return nil, d.err
 	}
@@ -2293,21 +2293,24 @@ func TestDebugHeldAfterJobOKResetsStreak(t *testing.T) {
 	}
 }
 
-// --- debug session recording (issue #207) ---
+// --- debug session recording ---
 
 // TestStripTerminalCodes: ANSI sequences and CR+LF are removed; plain text is
 // preserved.
 func TestStripTerminalCodes(t *testing.T) {
 	tests := []struct{ in, want string }{
-		{"\x1b[31mred\x1b[0m", "red"},                        // SGR color
-		{"\x1b[2J", ""},                                       // CSI erase-screen
-		{"\x1b[?25h", ""},                                     // CSI private mode
-		{"\x1bM", ""},                                         // standalone ESC sequence
-		{"hello\r\nworld\r\n", "hello\nworld\n"},              // CRLF normalization
-		{"\x1b[32mok\x1b[0m\r\n", "ok\n"},                    // both combined
-		{"plain text\n", "plain text\n"},                      // untouched
-		{"\x1b]0;My Title\x07prompt$ ", "prompt$ "},           // OSC BEL-terminated (macOS Terminal)
-		{"\x1b]0;My Title\x1b\\prompt$ ", "prompt$ "},        // OSC ST-terminated
+		{"\x1b[31mred\x1b[0m", "red"},                         // SGR color
+		{"\x1b[2J", ""},                                        // CSI erase-screen
+		{"\x1b[?25h", ""},                                      // CSI private mode
+		{"\x1bM", ""},                                          // 2-char standalone ESC sequence
+		{"\x1b(B", ""},                                         // 3-char designator: US-ASCII (vim)
+		{"\x1b(0", ""},                                         // 3-char designator: DEC line drawing (ncurses)
+		{"hello\r\nworld\r\n", "hello\nworld\n"},               // CRLF: \r stripped, \n preserved
+		{"\x1b[32mok\x1b[0m\r\n", "ok\n"},                     // ANSI stripped + CRLF normalized
+		{"plain text\n", "plain text\n"},                       // untouched
+		{"\x1b]0;My Title\x07prompt$ ", "prompt$ "},            // OSC BEL-terminated (macOS Terminal)
+		{"\x1b]0;My Title\x1b\\prompt$ ", "prompt$ "},         // OSC ST-terminated
+		{"overwrite\rprogress", "overwriteprogress"},           // bare \r (curl/npm progress bars)
 	}
 	for _, tc := range tests {
 		got := string(stripTerminalCodes([]byte(tc.in)))

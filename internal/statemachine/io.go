@@ -9,16 +9,19 @@ import (
 )
 
 // ansiRE matches ANSI/VT escape sequences found in script(1) recordings:
-// CSI sequences (ESC [ ... letter), OSC sequences (ESC ] ... BEL or ST), and
-// standalone ESC sequences. OSC is required for macOS Terminal, which emits
-// window-title sequences (ESC ] 0 ; title BEL) on every prompt.
-var ansiRE = regexp.MustCompile(`\x1b(?:\[[0-9;?]*[A-Za-z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[^[\]])`)
+//   - CSI  ESC [ params letter        (color, cursor movement, erase, …)
+//   - OSC  ESC ] … BEL|ST            (window titles — macOS Terminal emits these on every prompt)
+//   - Designator  ESC ( ) * + final  (3-byte character-set sequences; ncurses uses ESC(B and ESC(0)
+//   - Simple  ESC <any other byte>    (ESC M reverse-index, ESC = alt-keypad, …)
+var ansiRE = regexp.MustCompile(`\x1b(?:\[[0-9;?]*[A-Za-z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()*+][0-9A-Za-z]|[^[\]()*+])`)
 
-// stripTerminalCodes removes ANSI escape sequences and normalizes the \r\n
-// line endings that PTY/script output produces.
+// stripTerminalCodes removes ANSI/VT escape sequences and all carriage returns
+// from PTY/script output, yielding plain text. Stripping \r handles both
+// \r\n line endings (common in PTY recordings) and bare \r cursor-resets
+// (progress bars, npm, curl) in one pass.
 func stripTerminalCodes(b []byte) []byte {
 	b = ansiRE.ReplaceAll(b, nil)
-	return bytes.ReplaceAll(b, []byte{'\r', '\n'}, []byte{'\n'})
+	return bytes.ReplaceAll(b, []byte{'\r'}, nil)
 }
 
 // Small fs helpers kept separate so fsm.go stays pure control flow.

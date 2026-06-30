@@ -653,13 +653,13 @@ func TestInstallDebugKeyRecorderPerOS(t *testing.T) {
 	if strings.Contains(debugRecorderLinux, `/bin/sh -c "$SSH_ORIGINAL_COMMAND"`) {
 		t.Error("linux recorder must not use BSD positional form")
 	}
-	// Linux only: -f flushes after each write so in-progress teardown reads
-	// get the latest data (util-linux only; BSD script has no -f flag).
+	// Flush flags: -F on Darwin (BSD script), -f on Linux (util-linux) — different
+	// flag letters, same "flush after each write" semantics.
+	if !strings.Contains(debugRecorderDarwin, " -F ") {
+		t.Error("darwin recorder must use -F (flush) for in-progress session reads")
+	}
 	if !strings.Contains(debugRecorderLinux, " -f ") {
 		t.Error("linux recorder must use -f (flush) for in-progress session reads")
-	}
-	if strings.Contains(debugRecorderDarwin, " -f ") {
-		t.Error("darwin recorder must not use -f (BSD script has no flush flag)")
 	}
 	// Both: fallback when script is absent must respect SSH_ORIGINAL_COMMAND.
 	for name, r := range map[string]string{"darwin": debugRecorderDarwin, "linux": debugRecorderLinux} {

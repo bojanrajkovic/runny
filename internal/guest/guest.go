@@ -417,9 +417,9 @@ const debugRecorderDarwin = "#!/bin/sh\n" +
 	"  exec \"${SHELL:-/bin/sh}\"\n" +
 	"fi\n" +
 	"if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then\n" +
-	"  exec script -q -a " + debugSessionLogFile + " /bin/sh -c \"$SSH_ORIGINAL_COMMAND\"\n" +
+	"  exec script -q -F -a " + debugSessionLogFile + " /bin/sh -c \"$SSH_ORIGINAL_COMMAND\"\n" +
 	"else\n" +
-	"  exec script -q -a " + debugSessionLogFile + "\n" +
+	"  exec script -q -F -a " + debugSessionLogFile + "\n" +
 	"fi\n"
 
 const debugRecorderLinux = "#!/bin/sh\n" +

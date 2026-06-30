@@ -412,7 +412,10 @@ const debugSessionLogFile = "/tmp/runny-debug-session.log"
 // operator is never locked out when script is absent — record nothing rather
 // than deny access.
 const debugRecorderDarwin = "#!/bin/sh\n" +
-	"if ! command -v script >/dev/null 2>&1; then exec \"${SHELL:-/bin/sh}\"; fi\n" +
+	"if ! command -v script >/dev/null 2>&1; then\n" +
+	"  if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then exec \"${SHELL:-/bin/sh}\" -c \"$SSH_ORIGINAL_COMMAND\"; fi\n" +
+	"  exec \"${SHELL:-/bin/sh}\"\n" +
+	"fi\n" +
 	"if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then\n" +
 	"  exec script -q -a " + debugSessionLogFile + " /bin/sh -c \"$SSH_ORIGINAL_COMMAND\"\n" +
 	"else\n" +
@@ -420,11 +423,14 @@ const debugRecorderDarwin = "#!/bin/sh\n" +
 	"fi\n"
 
 const debugRecorderLinux = "#!/bin/sh\n" +
-	"if ! command -v script >/dev/null 2>&1; then exec \"${SHELL:-/bin/sh}\"; fi\n" +
+	"if ! command -v script >/dev/null 2>&1; then\n" +
+	"  if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then exec \"${SHELL:-/bin/sh}\" -c \"$SSH_ORIGINAL_COMMAND\"; fi\n" +
+	"  exec \"${SHELL:-/bin/sh}\"\n" +
+	"fi\n" +
 	"if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then\n" +
-	"  exec script -q -f -a -c \"$SSH_ORIGINAL_COMMAND\" -e " + debugSessionLogFile + "\n" +
+	"  exec script -q -f -a --output-limit 10m -c \"$SSH_ORIGINAL_COMMAND\" -e " + debugSessionLogFile + "\n" +
 	"else\n" +
-	"  exec script -q -f -a " + debugSessionLogFile + "\n" +
+	"  exec script -q -f -a --output-limit 10m " + debugSessionLogFile + "\n" +
 	"fi\n"
 
 // installDebugKeyScript writes the per-OS session recorder to /tmp/runny-record,

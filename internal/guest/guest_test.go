@@ -661,6 +661,19 @@ func TestInstallDebugKeyRecorderPerOS(t *testing.T) {
 	if strings.Contains(debugRecorderDarwin, " -f ") {
 		t.Error("darwin recorder must not use -f (BSD script has no flush flag)")
 	}
+	// Linux only: --output-limit caps on-guest log size (util-linux only).
+	if !strings.Contains(debugRecorderLinux, "--output-limit") {
+		t.Error("linux recorder must use --output-limit to bound on-guest log size")
+	}
+	if strings.Contains(debugRecorderDarwin, "--output-limit") {
+		t.Error("darwin recorder must not use --output-limit (BSD script has no equivalent)")
+	}
+	// Both: fallback when script is absent must respect SSH_ORIGINAL_COMMAND.
+	for name, r := range map[string]string{"darwin": debugRecorderDarwin, "linux": debugRecorderLinux} {
+		if !strings.Contains(r, "SSH_ORIGINAL_COMMAND") {
+			t.Errorf("%s recorder fallback must handle SSH_ORIGINAL_COMMAND", name)
+		}
+	}
 	// Both: append mode and quiet mode on every exec.
 	for name, r := range map[string]string{"darwin": debugRecorderDarwin, "linux": debugRecorderLinux} {
 		if !strings.Contains(r, " -q ") {

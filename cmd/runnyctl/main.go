@@ -880,10 +880,14 @@ func (c *ctl) renderCycle(rec *runnyv1.CycleRecord) {
 		fmt.Fprintln(c.out, line)
 	}
 	for _, a := range rec.GetArtifacts() {
+		note := ""
+		if a == "debug-session.log" {
+			note = " (raw terminal codes; strip ANSI to read, or replay with scriptreplay)"
+		}
 		if dir := rec.GetCycleDir(); dir != "" {
-			fmt.Fprintf(c.out, "  artifact: %s/%s\n", dir, a)
+			fmt.Fprintf(c.out, "  artifact: %s/%s%s\n", dir, a, note)
 		} else {
-			fmt.Fprintf(c.out, "  artifact: %s (in the cycle dir under ~/.runny/cycles)\n", a)
+			fmt.Fprintf(c.out, "  artifact: %s (in the cycle dir under ~/.runny/cycles)%s\n", a, note)
 		}
 	}
 }

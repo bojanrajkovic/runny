@@ -112,6 +112,20 @@ sidecar is written *before any byte reaches the guest*, survives a daemon
 crash, and is surfaced in `runnyctl why` for the cycle's **retention window**
 (not indefinitely — retention still ages it).
 
+**Session recording is best-effort reconstruction, not enforcement.** Each
+operator key is installed with a `command=` wrapper that appends every session
+it authorizes — including direct reconnects to the guest — to a
+`debug-session.log` artifact pulled at teardown. This is an audit/reconstruction
+aid for good-faith operators, **not a security control.** The operator owns
+`~/.ssh/authorized_keys` on the guest and can strip the wrapper; under the
+default image no file-ownership scheme changes this — the guest ships a
+well-known default password and `admin` holds sudo, so the operator who can run
+`runnyctl debug` can already reach root. Operators who need enforced capture
+should build a **custom guest image** with `ForceCommand`/auditd baked into
+`sshd_config` at image-build time, where the recording is root-owned and the
+operator cannot edit it. A future opt-in could scramble the guest password to
+support true-rootless runners (tracked separately).
+
 Authorization is the socket itself: the `0600` `runnyd.sock` is the sole gate,
 deliberately — whoever can open it already transitively holds everything
 injection grants (the config that can set `ssh_hardening: off`, the App key, the

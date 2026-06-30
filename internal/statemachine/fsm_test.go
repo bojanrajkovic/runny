@@ -187,6 +187,11 @@ type fakeGuest struct {
 	redialErr     error
 	redialCalls   int
 
+	// Debug session recording seam (issue #207).
+	sessionLog    []byte
+	sessionErr    error
+	sessionPulled bool
+
 	mu sync.Mutex
 }
 
@@ -263,6 +268,19 @@ func (g *fakeGuest) HostKeys() []string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.hostKeys
+}
+
+func (g *fakeGuest) PullDebugSession(ctx bounded.Context) ([]byte, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.sessionPulled = true
+	return g.sessionLog, g.sessionErr
+}
+
+func (g *fakeGuest) sessionPulledOnce() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.sessionPulled
 }
 
 func (g *fakeGuest) Redial(ctx bounded.Context) error {
@@ -2272,6 +2290,77 @@ func TestDebugHeldAfterJobOKResetsStreak(t *testing.T) {
 	}
 	if heldListening(rec) {
 		t.Error("fixture unexpectedly has a ≥10-min LISTENING record; the reset must be debugHeldAfterJobOK, not heldListening")
+	}
+}
+
+// --- debug session recording (issue #207) ---
+
+// TestDebugSessionPulledWhenKeyLanded: a cycle that entered DEBUG via a landed
+// key and has a non-empty session log produces a debug-session.log artifact.
+func TestDebugSessionPulledWhenKeyLanded(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	h.guest.sessionLog = []byte("operator ran some commands")
+	cancel := h.reachListening(t)
+	defer cancel()
+
+	r := h.debugCmd(t, nil)
+	if r.Err != nil {
+		t.Fatalf("freeze failed: %v", r.Err)
+	}
+	h.waitState(t, StateDebug)
+	h.slot.Command(Command{Kind: CmdRecycle, Reason: "done"})
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+
+	rec := h.jobRecord(t)
+	if !slices.Contains(rec.Artifacts, "debug-session.log") {
+		t.Errorf("debug-session.log missing from artifacts: %v", rec.Artifacts)
+	}
+	if !h.guest.sessionPulledOnce() {
+		t.Error("PullDebugSession was not called")
+	}
+}
+
+// TestDebugSessionSkippedWhenEmpty: an empty session log (operator never
+// connected) must not produce a debug-session.log artifact.
+func TestDebugSessionSkippedWhenEmpty(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	// sessionLog is nil (the zero value)
+	cancel := h.reachListening(t)
+	defer cancel()
+
+	r := h.debugCmd(t, nil)
+	if r.Err != nil {
+		t.Fatalf("freeze failed: %v", r.Err)
+	}
+	h.waitState(t, StateDebug)
+	h.slot.Command(Command{Kind: CmdRecycle, Reason: "done"})
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+
+	rec := h.jobRecord(t)
+	if slices.Contains(rec.Artifacts, "debug-session.log") {
+		t.Errorf("debug-session.log artifact must be skipped on empty session log; artifacts: %v", rec.Artifacts)
+	}
+}
+
+// TestDebugSessionNotPulledWithoutLandedKey: a normal successful cycle (no
+// debug key injection) must not call PullDebugSession.
+func TestDebugSessionNotPulledWithoutLandedKey(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	cancel := h.reachListening(t)
+	defer cancel()
+
+	h.proc.say("Running job: build")
+	h.proc.say("build completed with result: Succeeded")
+	h.proc.exit(0)
+	h.waitState(t, StateBackoff)
+
+	if h.guest.sessionPulledOnce() {
+		t.Error("PullDebugSession must not be called when no debug key landed")
 	}
 }
 

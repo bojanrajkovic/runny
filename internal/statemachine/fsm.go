@@ -142,6 +142,9 @@ type Guest interface {
 	StartRunner(ctx context.Context, jit, goos, runnerTarball string) (Proc, error)
 	// PullDiag fetches the tail of the runner's _diag logs (post-mortem).
 	PullDiag(ctx bounded.Context) ([]byte, error)
+	// PullDebugSession fetches the operator's session recording at teardown;
+	// empty output means the operator never connected — skip the artifact.
+	PullDebugSession(ctx bounded.Context) ([]byte, error)
 	// StopRunner kills the runner listener tree and PROVES it dead (a pgrep
 	// read-back loop). Any nonzero exit or exec error = death unproven, and
 	// the caller refuses the freeze/hold (issue #39, decision 2).
@@ -877,13 +880,14 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	// even force-stop wedges the slot, and the record says so truthfully.
 	stopWatcher()
 	wedged := s.teardown(cctx, rec, teardownInputs{
-		machine:  machine,
-		guest:    guest,
-		proc:     proc,
-		runnerID: runnerID,
-		jobRan:   jobRan,
-		vmDir:    vmDir,
-		failed:   !ok,
+		machine:        machine,
+		guest:          guest,
+		proc:           proc,
+		runnerID:       runnerID,
+		jobRan:         jobRan,
+		vmDir:          vmDir,
+		failed:         !ok,
+		debugKeyLanded: anyKeyLanded(rec),
 	})
 
 	// A cycle ended by operator recycle or daemon shutdown is recorded as a
@@ -1725,13 +1729,26 @@ func (s *Slot) emitRunnerLine(cycleID, line string) {
 }
 
 type teardownInputs struct {
-	machine  vm.Machine
-	guest    Guest
-	proc     Proc
-	runnerID int64
-	jobRan   bool
-	vmDir    string
-	failed   bool
+	machine        vm.Machine
+	guest          Guest
+	proc           Proc
+	runnerID       int64
+	jobRan         bool
+	vmDir          string
+	failed         bool
+	debugKeyLanded bool // a debug key was proven-installed this cycle
+}
+
+// anyKeyLanded reports whether any InjectedKeys entry this cycle landed with
+// outcome "ok", "armed", or "re-armed" — meaning a debug key actually reached
+// the guest and a session recording may exist.
+func anyKeyLanded(rec *cycle.Record) bool {
+	for _, k := range rec.InjectedKeys {
+		if k.Outcome == "ok" || k.Outcome == "armed" || k.Outcome == "re-armed" {
+			return true
+		}
+	}
+	return false
 }
 
 // teardown is the universal sink. Post-mortem first (failure cycles), then
@@ -1761,6 +1778,22 @@ func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInput
 			}
 		} else if err != nil {
 			s.deps.Log.Debug("post-mortem pull failed", "err", err)
+		}
+		pcancel()
+	}
+
+	// 1b. Debug session recording (if a debug key landed this cycle).
+	// Gated on debug key landing, not on failure: a DEBUG hold expiry is benign.
+	if in.debugKeyLanded && in.guest != nil {
+		pctx, pcancel := bounded.WithTimeout(tctx, 15*time.Second)
+		if session, err := in.guest.PullDebugSession(pctx); err == nil && len(session) > 0 {
+			if dir, derr := store.Dir(rec); derr == nil {
+				if werr := writeFile(dir, "debug-session.log", session); werr == nil {
+					rec.Artifacts = append(rec.Artifacts, "debug-session.log")
+				}
+			}
+		} else if err != nil {
+			s.deps.Log.Debug("debug session pull failed", "err", err)
 		}
 		pcancel()
 	}

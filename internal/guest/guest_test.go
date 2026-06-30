@@ -114,6 +114,7 @@ type rotateServer struct {
 	failDebugInstall  bool // InstallAuthorizedKey's read-back grep fails
 	stopCalls         int
 	debugInstalls     int
+	lastInstallScript string
 }
 
 func (s *rotateServer) lastScript(t *testing.T) string {
@@ -124,6 +125,16 @@ func (s *rotateServer) lastScript(t *testing.T) string {
 		t.Fatal("no rotate script reached the guest")
 	}
 	return s.scripts[len(s.scripts)-1]
+}
+
+func (s *rotateServer) lastInstall(t *testing.T) string {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastInstallScript == "" {
+		t.Fatal("no install script reached the guest")
+	}
+	return s.lastInstallScript
 }
 
 func newRotateServer(t *testing.T) *rotateServer {
@@ -237,6 +248,7 @@ func (s *rotateServer) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 			// InstallAuthorizedKey: the printf-append + grep read-back form
 			// (the read-back grep is its distinguishing marker).
 			s.mu.Lock()
+			s.lastInstallScript = payload.Cmd
 			s.debugInstalls++
 			fail := s.failDebugInstall
 			s.mu.Unlock()
@@ -339,7 +351,7 @@ func TestRotateChoreography(t *testing.T) {
 	srv := newRotateServer(t)
 	d := testDialer()
 
-	g, err := d.WaitFor(testCtx(t), srv.addr)
+	g, err := d.WaitFor(testCtx(t), srv.addr, "darwin")
 	if err != nil {
 		t.Fatalf("WaitFor: %v", err)
 	}
@@ -382,7 +394,7 @@ func TestRotateInstallFailureKeepsPasswordSession(t *testing.T) {
 	srv.mu.Unlock()
 	d := testDialer()
 
-	g, err := d.WaitFor(testCtx(t), srv.addr)
+	g, err := d.WaitFor(testCtx(t), srv.addr, "darwin")
 	if err != nil {
 		t.Fatalf("WaitFor: %v", err)
 	}
@@ -451,7 +463,7 @@ func TestRotateFailsLoudWhenPasswordSurvives(t *testing.T) {
 	srv.mu.Unlock()
 	d := testDialer()
 
-	g, err := d.WaitFor(testCtx(t), srv.addr)
+	g, err := d.WaitFor(testCtx(t), srv.addr, "darwin")
 	if err != nil {
 		t.Fatalf("WaitFor: %v", err)
 	}
@@ -482,7 +494,7 @@ func TestRotateRedialFailureKeepsPasswordSession(t *testing.T) {
 	srv.mu.Unlock()
 	d := testDialer()
 
-	g, err := d.WaitFor(testCtx(t), srv.addr)
+	g, err := d.WaitFor(testCtx(t), srv.addr, "darwin")
 	if err != nil {
 		t.Fatalf("WaitFor: %v", err)
 	}
@@ -524,7 +536,7 @@ func TestParseHostKeysLoudFailures(t *testing.T) {
 func TestStopRunner(t *testing.T) {
 	srv := newRotateServer(t)
 	d := testDialer()
-	g, err := d.WaitFor(testCtx(t), srv.addr)
+	g, err := d.WaitFor(testCtx(t), srv.addr, "darwin")
 	if err != nil {
 		t.Fatalf("WaitFor: %v", err)
 	}
@@ -555,7 +567,7 @@ func TestStopRunnerPatternIsSelfExcluding(t *testing.T) {
 func TestInstallAuthorizedKey(t *testing.T) {
 	srv := newRotateServer(t)
 	d := testDialer()
-	g, err := d.WaitFor(testCtx(t), srv.addr)
+	g, err := d.WaitFor(testCtx(t), srv.addr, "darwin")
 	if err != nil {
 		t.Fatalf("WaitFor: %v", err)
 	}
@@ -574,7 +586,7 @@ func TestInstallAuthorizedKey(t *testing.T) {
 func TestHostKeysKnownHostsForm(t *testing.T) {
 	srv := newRotateServer(t)
 	d := testDialer()
-	g, err := d.WaitFor(testCtx(t), srv.addr)
+	g, err := d.WaitFor(testCtx(t), srv.addr, "darwin")
 	if err != nil {
 		t.Fatalf("WaitFor: %v", err)
 	}
@@ -597,11 +609,109 @@ func TestHostKeysKnownHostsForm(t *testing.T) {
 	}
 }
 
+// The authorized_keys line installed by InstallAuthorizedKey must carry a
+// command= recording wrapper and restrict,pty options; the daemon's own cycle
+// key (installed by rotateScriptBase) must remain unwrapped.
+func TestInstallDebugKeyLineHasCommandWrapper(t *testing.T) {
+	srv := newRotateServer(t)
+	d := testDialer()
+	g, err := d.WaitFor(testCtx(t), srv.addr, "darwin")
+	if err != nil {
+		t.Fatalf("WaitFor: %v", err)
+	}
+	if err := g.(*Guest).InstallAuthorizedKey(testCtx(t), "ssh-ed25519 AAAAOPKEY op@host"); err != nil {
+		t.Fatalf("InstallAuthorizedKey: %v", err)
+	}
+	script := srv.lastInstall(t)
+	const prefix = `command="exec /tmp/runny-record",restrict,pty`
+	if !strings.Contains(script, prefix) {
+		t.Errorf("installed line missing command= wrapper\nscript: %q", script)
+	}
+	// The daemon's own key (rotateScriptBase) must NOT carry command=.
+	if strings.Contains(rotateScriptBase, "command=") {
+		t.Error("daemon cycle key must not be wrapped with command=")
+	}
+}
+
+// The per-OS debug recorder uses the correct script(1) calling convention:
+// BSD (darwin) uses the positional form, util-linux uses -c.
+func TestInstallDebugKeyRecorderPerOS(t *testing.T) {
+	// Darwin: BSD positional form for non-interactive execution.
+	if !strings.Contains(debugRecorderDarwin, `/bin/sh -c "$SSH_ORIGINAL_COMMAND"`) {
+		t.Error("darwin recorder must use BSD positional form: script FILE /bin/sh -c CMD")
+	}
+	if strings.Contains(debugRecorderDarwin, `-c "$SSH_ORIGINAL_COMMAND" -e`) {
+		t.Error("darwin recorder must not use util-linux -c flag form")
+	}
+	// Linux: util-linux flag form.
+	if !strings.Contains(debugRecorderLinux, `-c "$SSH_ORIGINAL_COMMAND"`) {
+		t.Error("linux recorder must use util-linux -c flag form")
+	}
+	if !strings.Contains(debugRecorderLinux, `-e`) {
+		t.Error("linux recorder must carry -e to propagate child exit code")
+	}
+	if strings.Contains(debugRecorderLinux, `/bin/sh -c "$SSH_ORIGINAL_COMMAND"`) {
+		t.Error("linux recorder must not use BSD positional form")
+	}
+	// Flush flags: -F on Darwin (BSD script), -f on Linux (util-linux) — different
+	// flag letters, same "flush after each write" semantics.
+	if !strings.Contains(debugRecorderDarwin, " -F ") {
+		t.Error("darwin recorder must use -F (flush) for in-progress session reads")
+	}
+	if !strings.Contains(debugRecorderLinux, " -f ") {
+		t.Error("linux recorder must use -f (flush) for in-progress session reads")
+	}
+	// Both: fallback when script is absent must respect SSH_ORIGINAL_COMMAND.
+	for name, r := range map[string]string{"darwin": debugRecorderDarwin, "linux": debugRecorderLinux} {
+		if !strings.Contains(r, "SSH_ORIGINAL_COMMAND") {
+			t.Errorf("%s recorder fallback must handle SSH_ORIGINAL_COMMAND", name)
+		}
+	}
+	// Both: append mode and quiet mode on every exec.
+	for name, r := range map[string]string{"darwin": debugRecorderDarwin, "linux": debugRecorderLinux} {
+		if !strings.Contains(r, " -q ") {
+			t.Errorf("%s recorder must use -q (quiet)", name)
+		}
+		if !strings.Contains(r, " -a") {
+			t.Errorf("%s recorder must use -a (append)", name)
+		}
+		// Fallback when script is absent.
+		if !strings.Contains(r, "command -v script") {
+			t.Errorf("%s recorder must check for script availability", name)
+		}
+		if !strings.Contains(r, "SHELL") {
+			t.Errorf("%s recorder must fall back to $SHELL when script is absent", name)
+		}
+	}
+}
+
+// The linux recorder (util-linux script -c form) is selected when WaitFor
+// receives goos="linux", even on the unhardened path where Rotate is never
+// called.
+func TestInstallDebugKeyUsesLinuxRecorderOnLinuxGuest(t *testing.T) {
+	srv := newRotateServer(t)
+	d := testDialer()
+	g, err := d.WaitFor(testCtx(t), srv.addr, "linux")
+	if err != nil {
+		t.Fatalf("WaitFor: %v", err)
+	}
+	if err := g.(*Guest).InstallAuthorizedKey(testCtx(t), "ssh-ed25519 AAAAOPKEY op@host"); err != nil {
+		t.Fatalf("InstallAuthorizedKey: %v", err)
+	}
+	script := srv.lastInstall(t)
+	if strings.Contains(script, `/bin/sh -c "$SSH_ORIGINAL_COMMAND"`) {
+		t.Errorf("linux guest got Darwin (BSD positional) recorder\nscript: %q", script)
+	}
+	if !strings.Contains(script, `-c "$SSH_ORIGINAL_COMMAND" -e`) {
+		t.Errorf("linux guest missing util-linux -c flag form\nscript: %q", script)
+	}
+}
+
 // Redial re-establishes the keyed session against the retained config.
 func TestRedialSwapsClient(t *testing.T) {
 	srv := newRotateServer(t)
 	d := testDialer()
-	g, err := d.WaitFor(testCtx(t), srv.addr)
+	g, err := d.WaitFor(testCtx(t), srv.addr, "darwin")
 	if err != nil {
 		t.Fatalf("WaitFor: %v", err)
 	}

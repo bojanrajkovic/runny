@@ -142,6 +142,9 @@ type Guest interface {
 	StartRunner(ctx context.Context, jit, goos, runnerTarball string) (Proc, error)
 	// PullDiag fetches the tail of the runner's _diag logs (post-mortem).
 	PullDiag(ctx bounded.Context) ([]byte, error)
+	// PullDebugSession fetches the operator's session recording at teardown;
+	// empty output means the operator never connected — skip the artifact.
+	PullDebugSession(ctx bounded.Context) ([]byte, error)
 	// StopRunner kills the runner listener tree and PROVES it dead (a pgrep
 	// read-back loop). Any nonzero exit or exec error = death unproven, and
 	// the caller refuses the freeze/hold (issue #39, decision 2).
@@ -162,7 +165,7 @@ type Guest interface {
 
 // Dialer establishes Guest sessions (sshx's seam).
 type Dialer interface {
-	WaitFor(ctx bounded.Context, addr string) (Guest, error)
+	WaitFor(ctx bounded.Context, addr, goos string) (Guest, error)
 	// Rotate hardens an authenticated session (the SECURE_SSH
 	// state): mint a per-cycle key, install it in the guest, disable
 	// password auth, reconnect keyed with host keys pinned. Returns the new
@@ -188,6 +191,7 @@ type Deps struct {
 	Images         ImageEnsurer
 	Clone          Cloner
 	CloneFile      FileCloner
+	RemoveAll      func(string) error
 	GitHub         GitHub
 	Dial           Dialer
 	Log            *slog.Logger
@@ -749,7 +753,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 			// wedging the slot in a CLONE→BACKOFF loop until a cold start. Clear
 			// it first so CLONE is self-healing. Safe: no live guest owns vmDir
 			// here — a wedged cycle parks the slot and never re-enters CLONE.
-			if err := removeAll(vmDir); err != nil {
+			if err := s.deps.RemoveAll(vmDir); err != nil {
 				return fmt.Errorf("clearing stale clone dir: %w", err)
 			}
 			if err := s.deps.Clone(srcBundle, vmDir); err != nil {
@@ -800,7 +804,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	}
 	if ok {
 		ok = enter(StateAwaitSSH, cfg.Deadlines.AwaitSSH.D(), func(c bounded.Context) error {
-			g, err := s.deps.Dial.WaitFor(c, ip+":22")
+			g, err := s.deps.Dial.WaitFor(c, ip+":22", s.deps.Pool.OS)
 			if err != nil {
 				return err
 			}
@@ -877,13 +881,14 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	// even force-stop wedges the slot, and the record says so truthfully.
 	stopWatcher()
 	wedged := s.teardown(cctx, rec, teardownInputs{
-		machine:  machine,
-		guest:    guest,
-		proc:     proc,
-		runnerID: runnerID,
-		jobRan:   jobRan,
-		vmDir:    vmDir,
-		failed:   !ok,
+		machine:        machine,
+		guest:          guest,
+		proc:           proc,
+		runnerID:       runnerID,
+		jobRan:         jobRan,
+		vmDir:          vmDir,
+		failed:         !ok,
+		debugKeyLanded: anyKeyLanded(rec),
 	})
 
 	// A cycle ended by operator recycle or daemon shutdown is recorded as a
@@ -1628,7 +1633,7 @@ func (s *Slot) debugReArm(ctx context.Context, rec *cycle.Record, guest Guest, c
 // entry this cycle — the DEBUG re-arm consults outcomes, not raw membership.
 func (s *Slot) keyInstalledThisCycle(rec *cycle.Record, fp string) bool {
 	for _, k := range rec.InjectedKeys {
-		if k.Fingerprint == fp && (k.Outcome == "ok" || k.Outcome == "armed" || k.Outcome == "re-armed") {
+		if k.Fingerprint == fp && keyOutcomeLanded(k.Outcome) {
 			return true
 		}
 	}
@@ -1725,13 +1730,36 @@ func (s *Slot) emitRunnerLine(cycleID, line string) {
 }
 
 type teardownInputs struct {
-	machine  vm.Machine
-	guest    Guest
-	proc     Proc
-	runnerID int64
-	jobRan   bool
-	vmDir    string
-	failed   bool
+	machine        vm.Machine
+	guest          Guest
+	proc           Proc
+	runnerID       int64
+	jobRan         bool
+	vmDir          string
+	failed         bool
+	debugKeyLanded bool // a debug key was proven-installed this cycle
+}
+
+// keyOutcomeLanded reports whether outcome means the key provably reached the
+// guest. Used by keyInstalledThisCycle (exact match) and anyKeyLanded (below).
+func keyOutcomeLanded(outcome string) bool {
+	return outcome == "ok" || outcome == "armed" || outcome == "re-armed"
+}
+
+// anyKeyLanded reports whether a debug key may have landed this cycle —
+// either proven (ok/armed/re-armed) or ambiguous (error: transport dropped
+// after the authorized_keys write but before the grep read-back). The
+// ambiguous case is included because PullDebugSession is safe to call when no
+// file exists (the 2>/dev/null || true shell guard returns empty, which the
+// len==0 check skips), so false negatives lose recordings and false positives
+// cost one no-op SSH command.
+func anyKeyLanded(rec *cycle.Record) bool {
+	for _, k := range rec.InjectedKeys {
+		if keyOutcomeLanded(k.Outcome) || k.Outcome == "error" {
+			return true
+		}
+	}
+	return false
 }
 
 // teardown is the universal sink. Post-mortem first (failure cycles), then
@@ -1753,6 +1781,7 @@ func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInput
 	// 1. Post-mortem while the guest still exists (failure cycles only).
 	if in.failed && in.guest != nil {
 		pctx, pcancel := bounded.WithTimeout(tctx, 15*time.Second)
+		defer pcancel()
 		if diag, err := in.guest.PullDiag(pctx); err == nil && len(diag) > 0 {
 			if dir, derr := store.Dir(rec); derr == nil {
 				if werr := writeFile(dir, "runner-diag.log", diag); werr == nil {
@@ -1762,7 +1791,26 @@ func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInput
 		} else if err != nil {
 			s.deps.Log.Debug("post-mortem pull failed", "err", err)
 		}
-		pcancel()
+	}
+
+	// 1b. Debug session recording (if a debug key landed this cycle).
+	// Gated on debug key landing, not on failure: a DEBUG hold expiry is benign.
+	if in.debugKeyLanded && in.guest != nil {
+		pctx, pcancel := bounded.WithTimeout(tctx, 5*time.Second)
+		defer pcancel()
+		if session, err := in.guest.PullDebugSession(pctx); err == nil && len(session) > 0 {
+			if dir, derr := store.Dir(rec); derr == nil {
+				if werr := writeFile(dir, "debug-session.log", stripTerminalCodes(session)); werr == nil {
+					rec.Artifacts = append(rec.Artifacts, "debug-session.log")
+				} else {
+					s.deps.Log.Debug("debug session write failed", "err", werr)
+				}
+			} else {
+				s.deps.Log.Debug("debug session dir lookup failed", "err", derr)
+			}
+		} else if err != nil {
+			s.deps.Log.Debug("debug session pull failed", "err", err)
+		}
 	}
 
 	// 2. Kill the runner proc and close the session.
@@ -1794,7 +1842,7 @@ func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInput
 	// Deleting the disk out from under a live guest destroys the evidence
 	// and frees nothing that matters (the guest-cap slot stays occupied).
 	if !wedged {
-		if err := removeAll(in.vmDir); err != nil {
+		if err := s.deps.RemoveAll(in.vmDir); err != nil {
 			s.deps.Log.Error("removing vm dir", "err", err)
 			cleanupWarns = append(cleanupWarns, fmt.Sprintf("remove clone: %v", err))
 		}

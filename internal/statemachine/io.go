@@ -1,10 +1,28 @@
 package statemachine
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 )
+
+// ansiRE matches ANSI/VT escape sequences found in script(1) recordings:
+//   - CSI  ESC [ params letter        (color, cursor movement, erase, …)
+//   - OSC  ESC ] … BEL|ST            (window titles — macOS Terminal emits these on every prompt)
+//   - Designator  ESC ( ) * + final  (3-byte character-set sequences; ncurses uses ESC(B and ESC(0)
+//   - Simple  ESC <any other byte>    (ESC M reverse-index, ESC = alt-keypad, …)
+var ansiRE = regexp.MustCompile(`\x1b(?:\[[0-9;?]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()*+][0-9A-Za-z]|[^[\]()*+])`)
+
+// stripTerminalCodes removes ANSI/VT escape sequences and all carriage returns
+// from PTY/script output, yielding plain text. Stripping \r handles both
+// \r\n line endings (common in PTY recordings) and bare \r cursor-resets
+// (progress bars, npm, curl) in one pass.
+func stripTerminalCodes(b []byte) []byte {
+	b = ansiRE.ReplaceAll(b, nil)
+	return bytes.ReplaceAll(b, []byte{'\r'}, nil)
+}
 
 // Small fs helpers kept separate so fsm.go stays pure control flow.
 
@@ -25,13 +43,4 @@ func cloneRunnerTarball(cloneFile FileCloner, storeDir, mountDir, tarball string
 		return fmt.Errorf("creating runner mount dir: %w", err)
 	}
 	return cloneFile(filepath.Join(storeDir, tarball), filepath.Join(mountDir, tarball))
-}
-
-// removeAll is a var so teardown's best-effort clone deletion can be made to
-// fail in tests (the cleanup-failure-is-recorded path).
-var removeAll = func(path string) error {
-	if path == "" {
-		return nil
-	}
-	return os.RemoveAll(path)
 }

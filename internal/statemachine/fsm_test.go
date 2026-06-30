@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -187,6 +188,11 @@ type fakeGuest struct {
 	redialErr     error
 	redialCalls   int
 
+	// PullDebugSession seam.
+	sessionLog    []byte
+	sessionErr    error
+	sessionPulled bool
+
 	mu sync.Mutex
 }
 
@@ -265,6 +271,19 @@ func (g *fakeGuest) HostKeys() []string {
 	return g.hostKeys
 }
 
+func (g *fakeGuest) PullDebugSession(ctx bounded.Context) ([]byte, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.sessionPulled = true
+	return g.sessionLog, g.sessionErr
+}
+
+func (g *fakeGuest) sessionPulledOnce() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.sessionPulled
+}
+
 func (g *fakeGuest) Redial(ctx bounded.Context) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -302,7 +321,7 @@ type fakeDialer struct {
 	rotateGoos  string
 }
 
-func (d *fakeDialer) WaitFor(ctx bounded.Context, addr string) (Guest, error) {
+func (d *fakeDialer) WaitFor(ctx bounded.Context, addr, goos string) (Guest, error) {
 	if d.err != nil {
 		return nil, d.err
 	}
@@ -403,6 +422,16 @@ type harness struct {
 
 	cloneMu    sync.Mutex
 	cloneFiles [][2]string // {src, dst} per CloneFile call
+
+	// removeAllFn is the injectable RemoveAll seam; swap via setRemoveAll.
+	removeAllFn atomic.Pointer[func(string) error]
+}
+
+// setRemoveAll swaps the RemoveAll seam for the harness's slot. The swap is
+// atomic so it can race safely against the FSM goroutine calling RemoveAll.
+// Restoring the original is the caller's responsibility (via t.Cleanup).
+func (h *harness) setRemoveAll(fn func(string) error) {
+	h.removeAllFn.Store(&fn)
 }
 
 func (h *harness) cloneFileCalls() [][2]string {
@@ -489,6 +518,8 @@ func newHarnessPool(t *testing.T, mutate func(*home.Config), mutatePool func(*ho
 		dir:    dir,
 		states: make(chan Status, 256),
 	}
+	defaultRemoveAll := func(path string) error { return os.RemoveAll(path) }
+	h.removeAllFn.Store(&defaultRemoveAll)
 	h.dialer = &fakeDialer{guest: h.guest}
 	deps := Deps{
 		Home:           dir,
@@ -506,8 +537,9 @@ func newHarnessPool(t *testing.T, mutate func(*home.Config), mutatePool func(*ho
 			h.cloneMu.Unlock()
 			return os.WriteFile(dst, nil, 0o600) // dir is created by cloneRunnerTarball
 		},
-		GitHub: h.gh,
-		Dial:   h.dialer,
+		RemoveAll: func(path string) error { return (*h.removeAllFn.Load())(path) },
+		GitHub:    h.gh,
+		Dial:      h.dialer,
 		OnRunnerLine: func(slot, cycleID, line string) {
 			h.linesMu.Lock()
 			h.runnerLines = append(h.runnerLines, slot+" "+cycleID+" "+line)
@@ -904,9 +936,8 @@ func TestTeardownRecordsFailedCleanupsAsWarn(t *testing.T) {
 	// vms/<slot>/ routes through the same removeAll seam and has already run by
 	// LISTENING, so injecting earlier would fail the cycle at CLONE instead of
 	// exercising teardown's best-effort path.
-	orig := removeAll
-	removeAll = func(string) error { return errors.New("clone busy") }
-	t.Cleanup(func() { removeAll = orig })
+	h.setRemoveAll(func(string) error { return errors.New("clone busy") })
+	t.Cleanup(func() { h.setRemoveAll(os.RemoveAll) })
 
 	// No job ran, but a runner is registered → teardown deregisters (and fails).
 	if !h.slot.Command(Command{Kind: CmdRecycle, Reason: "image bump"}) {
@@ -2272,6 +2303,112 @@ func TestDebugHeldAfterJobOKResetsStreak(t *testing.T) {
 	}
 	if heldListening(rec) {
 		t.Error("fixture unexpectedly has a ≥10-min LISTENING record; the reset must be debugHeldAfterJobOK, not heldListening")
+	}
+}
+
+// --- debug session recording ---
+
+// TestStripTerminalCodes: ANSI sequences and CR+LF are removed; plain text is
+// preserved.
+func TestStripTerminalCodes(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"\x1b[31mred\x1b[0m", "red"},                 // SGR color
+		{"\x1b[2J", ""},                               // CSI erase-screen
+		{"\x1b[?25h", ""},                             // CSI private mode
+		{"\x1b[3~", ""},                               // CSI ~ terminator (Delete key)
+		{"\x1bM", ""},                                 // 2-char standalone ESC sequence
+		{"\x1b(B", ""},                                // 3-char designator: US-ASCII (vim)
+		{"\x1b(0", ""},                                // 3-char designator: DEC line drawing (ncurses)
+		{"hello\r\nworld\r\n", "hello\nworld\n"},      // CRLF: \r stripped, \n preserved
+		{"\x1b[32mok\x1b[0m\r\n", "ok\n"},             // ANSI stripped + CRLF normalized
+		{"plain text\n", "plain text\n"},              // untouched
+		{"\x1b]0;My Title\x07prompt$ ", "prompt$ "},   // OSC BEL-terminated (macOS Terminal)
+		{"\x1b]0;My Title\x1b\\prompt$ ", "prompt$ "}, // OSC ST-terminated
+		{"overwrite\rprogress", "overwriteprogress"},  // bare \r (curl/npm progress bars)
+	}
+	for _, tc := range tests {
+		got := string(stripTerminalCodes([]byte(tc.in)))
+		if got != tc.want {
+			t.Errorf("stripTerminalCodes(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestDebugSessionPulledWhenKeyLanded: a cycle that entered DEBUG via a landed
+// key and has a non-empty session log produces a debug-session.log artifact.
+func TestDebugSessionPulledWhenKeyLanded(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	// Return raw terminal output; the artifact on disk must have codes stripped.
+	h.guest.sessionLog = []byte("\x1b[32moperator ran some commands\x1b[0m\r\n")
+	cancel := h.reachListening(t)
+	defer cancel()
+
+	r := h.debugCmd(t, nil)
+	if r.Err != nil {
+		t.Fatalf("freeze failed: %v", r.Err)
+	}
+	h.waitState(t, StateDebug)
+	h.slot.Command(Command{Kind: CmdRecycle, Reason: "done"})
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+
+	rec := h.jobRecord(t)
+	if !slices.Contains(rec.Artifacts, "debug-session.log") {
+		t.Errorf("debug-session.log missing from artifacts: %v", rec.Artifacts)
+	}
+	if !h.guest.sessionPulledOnce() {
+		t.Error("PullDebugSession was not called")
+	}
+	dir, _ := (cycle.Store{SlotDir: h.dir.SlotCyclesDir("runner-1")}).Dir(rec)
+	got, err := os.ReadFile(filepath.Join(dir, "debug-session.log"))
+	if err != nil {
+		t.Fatalf("reading debug-session.log: %v", err)
+	}
+	if want := "operator ran some commands\n"; string(got) != want {
+		t.Errorf("debug-session.log content = %q, want %q (ANSI codes not stripped?)", got, want)
+	}
+}
+
+// TestDebugSessionSkippedWhenEmpty: an empty session log (operator never
+// connected) must not produce a debug-session.log artifact.
+func TestDebugSessionSkippedWhenEmpty(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	// sessionLog is nil (the zero value)
+	cancel := h.reachListening(t)
+	defer cancel()
+
+	r := h.debugCmd(t, nil)
+	if r.Err != nil {
+		t.Fatalf("freeze failed: %v", r.Err)
+	}
+	h.waitState(t, StateDebug)
+	h.slot.Command(Command{Kind: CmdRecycle, Reason: "done"})
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+
+	rec := h.jobRecord(t)
+	if slices.Contains(rec.Artifacts, "debug-session.log") {
+		t.Errorf("debug-session.log artifact must be skipped on empty session log; artifacts: %v", rec.Artifacts)
+	}
+}
+
+// TestDebugSessionNotPulledWithoutLandedKey: a normal successful cycle (no
+// debug key injection) must not call PullDebugSession.
+func TestDebugSessionNotPulledWithoutLandedKey(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	cancel := h.reachListening(t)
+	defer cancel()
+
+	h.proc.say("Running job: build")
+	h.proc.say("build completed with result: Succeeded")
+	h.proc.exit(0)
+	h.waitState(t, StateBackoff)
+
+	if h.guest.sessionPulledOnce() {
+		t.Error("PullDebugSession must not be called when no debug key landed")
 	}
 }
 

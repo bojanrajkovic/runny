@@ -250,6 +250,7 @@ func run() error {
 				return err
 			},
 			CloneFile: clonefile.Clone,
+			RemoveAll: os.RemoveAll,
 			GitHub:    gh,
 			Dial: guest.Dialer{SSH: sshx.Config{
 				User:     p.SSHUser,

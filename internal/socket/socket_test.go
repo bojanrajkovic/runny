@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -192,7 +193,7 @@ func TestToLogLine(t *testing.T) {
 func testSlots(names ...string) []*statemachine.Slot {
 	var slots []*statemachine.Slot
 	for _, n := range names {
-		slots = append(slots, statemachine.NewSlot(n, statemachine.Deps{}))
+		slots = append(slots, statemachine.NewSlot(n, statemachine.Deps{RemoveAll: os.RemoveAll}))
 	}
 	return slots
 }

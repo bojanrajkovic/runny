@@ -35,12 +35,12 @@ func (d Dialer) interval() time.Duration {
 	return 2 * time.Second
 }
 
-func (d Dialer) WaitFor(ctx bounded.Context, addr string) (statemachine.Guest, error) {
+func (d Dialer) WaitFor(ctx bounded.Context, addr, goos string) (statemachine.Guest, error) {
 	c, err := sshx.WaitFor(ctx, addr, d.SSH, d.interval())
 	if err != nil {
 		return nil, err
 	}
-	return &Guest{c: c, addr: addr, cfg: d.SSH, interval: d.interval()}, nil
+	return &Guest{c: c, addr: addr, cfg: d.SSH, interval: d.interval(), goos: goos}, nil
 }
 
 // Guest is one authenticated session into a booted runner VM. It retains the
@@ -52,6 +52,9 @@ type Guest struct {
 	addr     string
 	cfg      sshx.Config
 	interval time.Duration
+	// goos is the guest OS; set by Rotate and WaitFor.
+	// InstallAuthorizedKey uses it to select the per-OS session recorder.
+	goos string
 }
 
 // The rotation scripts install the per-cycle public key and shut password
@@ -170,7 +173,7 @@ func (d Dialer) Rotate(ctx bounded.Context, addr string, g statemachine.Guest, g
 	// Guest retains the keyed config (Signer + pinned HostKeys) so Redial and
 	// HostKeys work against the hardened session (issue #39).
 	_ = pg.c.Close()
-	return &Guest{c: c, addr: addr, cfg: cfg, interval: d.interval()}, nil
+	return &Guest{c: c, addr: addr, cfg: cfg, interval: d.interval(), goos: goos}, nil
 }
 
 // verifyPasswordAuthDead attempts password auth and requires ErrAuthRejected.
@@ -342,6 +345,28 @@ func (g *Guest) PullDiag(ctx bounded.Context) ([]byte, error) {
 	return out, nil
 }
 
+// PullDebugSession fetches the operator's session recording at teardown.
+// Empty output (operator never connected) is returned as nil — the caller
+// skips the artifact.
+//
+// Uses a fresh connection for the same reason InstallAuthorizedKey does: the
+// supervision client g.c carries the live runner Proc, and newSession sets a
+// deadline on the SHARED net.Conn. Pulling over g.c during a forced teardown
+// (stuck job, proc still alive) would fire that deadline on the runner's
+// channel before proc.Kill() in step 2.
+func (g *Guest) PullDebugSession(ctx bounded.Context) ([]byte, error) {
+	c, err := sshx.WaitFor(ctx, g.addr, g.cfg, g.interval)
+	if err != nil {
+		return nil, fmt.Errorf("debug session pull: %w: %w", statemachine.ErrGuestUnreachable, err)
+	}
+	defer func() { _ = c.Close() }()
+	out, _, err := c.Output(ctx, "cat "+debugSessionLogFile+" 2>/dev/null || true")
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // stopRunnerScript kills the runner LISTENER tree and proves it dead. Every
 // process in that tree carries "--jitconfig <blob>" in argv; the [-]-bracket
 // makes the ERE match "--jitconfig" without matching the pattern's own literal
@@ -371,14 +396,60 @@ while alive; do
 done
 `
 
-// installDebugKeyScript appends one server-canonicalized authorized_keys line
-// (type+base64 only, so single-quoting is shell-safe) and greps it back to
-// prove it landed.
+// debugSessionLogFile is the path on the guest where the recorder writes and
+// teardown reads back the operator's session log. A single constant keeps the
+// recorder scripts and PullDebugSession in sync.
+const debugSessionLogFile = "/tmp/runny-debug-session.log"
+
+// debugRecorderDarwin / debugRecorderLinux are the /tmp/runny-record wrapper
+// scripts written alongside an operator debug key. The wrapper forces every
+// use of that key (interactive shell, non-interactive command, and direct
+// reconnects after runnyctl debug exits) through script(1), appending all
+// output to debugSessionLogFile for teardown to pull.
+//
+// The split mirrors provisionScriptDarwin / provisionScriptLinux: BSD script(1)
+// uses a positional command form; util-linux uses -c. The fallback ensures an
+// operator is never locked out when script is absent — record nothing rather
+// than deny access.
+const debugRecorderDarwin = "#!/bin/sh\n" +
+	"if ! command -v script >/dev/null 2>&1; then\n" +
+	"  if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then exec \"${SHELL:-/bin/sh}\" -c \"$SSH_ORIGINAL_COMMAND\"; fi\n" +
+	"  exec \"${SHELL:-/bin/sh}\"\n" +
+	"fi\n" +
+	"if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then\n" +
+	"  exec script -q -F -a " + debugSessionLogFile + " /bin/sh -c \"$SSH_ORIGINAL_COMMAND\"\n" +
+	"else\n" +
+	"  exec script -q -F -a " + debugSessionLogFile + "\n" +
+	"fi\n"
+
+const debugRecorderLinux = "#!/bin/sh\n" +
+	"if ! command -v script >/dev/null 2>&1; then\n" +
+	"  if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then exec \"${SHELL:-/bin/sh}\" -c \"$SSH_ORIGINAL_COMMAND\"; fi\n" +
+	"  exec \"${SHELL:-/bin/sh}\"\n" +
+	"fi\n" +
+	"if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then\n" +
+	"  exec script -q -f -a -c \"$SSH_ORIGINAL_COMMAND\" -e " + debugSessionLogFile + "\n" +
+	"else\n" +
+	"  exec script -q -f -a " + debugSessionLogFile + "\n" +
+	"fi\n"
+
+// installDebugKeyScript writes the per-OS session recorder to /tmp/runny-record,
+// then appends a command=-wrapped authorized_keys line and greps back the full
+// wrapped line to prove the command= wrapper landed (not just the bare key).
+// The command= option forces every operator SSH session through the recorder
+// regardless of what the client requests. restrict denies forwarding/X11/agent;
+// pty re-grants the PTY restrict would otherwise deny (which script(1) needs).
+// The daemon's own cycle key is a separate, unwrapped line, so daemon
+// operations are unaffected.
+//
+// Format args: recorder-script-content, key-line, key-line.
 const installDebugKeyScript = `set -e
 umask 077
 mkdir -p "$HOME/.ssh"
-printf '%%s\n' '%s' >> "$HOME/.ssh/authorized_keys"
-grep -qF -- '%s' "$HOME/.ssh/authorized_keys"
+printf '%%s' '%s' > /tmp/runny-record
+chmod 0755 /tmp/runny-record
+printf '%%s\n' 'command="exec /tmp/runny-record",restrict,pty %s' >> "$HOME/.ssh/authorized_keys"
+grep -qF -- 'command="exec /tmp/runny-record",restrict,pty %s' "$HOME/.ssh/authorized_keys"
 `
 
 // StopRunner kills the runner listener tree and PROVES it dead (issue #39).
@@ -414,7 +485,11 @@ func (g *Guest) InstallAuthorizedKey(ctx bounded.Context, line string) error {
 		return fmt.Errorf("installing debug key: %w: %w", statemachine.ErrGuestUnreachable, err)
 	}
 	defer func() { _ = c.Close() }()
-	script := fmt.Sprintf(installDebugKeyScript, line, line)
+	recorder := debugRecorderDarwin
+	if g.goos == "linux" {
+		recorder = debugRecorderLinux
+	}
+	script := fmt.Sprintf(installDebugKeyScript, recorder, line, line)
 	out, code, err := c.Output(ctx, script)
 	if err != nil {
 		if errors.Is(err, sshx.ErrSessionOpen) {

@@ -7,14 +7,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -23,7 +21,6 @@ import (
 	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/oci"
 	"github.com/bojanrajkovic/runny/internal/tart"
-	"github.com/bojanrajkovic/runny/internal/versioncore"
 )
 
 // defaultResolveTimeout is the fallback bound for the quick metadata
@@ -248,70 +245,6 @@ type RunnerResolver func(ctx bounded.Context) (filename, url, sha256 string, err
 // The wait is transitively bounded by the holder's own stall-watched
 // download (a wait on a peer's already-bounded operation is itself bounded).
 var tarballLocks sync.Map // filename -> chan struct{} (capacity-1 semaphore)
-
-// PruneRunnerCache keeps the `keep` newest tarball versions PER OS/arch flavor
-// (the actions-runner-<os>-arm64 prefix) in cacheDir and deletes the rest. It is
-// pure disk hygiene: every live cycle CoW-clones its resolved tarball into its
-// own per-slot mount before boot (see the state machine's CLONE state), so
-// nothing reads this shared store after CLONE and a prune here can never pull a
-// tarball out from under a running guest.
-//
-// Call it only when no cycle is live — at cold start, beside the vms/ sweep —
-// where that "no live reader" precondition holds by construction (a mid-run
-// prune could still drop a version a slot resolved-but-not-yet-cloned). Grouping
-// by flavor is load-bearing: a host with both darwin and linux pools must not
-// lose one flavor's current tarball to the other flavor's churn. Unparseable
-// names are left untouched, but a .partial temp is reaped: at the cold start
-// where this runs no download is in flight, so any leftover is from a process
-// that died mid-download. A missing cacheDir is not an error (a daemon that
-// never downloaded one). keep < 1 is refused as a no-op rather than wiping the
-// store — the sole caller passes a sane constant, but the exported contract must
-// not silently delete everything (or panic on a negative slice index).
-func PruneRunnerCache(cacheDir string, keep int) error {
-	if keep < 1 {
-		return nil
-	}
-	entries, err := os.ReadDir(cacheDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	var errs []error
-	type tarball struct{ name, version string }
-	groups := map[string][]tarball{}
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() {
-			continue
-		}
-		if strings.HasSuffix(name, ".partial") {
-			errs = append(errs, os.Remove(filepath.Join(cacheDir, name))) // dead temp; no live download at cold start
-			continue
-		}
-		parts := strings.Split(name, "-")
-		if len(parts) < 4 {
-			continue
-		}
-		prefix := strings.Join(parts[:4], "-") // actions-runner-<os>-arm64
-		v := versioncore.Core(strings.TrimPrefix(name, prefix+"-"))
-		if v == "" {
-			continue // unparseable: leave it alone rather than guess its age
-		}
-		groups[prefix] = append(groups[prefix], tarball{name, v})
-	}
-	for _, vs := range groups {
-		if len(vs) <= keep {
-			continue
-		}
-		slices.SortFunc(vs, func(a, b tarball) int { return versioncore.Compare(b.version, a.version) }) // newest first
-		for _, t := range vs[keep:] {
-			errs = append(errs, os.Remove(filepath.Join(cacheDir, t.name)))
-		}
-	}
-	return errors.Join(errs...)
-}
 
 // EnsureRunnerTarball makes sure the service-current actions-runner tarball
 // sits in cacheDir (the virtiofs share). Returns the tarball path and the

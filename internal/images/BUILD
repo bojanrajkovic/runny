@@ -4,6 +4,7 @@ go_library(
     name = "images",
     srcs = [
         "images.go",
+        "prune.go",
         "puller.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/images",
@@ -21,6 +22,7 @@ go_library(
 go_test(
     name = "images_test",
     srcs = [
+        "prune_test.go",
         "puller_test.go",
         "tarball_test.go",
     ],

@@ -183,6 +183,14 @@ type Server struct {
 	// reaches a socket created AFTER the grant).
 	socketPath string
 
+	// operatorMu serializes mutateOperator's List-then-mutate sequence:
+	// without it, two concurrent grant/revoke RPCs (gRPC dispatches unary
+	// calls on separate goroutines) can both read the same pre-mutation
+	// operator set and both pass a precondition (e.g. "not the last
+	// operator") that the other's mutation has already invalidated. A
+	// separate lock from mu, which guards the unrelated watch fan-out below.
+	operatorMu sync.Mutex
+
 	// watch fan-out
 	mu      sync.Mutex
 	watchID int

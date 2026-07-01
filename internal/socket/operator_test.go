@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -236,6 +237,76 @@ func TestRevokeOperatorRevokesAndRecords(t *testing.T) {
 	}
 	if !sawRevoke {
 		t.Errorf("no revoke record for %s: %+v", testGrantee2, grants)
+	}
+}
+
+// revokePrecheckForTest duplicates revokeOperator's precheck closure so this
+// test can drive mutateOperator directly with a slowed-down apply step,
+// widening the List-then-mutate race window deterministically instead of
+// hoping real scheduling happens to interleave two goroutines badly.
+func revokePrecheckForTest(ops []opacl.Operator, uid uint32, u *user.User) error {
+	found := false
+	for _, op := range ops {
+		if op.UID == uid {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return status.Errorf(codes.FailedPrecondition, "%s is not an operator", u.Username)
+	}
+	if len(ops) <= 1 {
+		return status.Error(codes.FailedPrecondition,
+			"refusing to revoke the last operator — recover with: sudo runnyctl install-daemon")
+	}
+	return nil
+}
+
+// TestMutateOperatorSerializesConcurrentRevokes pins the code-review fix
+// for a real TOCTOU race: mutateOperator's List->precheck->apply sequence
+// had no lock, so two concurrent revokes of the last two operators could
+// both read the pre-mutation list, both pass the last-operator guard, and
+// both succeed — zero operators left, recoverable only via install-daemon.
+// Goroutine 1's apply is slowed so it's still holding the lock (and hasn't
+// mutated the ACL yet) when goroutine 2 starts; if mutateOperator
+// serializes correctly, goroutine 2 blocks until goroutine 1 finishes and
+// then correctly sees only one operator left.
+func TestMutateOperatorSerializesConcurrentRevokes(t *testing.T) {
+	requireGrantees(t)
+	s := newOperatorTestServer(t)
+	ctx := asOperator(t.Context(), 501)
+	if _, err := s.grantOperator(ctx, testGrantee1); err != nil {
+		t.Fatalf("grant 1: %v", err)
+	}
+	if _, err := s.grantOperator(ctx, testGrantee2); err != nil {
+		t.Fatalf("grant 2: %v", err)
+	}
+
+	slowRevoke := func(actx bounded.Context, homeDir, sock, username string) error {
+		time.Sleep(200 * time.Millisecond)
+		return opacl.Revoke(actx, homeDir, sock, username)
+	}
+
+	var wg sync.WaitGroup
+	var err1, err2 error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, err1 = s.mutateOperator(ctx, testGrantee1, "revoke", "revoking", revokePrecheckForTest, slowRevoke)
+	}()
+	time.Sleep(50 * time.Millisecond) // let goroutine 1 acquire the lock and enter its slow apply
+	_, err2 = s.mutateOperator(ctx, testGrantee2, "revoke", "revoking", revokePrecheckForTest, opacl.Revoke)
+	wg.Wait()
+
+	if err1 == nil && err2 == nil {
+		t.Fatal("both concurrent revokes succeeded — the last-operator guard was bypassed by the race")
+	}
+	ops, err := opacl.List(s.HomeDir.String())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(ops) < 1 {
+		t.Fatalf("zero operators remain after concurrent revokes: err1=%v err2=%v, ops=%+v", err1, err2, ops)
 	}
 }
 

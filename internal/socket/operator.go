@@ -205,6 +205,14 @@ func (s *Server) mutateOperator(
 	}
 	uid := uint32(uid64)
 
+	// The List-then-mutate sequence below must run as one unit: without this
+	// lock, two concurrent grant/revoke RPCs (gRPC dispatches unary calls on
+	// separate goroutines) could both read the same pre-mutation operator
+	// set and both pass a precondition (e.g. "not the last operator") the
+	// other's mutation has already invalidated.
+	s.operatorMu.Lock()
+	defer s.operatorMu.Unlock()
+
 	ops, err := opacl.List(s.HomeDir.String())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "reading the operator set: %v", err)

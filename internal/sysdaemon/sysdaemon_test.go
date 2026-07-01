@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/bojanrajkovic/runny/internal/home"
+	"github.com/bojanrajkovic/runny/internal/opacl"
 )
 
 // testOperator is a local account that resolves via user.Lookup on any host,
@@ -59,8 +60,8 @@ func TestACEsPinned(t *testing.T) {
 	wantOp := "user:alice allow list,add_file,search,delete,add_subdirectory,delete_child," +
 		"readattr,writeattr,readextattr,writeextattr,readsecurity,read,write,append,execute," +
 		"file_inherit,directory_inherit"
-	if got := operatorACE("alice"); got != wantOp {
-		t.Errorf("operatorACE drift:\n got %q\nwant %q", got, wantOp)
+	if got := opacl.OperatorACE("alice"); got != wantOp {
+		t.Errorf("opacl.OperatorACE drift:\n got %q\nwant %q", got, wantOp)
 	}
 	wantSvc := "user:_runny allow list,search,read,readattr,readextattr,readsecurity," +
 		"file_inherit,directory_inherit"
@@ -199,7 +200,7 @@ func TestInstallPlan(t *testing.T) {
 	if !exactCall(r.calls, "/bin/chmod", "0700", home.SystemHomeDir) {
 		t.Error("missing chmod 0700 on the home")
 	}
-	if !exactCall(r.calls, "/bin/chmod", "-R", "+a", operatorACE(testOperator), home.SystemHomeDir) {
+	if !exactCall(r.calls, "/bin/chmod", "-R", "+a", opacl.OperatorACE(testOperator), home.SystemHomeDir) {
 		t.Error("missing operator ACE (recursive)")
 	}
 	if !exactCall(r.calls, "/bin/chmod", "-R", "+a", serviceACE("_runny"), home.SystemHomeDir) {

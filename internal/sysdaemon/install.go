@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bojanrajkovic/runny/internal/home"
+	"github.com/bojanrajkovic/runny/internal/opacl"
 )
 
 // Runner runs a privileged command and returns its combined output. The default
@@ -201,7 +202,7 @@ func (i *Installer) ensureHome(ctx context.Context) error {
 		{"/usr/sbin/chown", owner, i.cfg.HomeDir},
 		{"/bin/chmod", "0700", i.cfg.HomeDir},
 		{"/bin/chmod", "-R", "-N", i.cfg.HomeDir},
-		{"/bin/chmod", "-R", "+a", operatorACE(i.cfg.Operator), i.cfg.HomeDir},
+		{"/bin/chmod", "-R", "+a", opacl.OperatorACE(i.cfg.Operator), i.cfg.HomeDir},
 		{"/bin/chmod", "-R", "+a", serviceACE(i.cfg.ServiceUser), i.cfg.HomeDir},
 		{"/bin/mkdir", "-p", logs},
 		{"/usr/sbin/chown", owner, logs},

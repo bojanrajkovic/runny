@@ -14,6 +14,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
+	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/sshx"
 )
 
@@ -106,6 +107,7 @@ type rotateServer struct {
 	mu                sync.Mutex
 	authorized        map[string]bool
 	passwordDisabled  bool
+	currentPassword   string // starts "admin"; a landed scramble line updates it
 	scripts           []string
 	failInstall       bool // the install exec exits 1 (no sudo, say)
 	failAuthorize     bool // the install "runs" but the key never authorizes
@@ -147,17 +149,17 @@ func newRotateServer(t *testing.T) *rotateServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &rotateServer{hostPub: hostKey.PublicKey(), authorized: map[string]bool{}}
+	srv := &rotateServer{hostPub: hostKey.PublicKey(), authorized: map[string]bool{}, currentPassword: "admin"}
 
 	conf := &ssh.ServerConfig{
 		PasswordCallback: func(meta ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
 			srv.mu.Lock()
-			disabled := srv.passwordDisabled
+			disabled, want := srv.passwordDisabled, srv.currentPassword
 			srv.mu.Unlock()
 			if disabled {
 				return nil, errors.New("password auth disabled")
 			}
-			if meta.User() == "admin" && string(pass) == "admin" {
+			if meta.User() == "admin" && string(pass) == want {
 				return nil, nil
 			}
 			return nil, errors.New("denied")
@@ -288,6 +290,14 @@ func (s *rotateServer) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 			}
 			if name := dropInFromScript(payload.Cmd); name != "" && name < "50-cloud-init.conf" && !s.forceKeepPassword {
 				s.passwordDisabled = true
+			}
+			// A landed scramble line changes the account's real password —
+			// same as a real chpasswd/dscl would — independent of whether
+			// passwordDisabled flipped above (forceKeepPassword can leave
+			// password auth nominally on while the credential underneath it
+			// still moves).
+			if pw, ok := scramblePasswordFromScript(payload.Cmd); ok {
+				s.currentPassword = pw
 			}
 			s.mu.Unlock()
 			exit(0)
@@ -450,6 +460,137 @@ func TestRotateScriptsPerOS(t *testing.T) {
 	if name == "" || name >= "50-cloud-init.conf" {
 		t.Errorf("drop-in %q does not sort before 50-cloud-init.conf; sshd would ignore it", name)
 	}
+}
+
+// ssh_hardening: scramble is opt-in — plain rotate must never touch the
+// account password.
+func TestRotatePlainDoesNotScramblePassword(t *testing.T) {
+	srv := newRotateServer(t)
+	d := testDialer()
+
+	g, err := d.WaitFor(testCtx(t), srv.addr, "linux")
+	if err != nil {
+		t.Fatalf("WaitFor: %v", err)
+	}
+	if _, err := d.Rotate(testCtx(t), srv.addr, g, "linux"); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	if script := srv.lastScript(t); strings.Contains(script, "chpasswd") || strings.Contains(script, "dscl") {
+		t.Errorf("plain rotate must not scramble the password: %q", script)
+	}
+}
+
+// ssh_hardening: scramble appends the password-scramble line to the same
+// rotate script (one exec, one set -e), and mints a fresh, different
+// password every cycle — a static or reused value would defeat the point.
+func TestRotateScrambleAppendsPasswordChange(t *testing.T) {
+	srv := newRotateServer(t)
+	d := testDialer()
+	d.Hardening = home.SSHHardeningScramble
+
+	g, err := d.WaitFor(testCtx(t), srv.addr, "linux")
+	if err != nil {
+		t.Fatalf("WaitFor: %v", err)
+	}
+	if _, err := d.Rotate(testCtx(t), srv.addr, g, "linux"); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	script := srv.lastScript(t)
+	if !strings.Contains(script, "| sudo chpasswd") {
+		t.Errorf("linux scramble script missing chpasswd: %q", script)
+	}
+	pw1, ok := scramblePasswordFromScript(script)
+	if !ok {
+		t.Fatal("no scrambled password in script")
+	}
+
+	srv2 := newRotateServer(t)
+	d2 := testDialer()
+	d2.Hardening = home.SSHHardeningScramble
+	g2, err := d2.WaitFor(testCtx(t), srv2.addr, "linux")
+	if err != nil {
+		t.Fatalf("WaitFor: %v", err)
+	}
+	if _, err := d2.Rotate(testCtx(t), srv2.addr, g2, "linux"); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	pw2, ok := scramblePasswordFromScript(srv2.lastScript(t))
+	if !ok {
+		t.Fatal("no scrambled password in second script")
+	}
+	if pw1 == pw2 {
+		t.Error("scrambled password reused across cycles")
+	}
+}
+
+// darwin's dscl has no stdin form for -passwd, so the scramble line must use
+// dscl directly rather than the linux chpasswd form.
+func TestRotateScrambleUsesDsclOnDarwin(t *testing.T) {
+	srv := newRotateServer(t)
+	d := testDialer()
+	d.Hardening = home.SSHHardeningScramble
+
+	g, err := d.WaitFor(testCtx(t), srv.addr, "darwin")
+	if err != nil {
+		t.Fatalf("WaitFor: %v", err)
+	}
+	if _, err := d.Rotate(testCtx(t), srv.addr, g, "darwin"); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	script := srv.lastScript(t)
+	if !strings.Contains(script, "dscl . -passwd") {
+		t.Errorf("darwin scramble script missing dscl: %q", script)
+	}
+	if strings.Contains(script, "chpasswd") {
+		t.Error("darwin scramble script must not use linux's chpasswd form")
+	}
+}
+
+// A guest where the drop-in silently loses PLUS scramble is on must still be
+// a LOUD rotation failure. verifyPasswordAuthDead has to dial with the
+// freshly scrambled password, not the stale pool default — d.SSH.Password
+// stops being the guest's real password the instant the scramble line
+// lands, so proving the OLD value is rejected would prove nothing about
+// whether password auth is actually dead.
+func TestRotateScrambleFailsLoudWhenPasswordSurvives(t *testing.T) {
+	srv := newRotateServer(t)
+	srv.mu.Lock()
+	srv.forceKeepPassword = true
+	srv.mu.Unlock()
+	d := testDialer()
+	d.Hardening = home.SSHHardeningScramble
+
+	g, err := d.WaitFor(testCtx(t), srv.addr, "darwin")
+	if err != nil {
+		t.Fatalf("WaitFor: %v", err)
+	}
+	ctx, cancel := bounded.WithTimeout(t.Context(), 1500*time.Millisecond)
+	defer cancel()
+	_, err = d.Rotate(ctx, srv.addr, g, "linux")
+	if err == nil {
+		t.Fatal("Rotate reported success while the guest still accepts password auth")
+	}
+	if !strings.Contains(err.Error(), "password auth still alive") {
+		t.Errorf("err = %v, want the un-hardened diagnosis", err)
+	}
+}
+
+// scramblePasswordFromScript pulls the single-quoted password out of either
+// the linux (chpasswd) or darwin (dscl) scramble line, the same way
+// pubkeyFromScript reads the echoed key. ok is false when the script carries
+// no scramble line at all (plain rotate never gets one).
+func scramblePasswordFromScript(script string) (pw string, ok bool) {
+	for _, marker := range []string{`"$(id -un)" '`, `"/Users/$(id -un)" '`} {
+		i := strings.Index(script, marker)
+		if i < 0 {
+			continue
+		}
+		rest := script[i+len(marker):]
+		if j := strings.Index(rest, "'"); j >= 0 {
+			return rest[:j], true
+		}
+	}
+	return "", false
 }
 
 // A guest where the drop-in silently loses (sshd config precedence, a

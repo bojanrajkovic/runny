@@ -7,6 +7,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/bounded",
+        "//internal/home",
         "//internal/sshx",
         "//internal/statemachine",
         "@org_golang_x_crypto//ssh",
@@ -22,6 +23,7 @@ go_test(
     embed = [":guest"],
     deps = [
         "//internal/bounded",
+        "//internal/home",
         "//internal/sshx",
         "@org_golang_x_crypto//ssh",
     ],

@@ -17,6 +17,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
+	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/sshx"
 	"github.com/bojanrajkovic/runny/internal/statemachine"
 )
@@ -26,6 +27,11 @@ type Dialer struct {
 	SSH sshx.Config
 	// RetryInterval between connection attempts (default 2s).
 	RetryInterval time.Duration
+	// Hardening is the pool's home.SSHHardeningMode. Rotate consults
+	// Hardening.Scrambles() to decide whether to also randomize the guest
+	// account password; the FSM's own gate (ssh_hardening != off) already
+	// decides whether Rotate is called at all.
+	Hardening home.SSHHardeningMode
 }
 
 func (d Dialer) interval() time.Duration {
@@ -87,6 +93,36 @@ const rotateScriptLinux = rotateScriptBase + `sudo systemctl reload ssh || sudo 
 // connection's sshd reads the config fresh at spawn.
 const rotateScriptDarwin = rotateScriptBase
 
+// scramblePasswordPlaceholder is substituted via strings.ReplaceAll, not a
+// fmt verb — a plain substring swap needs no escaping discipline, matching
+// provisionScript's __RUNNER_TARBALL__ placeholder below.
+const scramblePasswordPlaceholder = "__RUNNY_SCRAMBLE_PASSWORD__"
+
+// scrambleLineLinux / scrambleLineDarwin set a fresh, never-disclosed
+// password for the just-authenticated account (ssh_hardening: scramble,
+// issue #210), appended to the rotate script so it lands in the same exec as
+// the key install — one round-trip, one set -e failure path. A scramble
+// failure aborts after PasswordAuthentication is already off, so it degrades
+// to plain "rotate" behavior rather than a worse state.
+//
+// The username comes from `id -un` on the guest, not a Go-level value
+// substituted in: the only thing interpolated into either line is the
+// random password, so there is nothing here for a misconfigured SSHUser to
+// inject into.
+//
+// Residual, both OSes: the whole rotate script — this line included — is
+// delivered as one SSH exec, which sshd runs as `<shell> -c "<script>"`, so
+// the password is live in that shell's argv (`ps`/`/proc/<pid>/cmdline`) for
+// the exec's full duration, not just chpasswd's own process. Same residual
+// class the JIT config already accepts on the guest side (StartRunner's
+// comment, below) — accepted here because this runs during SECURE_SSH,
+// before any operator debug key could exist to read it.
+const scrambleLineLinux = `printf '%s:%s\n' "$(id -un)" '` + scramblePasswordPlaceholder + `' | sudo chpasswd
+`
+
+const scrambleLineDarwin = `sudo dscl . -passwd "/Users/$(id -un)" '` + scramblePasswordPlaceholder + `'
+`
+
 // captureHostKeys reads every host public key the guest may present during
 // key exchange. All of them: the host-key algorithm is negotiated per
 // connection, so the pin set must cover whatever sshd offers
@@ -102,6 +138,20 @@ const captureHostKeys = `awk 1 /etc/ssh/ssh_host_*_key.pub`
 // authenticated by the key with the host keys pinned — then PROVE the
 // password is dead by attempting it and requiring rejection. The private key
 // never touches disk and dies with this process.
+//
+// When d.Hardening is "scramble", the same pre-flip exec also randomizes the
+// guest account's password (issue #210), so the image's well-known default
+// is never reachable again for the rest of the cycle through any channel,
+// not just SSH password auth. verifyPasswordAuthDead below is re-pointed at
+// that fresh password in this case — it must prove the guest's CURRENT
+// credential is rejected, not the stale pool default: once the scramble
+// line lands, the pool default simply stops being the guest's password, so
+// dialing with it would fail regardless of whether PasswordAuthentication
+// actually flipped, silently defeating the "prove the negative" check. There
+// is no way to prove the scramble itself took effect — guest control is SSH
+// only, and PasswordAuthentication no already blocks password auth
+// regardless of the account password's value, so the script's exit code is
+// the only signal, same trust level the rest of this script already gets.
 //
 // The password session is closed only when all of that succeeded. On every
 // failure path it is deliberately left open: the FSM still owns g, the
@@ -143,7 +193,23 @@ func (d Dialer) Rotate(ctx bounded.Context, addr string, g statemachine.Guest, g
 		script = rotateScriptLinux
 	}
 	pubLine := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
-	out, code, err = pg.c.Output(ctx, fmt.Sprintf(script, pubLine))
+	full := fmt.Sprintf(script, pubLine)
+
+	// verifyPW is the password verifyPasswordAuthDead must prove is dead: the
+	// guest's actual CURRENT credential. Under plain rotate that's the pool's
+	// static password (never changes). Under scramble it has to be the fresh
+	// value below instead — see the doc comment above.
+	verifyPW := d.SSH.Password
+	if d.Hardening.Scrambles() {
+		pw := rand.Text()
+		verifyPW = pw
+		scrambleLine := scrambleLineDarwin
+		if goos == "linux" {
+			scrambleLine = scrambleLineLinux
+		}
+		full += strings.ReplaceAll(scrambleLine, scramblePasswordPlaceholder, pw)
+	}
+	out, code, err = pg.c.Output(ctx, full)
 	if err != nil {
 		return nil, fmt.Errorf("rotate: installing cycle key: %w", err)
 	}
@@ -164,7 +230,9 @@ func (d Dialer) Rotate(ctx bounded.Context, addr string, g statemachine.Guest, g
 	// lexically-ordered includes, and image fleets ship their own auth
 	// drop-ins — and a guest that still takes the password while reporting
 	// SECURE_SSH ok is the silent un-hardening this state exists to kill.
-	if err := verifyPasswordAuthDead(ctx, addr, d.SSH); err != nil {
+	verifyCfg := d.SSH
+	verifyCfg.Password = verifyPW
+	if err := verifyPasswordAuthDead(ctx, addr, verifyCfg); err != nil {
 		_ = c.Close()
 		return nil, err
 	}

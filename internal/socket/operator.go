@@ -59,14 +59,34 @@ type accountLookupResult struct {
 	err error
 }
 
-// boundedAccountLookup runs fn (a name or uid os/user lookup) with a bound,
-// abandoning the goroutine on timeout — accepted here because
-// GrantOperator/RevokeOperator are rare, human-initiated admin actions, not
-// a path that could pile up abandoned goroutines under automated load the
-// way InjectDebugKey's audit lookup could.
+// accountLookupCap bounds concurrent stuck-lookup goroutines: os/user has
+// no cancelable variant, so a wedged directory service leaves an abandoned
+// goroutine per stuck call. lookupUsername (InjectDebugKey's audit-only
+// username) caps this at 1 and skips resolution when busy — safe there
+// because that result is cosmetic. Here the result is required for
+// GrantOperator/RevokeOperator to proceed, so skipping isn't safe; instead
+// a small cap bounds the leak while still letting a few concurrent admin
+// operations through without contention, and an exceeded cap fails fast
+// (Unavailable, retryable) rather than silently degrading.
+const accountLookupCap = 4
+
+var accountLookupInFlight = make(chan struct{}, accountLookupCap)
+
+// boundedAccountLookup runs fn (a name or uid os/user lookup) with a bound.
+// ok is false either on timeout or when accountLookupCap stuck lookups
+// already occupy every slot — in both cases the caller must treat the
+// result as unknown, not "no such account". The occupied slot is released
+// by the lookup goroutine itself when fn actually returns, not by the
+// timeout, so a still-stuck lookup keeps counting against the cap.
 func boundedAccountLookup(fn func() (*user.User, error)) (accountLookupResult, bool) {
+	select {
+	case accountLookupInFlight <- struct{}{}:
+	default:
+		return accountLookupResult{}, false
+	}
 	ch := make(chan accountLookupResult, 1)
 	go func() {
+		defer func() { <-accountLookupInFlight }()
 		u, err := fn()
 		ch <- accountLookupResult{u, err}
 	}()
@@ -89,6 +109,7 @@ func resolveOperatorAccount(input string) (*user.User, error) {
 	if r.err == nil {
 		return r.u, nil
 	}
+	lookupErr := r.err
 	if _, err := strconv.ParseUint(input, 10, 32); err == nil {
 		r, ok := boundedAccountLookup(func() (*user.User, error) { return userLookupByID(input) })
 		if !ok {
@@ -97,8 +118,9 @@ func resolveOperatorAccount(input string) (*user.User, error) {
 		if r.err == nil {
 			return r.u, nil
 		}
+		lookupErr = r.err
 	}
-	return nil, fmt.Errorf("no such user %q", input)
+	return nil, fmt.Errorf("no such user %q: %w", input, lookupErr)
 }
 
 // resolveOperatorAccountOrStatus wraps resolveOperatorAccount's result as a
@@ -114,7 +136,7 @@ func resolveOperatorAccountOrStatus(input string) (*user.User, error) {
 	case errors.Is(err, errAccountLookupTimeout):
 		return nil, status.Errorf(codes.Unavailable, "resolving %q timed out; the directory service may be unavailable — try again", input)
 	default:
-		return nil, status.Errorf(codes.InvalidArgument, "no such user %q", input)
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
 }
 
@@ -201,7 +223,7 @@ func (s *Server) mutateOperator(
 	}
 	uid64, err := strconv.ParseUint(u.Uid, 10, 32)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "account %s has a non-numeric uid %q", u.Username, u.Uid)
+		return nil, status.Errorf(codes.Internal, "account %s has a non-numeric uid %q: %v", u.Username, u.Uid, err)
 	}
 	uid := uint32(uid64)
 

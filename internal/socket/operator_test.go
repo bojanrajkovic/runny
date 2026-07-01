@@ -7,6 +7,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -78,6 +79,57 @@ func TestRevokeOperatorRequiresSystemDaemon(t *testing.T) {
 	_, err := s.RevokeOperator(t.Context(), &runnyv1.RevokeOperatorRequest{User: testGrantee1})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("code = %v, want FailedPrecondition", status.Code(err))
+	}
+}
+
+// TestBoundedAccountLookupCapsStuckGoroutines pins the code-review fix: a
+// wedged directory service must not let an unbounded number of stuck
+// lookups accumulate. Once accountLookupCap slots are occupied by stuck
+// calls, a further call must fail fast (ok=false, no wait for
+// resolveAccountTimeout) rather than spawning yet another abandoned
+// goroutine — the same class of fix lookupUsername already needed, sized
+// to a small cap (not cap-1) since grant/revoke isn't as single-threaded a
+// workflow as debug-key injection.
+func TestBoundedAccountLookupCapsStuckGoroutines(t *testing.T) {
+	release := make(chan struct{})
+	var calls atomic.Int32
+	stuckFn := func() (*user.User, error) {
+		calls.Add(1)
+		<-release
+		return nil, errors.New("unreachable")
+	}
+	var wg sync.WaitGroup
+	t.Cleanup(func() {
+		close(release)
+		wg.Wait()
+	})
+
+	for i := 0; i < accountLookupCap; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			boundedAccountLookup(stuckFn)
+		}()
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for calls.Load() < int32(accountLookupCap) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if n := calls.Load(); n != int32(accountLookupCap) {
+		t.Fatalf("expected all %d slots occupied, got %d calls", accountLookupCap, n)
+	}
+
+	start := time.Now()
+	_, ok := boundedAccountLookup(stuckFn)
+	elapsed := time.Since(start)
+	if ok {
+		t.Error("expected ok=false when the in-flight cap is full")
+	}
+	if elapsed > time.Second {
+		t.Errorf("call while cap full took %v, want near-instant (no timeout wait)", elapsed)
+	}
+	if n := calls.Load(); n != int32(accountLookupCap) {
+		t.Errorf("cap-exceeding call invoked fn anyway: calls=%d, want %d", n, accountLookupCap)
 	}
 }
 

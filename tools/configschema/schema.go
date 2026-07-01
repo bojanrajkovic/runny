@@ -84,7 +84,7 @@ func enrich(s *jsonschema.Schema) {
 		// The keys with no default — a config missing them fails validate().
 		pc.Required = []string{"name", "os", "image", "github", "target"}
 		setEnum(pc, "os", home.OSDarwin, home.OSLinux)
-		setEnum(pc, "ssh_hardening", home.SSHHardeningRotate, home.SSHHardeningOff)
+		setEnum(pc, "ssh_hardening", string(home.SSHHardeningOff), string(home.SSHHardeningRotate), string(home.SSHHardeningScramble))
 		if name, ok := pc.Properties.Get("name"); ok {
 			name.Pattern = home.PoolNamePattern
 		}

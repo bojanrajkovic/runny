@@ -81,8 +81,8 @@ func TestGeneratedSchemaShape(t *testing.T) {
 	if got := strs(t, obj(t, poolProps, "os"), "enum"); !reflect.DeepEqual(got, []string{"darwin", "linux"}) {
 		t.Errorf("os.enum = %v, want [darwin linux]", got)
 	}
-	if got := strs(t, obj(t, poolProps, "ssh_hardening"), "enum"); !reflect.DeepEqual(got, []string{"rotate", "off"}) {
-		t.Errorf("ssh_hardening.enum = %v, want [rotate off]", got)
+	if got := strs(t, obj(t, poolProps, "ssh_hardening"), "enum"); !reflect.DeepEqual(got, []string{"off", "rotate", "scramble"}) {
+		t.Errorf("ssh_hardening.enum = %v, want [off rotate scramble]", got)
 	}
 	// Pool name pattern.
 	if obj(t, poolProps, "name")["pattern"] == nil {

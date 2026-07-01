@@ -120,6 +120,32 @@ func TestLoadConfigMixedPools(t *testing.T) {
 	}
 }
 
+func TestSSHHardeningModePredicates(t *testing.T) {
+	cases := []struct {
+		mode      SSHHardeningMode
+		scrambles bool
+	}{
+		{SSHHardeningOff, false},
+		{SSHHardeningRotate, false},
+		{SSHHardeningScramble, true},
+	}
+	for _, tc := range cases {
+		if got := tc.mode.Scrambles(); got != tc.scrambles {
+			t.Errorf("%s.Scrambles() = %v, want %v", tc.mode, got, tc.scrambles)
+		}
+	}
+}
+
+func TestLoadConfigScrambleHardening(t *testing.T) {
+	c, err := LoadConfig(writeConfig(t, strings.Replace(minimalConfig, "count: 2", "count: 2\n    ssh_hardening: scramble", 1)))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := c.Pools[0].SSHHardening; got != SSHHardeningScramble {
+		t.Errorf("SSHHardening = %q, want %q", got, SSHHardeningScramble)
+	}
+}
+
 func TestLoadConfigValidation(t *testing.T) {
 	cases := []struct {
 		name, yaml, wantErr string
@@ -134,7 +160,7 @@ func TestLoadConfigValidation(t *testing.T) {
 		{"negative deadline", minimalConfig + "deadlines:\n  pull_stall: -30s\n", "must be positive"},
 		{"negative limit", minimalConfig + "limits:\n  max_idle: -1h\n", "must be positive"},
 		{"negative ssh timeout", strings.Replace(minimalConfig, "count: 2", "count: 2\n    ssh_timeout: -3s", 1), "ssh_timeout must be positive"},
-		{"bad ssh hardening", strings.Replace(minimalConfig, "count: 2", "count: 2\n    ssh_hardening: maybe", 1), `ssh_hardening must be "rotate" or "off"`},
+		{"bad ssh hardening", strings.Replace(minimalConfig, "count: 2", "count: 2\n    ssh_hardening: maybe", 1), `ssh_hardening must be "off", "rotate", or "scramble"`},
 		{"negative secure_ssh", minimalConfig + "deadlines:\n  secure_ssh: -15s\n", "secure_ssh must be positive"},
 		{"negative max_debug_hold", minimalConfig + "limits:\n  max_debug_hold: -1h\n", "max_debug_hold must be positive"},
 	}

@@ -212,8 +212,9 @@
         "ssh_hardening": {
           "type": "string",
           "enum": [
+            "off",
             "rotate",
-            "off"
+            "scramble"
           ]
         },
         "cpu_cores": {

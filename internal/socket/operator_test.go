@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -38,12 +39,30 @@ func requireGrantees(t *testing.T) {
 	}
 }
 
+// selfUID/selfUsername are this test process's own identity. Production
+// never reaches GrantOperator/RevokeOperator with a caller who isn't
+// already an operator — the OS refuses the connect() otherwise — so tests
+// that exercise the gated path use "self" as the pre-bootstrapped caller,
+// exactly like install-daemon seeds operator #1 outside any RPC.
+var (
+	selfUID      = uint32(os.Getuid())
+	selfUsername = func() string {
+		u, err := user.Current()
+		if err != nil {
+			return ""
+		}
+		return u.Username
+	}()
+)
+
 // newOperatorTestServer builds a *Server rooted at a fresh temp home with a
 // stand-in socket file already present (mirroring the live socket node
-// Grant/Revoke stamp directly). HomeDir deliberately does NOT equal
-// home.SystemHomeDir — tests that need to exercise the gated logic call the
-// unexported grantOperator/revokeOperator directly instead of the RPC
-// wrapper, which is exactly what production code cannot do (by design).
+// Grant/Revoke stamp directly), pre-granted to selfUID via a raw opacl.Grant
+// (bypassing the RPC, matching install-daemon's real bootstrap). HomeDir
+// deliberately does NOT equal home.SystemHomeDir — tests that need to
+// exercise the gated logic call the unexported grantOperator/revokeOperator
+// directly instead of the RPC wrapper, which is exactly what production
+// code cannot do (by design).
 func newOperatorTestServer(t *testing.T) *Server {
 	t.Helper()
 	dir := t.TempDir()
@@ -55,6 +74,11 @@ func newOperatorTestServer(t *testing.T) *Server {
 	if err := os.WriteFile(sock, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	bctx, cancel := bounded.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := opacl.Grant(bctx, homeDir, sock, selfUsername); err != nil {
+		t.Fatalf("bootstrapping the test operator (%s): %v", selfUsername, err)
+	}
 	s := &Server{HomeDir: home.Dir(homeDir)}
 	s.socketPath = sock
 	return s
@@ -64,6 +88,12 @@ func newOperatorTestServer(t *testing.T) *Server {
 // caller authenticated over the real socket with this uid.
 func asOperator(ctx context.Context, uid uint32) context.Context {
 	return peer.NewContext(ctx, &peer.Peer{AuthInfo: peerAuth{UID: &uid}})
+}
+
+// asSelf is asOperator(ctx, selfUID) — the common case, since production
+// callers of GrantOperator/RevokeOperator are always already an operator.
+func asSelf(ctx context.Context) context.Context {
+	return asOperator(ctx, selfUID)
 }
 
 func TestGrantOperatorRequiresSystemDaemon(t *testing.T) {
@@ -186,7 +216,7 @@ func TestGrantOperatorRefusesUnknownUser(t *testing.T) {
 func TestGrantOperatorGrantsAndRecords(t *testing.T) {
 	requireGrantees(t)
 	s := newOperatorTestServer(t)
-	ctx := asOperator(t.Context(), 501)
+	ctx := asSelf(t.Context())
 	mut, err := s.grantOperator(ctx, testGrantee1)
 	if err != nil {
 		t.Fatalf("grantOperator: %v", err)
@@ -207,7 +237,7 @@ func TestGrantOperatorGrantsAndRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadOperatorGrants: %v", err)
 	}
-	if len(grants) != 1 || grants[0].Action != "grant" || grants[0].TargetUser != testGrantee1 || grants[0].ByUID != 501 {
+	if len(grants) != 1 || grants[0].Action != "grant" || grants[0].TargetUser != testGrantee1 || grants[0].ByUID != selfUID {
 		t.Errorf("grant record wrong: %+v", grants)
 	}
 }
@@ -215,7 +245,7 @@ func TestGrantOperatorGrantsAndRecords(t *testing.T) {
 func TestGrantOperatorRefusesAlreadyOperator(t *testing.T) {
 	requireGrantees(t)
 	s := newOperatorTestServer(t)
-	ctx := asOperator(t.Context(), 501)
+	ctx := asSelf(t.Context())
 	if _, err := s.grantOperator(ctx, testGrantee1); err != nil {
 		t.Fatalf("first grant: %v", err)
 	}
@@ -225,14 +255,13 @@ func TestGrantOperatorRefusesAlreadyOperator(t *testing.T) {
 	}
 }
 
+// TestRevokeOperatorRefusesLastOperator: newOperatorTestServer bootstraps
+// exactly one operator (self) — revoking self while alone is the last-
+// operator case, no other grant needed to set it up.
 func TestRevokeOperatorRefusesLastOperator(t *testing.T) {
-	requireGrantees(t)
 	s := newOperatorTestServer(t)
-	ctx := asOperator(t.Context(), 501)
-	if _, err := s.grantOperator(ctx, testGrantee1); err != nil {
-		t.Fatalf("grant: %v", err)
-	}
-	_, err := s.revokeOperator(ctx, testGrantee1)
+	ctx := asSelf(t.Context())
+	_, err := s.revokeOperator(ctx, selfUsername)
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("code = %v, want FailedPrecondition", status.Code(err))
 	}
@@ -241,7 +270,7 @@ func TestRevokeOperatorRefusesLastOperator(t *testing.T) {
 func TestRevokeOperatorRefusesNonOperator(t *testing.T) {
 	requireGrantees(t)
 	s := newOperatorTestServer(t)
-	ctx := asOperator(t.Context(), 501)
+	ctx := asSelf(t.Context())
 	// Grant one so this isn't ALSO the last-operator case.
 	if _, err := s.grantOperator(ctx, testGrantee1); err != nil {
 		t.Fatalf("grant: %v", err)
@@ -255,7 +284,7 @@ func TestRevokeOperatorRefusesNonOperator(t *testing.T) {
 func TestRevokeOperatorRevokesAndRecords(t *testing.T) {
 	requireGrantees(t)
 	s := newOperatorTestServer(t)
-	ctx := asOperator(t.Context(), 501)
+	ctx := asSelf(t.Context())
 	if _, err := s.grantOperator(ctx, testGrantee1); err != nil {
 		t.Fatalf("grant 1: %v", err)
 	}
@@ -292,6 +321,40 @@ func TestRevokeOperatorRevokesAndRecords(t *testing.T) {
 	}
 }
 
+// TestMutateOperatorRefusesRevokedCaller pins the Codex-flagged fix: the ACL
+// is checked at connect() time, not per-RPC, so a caller revoked by ANOTHER
+// operator keeps their existing file descriptor and would otherwise still
+// reach GrantOperator/RevokeOperator. Self connects, grants testGrantee1 (a
+// second real operator), testGrantee1 then revokes self — and self's STALE
+// ctx (unchanged, as if the connection just stayed open) must now be
+// refused rather than allowed to grant testGrantee2.
+func TestMutateOperatorRefusesRevokedCaller(t *testing.T) {
+	requireGrantees(t)
+	s := newOperatorTestServer(t)
+	staleCtx := asSelf(t.Context())
+	if _, err := s.grantOperator(staleCtx, testGrantee1); err != nil {
+		t.Fatalf("grant testGrantee1: %v", err)
+	}
+
+	grantee1, err := resolveOperatorAccount(testGrantee1)
+	if err != nil {
+		t.Fatalf("resolveOperatorAccount(%q): %v", testGrantee1, err)
+	}
+	grantee1UID64, err := strconv.ParseUint(grantee1.Uid, 10, 32)
+	if err != nil {
+		t.Fatalf("parsing %s's uid: %v", testGrantee1, err)
+	}
+	grantee1Ctx := asOperator(t.Context(), uint32(grantee1UID64))
+	if _, err := s.revokeOperator(grantee1Ctx, selfUsername); err != nil {
+		t.Fatalf("testGrantee1 revoking self: %v", err)
+	}
+
+	_, err = s.grantOperator(staleCtx, testGrantee2)
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("grant on a stale (revoked) caller ctx: code = %v, want PermissionDenied", status.Code(err))
+	}
+}
+
 // revokePrecheckForTest duplicates revokeOperator's precheck closure so this
 // test can drive mutateOperator directly with a slowed-down apply step,
 // widening the List-then-mutate race window deterministically instead of
@@ -319,13 +382,28 @@ func revokePrecheckForTest(ops []opacl.Operator, uid uint32, u *user.User) error
 func TestMutateOperatorSerializesConcurrentRevokes(t *testing.T) {
 	requireGrantees(t)
 	s := newOperatorTestServer(t)
-	ctx := asOperator(t.Context(), 501)
+	ctx := asSelf(t.Context())
 	if _, err := s.grantOperator(ctx, testGrantee1); err != nil {
 		t.Fatalf("grant 1: %v", err)
 	}
 	if _, err := s.grantOperator(ctx, testGrantee2); err != nil {
 		t.Fatalf("grant 2: %v", err)
 	}
+	// Revoke self so exactly the original two-operator scenario remains —
+	// otherwise self would be a permanent 3rd operator and "both racing
+	// revokes succeed" would no longer risk reaching zero.
+	if _, err := s.revokeOperator(ctx, selfUsername); err != nil {
+		t.Fatalf("revoke self: %v", err)
+	}
+	grantee1, err := resolveOperatorAccount(testGrantee1)
+	if err != nil {
+		t.Fatalf("resolveOperatorAccount(%q): %v", testGrantee1, err)
+	}
+	grantee1UID64, err := strconv.ParseUint(grantee1.Uid, 10, 32)
+	if err != nil {
+		t.Fatalf("parsing %s's uid: %v", testGrantee1, err)
+	}
+	raceCtx := asOperator(t.Context(), uint32(grantee1UID64))
 
 	slowRevoke := func(actx bounded.Context, homeDir, sock, username string) error {
 		time.Sleep(200 * time.Millisecond)
@@ -337,10 +415,10 @@ func TestMutateOperatorSerializesConcurrentRevokes(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, err1 = s.mutateOperator(ctx, testGrantee1, "revoke", revokePrecheckForTest, slowRevoke)
+		_, err1 = s.mutateOperator(raceCtx, testGrantee1, "revoke", revokePrecheckForTest, slowRevoke)
 	}()
 	time.Sleep(50 * time.Millisecond) // let goroutine 1 acquire the lock and enter its slow apply
-	_, err2 = s.mutateOperator(ctx, testGrantee2, "revoke", revokePrecheckForTest, opacl.Revoke)
+	_, err2 = s.mutateOperator(raceCtx, testGrantee2, "revoke", revokePrecheckForTest, opacl.Revoke)
 	wg.Wait()
 
 	if err1 == nil && err2 == nil {
@@ -362,7 +440,7 @@ func TestMutateOperatorSerializesConcurrentRevokes(t *testing.T) {
 func TestListOperatorsJoinsAttribution(t *testing.T) {
 	requireGrantees(t)
 	s := newOperatorTestServer(t)
-	ctx := asOperator(t.Context(), 501)
+	ctx := asSelf(t.Context())
 	if _, err := s.grantOperator(ctx, testGrantee1); err != nil {
 		t.Fatalf("grant: %v", err)
 	}

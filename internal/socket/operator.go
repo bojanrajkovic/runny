@@ -229,6 +229,16 @@ func (s *Server) mutateOperator(
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "reading the operator set: %v", err)
 	}
+	// The ACL is checked at connect() time, not per-RPC: a caller revoked by
+	// ANOTHER operator after they connected keeps their existing file
+	// descriptor and would otherwise still reach mutateOperator. Re-check
+	// the peer's own uid against the operator set we're about to precheck
+	// and mutate. Fails open when the peer uid is unknown (non-darwin, or a
+	// cred-read miss) — matching PR1's peer-cred posture — never open when
+	// it's positively known and absent.
+	if callerUID, ok := peerUID(ctx); ok && !opacl.ContainsUID(ops, callerUID) {
+		return nil, status.Error(codes.PermissionDenied, "your operator access was revoked; reconnect to try again")
+	}
 	if err := precheck(ops, uid, u); err != nil {
 		return nil, err
 	}

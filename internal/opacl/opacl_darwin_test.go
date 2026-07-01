@@ -14,7 +14,7 @@ import (
 
 // testGrantee is a system account present on every Mac that the current
 // (non-root) test user does not already control — the same non-root-owner
-// claim the #209 aclprobe spike validated on a real host.
+// claim the aclprobe spike validated on a real host.
 const testGrantee = "daemon"
 
 func requireGrantee(t *testing.T) {

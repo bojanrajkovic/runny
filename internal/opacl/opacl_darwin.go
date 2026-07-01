@@ -65,7 +65,7 @@ const maxACLOperators = 64
 // List reads homeDir's ACL for ALLOW-user entries — the authoritative,
 // durable operator set — via cgo acl_get_file + mbr_uuid_to_id, resolving
 // each uid to a username best-effort (an unresolvable uid still appears,
-// with an empty User). Validated against a real chmod +a grant by the #209
+// with an empty User). Validated against a real chmod +a grant by the
 // aclprobe spike.
 func List(homeDir string) ([]Operator, error) {
 	cpath := C.CString(homeDir)

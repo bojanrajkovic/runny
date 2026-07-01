@@ -2,7 +2,9 @@ package socket
 
 import (
 	"context"
+	"errors"
 	"os"
+	"os/user"
 	"path/filepath"
 	"testing"
 	"time"
@@ -75,6 +77,40 @@ func TestRevokeOperatorRequiresSystemDaemon(t *testing.T) {
 	_, err := s.RevokeOperator(t.Context(), &runnyv1.RevokeOperatorRequest{User: testGrantee1})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("code = %v, want FailedPrecondition", status.Code(err))
+	}
+}
+
+// TestResolveOperatorAccountTimesOutOnStuckLookup pins that a wedged
+// directory service surfaces as a clear timeout, not a hang or a false
+// "no such user" — unlike lookupUsername's audit-only best-effort skip,
+// this result is required for GrantOperator/RevokeOperator to proceed at
+// all, so it cannot silently degrade.
+func TestResolveOperatorAccountTimesOutOnStuckLookup(t *testing.T) {
+	release := make(chan struct{})
+	origByName, origByID := userLookupByName, userLookupByID
+	userLookupByName = func(string) (*user.User, error) { <-release; return nil, errors.New("unreachable") }
+	userLookupByID = func(string) (*user.User, error) { <-release; return nil, errors.New("unreachable") }
+	t.Cleanup(func() {
+		userLookupByName, userLookupByID = origByName, origByID
+		close(release)
+	})
+
+	_, err := resolveOperatorAccount("wedged-nss-user")
+	if !errors.Is(err, errAccountLookupTimeout) {
+		t.Fatalf("resolveOperatorAccount = %v, want errAccountLookupTimeout", err)
+	}
+}
+
+// TestResolveOperatorAccountByName pins the fast path still works with the
+// seam in place (not just the timeout path).
+func TestResolveOperatorAccountByName(t *testing.T) {
+	requireGrantees(t)
+	u, err := resolveOperatorAccount(testGrantee1)
+	if err != nil {
+		t.Fatalf("resolveOperatorAccount(%q): %v", testGrantee1, err)
+	}
+	if u.Username != testGrantee1 {
+		t.Errorf("Username = %q, want %q", u.Username, testGrantee1)
 	}
 }
 

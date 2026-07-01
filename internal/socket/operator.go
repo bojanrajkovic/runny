@@ -2,6 +2,7 @@ package socket
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/user"
@@ -34,19 +35,87 @@ func (s *Server) requireSystemDaemon() error {
 	return nil
 }
 
+// resolveAccountTimeout bounds resolveOperatorAccount: os/user has no
+// context-aware lookup, and a directory-service-backed NSS can stall.
+// Unlike lookupUsername's audit-only best-effort skip, this result is
+// required for GrantOperator/RevokeOperator to proceed at all, so a stuck
+// lookup surfaces as a clear timeout rather than silently degrading.
+const resolveAccountTimeout = 5 * time.Second
+
+// errAccountLookupTimeout distinguishes "the lookup itself never returned"
+// from a genuine "no such account", so the RPC handler can report the
+// former as a retryable condition rather than a wrong argument.
+var errAccountLookupTimeout = errors.New("account resolution timed out")
+
+// userLookupByName/userLookupByID seam over os/user, overridable in tests to
+// simulate a stuck NSS lookup without a real syscall.
+var (
+	userLookupByName = user.Lookup
+	userLookupByID   = user.LookupId
+)
+
+type accountLookupResult struct {
+	u   *user.User
+	err error
+}
+
+// boundedAccountLookup runs fn (a name or uid os/user lookup) with a bound,
+// abandoning the goroutine on timeout — accepted here because
+// GrantOperator/RevokeOperator are rare, human-initiated admin actions, not
+// a path that could pile up abandoned goroutines under automated load the
+// way InjectDebugKey's audit lookup could.
+func boundedAccountLookup(fn func() (*user.User, error)) (accountLookupResult, bool) {
+	ch := make(chan accountLookupResult, 1)
+	go func() {
+		u, err := fn()
+		ch <- accountLookupResult{u, err}
+	}()
+	select {
+	case r := <-ch:
+		return r, true
+	case <-time.After(resolveAccountTimeout):
+		return accountLookupResult{}, false
+	}
+}
+
 // resolveOperatorAccount looks up user by name first, then (if it parses as
 // a uint32) by uid — the "name or uid" contract GrantOperator/
 // RevokeOperator's user field promises.
 func resolveOperatorAccount(input string) (*user.User, error) {
-	if u, err := user.Lookup(input); err == nil {
-		return u, nil
+	r, ok := boundedAccountLookup(func() (*user.User, error) { return userLookupByName(input) })
+	if !ok {
+		return nil, errAccountLookupTimeout
+	}
+	if r.err == nil {
+		return r.u, nil
 	}
 	if _, err := strconv.ParseUint(input, 10, 32); err == nil {
-		if u, err := user.LookupId(input); err == nil {
-			return u, nil
+		r, ok := boundedAccountLookup(func() (*user.User, error) { return userLookupByID(input) })
+		if !ok {
+			return nil, errAccountLookupTimeout
+		}
+		if r.err == nil {
+			return r.u, nil
 		}
 	}
 	return nil, fmt.Errorf("no such user %q", input)
+}
+
+// resolveOperatorAccountOrStatus wraps resolveOperatorAccount's result as a
+// gRPC status: a genuine lookup miss is InvalidArgument (a wrong argument),
+// while a stuck lookup is Unavailable (a retryable condition, not the
+// caller's fault) — distinct codes so a client can tell "fix your input"
+// from "try again".
+func resolveOperatorAccountOrStatus(input string) (*user.User, error) {
+	u, err := resolveOperatorAccount(input)
+	switch {
+	case err == nil:
+		return u, nil
+	case errors.Is(err, errAccountLookupTimeout):
+		return nil, status.Errorf(codes.Unavailable, "resolving %q timed out; the directory service may be unavailable — try again", input)
+	default:
+		return nil, status.Errorf(codes.InvalidArgument, "no such user %q", input)
+	}
 }
 
 // operatorIdentity resolves the calling peer's uid/username for grant
@@ -66,9 +135,9 @@ func (s *Server) GrantOperator(ctx context.Context, req *runnyv1.GrantOperatorRe
 }
 
 func (s *Server) grantOperator(ctx context.Context, userArg string) (*runnyv1.OperatorMutation, error) {
-	u, err := resolveOperatorAccount(userArg)
+	u, err := resolveOperatorAccountOrStatus(userArg)
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "no such user %q", userArg)
+		return nil, err
 	}
 	if u.Username == "root" || u.Uid == "0" {
 		return nil, status.Error(codes.InvalidArgument, "refusing to grant root")
@@ -114,9 +183,9 @@ func (s *Server) RevokeOperator(ctx context.Context, req *runnyv1.RevokeOperator
 }
 
 func (s *Server) revokeOperator(ctx context.Context, userArg string) (*runnyv1.OperatorMutation, error) {
-	u, err := resolveOperatorAccount(userArg)
+	u, err := resolveOperatorAccountOrStatus(userArg)
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "no such user %q", userArg)
+		return nil, err
 	}
 	uid64, err := strconv.ParseUint(u.Uid, 10, 32)
 	if err != nil {

@@ -77,6 +77,12 @@ commands:
                       render SLOT's recent cycle timelines
   prune [-apply]      show stale image bundles and runner tarballs that
                       can be reclaimed (dry run by default); -apply deletes them
+  operator grant USER    grant USER (name or uid) operator status — reachable
+                          on the control socket with no daemon restart
+  operator revoke USER   revoke USER's operator status
+  operator list           list granted operators, with who granted them and when
+                          ("(install)" = the install-time bootstrap operator).
+                          System-daemon-only: a per-user daemon has a single owner.
 
 SLOT accepts the bare slot name (mac-1) or a full runner name as shown
 by status and the GitHub runners page (<prefix>-mac-1-<cycle>).
@@ -294,6 +300,8 @@ func (c *ctl) dispatch(ctx context.Context, args []string) error {
 			return err
 		}
 		return c.prune(ctx, *apply)
+	case "operator":
+		return c.operatorDispatch(ctx, rest)
 	default:
 		flag.Usage()
 		return fmt.Errorf("unknown command %q", cmd)
@@ -389,17 +397,23 @@ func (c *ctl) parseArgs(fs *flag.FlagSet, j *bool, args []string) ([]string, err
 	return positional, nil
 }
 
-// slotArg parses a command that requires exactly one SLOT — in any position
-// relative to the flags — and folds a trailing -json.
-func (c *ctl) slotArg(fs *flag.FlagSet, j *bool, args []string) (string, error) {
+// oneArg parses a command that requires exactly one positional argument
+// named argName — in any position relative to the flags — and folds a
+// trailing -json.
+func (c *ctl) oneArg(fs *flag.FlagSet, j *bool, args []string, argName string) (string, error) {
 	positional, err := c.parseArgs(fs, j, args)
 	if err != nil {
 		return "", err
 	}
 	if len(positional) != 1 {
-		return "", fmt.Errorf("exactly one SLOT argument is required")
+		return "", fmt.Errorf("exactly one %s argument is required", argName)
 	}
 	return positional[0], nil
+}
+
+// slotArg is oneArg specialized for the common SLOT case.
+func (c *ctl) slotArg(fs *flag.FlagSet, j *bool, args []string) (string, error) {
+	return c.oneArg(fs, j, args, "SLOT")
 }
 
 type ctl struct {

@@ -228,6 +228,13 @@ type Command struct {
 	SeenState   State              // the state the operator saw (consent pin, decision 15)
 	Expires     time.Time          // enqueue + queueBound; consumers reject a late dequeue
 	Reply       chan DebugKeyReply // buffered 1; replied via select/default
+	// OperatorUID/OperatorUser identify the peer that issued this
+	// CmdDebugKey: the kernel-authenticated uid read server-side via
+	// SO_PEERCRED, and its username resolved best-effort at the socket layer.
+	// nil UID means unknown (non-darwin, or a cred-read failure) — distinct
+	// from a recorded uid 0 (root, which bypasses the socket's 0600 mode).
+	OperatorUID  *uint32
+	OperatorUser string
 }
 
 type CommandKind int
@@ -1202,12 +1209,14 @@ func (s *Slot) writeAuditSidecar(rec *cycle.Record) error {
 // entry and returns ok=false: "no audit, no injection" (decision 4).
 func (s *Slot) appendPending(rec *cycle.Record, cmd Command, state State) (int, bool) {
 	rec.InjectedKeys = append(rec.InjectedKeys, cycle.InjectedKey{
-		Fingerprint: cmd.Fingerprint,
-		Comment:     cmd.Comment,
-		Injected:    time.Now(),
-		Reason:      cmd.Reason,
-		Outcome:     "pending",
-		State:       string(state),
+		Fingerprint:  cmd.Fingerprint,
+		Comment:      cmd.Comment,
+		Injected:     time.Now(),
+		Reason:       cmd.Reason,
+		Outcome:      "pending",
+		State:        string(state),
+		OperatorUID:  cmd.OperatorUID,
+		OperatorUser: cmd.OperatorUser,
 	})
 	idx := len(rec.InjectedKeys) - 1
 	if err := s.writeAuditSidecar(rec); err != nil {
@@ -1409,7 +1418,9 @@ func (s *Slot) midJobInject(ctx context.Context, rec *cycle.Record, guest Guest,
 		rec.InjectedKeys = append(rec.InjectedKeys, cycle.InjectedKey{
 			Fingerprint: fp, Comment: cmd.Comment, Injected: time.Now(), Reason: cmd.Reason,
 			Outcome: "refused", State: string(StateJob),
-			Error: "operator saw " + string(cmd.SeenState) + ", not JOB",
+			Error:        "operator saw " + string(cmd.SeenState) + ", not JOB",
+			OperatorUID:  cmd.OperatorUID,
+			OperatorUser: cmd.OperatorUser,
 		})
 		_ = s.writeAuditSidecar(rec)
 		cmd.reply(DebugKeyReply{Err: errors.New(
@@ -1424,6 +1435,7 @@ func (s *Slot) midJobInject(ctx context.Context, rec *cycle.Record, guest Guest,
 		rec.InjectedKeys = append(rec.InjectedKeys, cycle.InjectedKey{
 			Fingerprint: fp, Comment: cmd.Comment, Injected: time.Now(), Reason: cmd.Reason,
 			Outcome: "re-armed", State: string(StateJob),
+			OperatorUID: cmd.OperatorUID, OperatorUser: cmd.OperatorUser,
 		})
 		_ = s.writeAuditSidecar(rec)
 		s.setArmedStatus(s.armedDetail(fp, arm.hold))
@@ -1594,6 +1606,7 @@ func (s *Slot) debugReArm(ctx context.Context, rec *cycle.Record, guest Guest, c
 		rec.InjectedKeys = append(rec.InjectedKeys, cycle.InjectedKey{
 			Fingerprint: cmd.Fingerprint, Comment: cmd.Comment, Injected: time.Now(), Reason: cmd.Reason,
 			Outcome: "re-armed", State: string(StateDebug),
+			OperatorUID: cmd.OperatorUID, OperatorUser: cmd.OperatorUser,
 		})
 		_ = s.writeAuditSidecar(rec)
 		cmd.reply(DebugKeyReply{User: s.deps.Pool.SSHUser, HostKeys: guest.HostKeys(), HoldUntil: newUntil})

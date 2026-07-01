@@ -102,6 +102,42 @@ func TestInjectedKeysRoundTrip(t *testing.T) {
 	}
 }
 
+// TestInjectedKeyOperatorUIDRoundTrip pins the has-bit distinction the design
+// requires: a recorded uid 0 (root, which bypasses the socket's 0600 mode) is
+// not the same as no uid at all (a non-darwin daemon or a cred-read miss).
+func TestInjectedKeyOperatorUIDRoundTrip(t *testing.T) {
+	s := Store{SlotDir: filepath.Join(t.TempDir(), "runner-1")}
+	base := time.Date(2026, 6, 9, 22, 0, 0, 0, time.UTC)
+	rootUID := uint32(0)
+	opUID := uint32(503)
+	rec := record("runner-1", "key00002", base, ResultFailure)
+	rec.InjectedKeys = []InjectedKey{
+		{Fingerprint: "SHA256:abc", Injected: base, Outcome: "ok", State: "DEBUG", OperatorUID: &opUID, OperatorUser: "bob"},
+		{Fingerprint: "SHA256:def", Injected: base, Outcome: "ok", State: "DEBUG", OperatorUID: &rootUID, OperatorUser: "root"},
+		{Fingerprint: "SHA256:ghi", Injected: base, Outcome: "ok", State: "DEBUG"},
+	}
+	if err := s.Write(rec); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	recs, err := s.Recent(1, "")
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("Recent: %v, %d", err, len(recs))
+	}
+	got := recs[0].InjectedKeys
+	if len(got) != 3 {
+		t.Fatalf("expected 3 injected keys, got %d", len(got))
+	}
+	if got[0].OperatorUID == nil || *got[0].OperatorUID != opUID || got[0].OperatorUser != "bob" {
+		t.Errorf("operator uid/user did not round-trip: %+v", got[0])
+	}
+	if got[1].OperatorUID == nil || *got[1].OperatorUID != 0 {
+		t.Errorf("uid 0 must round-trip distinctly from absent: %+v", got[1])
+	}
+	if got[2].OperatorUID != nil {
+		t.Errorf("absent operator uid must stay nil, got %v", got[2].OperatorUID)
+	}
+}
+
 func TestOldCycleJSONLoads(t *testing.T) {
 	// A cycle.json written before issue #39 (no injected_keys/operator_keys)
 	// must unmarshal unchanged.

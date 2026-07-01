@@ -9,8 +9,10 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/user"
 	"regexp"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -255,6 +257,7 @@ func (s *Server) Serve(ctx context.Context, socketPath string) error {
 		return fmt.Errorf("restricting socket perms: %w", err)
 	}
 	g := grpc.NewServer(
+		grpc.Creds(newPeerCreds()),
 		grpc.ChainUnaryInterceptor(recoveryUnary),
 		grpc.ChainStreamInterceptor(recoveryStream),
 	)
@@ -635,6 +638,65 @@ func (s *Server) Doctor(ctx context.Context, _ *runnyv1.DoctorRequest) (*runnyv1
 	return resp, nil
 }
 
+// usernameLookupBound caps how long InjectDebugKey waits on lookupUsername:
+// os/user.LookupId has no context-aware variant and can stall on a
+// directory-service-backed NSS (LDAP/AD-joined hosts), which must never
+// delay an operator's actual "shell in now" access (ADR-0014) for the sake
+// of a cosmetic display field.
+const usernameLookupBound = 2 * time.Second
+
+// lookupID is the seam lookupUsername calls; overridable in tests to
+// simulate a stuck NSS lookup without a real syscall.
+var lookupID = user.LookupId
+
+// lookupInFlight bounds the lookup goroutines lookupUsername can leave
+// running past usernameLookupBound to 1: LookupId cannot be cancelled once
+// started, so a wedged directory service means an abandoned goroutine stays
+// blocked indefinitely. Without this cap, every debug-key request during an
+// outage would leak another one — unbounded, the exact failure class the
+// timeout was meant to close. The single slot is released by the lookup
+// goroutine itself when LookupId actually returns, not by the timeout, so a
+// still-stuck lookup keeps occupying it and concurrent callers skip
+// resolution entirely rather than piling on.
+var lookupInFlight = make(chan struct{}, 1)
+
+// lookupUsername resolves uid to a username, best-effort: "" on any
+// resolution failure, on a usernameLookupBound timeout, or when a previous
+// lookup is still stuck (see lookupInFlight).
+func lookupUsername(uid uint32) string {
+	select {
+	case lookupInFlight <- struct{}{}:
+	default:
+		return ""
+	}
+	ch := make(chan string, 1)
+	go func() {
+		defer func() { <-lookupInFlight }()
+		name := ""
+		if u, err := lookupID(strconv.FormatUint(uint64(uid), 10)); err == nil {
+			name = u.Username
+		}
+		ch <- name
+	}()
+	select {
+	case name := <-ch:
+		return name
+	case <-time.After(usernameLookupBound):
+		return ""
+	}
+}
+
+// injectionAborted reports whether ctx already ended (canceled or deadline
+// exceeded), converting it to the same gRPC status InjectDebugKey's
+// post-enqueue select uses for the identical condition — so both call sites
+// agree on what the client sees. nil means ctx is still live.
+func injectionAborted(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return status.FromContextError(err).Err()
+	}
+	return nil
+}
+
 func (s *Server) InjectDebugKey(ctx context.Context, req *runnyv1.InjectDebugKeyRequest) (*runnyv1.InjectDebugKeyResponse, error) {
 	slot, err := s.findSlot(req.GetSlot())
 	if err != nil {
@@ -673,12 +735,30 @@ func (s *Server) InjectDebugKey(ctx context.Context, req *runnyv1.InjectDebugKey
 	fp := ssh.FingerprintSHA256(pub)
 	queueBound, handlerWait := s.injectBounds()
 
+	// The operator identity for the audit trail: the kernel-authenticated
+	// peer uid (never client-supplied), and its username resolved
+	// best-effort here so the FSM stays free of os/user.
+	var operatorUID *uint32
+	var operatorUser string
+	if uid, ok := peerUID(ctx); ok {
+		operatorUID = &uid
+		operatorUser = lookupUsername(uid)
+	}
+
+	// The lookup above can take up to usernameLookupBound; a client that
+	// canceled or hit its own deadline during that stall must not have a key
+	// installed after being told the request ended.
+	if err := injectionAborted(ctx); err != nil {
+		return nil, err
+	}
+
 	reply := make(chan statemachine.DebugKeyReply, 1)
 	if !slot.Command(statemachine.Command{
 		Kind: statemachine.CmdDebugKey, Reason: req.GetReason(),
 		PubKey: line, Fingerprint: fp, Comment: comment, Hold: hold,
 		CycleID: st.CycleID, SeenState: st.State, // both pins from the same read
 		Expires: time.Now().Add(queueBound), Reply: reply,
+		OperatorUID: operatorUID, OperatorUser: operatorUser,
 	}) {
 		return nil, status.Errorf(codes.Unavailable, "slot %s is not accepting commands", slot.Name())
 	}
@@ -827,13 +907,15 @@ func recordToProto(r *cycle.Record) *runnyv1.CycleRecord {
 	}
 	for _, k := range r.InjectedKeys {
 		out.InjectedKeys = append(out.InjectedKeys, &runnyv1.InjectedKey{
-			Fingerprint: k.Fingerprint,
-			Comment:     k.Comment,
-			Injected:    timestamppb.New(k.Injected),
-			Reason:      k.Reason,
-			Outcome:     k.Outcome,
-			Error:       k.Error,
-			State:       k.State,
+			Fingerprint:  k.Fingerprint,
+			Comment:      k.Comment,
+			Injected:     timestamppb.New(k.Injected),
+			Reason:       k.Reason,
+			Outcome:      k.Outcome,
+			Error:        k.Error,
+			State:        k.State,
+			OperatorUid:  k.OperatorUID,
+			OperatorUser: k.OperatorUser,
 		})
 	}
 	if r.Failure != nil {

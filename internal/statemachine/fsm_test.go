@@ -1700,6 +1700,203 @@ func TestDebugFreezeFromListening(t *testing.T) {
 	}
 }
 
+// TestDebugFreezeRecordsOperatorUID pins that a Command carrying the
+// peer-cred-read operator identity lands on the write-ahead InjectedKeys
+// entry appendPending writes before any guest byte.
+func TestDebugFreezeRecordsOperatorUID(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	cancel := h.reachListening(t)
+	defer cancel()
+
+	uid := uint32(503)
+	r := h.debugCmd(t, func(c *Command) { c.OperatorUID = &uid; c.OperatorUser = "bob" })
+	if r.Err != nil {
+		t.Fatalf("freeze failed: %v", r.Err)
+	}
+	h.waitState(t, StateDebug)
+	h.slot.Command(Command{Kind: CmdRecycle, Reason: "done"})
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+
+	rec := h.jobRecord(t)
+	if len(rec.InjectedKeys) != 1 {
+		t.Fatalf("expected 1 injected key, got %+v", rec.InjectedKeys)
+	}
+	k := rec.InjectedKeys[0]
+	if k.OperatorUID == nil || *k.OperatorUID != uid || k.OperatorUser != "bob" {
+		t.Errorf("operator uid/user did not land on the pending entry: %+v", k)
+	}
+}
+
+// TestDebugReArmRecordsOperatorUID pins the same requirement on debugReArm:
+// when an operator re-runs `debug` for a key already confirmed installed,
+// the FSM just extends the hold instead of reinstalling — that path builds
+// its own InjectedKey separately from appendPending's, so it needs its own
+// coverage.
+func TestDebugReArmRecordsOperatorUID(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	cancel := h.reachListening(t)
+	defer cancel()
+
+	if r := h.debugCmd(t, nil); r.Err != nil {
+		t.Fatalf("freeze: %v", r.Err)
+	}
+	h.waitState(t, StateDebug)
+
+	uid := uint32(502)
+	r := h.debugCmd(t, func(c *Command) { c.OperatorUID = &uid; c.OperatorUser = "alice" })
+	if r.Err != nil {
+		t.Fatalf("re-arm: %v", r.Err)
+	}
+	h.slot.Command(Command{Kind: CmdRecycle, Reason: "done"})
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+
+	rec := h.jobRecord(t)
+	if len(rec.InjectedKeys) != 2 {
+		t.Fatalf("expected 2 injected keys (freeze + re-arm), got %+v", rec.InjectedKeys)
+	}
+	k := rec.InjectedKeys[1]
+	if k.Outcome != "re-armed" {
+		t.Fatalf("expected the re-arm entry, got outcome %q", k.Outcome)
+	}
+	if k.OperatorUID == nil || *k.OperatorUID != uid || k.OperatorUser != "alice" {
+		t.Errorf("operator uid/user did not land on the re-arm entry: %+v", k)
+	}
+}
+
+// TestMidJobRefusedRecordsOperatorUID pins that midJobInject's raced-refusal
+// entry (SeenState mismatch) carries the operator identity, matching the
+// sibling appendPending/debugReArm sites — a refused attempt is exactly the
+// kind of event worth attributing.
+func TestMidJobRefusedRecordsOperatorUID(t *testing.T) {
+	h := newHarness(t, func(c *home.Config) {
+		c.Limits.MaxJobDuration = home.Duration(10 * time.Second)
+	})
+	h.images.maxCalls = 1
+	cancel := h.start(t)
+	defer cancel()
+	h.waitState(t, StateProvision)
+	h.proc.say("Listening for Jobs")
+	h.waitState(t, StateListening)
+	h.proc.say("Running job: build")
+	h.waitState(t, StateJob)
+
+	uid := uint32(504)
+	r := h.debugCmd(t, func(c *Command) {
+		c.SeenState = StateListening // operator saw LISTENING; a job started before it was serviced
+		c.OperatorUID = &uid
+		c.OperatorUser = "carol"
+	})
+	if r.Err == nil {
+		t.Fatal("expected the raced command to be refused")
+	}
+
+	h.proc.say("Job build completed with result: Succeeded")
+	h.proc.exit(0)
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+
+	rec := h.jobRecord(t)
+	var refused *cycle.InjectedKey
+	for i, k := range rec.InjectedKeys {
+		if k.Outcome == "refused" {
+			refused = &rec.InjectedKeys[i]
+		}
+	}
+	if refused == nil {
+		t.Fatalf("no refused entry recorded: %+v", rec.InjectedKeys)
+	}
+	if refused.OperatorUID == nil || *refused.OperatorUID != uid || refused.OperatorUser != "carol" {
+		t.Errorf("operator uid/user did not land on the refused entry: %+v", refused)
+	}
+}
+
+// TestMidJobReArmRecordsOperatorUID is the mid-job version of
+// TestDebugReArmRecordsOperatorUID: an operator re-running `debug` mid-job
+// for a key already confirmed installed just extends the hold, without
+// reinstalling — that entry must carry the operator identity too.
+func TestMidJobReArmRecordsOperatorUID(t *testing.T) {
+	h := newHarness(t, func(c *home.Config) {
+		c.Limits.MaxJobDuration = home.Duration(10 * time.Second)
+	})
+	h.images.maxCalls = 1
+	cancel := h.reachJobArmed(t)
+	defer cancel()
+
+	uid := uint32(505)
+	r := h.debugCmd(t, func(c *Command) { c.OperatorUID = &uid; c.OperatorUser = "dave" })
+	if r.Err != nil {
+		t.Fatalf("mid-job re-arm: %v", r.Err)
+	}
+
+	h.proc.say("Job build completed with result: Succeeded")
+	h.proc.exit(0)
+	h.waitState(t, StateDebug)
+	h.slot.Command(Command{Kind: CmdRecycle, Reason: "done"})
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+
+	rec := h.jobRecord(t)
+	var rearmed *cycle.InjectedKey
+	for i, k := range rec.InjectedKeys {
+		if k.Outcome == "re-armed" {
+			rearmed = &rec.InjectedKeys[i]
+		}
+	}
+	if rearmed == nil {
+		t.Fatalf("no re-armed entry recorded: %+v", rec.InjectedKeys)
+	}
+	if rearmed.OperatorUID == nil || *rearmed.OperatorUID != uid || rearmed.OperatorUser != "dave" {
+		t.Errorf("operator uid/user did not land on the mid-job re-arm entry: %+v", rearmed)
+	}
+}
+
+// TestMidJobDisarmHasNoOperator pins that auditDisarm entries carry no
+// operator identity even when the arming Command did — they record the FSM
+// disarming its OWN hold, not an operator act.
+func TestMidJobDisarmHasNoOperator(t *testing.T) {
+	h := newHarness(t, func(c *home.Config) {
+		c.Limits.MaxJobDuration = home.Duration(10 * time.Second)
+	})
+	h.images.maxCalls = 1
+	cancel := h.start(t)
+	defer cancel()
+	h.waitState(t, StateProvision)
+	h.proc.say("Listening for Jobs")
+	h.waitState(t, StateListening)
+	h.proc.say("Running job: build")
+	h.waitState(t, StateJob)
+
+	uid := uint32(501)
+	h.debugCmd(t, func(c *Command) { c.OperatorUID = &uid; c.OperatorUser = "brajkovic" })
+	if !h.slot.Status().DebugHoldArmed {
+		t.Fatal("precondition: armed")
+	}
+
+	h.slot.Command(Command{Kind: CmdRecycle, Reason: "no force"})
+	h.proc.say("Job build completed with result: Succeeded")
+	h.proc.exit(0)
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+
+	rec := h.jobRecord(t)
+	var disarmed *cycle.InjectedKey
+	for i, k := range rec.InjectedKeys {
+		if k.Outcome == "disarmed" {
+			disarmed = &rec.InjectedKeys[i]
+		}
+	}
+	if disarmed == nil {
+		t.Fatalf("no disarmed entry recorded: %+v", rec.InjectedKeys)
+	}
+	if disarmed.OperatorUID != nil {
+		t.Errorf("disarmed entry must carry no operator, got uid %v", *disarmed.OperatorUID)
+	}
+}
+
 func TestDebugFreezeKillUnprovenTearsDown(t *testing.T) {
 	h := newHarness(t, nil)
 	h.images.maxCalls = 1

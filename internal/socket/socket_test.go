@@ -9,8 +9,10 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/user"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -128,6 +130,132 @@ func TestRecordToProtoCarriesInjectedKeys(t *testing.T) {
 	}
 	if len(pb.GetJob().GetOperatorKeys()) != 1 || pb.GetJob().GetOperatorKeys()[0] != "SHA256:abc" {
 		t.Errorf("operator keys dropped: %+v", pb.GetJob().GetOperatorKeys())
+	}
+}
+
+// TestRecordToProtoCarriesOperatorUID pins the has-bit distinction on the
+// wire: a recorded uid 0 (root) must set OperatorUid's has-bit, and an
+// absent uid must leave it nil rather than defaulting to 0.
+func TestRecordToProtoCarriesOperatorUID(t *testing.T) {
+	rootUID := uint32(0)
+	opUID := uint32(503)
+	r := &cycle.Record{
+		CycleID: "abcd1234", Slot: "mac-1",
+		InjectedKeys: []cycle.InjectedKey{
+			{Fingerprint: "SHA256:abc", Outcome: "ok", State: "DEBUG", OperatorUID: &opUID, OperatorUser: "bob"},
+			{Fingerprint: "SHA256:def", Outcome: "ok", State: "DEBUG", OperatorUID: &rootUID, OperatorUser: "root"},
+			{Fingerprint: "SHA256:ghi", Outcome: "ok", State: "DEBUG"},
+		},
+	}
+	pb := recordToProto(r)
+	got := pb.GetInjectedKeys()
+	if len(got) != 3 {
+		t.Fatalf("expected 3 injected keys, got %d", len(got))
+	}
+	if got[0].OperatorUid == nil || *got[0].OperatorUid != opUID || got[0].GetOperatorUser() != "bob" {
+		t.Errorf("operator uid/user dropped: %+v", got[0])
+	}
+	if got[1].OperatorUid == nil || *got[1].OperatorUid != 0 {
+		t.Errorf("uid 0 must carry a has-bit distinct from absent: %+v", got[1])
+	}
+	if got[2].OperatorUid != nil {
+		t.Errorf("absent operator uid must stay nil, got %v", got[2].OperatorUid)
+	}
+}
+
+// TestLookupUsernameResolvesQuickly pins that lookupUsername's bounded
+// goroutine plumbing delivers a fast local resolution well within its
+// timeout, rather than always falling through to the "" timeout path.
+func TestLookupUsernameResolvesQuickly(t *testing.T) {
+	got := lookupUsername(uint32(os.Getuid()))
+	want, err := user.Current()
+	if err != nil {
+		t.Skipf("user.Current unavailable in this environment: %v", err)
+	}
+	if got != want.Username {
+		t.Errorf("lookupUsername(%d) = %q, want %q", os.Getuid(), got, want.Username)
+	}
+}
+
+// TestLookupUsernameUnknownUIDIsEmpty pins the existing best-effort fallback:
+// a uid with no matching account resolves to "", not an error or a hang.
+func TestLookupUsernameUnknownUIDIsEmpty(t *testing.T) {
+	if got := lookupUsername(4294967295); got != "" {
+		t.Errorf("lookupUsername(unknown) = %q, want empty", got)
+	}
+}
+
+// TestLookupUsernameCapsStuckGoroutines pins the Codex-review fix: a lookup
+// that never returns (a wedged directory service) must not let every
+// subsequent debug-key request leak another goroutine stuck in the same
+// call. Only one lookup may be in flight; concurrent callers skip resolution
+// entirely until it completes and frees the slot.
+func TestLookupUsernameCapsStuckGoroutines(t *testing.T) {
+	release := make(chan struct{})
+	var calls atomic.Int32
+	orig := lookupID
+	lookupID = func(id string) (*user.User, error) {
+		calls.Add(1)
+		<-release // simulate a wedged NSS backend
+		return &user.User{Username: "resolved"}, nil
+	}
+	t.Cleanup(func() { lookupID = orig })
+
+	// First call: the goroutine blocks past usernameLookupBound, so the call
+	// returns "" but the underlying lookup is still stuck holding the slot.
+	if got := lookupUsername(501); got != "" {
+		t.Errorf("first (stuck) call = %q, want empty (times out)", got)
+	}
+
+	// While stuck, a second call must NOT spawn another lookupID goroutine.
+	if got := lookupUsername(502); got != "" {
+		t.Errorf("second call while stuck = %q, want empty (slot occupied)", got)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("lookupID called %d times while one lookup was stuck, want 1 (no pile-up)", n)
+	}
+
+	// Unstick the first lookup; its goroutine frees the slot shortly after,
+	// asynchronously — poll until a fresh call gets through rather than
+	// racing a fixed sleep against the scheduler.
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	var got string
+	for time.Now().Before(deadline) {
+		if got = lookupUsername(503); got == "resolved" {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got != "resolved" {
+		t.Fatalf("call after unsticking = %q, want %q (slot never freed?)", got, "resolved")
+	}
+	if n := calls.Load(); n != 2 {
+		t.Errorf("lookupID called %d times total, want 2 (slot reused once freed)", n)
+	}
+}
+
+// TestInjectionAbortedReflectsContextState pins the Codex-review fix:
+// InjectDebugKey re-checks ctx after the (up to usernameLookupBound)
+// username lookup, before enqueueing CmdDebugKey — a client that canceled or
+// hit its own deadline during that stall must not have a key installed after
+// being told the request ended. injectionAborted converts ctx.Err() the same
+// way the pre-existing post-enqueue select already does for the identical
+// condition, so the two call sites agree on the error the client sees.
+func TestInjectionAbortedReflectsContextState(t *testing.T) {
+	if err := injectionAborted(t.Context()); err != nil {
+		t.Errorf("live context: got %v, want nil", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := injectionAborted(ctx); status.Code(err) != codes.Canceled {
+		t.Errorf("canceled context: code = %v, want Canceled", status.Code(err))
+	}
+	dctx, dcancel := context.WithTimeout(t.Context(), 0)
+	defer dcancel()
+	<-dctx.Done()
+	if err := injectionAborted(dctx); status.Code(err) != codes.DeadlineExceeded {
+		t.Errorf("expired context: code = %v, want DeadlineExceeded", status.Code(err))
 	}
 }
 

@@ -819,6 +819,35 @@ func TestRenderStatusDebugAndArmed(t *testing.T) {
 
 // why's contamination line: the job ran with operator keys, and each attempt's
 // state + outcome is rendered.
+// TestRenderCycleShowsOperatorSubject pins the `why` rendering contract: the
+// operator subject clause follows the fingerprint, falls back to a bare uid
+// when the username snapshot is empty, and is omitted entirely when the uid
+// itself is absent (an older daemon, non-darwin host, or a cred-read miss).
+func TestRenderCycleShowsOperatorSubject(t *testing.T) {
+	uid := uint32(503)
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	c.renderCycle(&runnyv1.CycleRecord{
+		CycleId: "abcd1234", Slot: "mac-1", Result: "success",
+		Started: timestamppb.New(time.Now()), Finished: timestamppb.New(time.Now()),
+		InjectedKeys: []*runnyv1.InjectedKey{
+			{Fingerprint: "SHA256:abc", Outcome: "armed", State: "JOB", Reason: "wedged", OperatorUid: &uid, OperatorUser: "bob"},
+			{Fingerprint: "SHA256:def", Outcome: "ok", State: "DEBUG", OperatorUid: &uid},
+			{Fingerprint: "SHA256:ghi", Outcome: "ok", State: "DEBUG"},
+		},
+	})
+	out := buf.String()
+	if !strings.Contains(out, "SHA256:abc · by bob (uid 503) — wedged") {
+		t.Errorf("named operator subject missing or misplaced:\n%s", out)
+	}
+	if !strings.Contains(out, "SHA256:def · by uid 503") {
+		t.Errorf("uid-only fallback missing:\n%s", out)
+	}
+	if strings.Contains(out, "SHA256:ghi · by") {
+		t.Errorf("absent uid must render no subject clause:\n%s", out)
+	}
+}
+
 func TestRenderCycleContamination(t *testing.T) {
 	var buf bytes.Buffer
 	c := &ctl{out: &buf}

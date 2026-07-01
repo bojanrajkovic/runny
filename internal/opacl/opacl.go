@@ -4,6 +4,12 @@
 // existing operator can grant another with no root and no restart (#209).
 package opacl
 
+// Operator is one account found in a home directory's operator ACL.
+type Operator struct {
+	UID  uint32
+	User string
+}
+
 // ACLInherit makes an ACE apply to a directory AND every file/dir created
 // beneath it. Shared by OperatorACE here and the service account's own
 // inheriting ACE in internal/sysdaemon.

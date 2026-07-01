@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/user"
 	"slices"
 	"strings"
 	"testing"
@@ -133,7 +134,7 @@ func TestRecordToProtoCarriesInjectedKeys(t *testing.T) {
 
 // TestRecordToProtoCarriesOperatorUID pins the has-bit distinction on the
 // wire: a recorded uid 0 (root) must set OperatorUid's has-bit, and an
-// absent uid must leave it nil rather than defaulting to 0 (issue #209).
+// absent uid must leave it nil rather than defaulting to 0.
 func TestRecordToProtoCarriesOperatorUID(t *testing.T) {
 	rootUID := uint32(0)
 	opUID := uint32(503)
@@ -158,6 +159,28 @@ func TestRecordToProtoCarriesOperatorUID(t *testing.T) {
 	}
 	if got[2].OperatorUid != nil {
 		t.Errorf("absent operator uid must stay nil, got %v", got[2].OperatorUid)
+	}
+}
+
+// TestLookupUsernameResolvesQuickly pins that lookupUsername's bounded
+// goroutine plumbing delivers a fast local resolution well within its
+// timeout, rather than always falling through to the "" timeout path.
+func TestLookupUsernameResolvesQuickly(t *testing.T) {
+	got := lookupUsername(uint32(os.Getuid()))
+	want, err := user.Current()
+	if err != nil {
+		t.Skipf("user.Current unavailable in this environment: %v", err)
+	}
+	if got != want.Username {
+		t.Errorf("lookupUsername(%d) = %q, want %q", os.Getuid(), got, want.Username)
+	}
+}
+
+// TestLookupUsernameUnknownUIDIsEmpty pins the existing best-effort fallback:
+// a uid with no matching account resolves to "", not an error or a hang.
+func TestLookupUsernameUnknownUIDIsEmpty(t *testing.T) {
+	if got := lookupUsername(4294967295); got != "" {
+		t.Errorf("lookupUsername(unknown) = %q, want empty", got)
 	}
 }
 

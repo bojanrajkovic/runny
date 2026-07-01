@@ -638,6 +638,32 @@ func (s *Server) Doctor(ctx context.Context, _ *runnyv1.DoctorRequest) (*runnyv1
 	return resp, nil
 }
 
+// usernameLookupBound caps lookupUsername: os/user.LookupId has no
+// context-aware variant and can stall on a directory-service-backed NSS
+// (LDAP/AD-joined hosts), which must never delay an operator's actual
+// "shell in now" access (ADR-0014) for the sake of a cosmetic display field.
+const usernameLookupBound = 2 * time.Second
+
+// lookupUsername resolves uid to a username, best-effort: "" on any
+// resolution failure OR if it does not return within usernameLookupBound
+// (the lookup goroutine is abandoned, never awaited).
+func lookupUsername(uid uint32) string {
+	ch := make(chan string, 1)
+	go func() {
+		name := ""
+		if u, err := user.LookupId(strconv.FormatUint(uint64(uid), 10)); err == nil {
+			name = u.Username
+		}
+		ch <- name
+	}()
+	select {
+	case name := <-ch:
+		return name
+	case <-time.After(usernameLookupBound):
+		return ""
+	}
+}
+
 func (s *Server) InjectDebugKey(ctx context.Context, req *runnyv1.InjectDebugKeyRequest) (*runnyv1.InjectDebugKeyResponse, error) {
 	slot, err := s.findSlot(req.GetSlot())
 	if err != nil {
@@ -678,14 +704,12 @@ func (s *Server) InjectDebugKey(ctx context.Context, req *runnyv1.InjectDebugKey
 
 	// The operator identity for the audit trail: the kernel-authenticated
 	// peer uid (never client-supplied), and its username resolved
-	// best-effort here so the FSM stays free of os/user (issue #209).
+	// best-effort here so the FSM stays free of os/user.
 	var operatorUID *uint32
 	var operatorUser string
 	if uid, ok := peerUID(ctx); ok {
 		operatorUID = &uid
-		if u, err := user.LookupId(strconv.FormatUint(uint64(uid), 10)); err == nil {
-			operatorUser = u.Username
-		}
+		operatorUser = lookupUsername(uid)
 	}
 
 	reply := make(chan statemachine.DebugKeyReply, 1)

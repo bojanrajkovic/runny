@@ -10,6 +10,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/home",
+        "//internal/opacl",
         "@net_howett_plist//:plist",
     ],
 )
@@ -18,5 +19,8 @@ go_test(
     name = "sysdaemon_test",
     srcs = ["sysdaemon_test.go"],
     embed = [":sysdaemon"],
-    deps = ["//internal/home"],
+    deps = [
+        "//internal/home",
+        "//internal/opacl",
+    ],
 )

@@ -16,6 +16,7 @@ import (
 	"howett.net/plist"
 
 	"github.com/bojanrajkovic/runny/internal/home"
+	"github.com/bojanrajkovic/runny/internal/opacl"
 )
 
 // Label is the launchd job label, shared with the app's per-user LaunchAgent
@@ -117,21 +118,6 @@ func Plist(cfg Config) string {
 	return string(out)
 }
 
-// aclInherit makes an ACE apply to the home AND every file/dir created beneath it
-// (including the daemon's Ensure() subdirs and operator-landed config/key).
-const aclInherit = "file_inherit,directory_inherit"
-
-// operatorACE grants the operator full directory management plus read/write on
-// inherited files: edit config, atomically rename over it, land the App key, and
-// read the daemon's artifacts. It overrides the home's 0700 POSIX mode (ACL allow
-// is evaluated ahead of POSIX). Pinned literal — validated by the PR4c spike.
-func operatorACE(operator string) string {
-	return "user:" + operator + " allow " +
-		"list,add_file,search,delete,add_subdirectory,delete_child," +
-		"readattr,writeattr,readextattr,writeextattr,readsecurity," +
-		"read,write,append,execute," + aclInherit
-}
-
 // serviceACE is the second, load-bearing inheriting ACE: it grants the service
 // account READ on inherited files so the daemon can read an operator-LANDED
 // config.yaml / .pem (owned by the operator, mode 0600) regardless of the
@@ -139,7 +125,7 @@ func operatorACE(operator string) string {
 // cannot read its own config or key (the PR4c spike proved this gap and this fix).
 func serviceACE(serviceUser string) string {
 	return "user:" + serviceUser + " allow " +
-		"list,search,read,readattr,readextattr,readsecurity," + aclInherit
+		"list,search,read,readattr,readextattr,readsecurity," + opacl.ACLInherit
 }
 
 // ResolveRunnydPath returns the runnyd the plist should exec: the sibling of the

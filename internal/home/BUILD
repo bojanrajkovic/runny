@@ -6,6 +6,7 @@ go_library(
         "config.go",
         "home.go",
         "instance.go",
+        "operatorgrants.go",
         "warnings.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/home",
@@ -21,6 +22,7 @@ go_test(
     srcs = [
         "config_test.go",
         "instance_test.go",
+        "operatorgrants_test.go",
         "resolve_test.go",
         "warnings_test.go",
     ],

@@ -82,6 +82,10 @@ func run() error {
 	if err := systemHomeOwnershipError(dir, os.Geteuid(), systemHomeErr == nil); err != nil {
 		return err
 	}
+	// Computed once here rather than re-derived at each of its two other
+	// use sites (the upgrade notice below, and Server.IsSystemDaemon) —
+	// each doing its own dir.String() == home.SystemHomeDir comparison.
+	isSystemDaemon := dir.String() == home.SystemHomeDir
 	if err := dir.Ensure(); err != nil {
 		return err
 	}
@@ -279,6 +283,11 @@ func run() error {
 	// Publish the hash of the file THIS process loaded, so a reload follower
 	// can prove the respawn came up on the config its preflight vetted.
 	srv.ConfigSHA256 = startupSHA
+	// Operator grant/revoke/list reads and writes this home's ACL and
+	// operator-grants.jsonl; grant/revoke additionally gate on
+	// IsSystemDaemon (a per-user home has a single owner).
+	srv.HomeDir = dir
+	srv.IsSystemDaemon = isSystemDaemon
 
 	// Drain coordination: the wedge escalation (a guest that survives
 	// force-stop can only be reclaimed by process exit) and the config reload
@@ -542,7 +551,7 @@ func run() error {
 	// never detect a newer on-disk binary. Log-only — the daemon never respawns
 	// itself. Only the system daemon has a plist to read; a per-user agent stays
 	// quiet.
-	if dir.String() == home.SystemHomeDir {
+	if isSystemDaemon {
 		notice := &upgradeNotice{
 			log:     logger,
 			running: versioncore.Core(version),

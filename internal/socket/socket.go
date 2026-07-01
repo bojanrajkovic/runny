@@ -169,9 +169,33 @@ type Server struct {
 	// Config carries the limits InjectDebugKey validates against (hold cap,
 	// the queue/service bounds for the synchronous wait).
 	Config *home.Config
+	// HomeDir is this daemon's resolved home (home.ResolveServer). Operator
+	// grant/revoke/list reads and writes its ACL and operator-grants.jsonl.
+	// Set by main.
+	HomeDir home.Dir
+	// IsSystemDaemon gates operator grant/revoke: a per-user home has a
+	// single owner, not an ACL-managed set to mutate. Computed once in main
+	// (where the resolveServer ownership check already ran) rather than
+	// re-derived here by comparing HomeDir against home.SystemHomeDir — a
+	// third copy of a comparison already made twice in cmd/runnyd/main.go.
+	// Set by main.
+	IsSystemDaemon bool
 	// PruneFn builds a reclaim plan for stale image bundles and runner tarballs.
 	// apply=true also deletes them. Nil = Unimplemented.
 	PruneFn func(ctx context.Context, apply bool) PrunePlan
+
+	// socketPath is the live control socket, set by Serve; GrantOperator and
+	// RevokeOperator stamp it directly (inheritance from the home dir only
+	// reaches a socket created AFTER the grant).
+	socketPath string
+
+	// operatorMu serializes mutateOperator's List-then-mutate sequence:
+	// without it, two concurrent grant/revoke RPCs (gRPC dispatches unary
+	// calls on separate goroutines) can both read the same pre-mutation
+	// operator set and both pass a precondition (e.g. "not the last
+	// operator") that the other's mutation has already invalidated. A
+	// separate lock from mu, which guards the unrelated watch fan-out below.
+	operatorMu sync.Mutex
 
 	// watch fan-out
 	mu      sync.Mutex
@@ -256,6 +280,7 @@ func (s *Server) Serve(ctx context.Context, socketPath string) error {
 	if err := os.Chmod(socketPath, 0o600); err != nil {
 		return fmt.Errorf("restricting socket perms: %w", err)
 	}
+	s.socketPath = socketPath
 	g := grpc.NewServer(
 		grpc.Creds(newPeerCreds()),
 		grpc.ChainUnaryInterceptor(recoveryUnary),

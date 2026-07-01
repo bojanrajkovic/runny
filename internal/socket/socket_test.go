@@ -327,7 +327,10 @@ func testSlots(names ...string) []*statemachine.Slot {
 }
 
 // newTestServer builds a Server with sensible defaults; pass non-nil to
-// override a specific seam.
+// override a specific seam. It never sets HomeDir or socketPath (Serve is
+// the only place socketPath is assigned) — a test for the operator
+// grant/revoke/list RPCs needs both, so use newOperatorTestServer
+// (internal/socket/operator_test.go) instead.
 func newTestServer(slots []*statemachine.Slot, ring *logring.Ring, stores func(string) cycle.Store, doctor func(context.Context) []DoctorCheck) *Server {
 	if ring == nil {
 		ring = logring.NewRing(16)

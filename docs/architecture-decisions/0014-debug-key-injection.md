@@ -9,6 +9,14 @@ trail extended to name *which* operator, not just that "an operator" acted.
 No change to the authorization model below: it remains socket ownership. See
 `docs/security.md`'s "Operator debug keys" section for the current behavior.
 
+**Amended:** 2026-07-01 — the control socket can now grant *several*
+operator accounts on the system daemon (`runnyctl operator grant/revoke/
+list`), an RPC-driven extension of this ADR's own authorization model: any
+operator already holds full daemon control, so an operator granting another
+is transitive trust, not a new gate, and the daemon (which owns its home)
+performs the grant unprivileged. See `docs/security.md`'s "Operator debug
+keys" section for the current behavior.
+
 ## Context
 
 When a runner VM misbehaves — a wedged provision, a hung job, a guest that

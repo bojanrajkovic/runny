@@ -160,9 +160,29 @@ alongside a best-effort username snapshot, surfaced in `runnyctl why` (e.g.
 recorded as `uid 0`; a uid the daemon cannot read (a non-darwin host, or a
 cred-read failure) is recorded as unknown rather than failing the request —
 an audit enhancement, never a second gate. This closes the "an operator did
-X" → "operator A did X" gap once more than one operator identity can exist
-(single-operator installs today; see [ADR-0014](architecture-decisions/0014-debug-key-injection.md)
-for the authorization model this extends).
+X" → "operator A did X" gap once more than one operator identity can exist;
+see [ADR-0014](architecture-decisions/0014-debug-key-injection.md) for the
+authorization model this extends.
+
+**The control socket may grant several operator accounts, on the system
+daemon.** An existing operator grants another via `runnyctl operator grant`:
+the daemon, which owns its home, adds an inheriting ACL entry for the new
+account to the home dir (future artifacts) and directly to the live socket
+(no restart) — reaching the `GrantOperator`/`RevokeOperator` RPCs at all
+already means the caller is an operator, so granting another is transitive
+trust, not a new gate, the same posture ADR-0014 already established for
+debug-key injection. Grants are attributed in an `operator-grants.jsonl`
+audit trail under the operator-writable home — a good-faith reconstruction
+aid, not a tamper-proof control, exactly like the `injected_keys` trail and
+the guest `authorized_keys` before it. `runnyctl operator revoke` refuses to
+remove the last operator (recoverable only via `sudo runnyctl
+install-daemon`, which resets the ACL to the install-time bootstrap); a
+revoke refuses new connections immediately, though a read-only stream
+already open (the app's `WatchStatus`) may linger until it closes. A root
+peer is refused as a grant target (root already bypasses the socket's
+`0600` mode and needs no ACE). Per-user deployments have a single owner and
+no ACL-managed set, so `operator grant`/`revoke` require the system daemon;
+`operator list` still works everywhere, reading whatever ACL is present.
 
 ## Ephemeral guests
 

@@ -85,16 +85,16 @@ func TestPeerCredsCarriesUIDOverRealSocket(t *testing.T) {
 	// The stub always reports "unknown" on non-darwin; darwin must resolve
 	// the real connecting uid (this test process's own).
 	if runtime.GOOS != "darwin" {
-		if auth.HasUID {
-			t.Errorf("non-darwin stub must report unknown, got uid %d", auth.UID)
+		if auth.UID != nil {
+			t.Errorf("non-darwin stub must report unknown, got uid %d", *auth.UID)
 		}
 		return
 	}
-	if !auth.HasUID {
+	if auth.UID == nil {
 		t.Fatal("darwin must read the peer uid, got unknown")
 	}
-	if auth.UID != uint32(os.Getuid()) {
-		t.Errorf("uid = %d, want this process's uid %d", auth.UID, os.Getuid())
+	if *auth.UID != uint32(os.Getuid()) {
+		t.Errorf("uid = %d, want this process's uid %d", *auth.UID, os.Getuid())
 	}
 }
 
@@ -104,14 +104,15 @@ func TestPeerUID(t *testing.T) {
 		t.Errorf("no peer in context: expected unknown, got uid %d", uid)
 	}
 
-	ctx := peer.NewContext(t.Context(), &peer.Peer{AuthInfo: peerAuth{UID: 42, HasUID: true}})
+	want := uint32(42)
+	ctx := peer.NewContext(t.Context(), &peer.Peer{AuthInfo: peerAuth{UID: &want}})
 	if uid, ok := peerUID(ctx); !ok || uid != 42 {
 		t.Errorf("peerUID = (%d, %v), want (42, true)", uid, ok)
 	}
 
-	ctx = peer.NewContext(t.Context(), &peer.Peer{AuthInfo: peerAuth{HasUID: false}})
+	ctx = peer.NewContext(t.Context(), &peer.Peer{AuthInfo: peerAuth{UID: nil}})
 	if _, ok := peerUID(ctx); ok {
-		t.Error("HasUID false must report unknown")
+		t.Error("nil UID must report unknown")
 	}
 
 	ctx = peer.NewContext(t.Context(), &peer.Peer{AuthInfo: otherAuthInfo{}})

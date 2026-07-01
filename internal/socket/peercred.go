@@ -16,11 +16,10 @@ import (
 // is safe to send in the clear.
 type peerAuth struct {
 	credentials.CommonAuthInfo
-	// UID is only meaningful when HasUID is true: a real peer uid (including
-	// 0, root, which bypasses the socket's 0600 mode) must be distinguishable
-	// from "the daemon could not read it" (non-darwin, or a cred-read miss).
-	UID    uint32
-	HasUID bool
+	// UID is nil when the daemon could not read it (non-darwin, or a
+	// cred-read miss) — distinct from a real peer uid 0 (root, which bypasses
+	// the socket's 0600 mode).
+	UID *uint32
 }
 
 func (peerAuth) AuthType() string { return "peercred" }
@@ -44,7 +43,9 @@ func (peerCreds) ServerHandshake(conn net.Conn) (net.Conn, credentials.AuthInfo,
 	if uc, ok := conn.(*net.UnixConn); ok {
 		if sc, err := uc.SyscallConn(); err == nil {
 			_ = sc.Control(func(fd uintptr) {
-				auth.UID, auth.HasUID = readPeerUID(fd)
+				if uid, ok := readPeerUID(fd); ok {
+					auth.UID = &uid
+				}
 			})
 		}
 	}
@@ -61,16 +62,16 @@ func (peerCreds) OverrideServerName(string) error { return nil }
 
 // peerUID extracts the calling peer's kernel-authenticated uid set by
 // peerCreds during ServerHandshake. ok is false whenever it is not known —
-// no peer in ctx, a foreign AuthInfo implementation, or HasUID unset — never
-// a client-controlled value.
+// no peer in ctx, a foreign AuthInfo implementation, or a nil UID — never a
+// client-controlled value.
 func peerUID(ctx context.Context) (uint32, bool) {
 	p, ok := peer.FromContext(ctx)
 	if !ok {
 		return 0, false
 	}
 	auth, ok := p.AuthInfo.(peerAuth)
-	if !ok || !auth.HasUID {
+	if !ok || auth.UID == nil {
 		return 0, false
 	}
-	return auth.UID, true
+	return *auth.UID, true
 }

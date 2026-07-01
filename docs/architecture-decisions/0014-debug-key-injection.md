@@ -2,6 +2,13 @@
 
 **Status:** Accepted (2026-06-12)
 
+**Amended:** 2026-07-01 — each `injected_keys` entry now also carries the
+authenticated peer uid (`SO_PEERCRED`, server-read, not client-forgeable) and
+a best-effort username snapshot — the accountability half of this ADR's audit
+trail extended to name *which* operator, not just that "an operator" acted.
+No change to the authorization model below: it remains socket ownership. See
+`docs/security.md`'s "Operator debug keys" section for the current behavior.
+
 ## Context
 
 When a runner VM misbehaves — a wedged provision, a hung job, a guest that
@@ -140,11 +147,3 @@ after a crash).
 
 Recorded in `docs/security.md`. The command-servicing prerequisite is
 ADR-0015.
-
-**2026-07 note (issue #209):** each `injected_keys` entry now also carries
-the authenticated peer uid (`SO_PEERCRED`, server-read, not
-client-forgeable) and a best-effort username snapshot — the accountability
-half of this ADR's audit trail extended to name *which* operator, not just
-that "an operator" acted. No change to the authorization model above: it
-remains socket ownership. See `docs/security.md`'s "Operator debug keys"
-section for the current behavior.

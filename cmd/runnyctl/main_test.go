@@ -819,11 +819,10 @@ func TestRenderStatusDebugAndArmed(t *testing.T) {
 
 // why's contamination line: the job ran with operator keys, and each attempt's
 // state + outcome is rendered.
-// TestRenderCycleShowsOperatorSubject pins the `why` rendering contract
-// (issue #209): the operator subject clause follows the fingerprint, falls
-// back to a bare uid when the username snapshot is empty, and is omitted
-// entirely when the uid itself is absent (an older daemon, non-darwin host,
-// or a cred-read miss).
+// TestRenderCycleShowsOperatorSubject pins the `why` rendering contract: the
+// operator subject clause follows the fingerprint, falls back to a bare uid
+// when the username snapshot is empty, and is omitted entirely when the uid
+// itself is absent (an older daemon, non-darwin host, or a cred-read miss).
 func TestRenderCycleShowsOperatorSubject(t *testing.T) {
 	uid := uint32(503)
 	var buf bytes.Buffer

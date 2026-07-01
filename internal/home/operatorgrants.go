@@ -3,7 +3,6 @@ package home
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,41 +45,16 @@ func (d Dir) AppendOperatorGrant(g OperatorGrant) error {
 	return nil
 }
 
-// operatorGrantsReadCap bounds ReadOperatorGrants' memory: the file lives
-// under the operator-writable home and is a good-faith audit aid, not a
-// tamper-proof control, so an accidentally or deliberately grown file must
-// not let a read-only ListOperators call allocate unbounded memory. A var,
-// not a const, so tests can shrink it instead of writing megabytes of
-// fixture data.
-var operatorGrantsReadCap int64 = 4 << 20 // 4 MiB, tens of thousands of records
-
-// ReadOperatorGrants parses records in operator-grants.jsonl, oldest first,
-// skipping unparseable lines (a corrupt line must not break ListOperators —
-// the file is a good-faith aid, not a control). If the file exceeds
-// operatorGrantsReadCap, only the last operatorGrantsReadCap bytes are read
-// — the most recent records, which is what latestGrant actually needs, not
-// the oldest. Returns (nil, nil) when the file does not exist yet (no
-// grants/revokes since install).
+// ReadOperatorGrants parses every record in operator-grants.jsonl, oldest
+// first, skipping unparseable lines (a corrupt line must not break
+// ListOperators — the file is a good-faith aid, not a control). Returns
+// (nil, nil) when the file does not exist yet (no grants/revokes since
+// install).
 func (d Dir) ReadOperatorGrants() ([]OperatorGrant, error) {
-	f, err := os.Open(d.OperatorGrantsPath())
+	data, err := os.ReadFile(d.OperatorGrantsPath())
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("opening operator-grants.jsonl: %w", err)
-	}
-	defer f.Close()
-
-	info, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("statting operator-grants.jsonl: %w", err)
-	}
-	if info.Size() > operatorGrantsReadCap {
-		if _, err := f.Seek(-operatorGrantsReadCap, io.SeekEnd); err != nil {
-			return nil, fmt.Errorf("seeking operator-grants.jsonl: %w", err)
-		}
-	}
-	data, err := io.ReadAll(f)
 	if err != nil {
 		return nil, fmt.Errorf("reading operator-grants.jsonl: %w", err)
 	}
@@ -91,7 +65,7 @@ func (d Dir) ReadOperatorGrants() ([]OperatorGrant, error) {
 		}
 		var g OperatorGrant
 		if err := json.Unmarshal([]byte(line), &g); err != nil {
-			continue // includes a partial first line from a mid-record seek
+			continue
 		}
 		grants = append(grants, g)
 	}

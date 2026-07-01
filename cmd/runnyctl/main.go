@@ -871,6 +871,16 @@ func (c *ctl) renderCycle(rec *runnyv1.CycleRecord) {
 	}
 	for _, k := range rec.GetInjectedKeys() {
 		line := fmt.Sprintf("  debug key %-9s [%s] %s", k.GetOutcome(), k.GetState(), k.GetFingerprint())
+		// The has-bit matters: an absent uid (older daemon, non-darwin host, a
+		// cred-read miss) omits the clause; a resolved-but-empty username
+		// falls back to a bare uid rather than silently dropping the subject.
+		if k.OperatorUid != nil {
+			if u := k.GetOperatorUser(); u != "" {
+				line += fmt.Sprintf(" · by %s (uid %d)", u, k.GetOperatorUid())
+			} else {
+				line += fmt.Sprintf(" · by uid %d", k.GetOperatorUid())
+			}
+		}
 		if r := k.GetReason(); r != "" {
 			line += " — " + r
 		}

@@ -120,7 +120,7 @@ func TestOperatorListDistinguishesUnknownAttributionFromBootstrap(t *testing.T) 
 	when := time.Date(2026, 6, 28, 0, 0, 0, 0, time.UTC)
 	f := &fakeOperatorClient{list: &runnyv1.ListOperatorsResponse{
 		Operators: []*runnyv1.Operator{
-			{Uid: 501, User: "brajkovic"},                             // bootstrap: no record at all
+			{Uid: 501, User: "brajkovic"},                               // bootstrap: no record at all
 			{Uid: 503, User: "carol", GrantedAt: timestamppb.New(when)}, // granted, but attribution failed
 		},
 	}}

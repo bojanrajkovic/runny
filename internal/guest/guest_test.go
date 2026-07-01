@@ -18,6 +18,24 @@ import (
 	"github.com/bojanrajkovic/runny/internal/sshx"
 )
 
+// Unrecognized goos falls through to darwin, not a loud failure — perOS
+// doesn't validate (config.go's validate() already does, upstream).
+func TestPerOSFallsThroughToDarwin(t *testing.T) {
+	cases := []struct {
+		goos string
+		want string
+	}{
+		{home.OSLinux, "linux"},
+		{home.OSDarwin, "darwin"},
+		{"", "darwin"},
+	}
+	for _, tc := range cases {
+		if got := perOS(tc.goos, "darwin", "linux"); got != tc.want {
+			t.Errorf("perOS(%q, ...) = %q, want %q", tc.goos, got, tc.want)
+		}
+	}
+}
+
 // The darwin runner launches over a non-login SSH exec, whose PATH lacks
 // /usr/local/bin; the provision script must rebuild a login PATH so job steps
 // find tools that pkg installers symlink there. Regression guard for the

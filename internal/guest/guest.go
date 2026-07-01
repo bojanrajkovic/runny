@@ -63,6 +63,14 @@ type Guest struct {
 	goos string
 }
 
+// perOS returns darwinVal unless goos is home.OSLinux.
+func perOS(goos, darwinVal, linuxVal string) string {
+	if goos == home.OSLinux {
+		return linuxVal
+	}
+	return darwinVal
+}
+
 // The rotation scripts install the per-cycle public key and shut password
 // auth off. They rely on the image contract the provision scripts
 // already demand — passwordless sudo, an sshd_config that includes
@@ -188,10 +196,7 @@ func (d Dialer) Rotate(ctx bounded.Context, addr string, g statemachine.Guest, g
 		return nil, fmt.Errorf("rotate: %w", err)
 	}
 
-	script := rotateScriptDarwin
-	if goos == "linux" {
-		script = rotateScriptLinux
-	}
+	script := perOS(goos, rotateScriptDarwin, rotateScriptLinux)
 	pubLine := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
 	full := fmt.Sprintf(script, pubLine)
 
@@ -203,10 +208,7 @@ func (d Dialer) Rotate(ctx bounded.Context, addr string, g statemachine.Guest, g
 	if d.Hardening.Scrambles() {
 		pw := rand.Text()
 		verifyPW = pw
-		scrambleLine := scrambleLineDarwin
-		if goos == "linux" {
-			scrambleLine = scrambleLineLinux
-		}
+		scrambleLine := perOS(goos, scrambleLineDarwin, scrambleLineLinux)
 		full += strings.ReplaceAll(scrambleLine, scramblePasswordPlaceholder, pw)
 	}
 	out, code, err = pg.c.Output(ctx, full)
@@ -395,10 +397,7 @@ func provisionScript(goos, runnerTarball string) (string, error) {
 	if !runnerTarballRE.MatchString(runnerTarball) {
 		return "", fmt.Errorf("refusing to stage runner tarball with an unexpected name %q", runnerTarball)
 	}
-	script := provisionScriptDarwin
-	if goos == "linux" {
-		script = provisionScriptLinux
-	}
+	script := perOS(goos, provisionScriptDarwin, provisionScriptLinux)
 	return strings.ReplaceAll(script, runnerTarballPlaceholder, runnerTarball), nil
 }
 
@@ -553,10 +552,7 @@ func (g *Guest) InstallAuthorizedKey(ctx bounded.Context, line string) error {
 		return fmt.Errorf("installing debug key: %w: %w", statemachine.ErrGuestUnreachable, err)
 	}
 	defer func() { _ = c.Close() }()
-	recorder := debugRecorderDarwin
-	if g.goos == "linux" {
-		recorder = debugRecorderLinux
-	}
+	recorder := perOS(g.goos, debugRecorderDarwin, debugRecorderLinux)
 	script := fmt.Sprintf(installDebugKeyScript, recorder, line, line)
 	out, code, err := c.Output(ctx, script)
 	if err != nil {

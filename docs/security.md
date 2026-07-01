@@ -152,6 +152,18 @@ operator is the trusted administrator who landed the App key and edits the
 config, so it already holds that same transitive power. The audit trail is the
 accountability layer, not a second authorization tier.
 
+**Each `injected_keys` entry is stamped with the authenticated peer.** The
+daemon reads the connecting operator's uid server-side via `SO_PEERCRED` on
+the `0600` socket — authoritative and not client-forgeable — and records it
+alongside a best-effort username snapshot, surfaced in `runnyctl why` (e.g.
+"by bob (uid 503)"). A root peer, which bypasses the socket's `0600` mode, is
+recorded as `uid 0`; a uid the daemon cannot read (a non-darwin host, or a
+cred-read failure) is recorded as unknown rather than failing the request —
+an audit enhancement, never a second gate. This closes the "an operator did
+X" → "operator A did X" gap once more than one operator identity can exist
+(single-operator installs today; see [ADR-0014](architecture-decisions/0014-debug-key-injection.md)
+for the authorization model this extends).
+
 ## Ephemeral guests
 
 Each cycle runs a **fresh APFS clone, destroyed on teardown** by the crash-only

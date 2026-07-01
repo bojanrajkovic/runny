@@ -131,6 +131,36 @@ func TestRecordToProtoCarriesInjectedKeys(t *testing.T) {
 	}
 }
 
+// TestRecordToProtoCarriesOperatorUID pins the has-bit distinction on the
+// wire: a recorded uid 0 (root) must set OperatorUid's has-bit, and an
+// absent uid must leave it nil rather than defaulting to 0 (issue #209).
+func TestRecordToProtoCarriesOperatorUID(t *testing.T) {
+	rootUID := uint32(0)
+	opUID := uint32(503)
+	r := &cycle.Record{
+		CycleID: "abcd1234", Slot: "mac-1",
+		InjectedKeys: []cycle.InjectedKey{
+			{Fingerprint: "SHA256:abc", Outcome: "ok", State: "DEBUG", OperatorUID: &opUID, OperatorUser: "bob"},
+			{Fingerprint: "SHA256:def", Outcome: "ok", State: "DEBUG", OperatorUID: &rootUID, OperatorUser: "root"},
+			{Fingerprint: "SHA256:ghi", Outcome: "ok", State: "DEBUG"},
+		},
+	}
+	pb := recordToProto(r)
+	got := pb.GetInjectedKeys()
+	if len(got) != 3 {
+		t.Fatalf("expected 3 injected keys, got %d", len(got))
+	}
+	if got[0].OperatorUid == nil || *got[0].OperatorUid != opUID || got[0].GetOperatorUser() != "bob" {
+		t.Errorf("operator uid/user dropped: %+v", got[0])
+	}
+	if got[1].OperatorUid == nil || *got[1].OperatorUid != 0 {
+		t.Errorf("uid 0 must carry a has-bit distinct from absent: %+v", got[1])
+	}
+	if got[2].OperatorUid != nil {
+		t.Errorf("absent operator uid must stay nil, got %v", got[2].OperatorUid)
+	}
+}
+
 func TestInjectDebugKeyValidation(t *testing.T) {
 	c := dial(t, newTestServer(testSlots("mac-1"), nil, nil, nil))
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)

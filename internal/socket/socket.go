@@ -9,8 +9,10 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/user"
 	"regexp"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -255,6 +257,7 @@ func (s *Server) Serve(ctx context.Context, socketPath string) error {
 		return fmt.Errorf("restricting socket perms: %w", err)
 	}
 	g := grpc.NewServer(
+		grpc.Creds(newPeerCreds()),
 		grpc.ChainUnaryInterceptor(recoveryUnary),
 		grpc.ChainStreamInterceptor(recoveryStream),
 	)
@@ -673,12 +676,25 @@ func (s *Server) InjectDebugKey(ctx context.Context, req *runnyv1.InjectDebugKey
 	fp := ssh.FingerprintSHA256(pub)
 	queueBound, handlerWait := s.injectBounds()
 
+	// The operator identity for the audit trail: the kernel-authenticated
+	// peer uid (never client-supplied), and its username resolved
+	// best-effort here so the FSM stays free of os/user (issue #209).
+	var operatorUID *uint32
+	var operatorUser string
+	if uid, ok := peerUID(ctx); ok {
+		operatorUID = &uid
+		if u, err := user.LookupId(strconv.FormatUint(uint64(uid), 10)); err == nil {
+			operatorUser = u.Username
+		}
+	}
+
 	reply := make(chan statemachine.DebugKeyReply, 1)
 	if !slot.Command(statemachine.Command{
 		Kind: statemachine.CmdDebugKey, Reason: req.GetReason(),
 		PubKey: line, Fingerprint: fp, Comment: comment, Hold: hold,
 		CycleID: st.CycleID, SeenState: st.State, // both pins from the same read
 		Expires: time.Now().Add(queueBound), Reply: reply,
+		OperatorUID: operatorUID, OperatorUser: operatorUser,
 	}) {
 		return nil, status.Errorf(codes.Unavailable, "slot %s is not accepting commands", slot.Name())
 	}
@@ -827,13 +843,15 @@ func recordToProto(r *cycle.Record) *runnyv1.CycleRecord {
 	}
 	for _, k := range r.InjectedKeys {
 		out.InjectedKeys = append(out.InjectedKeys, &runnyv1.InjectedKey{
-			Fingerprint: k.Fingerprint,
-			Comment:     k.Comment,
-			Injected:    timestamppb.New(k.Injected),
-			Reason:      k.Reason,
-			Outcome:     k.Outcome,
-			Error:       k.Error,
-			State:       k.State,
+			Fingerprint:  k.Fingerprint,
+			Comment:      k.Comment,
+			Injected:     timestamppb.New(k.Injected),
+			Reason:       k.Reason,
+			Outcome:      k.Outcome,
+			Error:        k.Error,
+			State:        k.State,
+			OperatorUid:  k.OperatorUID,
+			OperatorUser: k.OperatorUser,
 		})
 	}
 	if r.Failure != nil {

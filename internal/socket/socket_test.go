@@ -686,6 +686,22 @@ func TestPauseNoteOnlyWhileDraining(t *testing.T) {
 	}
 }
 
+// TestSnapshotAdvertisesLookupBoundInHandlerWait pins a Codex-review finding:
+// InjectHandlerWait is the contract a client sizes its own InjectDebugKey
+// deadline against (see #0's "a timeout lies" precedent). The best-effort
+// username lookup runs BEFORE the FSM round-trip the raw injectBounds
+// handlerWait covers, so a client that took the advertised value at face
+// value (rather than mimicking runnyctl's own "+10s slack" convention) could
+// time out while the daemon was still within its own true worst case.
+func TestSnapshotAdvertisesLookupBoundInHandlerWait(t *testing.T) {
+	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	_, handlerWait := srv.injectBounds()
+	want := handlerWait + usernameLookupBound
+	if got := srv.snapshot().GetInjectHandlerWait().AsDuration(); got != want {
+		t.Errorf("InjectHandlerWait = %v, want handlerWait+usernameLookupBound = %v", got, want)
+	}
+}
+
 func TestSnapshotCarriesDraining(t *testing.T) {
 	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
 	if got := srv.snapshot().GetDraining(); got != "" {

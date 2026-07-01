@@ -311,9 +311,13 @@ func (s *Server) snapshot() *runnyv1.GetStatusResponse {
 	}
 	// The config-derived InjectDebugKey wait, so `runnyctl debug` can size its
 	// client deadline to outlast the daemon (else a timeout lies — see #0).
+	// Includes usernameLookupBound: that lookup runs before the FSM
+	// round-trip handlerWait covers, so it is part of the true worst case a
+	// client's deadline must outlast, not just an internal implementation
+	// detail invisible to the advertised contract.
 	if s.Config != nil {
 		_, handlerWait := s.injectBounds()
-		resp.InjectHandlerWait = durationpb.New(handlerWait)
+		resp.InjectHandlerWait = durationpb.New(handlerWait + usernameLookupBound)
 	}
 	for _, slot := range s.Slots {
 		resp.Slots = append(resp.Slots, statusToProto(slot.Status()))

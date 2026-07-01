@@ -653,21 +653,45 @@ func TestWaitForRetriesAuthRejection(t *testing.T) {
 		t.Fatalf("WaitFor did not survive transient auth rejection: %v", err)
 	}
 	_ = c.Close()
+}
 
-	// And when rejection never lifts, the expiry error names it — in text
-	// (WaitFor deliberately keeps lastErr out of the chain; see its comment).
-	// The budget must clear one full rejection round-trip before expiry so
-	// lastErr holds the rejection, not the ctx abort. Under -race a loopback
-	// dial+handshake runs several times slower and the scheduler can starve
-	// even the TCP connect, so the budget is a generous multiple of the 1s
-	// per-attempt timeout — a tighter window lets the first attempt straddle
-	// the deadline and report an i/o timeout instead.
-	accept.Store(false)
-	ctx2, cancel2 := bounded.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel2()
-	_, err = WaitFor(ctx2, addr, Config{User: "admin", Signer: signer, Timeout: time.Second}, 50*time.Millisecond)
+// TestWaitForNamesRejectionOnExpiry covers the same invariant the real-network
+// half of TestWaitForRetriesAuthRejection used to (permanent rejection: the
+// expiry error names it, in text, without leaking into the chain), but
+// against waitFor directly with a zero-latency fake dial instead of a real
+// SSH handshake. That real-handshake version raced two wall-clock budgets
+// against each other (a 1s per-attempt Dial timeout against a 2s outer ctx) —
+// reliable when the loopback dial+handshake was fast, but a real attempt on a
+// contended CI runner (many concurrent bazel test actions on a small hosted
+// macOS runner, observed CI failures unrelated to -race) could legitimately
+// exceed its own 1s budget on every attempt, so lastErr never once held a
+// clean rejection to report.
+//
+// Termination is driven from inside the fake dial (cancel() on the Nth
+// call), not by racing a real deadline against real sleeps: a
+// context-expires-after-some-wall-clock-duration version would just
+// reintroduce a smaller copy of the same class of flake this test replaces
+// — the goroutine could still be descheduled long enough to expire the
+// context after fewer than N calls. The bounded.Context deadline here is
+// only a backstop against this test hanging if cancel() were never reached;
+// it is not what ends the loop.
+func TestWaitForNamesRejectionOnExpiry(t *testing.T) {
+	ctx, cancel := bounded.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	const wantCalls = 3
+	calls := 0
+	_, err := waitFor(ctx, "guest:22", time.Millisecond, func() (*Client, error) {
+		calls++
+		if calls == wantCalls {
+			cancel()
+		}
+		return nil, ErrAuthRejected
+	})
 	if err == nil {
-		t.Fatal("want WaitFor expiry under permanent rejection")
+		t.Fatal("want waitFor expiry under permanent rejection")
+	}
+	if calls != wantCalls {
+		t.Fatalf("want exactly %d dial attempts before expiry, got %d", wantCalls, calls)
 	}
 	if !strings.Contains(err.Error(), ErrAuthRejected.Error()) {
 		t.Errorf("expiry error does not name the rejection: %v", err)

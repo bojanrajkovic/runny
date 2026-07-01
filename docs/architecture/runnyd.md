@@ -50,7 +50,7 @@ stateDiagram-v2
     CLONE --> BOOT: clonefile × 3 + runner tarball
     BOOT --> AWAIT_IP: vz state Running
     AWAIT_IP --> AWAIT_SSH: dhcpd lease for our MAC
-    AWAIT_SSH --> SECURE_SSH: authed session (ssh_hardening rotate)
+    AWAIT_SSH --> SECURE_SSH: authed session (ssh_hardening rotate/scramble)
     AWAIT_SSH --> MINT_JIT: authed session (ssh_hardening off)
     SECURE_SSH --> MINT_JIT: per-cycle key live, host key pinned
     MINT_JIT --> PROVISION: encoded_jit_config
@@ -315,4 +315,5 @@ App, real images), not just under test fakes:
   set `ssh_hardening: off` accepts password auth and skips the state, and
   rotate/off pools coexist in one daemon with per-pool behavior intact. A
   transient PROVISION failure after a successful rotation recycles cleanly —
-  the next cycle rotates fresh.
+  the next cycle rotates fresh. (`ssh_hardening: scramble` is unit-tested
+  only; it hasn't run live on ix yet.)

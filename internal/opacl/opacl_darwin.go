@@ -10,7 +10,14 @@ package opacl
 #include <stdlib.h>
 #include <errno.h>
 
-// read_acl_allow_uids reads ALLOW ACEs whose principal resolves to a uid.
+// read_acl_allow_uids reads ALLOW ACEs whose principal resolves to a uid AND
+// whose permission set carries write. write is the operator-defining bit,
+// not an arbitrary filter: it is what lets a principal connect() to the
+// inherited socket (the aclprobe spike's claim C2). Without this check, the
+// _runny service account's read-only ACE (sysdaemon's serviceACE, granted so
+// the daemon can read operator-landed files) is indistinguishable from a
+// real operator grant here, which would silently defeat the last-operator
+// revoke guard on every real install.
 // Returns the count written to out (<=max), or -1 if the path carries no ACL.
 static int read_acl_allow_uids(const char *path, uint32_t *out, int max) {
     errno = 0;
@@ -25,6 +32,10 @@ static int read_acl_allow_uids(const char *path, uint32_t *out, int max) {
          r = acl_get_entry(acl, ACL_NEXT_ENTRY, &entry)) {
         acl_tag_t tag;
         if (acl_get_tag_type(entry, &tag) != 0 || tag != ACL_EXTENDED_ALLOW) {
+            continue;
+        }
+        acl_permset_t permset;
+        if (acl_get_permset(entry, &permset) != 0 || acl_get_perm_np(permset, ACL_WRITE_DATA) != 1) {
             continue;
         }
         void *q = acl_get_qualifier(entry); // guid_t* for user/group entries

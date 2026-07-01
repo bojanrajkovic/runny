@@ -1700,6 +1700,114 @@ func TestDebugFreezeFromListening(t *testing.T) {
 	}
 }
 
+// TestDebugFreezeRecordsOperatorUID pins that a Command carrying the
+// peer-cred-read operator identity (issue #209) lands on the write-ahead
+// InjectedKeys entry appendPending writes before any guest byte.
+func TestDebugFreezeRecordsOperatorUID(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	cancel := h.reachListening(t)
+	defer cancel()
+
+	uid := uint32(503)
+	r := h.debugCmd(t, func(c *Command) { c.OperatorUID = &uid; c.OperatorUser = "bob" })
+	if r.Err != nil {
+		t.Fatalf("freeze failed: %v", r.Err)
+	}
+	h.waitState(t, StateDebug)
+	h.slot.Command(Command{Kind: CmdRecycle, Reason: "done"})
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+
+	rec := h.jobRecord(t)
+	if len(rec.InjectedKeys) != 1 {
+		t.Fatalf("expected 1 injected key, got %+v", rec.InjectedKeys)
+	}
+	k := rec.InjectedKeys[0]
+	if k.OperatorUID == nil || *k.OperatorUID != uid || k.OperatorUser != "bob" {
+		t.Errorf("operator uid/user did not land on the pending entry: %+v", k)
+	}
+}
+
+// TestDebugReArmRecordsOperatorUID pins the SAME requirement on the
+// exec-free re-arm path (fsm.go debugReArm), whose InjectedKey is a separate
+// literal construction from appendPending's.
+func TestDebugReArmRecordsOperatorUID(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	cancel := h.reachListening(t)
+	defer cancel()
+
+	if r := h.debugCmd(t, nil); r.Err != nil {
+		t.Fatalf("freeze: %v", r.Err)
+	}
+	h.waitState(t, StateDebug)
+
+	uid := uint32(502)
+	r := h.debugCmd(t, func(c *Command) { c.OperatorUID = &uid; c.OperatorUser = "alice" })
+	if r.Err != nil {
+		t.Fatalf("re-arm: %v", r.Err)
+	}
+	h.slot.Command(Command{Kind: CmdRecycle, Reason: "done"})
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+
+	rec := h.jobRecord(t)
+	if len(rec.InjectedKeys) != 2 {
+		t.Fatalf("expected 2 injected keys (freeze + re-arm), got %+v", rec.InjectedKeys)
+	}
+	k := rec.InjectedKeys[1]
+	if k.Outcome != "re-armed" {
+		t.Fatalf("expected the re-arm entry, got outcome %q", k.Outcome)
+	}
+	if k.OperatorUID == nil || *k.OperatorUID != uid || k.OperatorUser != "alice" {
+		t.Errorf("operator uid/user did not land on the re-arm entry: %+v", k)
+	}
+}
+
+// TestMidJobDisarmHasNoOperator pins that auditDisarm entries carry no
+// operator identity even when the arming Command did — they record the FSM
+// disarming its OWN hold, not an operator act (issue #209).
+func TestMidJobDisarmHasNoOperator(t *testing.T) {
+	h := newHarness(t, func(c *home.Config) {
+		c.Limits.MaxJobDuration = home.Duration(10 * time.Second)
+	})
+	h.images.maxCalls = 1
+	cancel := h.start(t)
+	defer cancel()
+	h.waitState(t, StateProvision)
+	h.proc.say("Listening for Jobs")
+	h.waitState(t, StateListening)
+	h.proc.say("Running job: build")
+	h.waitState(t, StateJob)
+
+	uid := uint32(501)
+	h.debugCmd(t, func(c *Command) { c.OperatorUID = &uid; c.OperatorUser = "brajkovic" })
+	if !h.slot.Status().DebugHoldArmed {
+		t.Fatal("precondition: armed")
+	}
+
+	h.slot.Command(Command{Kind: CmdRecycle, Reason: "no force"})
+	h.proc.say("Job build completed with result: Succeeded")
+	h.proc.exit(0)
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+
+	rec := h.jobRecord(t)
+	var disarmed *cycle.InjectedKey
+	for i, k := range rec.InjectedKeys {
+		if k.Outcome == "disarmed" {
+			disarmed = &rec.InjectedKeys[i]
+		}
+	}
+	if disarmed == nil {
+		t.Fatalf("no disarmed entry recorded: %+v", rec.InjectedKeys)
+	}
+	if disarmed.OperatorUID != nil {
+		t.Errorf("disarmed entry must carry no operator, got uid %v", *disarmed.OperatorUID)
+	}
+}
+
 func TestDebugFreezeKillUnprovenTearsDown(t *testing.T) {
 	h := newHarness(t, nil)
 	h.images.maxCalls = 1

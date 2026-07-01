@@ -63,6 +63,7 @@ import (
 	"os/user"
 	"strconv"
 	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
@@ -72,6 +73,48 @@ import (
 // ACL: a bounded stack buffer, not a per-daemon operator-count limit anyone
 // is expected to approach.
 const maxACLOperators = 64
+
+// userLookupID is a seam over user.LookupId, overridable in tests to
+// simulate a stuck NSS lookup without a real syscall.
+var userLookupID = user.LookupId
+
+// usernameLookupBound/usernameLookupInFlight cap List's best-effort uid->
+// username resolution: os/user has no context-aware lookup, and a
+// directory-service-backed NSS can stall. List runs inside
+// socket.mutateOperator while that holds Server.operatorMu, so an unbounded
+// lookup here would hang every subsequent grant/revoke, not just this call
+// — the same class of risk internal/socket's lookupUsername already bounds
+// for InjectDebugKey's audit trail.
+const usernameLookupBound = 2 * time.Second
+
+var usernameLookupInFlight = make(chan struct{}, 1)
+
+// lookupUsername resolves uid to a username, abandoning the goroutine on
+// timeout or when a previous lookup is still stuck. Best-effort: an
+// unresolvable or timed-out uid returns "", the same fail-open contract
+// List already documents for User.
+func lookupUsername(uid uint32) string {
+	select {
+	case usernameLookupInFlight <- struct{}{}:
+	default:
+		return ""
+	}
+	ch := make(chan string, 1)
+	go func() {
+		defer func() { <-usernameLookupInFlight }()
+		name := ""
+		if u, err := userLookupID(strconv.FormatUint(uint64(uid), 10)); err == nil {
+			name = u.Username
+		}
+		ch <- name
+	}()
+	select {
+	case name := <-ch:
+		return name
+	case <-time.After(usernameLookupBound):
+		return ""
+	}
+}
 
 // List reads homeDir's ACL for ALLOW-user entries — the authoritative,
 // durable operator set — via cgo acl_get_file + mbr_uuid_to_id, resolving
@@ -89,11 +132,7 @@ func List(homeDir string) ([]Operator, error) {
 	ops := make([]Operator, 0, n)
 	for i := 0; i < n; i++ {
 		uid := uint32(buf[i])
-		name := ""
-		if u, err := user.LookupId(strconv.FormatUint(uint64(uid), 10)); err == nil {
-			name = u.Username
-		}
-		ops = append(ops, Operator{UID: uid, User: name})
+		ops = append(ops, Operator{UID: uid, User: lookupUsername(uid)})
 	}
 	return ops, nil
 }

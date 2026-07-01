@@ -279,6 +279,10 @@ func run() error {
 	// Publish the hash of the file THIS process loaded, so a reload follower
 	// can prove the respawn came up on the config its preflight vetted.
 	srv.ConfigSHA256 = startupSHA
+	// Operator grant/revoke/list reads and writes this home's ACL and
+	// operator-grants.jsonl; grant/revoke additionally gate on it being the
+	// system home (a per-user home has a single owner).
+	srv.HomeDir = dir
 
 	// Drain coordination: the wedge escalation (a guest that survives
 	// force-stop can only be reclaimed by process exit) and the config reload

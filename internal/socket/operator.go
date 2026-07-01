@@ -135,44 +135,21 @@ func (s *Server) GrantOperator(ctx context.Context, req *runnyv1.GrantOperatorRe
 }
 
 func (s *Server) grantOperator(ctx context.Context, userArg string) (*runnyv1.OperatorMutation, error) {
-	u, err := resolveOperatorAccountOrStatus(userArg)
-	if err != nil {
-		return nil, err
-	}
-	if u.Username == "root" || u.Uid == "0" {
-		return nil, status.Error(codes.InvalidArgument, "refusing to grant root")
-	}
-	uid64, err := strconv.ParseUint(u.Uid, 10, 32)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "account %s has a non-numeric uid %q", u.Username, u.Uid)
-	}
-	uid := uint32(uid64)
-
-	ops, err := opacl.List(s.HomeDir.String())
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "reading the operator set: %v", err)
-	}
-	for _, op := range ops {
-		if op.UID == uid {
-			return nil, status.Errorf(codes.FailedPrecondition, "%s is already an operator", u.Username)
-		}
-	}
-
-	actx, cancel := bounded.WithTimeout(ctx, aclOpTimeout)
-	defer cancel()
-	if err := opacl.Grant(actx, s.HomeDir.String(), s.socketPath, u.Username); err != nil {
-		return nil, status.Errorf(codes.Internal, "granting %s: %v", u.Username, err)
-	}
-
-	byUID, byUser := operatorIdentity(ctx)
-	rec := home.OperatorGrant{
-		Action: "grant", ByUID: byUID, ByUser: byUser,
-		TargetUID: uid, TargetUser: u.Username, At: time.Now(),
-	}
-	if err := s.HomeDir.AppendOperatorGrant(rec); err != nil {
-		slog.Error("operator grant: attribution record not written", "target", u.Username, "err", err)
-	}
-	return &runnyv1.OperatorMutation{Uid: uid, User: u.Username}, nil
+	return s.mutateOperator(
+		ctx, userArg, "grant", "granting",
+		func(ops []opacl.Operator, uid uint32, u *user.User) error {
+			if u.Username == "root" || u.Uid == "0" {
+				return status.Error(codes.InvalidArgument, "refusing to grant root")
+			}
+			for _, op := range ops {
+				if op.UID == uid {
+					return status.Errorf(codes.FailedPrecondition, "%s is already an operator", u.Username)
+				}
+			}
+			return nil
+		},
+		opacl.Grant,
+	)
 }
 
 func (s *Server) RevokeOperator(ctx context.Context, req *runnyv1.RevokeOperatorRequest) (*runnyv1.OperatorMutation, error) {
@@ -183,6 +160,41 @@ func (s *Server) RevokeOperator(ctx context.Context, req *runnyv1.RevokeOperator
 }
 
 func (s *Server) revokeOperator(ctx context.Context, userArg string) (*runnyv1.OperatorMutation, error) {
+	return s.mutateOperator(
+		ctx, userArg, "revoke", "revoking",
+		func(ops []opacl.Operator, uid uint32, u *user.User) error {
+			found := false
+			for _, op := range ops {
+				if op.UID == uid {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return status.Errorf(codes.FailedPrecondition, "%s is not an operator", u.Username)
+			}
+			if len(ops) <= 1 {
+				return status.Error(codes.FailedPrecondition,
+					"refusing to revoke the last operator — recover with: sudo runnyctl install-daemon")
+			}
+			return nil
+		},
+		opacl.Revoke,
+	)
+}
+
+// mutateOperator is the shared grant/revoke skeleton: resolve the account,
+// list the current operator set, run precheck (which returns the
+// grant-only "already an operator"/refuse-root or revoke-only "not an
+// operator"/last-operator errors), apply the opacl mutation under a bound,
+// and append an attribution record. recordAction ("grant"/"revoke") is the
+// operator-grants.jsonl verb; verbing ("granting"/"revoking") is only for
+// the apply-failure error message.
+func (s *Server) mutateOperator(
+	ctx context.Context, userArg, recordAction, verbing string,
+	precheck func(ops []opacl.Operator, uid uint32, u *user.User) error,
+	apply func(actx bounded.Context, homeDir, sock, username string) error,
+) (*runnyv1.OperatorMutation, error) {
 	u, err := resolveOperatorAccountOrStatus(userArg)
 	if err != nil {
 		return nil, err
@@ -197,34 +209,23 @@ func (s *Server) revokeOperator(ctx context.Context, userArg string) (*runnyv1.O
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "reading the operator set: %v", err)
 	}
-	found := false
-	for _, op := range ops {
-		if op.UID == uid {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return nil, status.Errorf(codes.FailedPrecondition, "%s is not an operator", u.Username)
-	}
-	if len(ops) <= 1 {
-		return nil, status.Error(codes.FailedPrecondition,
-			"refusing to revoke the last operator — recover with: sudo runnyctl install-daemon")
+	if err := precheck(ops, uid, u); err != nil {
+		return nil, err
 	}
 
 	actx, cancel := bounded.WithTimeout(ctx, aclOpTimeout)
 	defer cancel()
-	if err := opacl.Revoke(actx, s.HomeDir.String(), s.socketPath, u.Username); err != nil {
-		return nil, status.Errorf(codes.Internal, "revoking %s: %v", u.Username, err)
+	if err := apply(actx, s.HomeDir.String(), s.socketPath, u.Username); err != nil {
+		return nil, status.Errorf(codes.Internal, "%s %s: %v", verbing, u.Username, err)
 	}
 
 	byUID, byUser := operatorIdentity(ctx)
 	rec := home.OperatorGrant{
-		Action: "revoke", ByUID: byUID, ByUser: byUser,
+		Action: recordAction, ByUID: byUID, ByUser: byUser,
 		TargetUID: uid, TargetUser: u.Username, At: time.Now(),
 	}
 	if err := s.HomeDir.AppendOperatorGrant(rec); err != nil {
-		slog.Error("operator revoke: attribution record not written", "target", u.Username, "err", err)
+		slog.Error("operator "+recordAction+": attribution record not written", "target", u.Username, "err", err)
 	}
 	return &runnyv1.OperatorMutation{Uid: uid, User: u.Username}, nil
 }

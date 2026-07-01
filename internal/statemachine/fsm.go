@@ -228,8 +228,8 @@ type Command struct {
 	SeenState   State              // the state the operator saw (consent pin, decision 15)
 	Expires     time.Time          // enqueue + queueBound; consumers reject a late dequeue
 	Reply       chan DebugKeyReply // buffered 1; replied via select/default
-	// OperatorUID/OperatorUser identify the peer that issued this CmdDebugKey
-	// (issue #209): the kernel-authenticated uid read server-side via
+	// OperatorUID/OperatorUser identify the peer that issued this
+	// CmdDebugKey: the kernel-authenticated uid read server-side via
 	// SO_PEERCRED, and its username resolved best-effort at the socket layer.
 	// nil UID means unknown (non-darwin, or a cred-read failure) — distinct
 	// from a recorded uid 0 (root, which bypasses the socket's 0600 mode).
@@ -1418,7 +1418,9 @@ func (s *Slot) midJobInject(ctx context.Context, rec *cycle.Record, guest Guest,
 		rec.InjectedKeys = append(rec.InjectedKeys, cycle.InjectedKey{
 			Fingerprint: fp, Comment: cmd.Comment, Injected: time.Now(), Reason: cmd.Reason,
 			Outcome: "refused", State: string(StateJob),
-			Error: "operator saw " + string(cmd.SeenState) + ", not JOB",
+			Error:        "operator saw " + string(cmd.SeenState) + ", not JOB",
+			OperatorUID:  cmd.OperatorUID,
+			OperatorUser: cmd.OperatorUser,
 		})
 		_ = s.writeAuditSidecar(rec)
 		cmd.reply(DebugKeyReply{Err: errors.New(
@@ -1433,6 +1435,7 @@ func (s *Slot) midJobInject(ctx context.Context, rec *cycle.Record, guest Guest,
 		rec.InjectedKeys = append(rec.InjectedKeys, cycle.InjectedKey{
 			Fingerprint: fp, Comment: cmd.Comment, Injected: time.Now(), Reason: cmd.Reason,
 			Outcome: "re-armed", State: string(StateJob),
+			OperatorUID: cmd.OperatorUID, OperatorUser: cmd.OperatorUser,
 		})
 		_ = s.writeAuditSidecar(rec)
 		s.setArmedStatus(s.armedDetail(fp, arm.hold))

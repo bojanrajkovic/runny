@@ -28,7 +28,7 @@ const aclOpTimeout = 10 * time.Second
 // which has a single owner and no ACL-managed set to mutate. Read-only
 // ListOperators is not gated: it simply reports whatever ACL is present.
 func (s *Server) requireSystemDaemon() error {
-	if s.HomeDir.String() != home.SystemHomeDir {
+	if !s.IsSystemDaemon {
 		return status.Error(codes.FailedPrecondition,
 			"operator grants require the system daemon (the per-user daemon has a single owner)")
 	}

@@ -170,10 +170,16 @@ type Server struct {
 	// the queue/service bounds for the synchronous wait).
 	Config *home.Config
 	// HomeDir is this daemon's resolved home (home.ResolveServer). Operator
-	// grant/revoke/list reads and writes its ACL and operator-grants.jsonl;
-	// grant/revoke additionally require it to equal home.SystemHomeDir — a
-	// per-user home has a single owner, not a set to manage. Set by main.
+	// grant/revoke/list reads and writes its ACL and operator-grants.jsonl.
+	// Set by main.
 	HomeDir home.Dir
+	// IsSystemDaemon gates operator grant/revoke: a per-user home has a
+	// single owner, not an ACL-managed set to mutate. Computed once in main
+	// (where the resolveServer ownership check already ran) rather than
+	// re-derived here by comparing HomeDir against home.SystemHomeDir — a
+	// third copy of a comparison already made twice in cmd/runnyd/main.go.
+	// Set by main.
+	IsSystemDaemon bool
 	// PruneFn builds a reclaim plan for stale image bundles and runner tarballs.
 	// apply=true also deletes them. Nil = Unimplemented.
 	PruneFn func(ctx context.Context, apply bool) PrunePlan

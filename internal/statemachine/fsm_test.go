@@ -1729,9 +1729,11 @@ func TestDebugFreezeRecordsOperatorUID(t *testing.T) {
 	}
 }
 
-// TestDebugReArmRecordsOperatorUID pins the SAME requirement on the
-// exec-free re-arm path (fsm.go debugReArm), whose InjectedKey is a separate
-// literal construction from appendPending's.
+// TestDebugReArmRecordsOperatorUID pins the same requirement on debugReArm:
+// when an operator re-runs `debug` for a key already confirmed installed,
+// the FSM just extends the hold instead of reinstalling — that path builds
+// its own InjectedKey separately from appendPending's, so it needs its own
+// coverage.
 func TestDebugReArmRecordsOperatorUID(t *testing.T) {
 	h := newHarness(t, nil)
 	h.images.maxCalls = 1
@@ -1812,9 +1814,10 @@ func TestMidJobRefusedRecordsOperatorUID(t *testing.T) {
 	}
 }
 
-// TestMidJobReArmRecordsOperatorUID pins that midJobInject's proven-landed
-// exec-free re-arm entry carries the operator identity — the mid-job twin of
-// TestDebugReArmRecordsOperatorUID.
+// TestMidJobReArmRecordsOperatorUID is the mid-job version of
+// TestDebugReArmRecordsOperatorUID: an operator re-running `debug` mid-job
+// for a key already confirmed installed just extends the hold, without
+// reinstalling — that entry must carry the operator identity too.
 func TestMidJobReArmRecordsOperatorUID(t *testing.T) {
 	h := newHarness(t, func(c *home.Config) {
 		c.Limits.MaxJobDuration = home.Duration(10 * time.Second)

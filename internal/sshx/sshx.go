@@ -153,9 +153,19 @@ func Dial(ctx bounded.Context, addr string, cfg Config) (*Client, error) {
 // expiry error carries the last attempt's text, so a deadline spent being
 // rejected reads as rejection, not absence.
 func WaitFor(ctx bounded.Context, addr string, cfg Config, interval time.Duration) (*Client, error) {
+	return waitFor(ctx, addr, interval, func() (*Client, error) { return Dial(ctx, addr, cfg) })
+}
+
+// waitFor is WaitFor's retry loop with the per-attempt dial pulled out as a
+// parameter — Dial in production, a fake in tests — so the "which error
+// survives to the expiry message" bookkeeping is unit-testable without a
+// real network attempt in the timing-critical path. A real attempt's own
+// socket deadline stays covered by TestDial* against a real server; this
+// only exercises the loop.
+func waitFor(ctx bounded.Context, addr string, interval time.Duration, dial func() (*Client, error)) (*Client, error) {
 	var lastErr error
 	for {
-		c, err := Dial(ctx, addr, cfg)
+		c, err := dial()
 		if err == nil {
 			return c, nil
 		}

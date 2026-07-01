@@ -61,8 +61,11 @@ type PoolConfig struct {
 	// per-cycle in-memory keypair, installs it, disables password auth, and
 	// reconnects with the key and pinned host keys — the SECURE_SSH state.
 	// "off" keeps password auth for the whole cycle (interactive debugging;
-	// images whose sshd can't take the drop-in).
-	SSHHardening string `yaml:"ssh_hardening"`
+	// images whose sshd can't take the drop-in). "scramble" does everything
+	// "rotate" does, then additionally randomizes the guest account's
+	// password, so the image's well-known default is never reachable again
+	// for the rest of the cycle through any channel, not just SSH.
+	SSHHardening SSHHardeningMode `yaml:"ssh_hardening"`
 	// CPUCores and RAMGB override the guest's CPU count and memory, which
 	// otherwise come from the image's baked config.json (e.g. cirruslabs
 	// images ship a conservative 2c/4GiB). Zero means "use the image's
@@ -72,11 +75,37 @@ type PoolConfig struct {
 	RAMGB    uint `yaml:"ram_gb"`
 }
 
+// SSHHardeningMode is the SSH posture applied to a pool's guests once the
+// first password-authenticated session lands. The three values are strictly
+// ascending in strictness — off < rotate < scramble, each doing everything
+// the one before it does plus one more thing — never independent flags: a
+// "scramble but skip rotate" state would leave the known default password
+// reachable over still-enabled SSH password auth, which is strictly worse
+// than disabling it, so that combination is deliberately unrepresentable
+// rather than a validation rule to maintain.
+type SSHHardeningMode string
+
 // PoolConfig.SSHHardening values.
 const (
-	SSHHardeningRotate = "rotate"
-	SSHHardeningOff    = "off"
+	SSHHardeningOff      SSHHardeningMode = "off"
+	SSHHardeningRotate   SSHHardeningMode = "rotate"
+	SSHHardeningScramble SSHHardeningMode = "scramble"
 )
+
+// Scrambles reports whether this mode randomizes the guest account
+// password, on top of everything SSHHardeningRotate already does.
+//
+// There's no analogous Rotates() predicate: the one place that logically
+// wants "does this mode rotate" (the SECURE_SSH gate in
+// internal/statemachine/fsm.go) deliberately keeps its own
+// `!= SSHHardeningOff` comparison instead, because that gate must fail
+// CLOSED on a zero-value/undefaulted SSHHardening (rotate rather than
+// silently un-harden) — a positive Rotates()-style membership check would
+// get that backwards, since the zero value matches neither Rotate nor
+// Scramble and would fail OPEN.
+func (m SSHHardeningMode) Scrambles() bool {
+	return m == SSHHardeningScramble
+}
 
 // PoolConfig.OS values. Exported so the config JSON Schema generator
 // (tools/configschema) constrains the same set validate() enforces, rather than
@@ -315,9 +344,11 @@ func (c *Config) validate() error {
 		if p.GitHub.PrivateKeyPath == "" {
 			errs = append(errs, fmt.Errorf("%s: github.private_key_path is required", at))
 		}
-		if p.SSHHardening != SSHHardeningRotate && p.SSHHardening != SSHHardeningOff {
-			errs = append(errs, fmt.Errorf("%s: ssh_hardening must be %q or %q, got %q",
-				at, SSHHardeningRotate, SSHHardeningOff, p.SSHHardening))
+		switch p.SSHHardening {
+		case SSHHardeningOff, SSHHardeningRotate, SSHHardeningScramble:
+		default:
+			errs = append(errs, fmt.Errorf("%s: ssh_hardening must be %q, %q, or %q, got %q",
+				at, SSHHardeningOff, SSHHardeningRotate, SSHHardeningScramble, p.SSHHardening))
 		}
 		hasOrg, hasRepo := p.Target.Org != "", p.Target.Owner != "" || p.Target.Repo != ""
 		switch {

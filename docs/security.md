@@ -90,6 +90,16 @@ password-auth-for-the-whole-cycle behavior; the network posture above is then
 what bounds the password (reachable from the host datapath only, not from
 sibling guests).
 
+Pools can also opt further **in** (`ssh_hardening: scramble`): the same
+pre-flip exec that installs the cycle key and disables password auth also
+randomizes the guest account's password. The image's well-known default is
+never reachable again for the rest of the cycle, through any channel — not
+just SSH password auth. The new value is generated in memory, installed
+once, and discarded; the daemon authenticates by key from here on and never
+needs to recover it. Opt-in by design: some workflows rely on the known
+guest password (interactive console access, password-auth tooling), so this
+has to be a deliberate choice, not the default.
+
 ## Operator debug keys
 
 `runnyctl debug` injects an operator's SSH public key into a live guest's
@@ -120,10 +130,17 @@ aid for good-faith operators, **not a security control.** The operator owns
 `~/.ssh/authorized_keys` on the guest and can strip the wrapper; under the
 default image no file-ownership scheme changes this — the guest ships a
 well-known default password and `admin` holds sudo, so the operator who can run
-`runnyctl debug` can already reach root. Operators who need enforced capture
-should build a **custom guest image** with `ForceCommand`/auditd baked into
-`sshd_config` at image-build time, where the recording is root-owned and the
-operator cannot edit it.
+`runnyctl debug` can already reach root. `ssh_hardening: scramble` does not
+close this on its own: the operator's own debug-key session already has
+write access to `~/.ssh/authorized_keys` and passwordless sudo, neither of
+which needs the account password. Enforced capture needs a different guest
+shape entirely: a **custom guest image** with `ForceCommand`/auditd baked
+into `sshd_config` at image-build time — root-owned, so the operator cannot
+edit it — paired with a separate, non-`admin` operator account so the
+operator's own sudo doesn't reach that root-owned config either. `scramble`
+(above) is what keeps that combination airtight once built: with the
+operator no longer owning the config or holding sudo, a still-known default
+password would be the one remaining door back into `admin`.
 
 Authorization is the socket itself: the `0600` `runnyd.sock` is the sole gate,
 deliberately — whoever can open it already transitively holds everything

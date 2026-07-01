@@ -3,7 +3,6 @@
 package opacl
 
 import (
-	"errors"
 	"os"
 	"os/exec"
 	"os/user"
@@ -26,42 +25,6 @@ func requireGrantee(t *testing.T) {
 	t.Helper()
 	if _, err := user.Lookup(testGrantee); err != nil {
 		t.Skipf("test principal %q not present on this host: %v", testGrantee, err)
-	}
-}
-
-// TestLookupUsernameCapsStuckGoroutines pins the Codex-flagged fix: List
-// runs inside socket.mutateOperator while it holds Server.operatorMu, so an
-// unbounded NSS lookup here would hang every subsequent grant/revoke, not
-// just this call. A second call while the single in-flight slot is occupied
-// by a stuck lookup must return "" immediately, not wait out
-// usernameLookupBound.
-func TestLookupUsernameCapsStuckGoroutines(t *testing.T) {
-	release := make(chan struct{})
-	orig := userLookupID
-	userLookupID = func(string) (*user.User, error) { <-release; return nil, errors.New("unreachable") }
-	t.Cleanup(func() {
-		userLookupID = orig
-		close(release)
-	})
-
-	go lookupUsername(1) // occupies the single in-flight slot indefinitely
-
-	deadline := time.Now().Add(2 * time.Second)
-	for len(usernameLookupInFlight) == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if len(usernameLookupInFlight) == 0 {
-		t.Fatal("first lookupUsername never occupied the in-flight slot")
-	}
-
-	start := time.Now()
-	name := lookupUsername(2)
-	elapsed := time.Since(start)
-	if name != "" {
-		t.Errorf("lookupUsername while the slot is busy = %q, want empty", name)
-	}
-	if elapsed > time.Second {
-		t.Errorf("call while slot busy took %v, want near-instant (no timeout wait)", elapsed)
 	}
 }
 

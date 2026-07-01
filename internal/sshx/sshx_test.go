@@ -665,21 +665,33 @@ func TestWaitForRetriesAuthRejection(t *testing.T) {
 // contended CI runner (many concurrent bazel test actions on a small hosted
 // macOS runner, observed CI failures unrelated to -race) could legitimately
 // exceed its own 1s budget on every attempt, so lastErr never once held a
-// clean rejection to report. A fake dial has no such budget to blow: this
-// test exercises the exact same lastErr bookkeeping in waitFor, deterministically.
+// clean rejection to report.
+//
+// Termination is driven from inside the fake dial (cancel() on the Nth
+// call), not by racing a real deadline against real sleeps: a
+// context-expires-after-some-wall-clock-duration version would just
+// reintroduce a smaller copy of the same class of flake this test replaces
+// — the goroutine could still be descheduled long enough to expire the
+// context after fewer than N calls. The bounded.Context deadline here is
+// only a backstop against this test hanging if cancel() were never reached;
+// it is not what ends the loop.
 func TestWaitForNamesRejectionOnExpiry(t *testing.T) {
-	ctx, cancel := bounded.WithTimeout(t.Context(), 200*time.Millisecond)
+	ctx, cancel := bounded.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
+	const wantCalls = 3
 	calls := 0
-	_, err := waitFor(ctx, "guest:22", 10*time.Millisecond, func() (*Client, error) {
+	_, err := waitFor(ctx, "guest:22", time.Millisecond, func() (*Client, error) {
 		calls++
+		if calls == wantCalls {
+			cancel()
+		}
 		return nil, ErrAuthRejected
 	})
 	if err == nil {
 		t.Fatal("want waitFor expiry under permanent rejection")
 	}
-	if calls < 2 {
-		t.Fatalf("want at least 2 dial attempts before expiry, got %d", calls)
+	if calls != wantCalls {
+		t.Fatalf("want exactly %d dial attempts before expiry, got %d", wantCalls, calls)
 	}
 	if !strings.Contains(err.Error(), ErrAuthRejected.Error()) {
 		t.Errorf("expiry error does not name the rejection: %v", err)

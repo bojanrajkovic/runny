@@ -235,6 +235,30 @@ func TestLookupUsernameCapsStuckGoroutines(t *testing.T) {
 	}
 }
 
+// TestInjectionAbortedReflectsContextState pins the Codex-review fix:
+// InjectDebugKey re-checks ctx after the (up to usernameLookupBound)
+// username lookup, before enqueueing CmdDebugKey — a client that canceled or
+// hit its own deadline during that stall must not have a key installed after
+// being told the request ended. injectionAborted converts ctx.Err() the same
+// way the pre-existing post-enqueue select already does for the identical
+// condition, so the two call sites agree on the error the client sees.
+func TestInjectionAbortedReflectsContextState(t *testing.T) {
+	if err := injectionAborted(t.Context()); err != nil {
+		t.Errorf("live context: got %v, want nil", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := injectionAborted(ctx); status.Code(err) != codes.Canceled {
+		t.Errorf("canceled context: code = %v, want Canceled", status.Code(err))
+	}
+	dctx, dcancel := context.WithTimeout(t.Context(), 0)
+	defer dcancel()
+	<-dctx.Done()
+	if err := injectionAborted(dctx); status.Code(err) != codes.DeadlineExceeded {
+		t.Errorf("expired context: code = %v, want DeadlineExceeded", status.Code(err))
+	}
+}
+
 func TestInjectDebugKeyValidation(t *testing.T) {
 	c := dial(t, newTestServer(testSlots("mac-1"), nil, nil, nil))
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)

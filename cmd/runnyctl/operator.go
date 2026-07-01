@@ -81,11 +81,20 @@ func (c *ctl) operatorList(ctx context.Context) error {
 	for _, op := range ops {
 		grantedBy := op.GetGrantedBy()
 		when := ""
-		switch {
-		case grantedBy == "":
-			grantedBy = "(install)"
-		case op.GetGrantedAt() != nil:
-			when = op.GetGrantedAt().AsTime().Local().Format("2006-01-02")
+		if at := op.GetGrantedAt(); at != nil {
+			when = at.AsTime().Local().Format("2006-01-02")
+		}
+		if grantedBy == "" {
+			// No timestamp either: no grant record exists at all — the
+			// install-time bootstrap operator. A timestamp WITH no name is a
+			// real RPC grant whose peer-identity read failed (fail-open, see
+			// operatorIdentity) — that must keep its "when", not collapse
+			// into the bootstrap label.
+			if when == "" {
+				grantedBy = "(install)"
+			} else {
+				grantedBy = "(unknown)"
+			}
 		}
 		fmt.Fprintf(c.out, "%-10s %-5d %-12s %s\n", op.GetUser(), op.GetUid(), grantedBy, when)
 	}

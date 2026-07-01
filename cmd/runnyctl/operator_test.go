@@ -109,6 +109,48 @@ func TestOperatorListRendersTable(t *testing.T) {
 	}
 }
 
+// TestOperatorListDistinguishesUnknownAttributionFromBootstrap pins a code
+// review fix: an operator granted via the RPC but whose peer-identity read
+// failed at grant time (operatorIdentity's fail-open path) has a real
+// GrantedAt but an empty GrantedBy — that must render distinctly from the
+// install-time bootstrap operator (no record at all, both fields empty),
+// not silently collapse into the same "(install)" label with the real
+// grant timestamp dropped.
+func TestOperatorListDistinguishesUnknownAttributionFromBootstrap(t *testing.T) {
+	when := time.Date(2026, 6, 28, 0, 0, 0, 0, time.UTC)
+	f := &fakeOperatorClient{list: &runnyv1.ListOperatorsResponse{
+		Operators: []*runnyv1.Operator{
+			{Uid: 501, User: "brajkovic"},                             // bootstrap: no record at all
+			{Uid: 503, User: "carol", GrantedAt: timestamppb.New(when)}, // granted, but attribution failed
+		},
+	}}
+	var buf bytes.Buffer
+	c := &ctl{client: f, out: &buf}
+	if err := c.operatorList(t.Context()); err != nil {
+		t.Fatalf("operatorList: %v", err)
+	}
+	out := buf.String()
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	var bootstrapLine, unknownLine string
+	for _, l := range lines {
+		if strings.Contains(l, "brajkovic") {
+			bootstrapLine = l
+		}
+		if strings.Contains(l, "carol") {
+			unknownLine = l
+		}
+	}
+	if !strings.Contains(bootstrapLine, "(install)") {
+		t.Errorf("bootstrap operator not labeled (install): %q", bootstrapLine)
+	}
+	if !strings.Contains(unknownLine, "2026-06-28") {
+		t.Errorf("attributed-but-unnamed grant lost its timestamp: %q", unknownLine)
+	}
+	if strings.Contains(unknownLine, "(install)") {
+		t.Errorf("a real grant with failed attribution must not render as (install): %q", unknownLine)
+	}
+}
+
 func TestOperatorRevokePropagatesError(t *testing.T) {
 	f := &fakeOperatorClient{revoked1: status.Error(codes.FailedPrecondition, "refusing to revoke the last operator")}
 	c := &ctl{client: f, out: &bytes.Buffer{}}

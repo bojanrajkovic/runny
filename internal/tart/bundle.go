@@ -17,6 +17,16 @@ import (
 // is a copy-on-write clone of exactly these.
 var BundleFiles = []string{"config.json", "disk.img", "nvram.bin"}
 
+// CompatVersion is the tart release whose bundle/OCI format this package
+// tracks, advertised to guests via GuestAgentPortName.
+const CompatVersion = "2.32.1"
+
+// GuestAgentPortName is the console-port name the cirruslabs images'
+// tart-guest-agent requires ("tart-version-" + digits-only semver, major
+// ≥ 2). Load-bearing: without it the agent repeatedly kills launchd and
+// macOS guests are unusable.
+const GuestAgentPortName = "tart-version-" + CompatVersion
+
 var (
 	// ErrUnsupportedDiskFormat: ASIF (macOS 26 tart) is rejected until vz
 	// attachment support is verified — a clear error beats a hung boot.

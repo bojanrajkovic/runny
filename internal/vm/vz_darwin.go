@@ -137,7 +137,8 @@ func (VZManager) bootLinux(ctx context.Context, bundle tart.Bundle, cfg *tart.Co
 }
 
 // finishBoot attaches the OS-independent devices (disk, NAT net with a fresh
-// MAC, optional virtiofs cache share), validates, and starts the guest. The
+// MAC, the guest-agent console port + vsock, optional virtiofs cache
+// share), validates, and starts the guest. The
 // start itself honors ctx: Machine's contract says nothing here may block
 // indefinitely, and the BOOT state's deadline only works if that is true —
 // Start is an unbounded call into Virtualization.framework, the same
@@ -167,6 +168,32 @@ func finishBoot(ctx context.Context, vmc *vz.VirtualMachineConfiguration, bundle
 	}
 	netDev.SetMACAddress(mac)
 	vmc.SetNetworkDevicesVirtualMachineConfiguration([]*vz.VirtioNetworkDeviceConfiguration{netDev})
+
+	// The cirruslabs images' tart-guest-agent SIGTERMs launchd on every
+	// ~10 s respawn unless it finds this console port; macOS 15 guests then
+	// cycle their userspace and the NIC flaps until SSH dies. This port
+	// alone fixes it (bisect-verified); no other tart device matters.
+	agentPort, err := vz.NewVirtioConsolePortConfiguration(
+		vz.WithVirtioConsolePortConfigurationName(tart.GuestAgentPortName),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("guest-agent console port: %w", err)
+	}
+	console, err := vz.NewVirtioConsoleDeviceConfiguration()
+	if err != nil {
+		return nil, fmt.Errorf("console device: %w", err)
+	}
+	console.SetVirtioConsolePortConfiguration(0, agentPort)
+	vmc.SetConsoleDevicesVirtualMachineConfiguration([]vz.ConsoleDeviceConfiguration{console})
+
+	// vsock keeps the agent's RPC listener from retrying every second; it is
+	// host-initiated only and runny never connects. No spice/clipboard port
+	// — needless surface on a CI host.
+	sock, err := vz.NewVirtioSocketDeviceConfiguration()
+	if err != nil {
+		return nil, fmt.Errorf("socket device: %w", err)
+	}
+	vmc.SetSocketDevicesVirtualMachineConfiguration([]vz.SocketDeviceConfiguration{sock})
 
 	if opts.RunnerShareDir != "" {
 		fs, err := vz.NewVirtioFileSystemDeviceConfiguration(ShareTag)

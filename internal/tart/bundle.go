@@ -55,22 +55,30 @@ type Config struct {
 	} `json:"display"`
 }
 
-// HardwareModel decodes the VZMacHardwareModel data representation.
+// HardwareModel decodes the VZMacHardwareModel data representation. Empty
+// decodes fail here: vz's *WithData constructors index &b[0] unguarded.
 func (c *Config) HardwareModel() ([]byte, error) {
 	b, err := base64.StdEncoding.DecodeString(c.HardwareModelB64)
 	if err != nil {
 		return nil, fmt.Errorf("decoding hardwareModel: %w", err)
 	}
+	if len(b) == 0 {
+		return nil, errors.New("decoding hardwareModel: empty data representation")
+	}
 	return b, nil
 }
 
-// ECID decodes the VZMacMachineIdentifier data representation. Note: clones
-// boot with a *fresh* identifier (two running macOS guests must not share
-// one); this value is only meaningful for the bundle as pulled.
+// ECID decodes the VZMacMachineIdentifier data representation. Boots reuse
+// this persisted identifier — a fresh one paired with the bundle's aux
+// storage boots the guest on the image's baked, stale RTC, and GitHub
+// rejects the runner's JIT token. Clones share it, as tart's clones do.
 func (c *Config) ECID() ([]byte, error) {
 	b, err := base64.StdEncoding.DecodeString(c.ECIDB64)
 	if err != nil {
 		return nil, fmt.Errorf("decoding ecid: %w", err)
+	}
+	if len(b) == 0 {
+		return nil, errors.New("decoding ecid: empty data representation")
 	}
 	return b, nil
 }

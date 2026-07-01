@@ -330,6 +330,9 @@ func parseHostKeys(out []byte) ([]ssh.PublicKey, error) {
 const provisionScriptDarwin = `set -e
 eval "$(/usr/libexec/path_helper -s)"
 [ -x /opt/homebrew/bin/brew ] && eval "$(/opt/homebrew/bin/brew shellenv)" || true
+# Surface the guest clock: a stale RTC breaks runner registration with an
+# opaque expired-token error.
+echo "runny: provision-clock $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 CACHE="/Volumes/My Shared Files"
 if [ ! -d "$CACHE" ]; then
   sudo mkdir -p /Volumes/runny-cache 2>/dev/null || true
@@ -347,6 +350,8 @@ exec ./run.sh --jitconfig "$(cat)"
 // linux: explicit virtiofs mount; installdependencies.sh covers images
 // missing libicu et al (idempotent, tolerated offline when deps exist).
 const provisionScriptLinux = `set -e
+# Same clock tripwire as the darwin script.
+echo "runny: provision-clock $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 CACHE=/mnt/runny-cache
 sudo mkdir -p "$CACHE"
 mountpoint -q "$CACHE" || sudo mount -t virtiofs runny-cache "$CACHE"

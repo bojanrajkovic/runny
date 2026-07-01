@@ -24,9 +24,7 @@ var _ Manager = VZManager{}
 
 // Boot builds the VZ configuration from the bundle's tart config and starts
 // the guest, dispatching on the bundle's OS: the Mac platform
-// path for darwin, EFI for linux. A fresh machine identifier and a fresh
-// random MAC are used — the bundle's own values may be shared by other
-// clones (spike-verified).
+// path for darwin, EFI for linux.
 func (m VZManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptions) (Machine, error) {
 	cfg, err := bundle.LoadConfig()
 	if err != nil {
@@ -52,9 +50,19 @@ func (VZManager) bootDarwin(ctx context.Context, bundle tart.Bundle, cfg *tart.C
 	if !hw.Supported() {
 		return nil, fmt.Errorf("bundle hardware model unsupported on this host")
 	}
-	machineID, err := vz.NewMacMachineIdentifier()
+	// Persisted identifier, never fresh — see tart.Config.ECID.
+	ecidData, err := cfg.ECID()
+	if err != nil {
+		return nil, err
+	}
+	machineID, err := vz.NewMacMachineIdentifierWithData(ecidData)
 	if err != nil {
 		return nil, fmt.Errorf("machine identifier: %w", err)
+	}
+	// vz returns a nil identifier (with nil error) for invalid data; the
+	// empty round-trip catches it here, attributed.
+	if len(machineID.DataRepresentation()) == 0 {
+		return nil, fmt.Errorf("machine identifier: bundle ecid is not a valid VZMacMachineIdentifier data representation")
 	}
 	aux, err := vz.NewMacAuxiliaryStorage(bundle.NVRAMPath())
 	if err != nil {

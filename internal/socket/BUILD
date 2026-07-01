@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "socket",
     srcs = [
+        "operator.go",
         "peercred.go",
         "peercred_darwin.go",
         "peercred_other.go",
@@ -11,9 +12,11 @@ go_library(
     importpath = "github.com/bojanrajkovic/runny/internal/socket",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/bounded",
         "//internal/cycle",
         "//internal/home",
         "//internal/logring",
+        "//internal/opacl",
         "//internal/statemachine",
         "//proto/runny/v1:runny",
         "@org_golang_google_grpc//:grpc",
@@ -39,14 +42,17 @@ go_library(
 go_test(
     name = "socket_test",
     srcs = [
+        "operator_test.go",
         "peercred_test.go",
         "socket_test.go",
     ],
     embed = [":socket"],
     deps = [
+        "//internal/bounded",
         "//internal/cycle",
         "//internal/home",
         "//internal/logring",
+        "//internal/opacl",
         "//internal/statemachine",
         "//proto/runny/v1:runny",
         "@org_golang_google_grpc//:grpc",

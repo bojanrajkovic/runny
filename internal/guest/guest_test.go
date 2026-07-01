@@ -46,6 +46,21 @@ func TestProvisionScriptDarwinPrimesPATH(t *testing.T) {
 	}
 }
 
+// Pin the provision-clock tripwire in both scripts so a refactor can't
+// silently drop it.
+func TestProvisionScriptsReportProvisionClock(t *testing.T) {
+	for _, s := range []struct {
+		name, script string
+	}{
+		{"darwin", provisionScriptDarwin},
+		{"linux", provisionScriptLinux},
+	} {
+		if !strings.Contains(s.script, `echo "runny: provision-clock $(date -u +%Y-%m-%dT%H:%M:%SZ)"`) {
+			t.Errorf("%s provision script must report the guest clock (runny: provision-clock ...)", s.name)
+		}
+	}
+}
+
 // The JIT config is a secret: it must reach run.sh over stdin (`$(cat)`), never
 // be interpolated into the command string, where x/crypto would fold it into
 // the exec error on a server-side reject and leak it to cycle.json and the

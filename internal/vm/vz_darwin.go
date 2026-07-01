@@ -24,9 +24,7 @@ var _ Manager = VZManager{}
 
 // Boot builds the VZ configuration from the bundle's tart config and starts
 // the guest, dispatching on the bundle's OS: the Mac platform
-// path for darwin, EFI for linux. A fresh machine identifier and a fresh
-// random MAC are used — the bundle's own values may be shared by other
-// clones (spike-verified).
+// path for darwin, EFI for linux.
 func (m VZManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptions) (Machine, error) {
 	cfg, err := bundle.LoadConfig()
 	if err != nil {
@@ -52,9 +50,19 @@ func (VZManager) bootDarwin(ctx context.Context, bundle tart.Bundle, cfg *tart.C
 	if !hw.Supported() {
 		return nil, fmt.Errorf("bundle hardware model unsupported on this host")
 	}
-	machineID, err := vz.NewMacMachineIdentifier()
+	// Persisted identifier, never fresh — see tart.Config.ECID.
+	ecidData, err := cfg.ECID()
+	if err != nil {
+		return nil, err
+	}
+	machineID, err := vz.NewMacMachineIdentifierWithData(ecidData)
 	if err != nil {
 		return nil, fmt.Errorf("machine identifier: %w", err)
+	}
+	// vz returns a nil identifier (with nil error) for invalid data; the
+	// empty round-trip catches it here, attributed.
+	if len(machineID.DataRepresentation()) == 0 {
+		return nil, fmt.Errorf("machine identifier: bundle ecid is not a valid VZMacMachineIdentifier data representation")
 	}
 	aux, err := vz.NewMacAuxiliaryStorage(bundle.NVRAMPath())
 	if err != nil {
@@ -129,7 +137,8 @@ func (VZManager) bootLinux(ctx context.Context, bundle tart.Bundle, cfg *tart.Co
 }
 
 // finishBoot attaches the OS-independent devices (disk, NAT net with a fresh
-// MAC, optional virtiofs cache share), validates, and starts the guest. The
+// MAC, the guest-agent console port + vsock, optional virtiofs cache
+// share), validates, and starts the guest. The
 // start itself honors ctx: Machine's contract says nothing here may block
 // indefinitely, and the BOOT state's deadline only works if that is true —
 // Start is an unbounded call into Virtualization.framework, the same
@@ -159,6 +168,32 @@ func finishBoot(ctx context.Context, vmc *vz.VirtualMachineConfiguration, bundle
 	}
 	netDev.SetMACAddress(mac)
 	vmc.SetNetworkDevicesVirtualMachineConfiguration([]*vz.VirtioNetworkDeviceConfiguration{netDev})
+
+	// The cirruslabs images' tart-guest-agent SIGTERMs launchd on every
+	// ~10 s respawn unless it finds this console port; macOS 15 guests then
+	// cycle their userspace and the NIC flaps until SSH dies. This port
+	// alone fixes it (bisect-verified); no other tart device matters.
+	agentPort, err := vz.NewVirtioConsolePortConfiguration(
+		vz.WithVirtioConsolePortConfigurationName(tart.GuestAgentPortName),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("guest-agent console port: %w", err)
+	}
+	console, err := vz.NewVirtioConsoleDeviceConfiguration()
+	if err != nil {
+		return nil, fmt.Errorf("console device: %w", err)
+	}
+	console.SetVirtioConsolePortConfiguration(0, agentPort)
+	vmc.SetConsoleDevicesVirtualMachineConfiguration([]vz.ConsoleDeviceConfiguration{console})
+
+	// vsock keeps the agent's RPC listener from retrying every second; it is
+	// host-initiated only and runny never connects. No spice/clipboard port
+	// — needless surface on a CI host.
+	sock, err := vz.NewVirtioSocketDeviceConfiguration()
+	if err != nil {
+		return nil, fmt.Errorf("socket device: %w", err)
+	}
+	vmc.SetSocketDevicesVirtualMachineConfiguration([]vz.SocketDeviceConfiguration{sock})
 
 	if opts.RunnerShareDir != "" {
 		fs, err := vz.NewVirtioFileSystemDeviceConfiguration(ShareTag)

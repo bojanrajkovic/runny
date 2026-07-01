@@ -17,6 +17,16 @@ import (
 // is a copy-on-write clone of exactly these.
 var BundleFiles = []string{"config.json", "disk.img", "nvram.bin"}
 
+// CompatVersion is the tart release whose bundle/OCI format this package
+// tracks, advertised to guests via GuestAgentPortName.
+const CompatVersion = "2.32.1"
+
+// GuestAgentPortName is the console-port name the cirruslabs images'
+// tart-guest-agent requires ("tart-version-" + digits-only semver, major
+// ≥ 2). Load-bearing: without it the agent repeatedly kills launchd and
+// macOS guests are unusable.
+const GuestAgentPortName = "tart-version-" + CompatVersion
+
 var (
 	// ErrUnsupportedDiskFormat: ASIF (macOS 26 tart) is rejected until vz
 	// attachment support is verified — a clear error beats a hung boot.
@@ -55,22 +65,30 @@ type Config struct {
 	} `json:"display"`
 }
 
-// HardwareModel decodes the VZMacHardwareModel data representation.
+// HardwareModel decodes the VZMacHardwareModel data representation. Empty
+// decodes fail here: vz's *WithData constructors index &b[0] unguarded.
 func (c *Config) HardwareModel() ([]byte, error) {
 	b, err := base64.StdEncoding.DecodeString(c.HardwareModelB64)
 	if err != nil {
 		return nil, fmt.Errorf("decoding hardwareModel: %w", err)
 	}
+	if len(b) == 0 {
+		return nil, errors.New("decoding hardwareModel: empty data representation")
+	}
 	return b, nil
 }
 
-// ECID decodes the VZMacMachineIdentifier data representation. Note: clones
-// boot with a *fresh* identifier (two running macOS guests must not share
-// one); this value is only meaningful for the bundle as pulled.
+// ECID decodes the VZMacMachineIdentifier data representation. Boots reuse
+// this persisted identifier — a fresh one paired with the bundle's aux
+// storage boots the guest on the image's baked, stale RTC, and GitHub
+// rejects the runner's JIT token. Clones share it, as tart's clones do.
 func (c *Config) ECID() ([]byte, error) {
 	b, err := base64.StdEncoding.DecodeString(c.ECIDB64)
 	if err != nil {
 		return nil, fmt.Errorf("decoding ecid: %w", err)
+	}
+	if len(b) == 0 {
+		return nil, errors.New("decoding ecid: empty data representation")
 	}
 	return b, nil
 }

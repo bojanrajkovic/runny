@@ -4,8 +4,41 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// The agent accepts only "tart-version-" + a digits-only MAJOR.MINOR.PATCH
+// (no signs, no leading zeros), major ≥ 2. Pin the advertised name.
+func TestGuestAgentPortNameSatisfiesContract(t *testing.T) {
+	version, ok := strings.CutPrefix(GuestAgentPortName, "tart-version-")
+	if !ok {
+		t.Fatalf("GuestAgentPortName %q must start with tart-version-", GuestAgentPortName)
+	}
+	if version != CompatVersion {
+		t.Fatalf("GuestAgentPortName %q must advertise CompatVersion %q", GuestAgentPortName, CompatVersion)
+	}
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		t.Fatalf("CompatVersion %q is not MAJOR.MINOR.PATCH", CompatVersion)
+	}
+	for _, p := range parts {
+		if p == "" {
+			t.Fatalf("CompatVersion %q has an empty component", CompatVersion)
+		}
+		for _, r := range p {
+			if r < '0' || r > '9' {
+				t.Fatalf("CompatVersion %q has a non-digit character in component %q", CompatVersion, p)
+			}
+		}
+		if len(p) > 1 && p[0] == '0' {
+			t.Fatalf("CompatVersion %q has a leading zero in component %q", CompatVersion, p)
+		}
+	}
+	if parts[0] == "0" || parts[0] == "1" {
+		t.Fatalf("CompatVersion %q has major < 2 — the guest agent ignores it", CompatVersion)
+	}
+}
 
 // realConfig is the literal config.json shape observed on a live tart 2.32
 // bundle (runner-1 on ix, 2026-06-09), values intact.

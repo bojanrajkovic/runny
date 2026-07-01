@@ -199,7 +199,7 @@ func TestGrantOperatorGrantsAndRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("opacl.List: %v", err)
 	}
-	if !hasOp(ops, testGrantee1) {
+	if !opacl.ContainsUser(ops, testGrantee1) {
 		t.Fatalf("granted operator missing from ACL: %+v", ops)
 	}
 
@@ -270,10 +270,10 @@ func TestRevokeOperatorRevokesAndRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("opacl.List: %v", err)
 	}
-	if hasOp(ops, testGrantee2) {
+	if opacl.ContainsUser(ops, testGrantee2) {
 		t.Errorf("revoked operator still present: %+v", ops)
 	}
-	if !hasOp(ops, testGrantee1) {
+	if !opacl.ContainsUser(ops, testGrantee1) {
 		t.Errorf("unrelated operator was removed: %+v", ops)
 	}
 
@@ -297,14 +297,7 @@ func TestRevokeOperatorRevokesAndRecords(t *testing.T) {
 // widening the List-then-mutate race window deterministically instead of
 // hoping real scheduling happens to interleave two goroutines badly.
 func revokePrecheckForTest(ops []opacl.Operator, uid uint32, u *user.User) error {
-	found := false
-	for _, op := range ops {
-		if op.UID == uid {
-			found = true
-			break
-		}
-	}
-	if !found {
+	if !opacl.ContainsUID(ops, uid) {
 		return status.Errorf(codes.FailedPrecondition, "%s is not an operator", u.Username)
 	}
 	if len(ops) <= 1 {
@@ -344,10 +337,10 @@ func TestMutateOperatorSerializesConcurrentRevokes(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, err1 = s.mutateOperator(ctx, testGrantee1, "revoke", "revoking", revokePrecheckForTest, slowRevoke)
+		_, err1 = s.mutateOperator(ctx, testGrantee1, "revoke", revokePrecheckForTest, slowRevoke)
 	}()
 	time.Sleep(50 * time.Millisecond) // let goroutine 1 acquire the lock and enter its slow apply
-	_, err2 = s.mutateOperator(ctx, testGrantee2, "revoke", "revoking", revokePrecheckForTest, opacl.Revoke)
+	_, err2 = s.mutateOperator(ctx, testGrantee2, "revoke", revokePrecheckForTest, opacl.Revoke)
 	wg.Wait()
 
 	if err1 == nil && err2 == nil {
@@ -424,13 +417,4 @@ func TestListOperatorsBootstrapHasNoAttribution(t *testing.T) {
 	if !found {
 		t.Fatalf("stamped operator missing from ListOperators: %+v", resp.GetOperators())
 	}
-}
-
-func hasOp(ops []opacl.Operator, username string) bool {
-	for _, op := range ops {
-		if op.User == username {
-			return true
-		}
-	}
-	return false
 }

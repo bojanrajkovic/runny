@@ -158,15 +158,13 @@ func (s *Server) GrantOperator(ctx context.Context, req *runnyv1.GrantOperatorRe
 
 func (s *Server) grantOperator(ctx context.Context, userArg string) (*runnyv1.OperatorMutation, error) {
 	return s.mutateOperator(
-		ctx, userArg, "grant", "granting",
+		ctx, userArg, "grant",
 		func(ops []opacl.Operator, uid uint32, u *user.User) error {
 			if u.Username == "root" || u.Uid == "0" {
 				return status.Error(codes.InvalidArgument, "refusing to grant root")
 			}
-			for _, op := range ops {
-				if op.UID == uid {
-					return status.Errorf(codes.FailedPrecondition, "%s is already an operator", u.Username)
-				}
+			if opacl.ContainsUID(ops, uid) {
+				return status.Errorf(codes.FailedPrecondition, "%s is already an operator", u.Username)
 			}
 			return nil
 		},
@@ -183,16 +181,9 @@ func (s *Server) RevokeOperator(ctx context.Context, req *runnyv1.RevokeOperator
 
 func (s *Server) revokeOperator(ctx context.Context, userArg string) (*runnyv1.OperatorMutation, error) {
 	return s.mutateOperator(
-		ctx, userArg, "revoke", "revoking",
+		ctx, userArg, "revoke",
 		func(ops []opacl.Operator, uid uint32, u *user.User) error {
-			found := false
-			for _, op := range ops {
-				if op.UID == uid {
-					found = true
-					break
-				}
-			}
-			if !found {
+			if !opacl.ContainsUID(ops, uid) {
 				return status.Errorf(codes.FailedPrecondition, "%s is not an operator", u.Username)
 			}
 			if len(ops) <= 1 {
@@ -209,11 +200,10 @@ func (s *Server) revokeOperator(ctx context.Context, userArg string) (*runnyv1.O
 // list the current operator set, run precheck (which returns the
 // grant-only "already an operator"/refuse-root or revoke-only "not an
 // operator"/last-operator errors), apply the opacl mutation under a bound,
-// and append an attribution record. recordAction ("grant"/"revoke") is the
-// operator-grants.jsonl verb; verbing ("granting"/"revoking") is only for
-// the apply-failure error message.
+// and append an attribution record. recordAction ("grant"/"revoke") is both
+// the operator-grants.jsonl verb and the apply-failure error message's verb.
 func (s *Server) mutateOperator(
-	ctx context.Context, userArg, recordAction, verbing string,
+	ctx context.Context, userArg, recordAction string,
 	precheck func(ops []opacl.Operator, uid uint32, u *user.User) error,
 	apply func(actx bounded.Context, homeDir, sock, username string) error,
 ) (*runnyv1.OperatorMutation, error) {
@@ -246,7 +236,7 @@ func (s *Server) mutateOperator(
 	actx, cancel := bounded.WithTimeout(ctx, aclOpTimeout)
 	defer cancel()
 	if err := apply(actx, s.HomeDir.String(), s.socketPath, u.Username); err != nil {
-		return nil, status.Errorf(codes.Internal, "%s %s: %v", verbing, u.Username, err)
+		return nil, status.Errorf(codes.Internal, "%s failed for %s: %v", recordAction, u.Username, err)
 	}
 
 	byUID, byUser := operatorIdentity(ctx)

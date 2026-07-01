@@ -57,7 +57,7 @@ func TestGrantListRevokeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List after grant: %v", err)
 	}
-	if !hasOperator(ops, testGrantee) {
+	if !ContainsUser(ops, testGrantee) {
 		t.Fatalf("granted operator %q not found: %+v", testGrantee, ops)
 	}
 
@@ -68,7 +68,7 @@ func TestGrantListRevokeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List after revoke: %v", err)
 	}
-	if hasOperator(ops, testGrantee) {
+	if ContainsUser(ops, testGrantee) {
 		t.Fatalf("revoked operator %q still present: %+v", testGrantee, ops)
 	}
 }
@@ -131,19 +131,10 @@ func TestListExcludesReadOnlyACE(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if !hasOperator(ops, testGrantee) {
+	if !ContainsUser(ops, testGrantee) {
 		t.Errorf("real operator missing: %+v", ops)
 	}
-	if hasOperator(ops, testReadOnlyGrantee) {
+	if ContainsUser(ops, testReadOnlyGrantee) {
 		t.Errorf("read-only (no write) ACE counted as an operator: %+v", ops)
 	}
-}
-
-func hasOperator(ops []Operator, username string) bool {
-	for _, op := range ops {
-		if op.User == username {
-			return true
-		}
-	}
-	return false
 }

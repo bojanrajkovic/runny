@@ -5,6 +5,7 @@ import (
 	"net"
 
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/peer"
 )
 
@@ -26,16 +27,21 @@ func (peerAuth) AuthType() string { return "peercred" }
 
 // peerCreds is a server-only credentials.TransportCredentials: it reads the
 // connecting peer's uid during ServerHandshake and otherwise does no
-// handshaking at all (like insecure.NewCredentials, it wraps the conn without
-// exchanging bytes). ClientHandshake exists only to satisfy the interface —
-// every runny client (runnyctl, the app) dials with insecure.NewCredentials,
-// never this type.
-type peerCreds struct{}
+// handshaking at all, like insecure.NewCredentials — which it embeds to
+// inherit ClientHandshake/OverrideServerName unchanged (every runny client
+// dials with insecure.NewCredentials, never this type, so ClientHandshake is
+// never actually exercised). Info and Clone are overridden rather than left
+// to promote: unlike the client-only fields above, grpc-go's server path
+// could plausibly clone or introspect server creds in a future version, and a
+// promoted Clone would silently return a bare insecure value that has lost
+// ServerHandshake entirely — a security-relevant regression with no error and
+// no obvious test failure, worth the two extra methods to foreclose.
+type peerCreds struct {
+	credentials.TransportCredentials
+}
 
-func newPeerCreds() credentials.TransportCredentials { return peerCreds{} }
-
-func (peerCreds) ClientHandshake(_ context.Context, _ string, conn net.Conn) (net.Conn, credentials.AuthInfo, error) {
-	return conn, peerAuth{CommonAuthInfo: credentials.CommonAuthInfo{SecurityLevel: credentials.NoSecurity}}, nil
+func newPeerCreds() credentials.TransportCredentials {
+	return peerCreds{TransportCredentials: insecure.NewCredentials()}
 }
 
 func (peerCreds) ServerHandshake(conn net.Conn) (net.Conn, credentials.AuthInfo, error) {
@@ -56,9 +62,7 @@ func (peerCreds) Info() credentials.ProtocolInfo {
 	return credentials.ProtocolInfo{SecurityProtocol: "peercred"}
 }
 
-func (peerCreds) Clone() credentials.TransportCredentials { return peerCreds{} }
-
-func (peerCreds) OverrideServerName(string) error { return nil }
+func (c peerCreds) Clone() credentials.TransportCredentials { return c }
 
 // peerUID extracts the calling peer's kernel-authenticated uid set by
 // peerCreds during ServerHandshake. ok is false whenever it is not known —

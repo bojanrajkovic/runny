@@ -404,6 +404,15 @@ message InjectedKey {
   // are mid-job contamination events (outcome "armed" = the key landed
   // while the job ran).
   string state = 7;
+  // The kernel-authenticated uid of the peer that ran `runnyctl debug`, read
+  // server-side via SO_PEERCRED — never client-supplied. Unset (no has-bit)
+  // when the daemon could not read it (non-darwin, or a cred-read failure);
+  // distinct from uid 0, which is a real possible peer (root bypasses the
+  // socket's 0600 mode).
+  optional uint32 operator_uid = 8;
+  // The operator_uid's username, resolved best-effort at request time; empty
+  // if the uid could not be resolved to an account.
+  string operator_user = 9;
 }
 
 message StateRecord {

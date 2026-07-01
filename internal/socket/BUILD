@@ -48,11 +48,9 @@ go_test(
     ],
     embed = [":socket"],
     deps = [
-        "//internal/bounded",
         "//internal/cycle",
         "//internal/home",
         "//internal/logring",
-        "//internal/opacl",
         "//internal/statemachine",
         "//proto/runny/v1:runny",
         "@org_golang_google_grpc//:grpc",
@@ -64,5 +62,15 @@ go_test(
         "@org_golang_google_grpc//test/bufconn",
         "@org_golang_google_protobuf//types/known/durationpb",
         "@org_golang_x_crypto//ssh",
-    ],
+    ] + select({
+        "@rules_go//go/platform:darwin": [
+            "//internal/bounded",
+            "//internal/opacl",
+        ],
+        "@rules_go//go/platform:ios": [
+            "//internal/bounded",
+            "//internal/opacl",
+        ],
+        "//conditions:default": [],
+    }),
 )

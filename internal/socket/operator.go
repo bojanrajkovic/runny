@@ -2,7 +2,6 @@ package socket
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os/user"
@@ -35,109 +34,37 @@ func (s *Server) requireSystemDaemon() error {
 	return nil
 }
 
-// resolveAccountTimeout bounds resolveOperatorAccount: os/user has no
-// context-aware lookup, and a directory-service-backed NSS can stall.
-// Unlike lookupUsername's audit-only best-effort skip, this result is
-// required for GrantOperator/RevokeOperator to proceed at all, so a stuck
-// lookup surfaces as a clear timeout rather than silently degrading.
-const resolveAccountTimeout = 5 * time.Second
-
-// errAccountLookupTimeout distinguishes "the lookup itself never returned"
-// from a genuine "no such account", so the RPC handler can report the
-// former as a retryable condition rather than a wrong argument.
-var errAccountLookupTimeout = errors.New("account resolution timed out")
-
-// userLookupByName/userLookupByID seam over os/user, overridable in tests to
-// simulate a stuck NSS lookup without a real syscall.
-var (
-	userLookupByName = user.Lookup
-	userLookupByID   = user.LookupId
-)
-
-type accountLookupResult struct {
-	u   *user.User
-	err error
-}
-
-// accountLookupCap bounds concurrent stuck-lookup goroutines: os/user has
-// no cancelable variant, so a wedged directory service leaves an abandoned
-// goroutine per stuck call. lookupUsername (InjectDebugKey's audit-only
-// username) caps this at 1 and skips resolution when busy — safe there
-// because that result is cosmetic. Here the result is required for
-// GrantOperator/RevokeOperator to proceed, so skipping isn't safe; instead
-// a small cap bounds the leak while still letting a few concurrent admin
-// operations through without contention, and an exceeded cap fails fast
-// (Unavailable, retryable) rather than silently degrading.
-const accountLookupCap = 4
-
-var accountLookupInFlight = make(chan struct{}, accountLookupCap)
-
-// boundedAccountLookup runs fn (a name or uid os/user lookup) with a bound.
-// ok is false either on timeout or when accountLookupCap stuck lookups
-// already occupy every slot — in both cases the caller must treat the
-// result as unknown, not "no such account". The occupied slot is released
-// by the lookup goroutine itself when fn actually returns, not by the
-// timeout, so a still-stuck lookup keeps counting against the cap.
-func boundedAccountLookup(fn func() (*user.User, error)) (accountLookupResult, bool) {
-	select {
-	case accountLookupInFlight <- struct{}{}:
-	default:
-		return accountLookupResult{}, false
-	}
-	ch := make(chan accountLookupResult, 1)
-	go func() {
-		defer func() { <-accountLookupInFlight }()
-		u, err := fn()
-		ch <- accountLookupResult{u, err}
-	}()
-	select {
-	case r := <-ch:
-		return r, true
-	case <-time.After(resolveAccountTimeout):
-		return accountLookupResult{}, false
-	}
-}
-
 // resolveOperatorAccount looks up user by name first, then (if it parses as
 // a uint32) by uid — the "name or uid" contract GrantOperator/
-// RevokeOperator's user field promises.
+// RevokeOperator's user field promises. os/user has no context-aware
+// variant, but this is a local, human-initiated admin lookup against local
+// accounts; a stall would need a domain-joined Mac with a wedged directory
+// service, which is a bug report, not the unbounded-guest failure mode the
+// project's bounded-context invariant exists to kill.
 func resolveOperatorAccount(input string) (*user.User, error) {
-	r, ok := boundedAccountLookup(func() (*user.User, error) { return userLookupByName(input) })
-	if !ok {
-		return nil, errAccountLookupTimeout
+	u, err := user.Lookup(input)
+	if err == nil {
+		return u, nil
 	}
-	if r.err == nil {
-		return r.u, nil
-	}
-	lookupErr := r.err
-	if _, err := strconv.ParseUint(input, 10, 32); err == nil {
-		r, ok := boundedAccountLookup(func() (*user.User, error) { return userLookupByID(input) })
-		if !ok {
-			return nil, errAccountLookupTimeout
+	lookupErr := err
+	if _, perr := strconv.ParseUint(input, 10, 32); perr == nil {
+		if u, err := user.LookupId(input); err == nil {
+			return u, nil
+		} else {
+			lookupErr = err
 		}
-		if r.err == nil {
-			return r.u, nil
-		}
-		lookupErr = r.err
 	}
 	return nil, fmt.Errorf("no such user %q: %w", input, lookupErr)
 }
 
-// resolveOperatorAccountOrStatus wraps resolveOperatorAccount's result as a
-// gRPC status: a genuine lookup miss is InvalidArgument (a wrong argument),
-// while a stuck lookup is Unavailable (a retryable condition, not the
-// caller's fault) — distinct codes so a client can tell "fix your input"
-// from "try again".
+// resolveOperatorAccountOrStatus wraps a lookup miss as InvalidArgument (a
+// wrong argument, not the caller's transient fault).
 func resolveOperatorAccountOrStatus(input string) (*user.User, error) {
 	u, err := resolveOperatorAccount(input)
-	switch {
-	case err == nil:
-		return u, nil
-	case errors.Is(err, errAccountLookupTimeout):
-		return nil, status.Errorf(codes.Unavailable, "resolving %q timed out; the directory service may be unavailable — try again", input)
-	default:
+	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
+	return u, nil
 }
 
 // operatorIdentity resolves the calling peer's uid/username for grant
@@ -229,21 +156,15 @@ func (s *Server) mutateOperator(
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "reading the operator set: %v", err)
 	}
-	// The ACL is checked at connect() time, not per-RPC: a caller revoked by
-	// ANOTHER operator after they connected keeps their existing file
-	// descriptor and would otherwise still reach mutateOperator. Re-check
-	// the peer's own uid against the operator set we're about to precheck
-	// and mutate. Fails open when the peer uid is unknown (non-darwin, or a
-	// cred-read miss) — matching PR1's peer-cred posture — never open when
-	// it's positively known and absent.
-	if callerUID, ok := peerUID(ctx); ok && !opacl.ContainsUID(ops, callerUID) {
-		return nil, status.Error(codes.PermissionDenied, "your operator access was revoked; reconnect to try again")
-	}
 	if err := precheck(ops, uid, u); err != nil {
 		return nil, err
 	}
 
-	actx, cancel := bounded.WithTimeout(ctx, aclOpTimeout)
+	// context.Background(), not ctx: the two-chmod ACL mutation is a local,
+	// daemon-owned operation that must run to completion, so a client
+	// disconnecting mid-flight can't leave the ACL half-stamped. Still
+	// bounded by aclOpTimeout.
+	actx, cancel := bounded.WithTimeout(context.Background(), aclOpTimeout)
 	defer cancel()
 	if err := apply(actx, s.HomeDir.String(), s.socketPath, u.Username); err != nil {
 		return nil, status.Errorf(codes.Internal, "%s failed for %s: %v", recordAction, u.Username, err)

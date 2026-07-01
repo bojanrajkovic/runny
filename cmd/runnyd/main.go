@@ -252,11 +252,14 @@ func run() error {
 			CloneFile: clonefile.Clone,
 			RemoveAll: os.RemoveAll,
 			GitHub:    gh,
-			Dial: guest.Dialer{SSH: sshx.Config{
-				User:     p.SSHUser,
-				Password: p.SSHPassword,
-				Timeout:  p.SSHTimeout.D(),
-			}},
+			Dial: guest.Dialer{
+				SSH: sshx.Config{
+					User:     p.SSHUser,
+					Password: p.SSHPassword,
+					Timeout:  p.SSHTimeout.D(),
+				},
+				Hardening: p.SSHHardening,
+			},
 			Log: logger,
 			OnRunnerLine: func(slot, cycleID, line string) {
 				runnerRing.Add(logring.Entry{

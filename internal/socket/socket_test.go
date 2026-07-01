@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -181,6 +182,56 @@ func TestLookupUsernameResolvesQuickly(t *testing.T) {
 func TestLookupUsernameUnknownUIDIsEmpty(t *testing.T) {
 	if got := lookupUsername(4294967295); got != "" {
 		t.Errorf("lookupUsername(unknown) = %q, want empty", got)
+	}
+}
+
+// TestLookupUsernameCapsStuckGoroutines pins the Codex-review fix: a lookup
+// that never returns (a wedged directory service) must not let every
+// subsequent debug-key request leak another goroutine stuck in the same
+// call. Only one lookup may be in flight; concurrent callers skip resolution
+// entirely until it completes and frees the slot.
+func TestLookupUsernameCapsStuckGoroutines(t *testing.T) {
+	release := make(chan struct{})
+	var calls atomic.Int32
+	orig := lookupID
+	lookupID = func(id string) (*user.User, error) {
+		calls.Add(1)
+		<-release // simulate a wedged NSS backend
+		return &user.User{Username: "resolved"}, nil
+	}
+	t.Cleanup(func() { lookupID = orig })
+
+	// First call: the goroutine blocks past usernameLookupBound, so the call
+	// returns "" but the underlying lookup is still stuck holding the slot.
+	if got := lookupUsername(501); got != "" {
+		t.Errorf("first (stuck) call = %q, want empty (times out)", got)
+	}
+
+	// While stuck, a second call must NOT spawn another lookupID goroutine.
+	if got := lookupUsername(502); got != "" {
+		t.Errorf("second call while stuck = %q, want empty (slot occupied)", got)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("lookupID called %d times while one lookup was stuck, want 1 (no pile-up)", n)
+	}
+
+	// Unstick the first lookup; its goroutine frees the slot shortly after,
+	// asynchronously — poll until a fresh call gets through rather than
+	// racing a fixed sleep against the scheduler.
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	var got string
+	for time.Now().Before(deadline) {
+		if got = lookupUsername(503); got == "resolved" {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got != "resolved" {
+		t.Fatalf("call after unsticking = %q, want %q (slot never freed?)", got, "resolved")
+	}
+	if n := calls.Load(); n != 2 {
+		t.Errorf("lookupID called %d times total, want 2 (slot reused once freed)", n)
 	}
 }
 

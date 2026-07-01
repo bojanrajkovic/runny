@@ -638,20 +638,42 @@ func (s *Server) Doctor(ctx context.Context, _ *runnyv1.DoctorRequest) (*runnyv1
 	return resp, nil
 }
 
-// usernameLookupBound caps lookupUsername: os/user.LookupId has no
-// context-aware variant and can stall on a directory-service-backed NSS
-// (LDAP/AD-joined hosts), which must never delay an operator's actual
-// "shell in now" access (ADR-0014) for the sake of a cosmetic display field.
+// usernameLookupBound caps how long InjectDebugKey waits on lookupUsername:
+// os/user.LookupId has no context-aware variant and can stall on a
+// directory-service-backed NSS (LDAP/AD-joined hosts), which must never
+// delay an operator's actual "shell in now" access (ADR-0014) for the sake
+// of a cosmetic display field.
 const usernameLookupBound = 2 * time.Second
 
+// lookupID is the seam lookupUsername calls; overridable in tests to
+// simulate a stuck NSS lookup without a real syscall.
+var lookupID = user.LookupId
+
+// lookupInFlight bounds the lookup goroutines lookupUsername can leave
+// running past usernameLookupBound to 1: LookupId cannot be cancelled once
+// started, so a wedged directory service means an abandoned goroutine stays
+// blocked indefinitely. Without this cap, every debug-key request during an
+// outage would leak another one — unbounded, the exact failure class the
+// timeout was meant to close. The single slot is released by the lookup
+// goroutine itself when LookupId actually returns, not by the timeout, so a
+// still-stuck lookup keeps occupying it and concurrent callers skip
+// resolution entirely rather than piling on.
+var lookupInFlight = make(chan struct{}, 1)
+
 // lookupUsername resolves uid to a username, best-effort: "" on any
-// resolution failure OR if it does not return within usernameLookupBound
-// (the lookup goroutine is abandoned, never awaited).
+// resolution failure, on a usernameLookupBound timeout, or when a previous
+// lookup is still stuck (see lookupInFlight).
 func lookupUsername(uid uint32) string {
+	select {
+	case lookupInFlight <- struct{}{}:
+	default:
+		return ""
+	}
 	ch := make(chan string, 1)
 	go func() {
+		defer func() { <-lookupInFlight }()
 		name := ""
-		if u, err := user.LookupId(strconv.FormatUint(uint64(uid), 10)); err == nil {
+		if u, err := lookupID(strconv.FormatUint(uint64(uid), 10)); err == nil {
 			name = u.Username
 		}
 		ch <- name

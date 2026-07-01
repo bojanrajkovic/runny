@@ -47,6 +47,21 @@ service RunnyService {
   // and arm a DEBUG hold for job end. In DEBUG: extend the hold / add a
   // key. Per-guest, per-cycle: the key dies at teardown.
   rpc InjectDebugKey(InjectDebugKeyRequest) returns (InjectDebugKeyResponse);
+  // Grant another account operator status on the control socket: an
+  // inheriting ACL entry on the home dir (future artifacts) and the live
+  // socket (immediate). No root, no restart — the daemon owns its home.
+  // Authorization is reaching this RPC at all (an existing operator).
+  // System-daemon deployments only; a per-user home has a single owner.
+  rpc GrantOperator(GrantOperatorRequest) returns (OperatorMutation);
+  // Revoke an account's operator status. Refuses to remove the last
+  // operator (recover via `install-daemon`). New connections are refused
+  // immediately; a read-only stream already open (WatchStatus) may linger
+  // until it closes.
+  rpc RevokeOperator(RevokeOperatorRequest) returns (OperatorMutation);
+  // List the currently-granted operator accounts, read from the home dir's
+  // ACL (the authoritative set) and joined with the grant attribution log
+  // for granted-by/when.
+  rpc ListOperators(ListOperatorsRequest) returns (ListOperatorsResponse);
   // Plan (and optionally apply) a prune of stale image bundles and runner
   // tarballs. Safe to call while the daemon is running: bundles whose digest
   // is held by a live slot are never removed. Defaults to dry-run (apply=false).
@@ -551,4 +566,33 @@ message InjectDebugKeyResponse {
   // True when the key was installed into a RUNNING job and a post-job DEBUG
   // hold was armed. The key is usable NOW.
   bool armed = 6;
+}
+
+message GrantOperatorRequest {
+  string user = 1;  // account name or uid
+}
+
+message RevokeOperatorRequest {
+  string user = 1;  // account name or uid
+}
+
+message OperatorMutation {
+  uint32 uid = 1;
+  string user = 2;
+}
+
+message ListOperatorsRequest {}
+
+message ListOperatorsResponse {
+  repeated Operator operators = 1;
+}
+
+message Operator {
+  uint32 uid = 1;
+  string user = 2;
+  // Empty when this account is the install-time bootstrap operator, not an
+  // RPC grant (operator-grants.jsonl carries no record for it).
+  string granted_by = 3;
+  // Unset for the same reason granted_by is empty.
+  google.protobuf.Timestamp granted_at = 4;
 }

@@ -58,9 +58,13 @@ nothing:
   daemon exit into a hang, the same guarantee [ADR-0011](../architecture-decisions/0011-bounded-contexts.md)
   gives every other guest-facing operation.
 
-### What this issue lands vs. what's still to come
+### What this is not
 
-This is providers, resource attribution, and bounded shutdown only. Turning
-`obs.Event` into actual spans and metrics — the trace emitter and metrics
-emitter in the diagram above — is separate, later work that plugs into this
-runtime; an unconfigured daemon already runs identically with or without it.
+`internal/telemetry` owns providers, resource attribution, and bounded
+shutdown — not emission. The trace emitter and metrics emitter in the
+diagram above, which fold `obs.Event` into actual spans and metrics, are
+separate consumers that install onto the providers this runtime sets up;
+they do not live in this package. Until they exist, a configured endpoint
+gets a live OTLP connection carrying no traffic — the connection and its
+resource attributes are real, the data isn't yet. An unconfigured daemon is
+unaffected either way: no SDK, no goroutines, no egress.

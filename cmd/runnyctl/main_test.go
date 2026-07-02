@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/bojanrajkovic/runny/internal/cycle"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
@@ -393,19 +394,23 @@ func TestRenderCycleShowsImageRef(t *testing.T) {
 // TestRenderCycleShowsEnding pins issue #229's `why` requirement: a recycled
 // or shutdown-interrupted cycle must read as such at a glance, not as a
 // failure with a suspicious error string, even though Result is "failure"
-// for both (the timeline stays truthful).
+// for both (the timeline stays truthful). The reason the operator typed
+// (carried in FailureError) must survive: `runnyctl recycle -reason` exists
+// so `why` can answer "why was this healthy slot recycled". The ending values
+// come from the real cycle constants, not string literals — renaming a
+// constant must turn this red, not silently unstyle `why`.
 func TestRenderCycleShowsEnding(t *testing.T) {
 	now := timestamppb.New(time.Now())
 
 	cases := []struct {
 		name   string
 		ending string
-		want   string
+		wants  []string
 		avoid  string
 	}{
-		{"recycle", "recycle", "recycled by operator", "✗"},
-		{"shutdown", "shutdown", "daemon shutdown", "✗"},
-		{"wedge still reads as a failure", "wedge", "✗", ""},
+		{"recycle", string(cycle.EndingRecycle), []string{"recycled by operator", "image bump"}, "✗"},
+		{"shutdown", string(cycle.EndingShutdown), []string{"daemon shutdown", "image bump"}, "✗"},
+		{"wedge still reads as a failure", string(cycle.EndingWedge), []string{"✗"}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -417,8 +422,10 @@ func TestRenderCycleShowsEnding(t *testing.T) {
 				Started: now, Finished: now,
 			})
 			got := buf.String()
-			if !strings.Contains(got, tc.want) {
-				t.Errorf("ending=%q: output missing %q:\n%s", tc.ending, tc.want, got)
+			for _, want := range tc.wants {
+				if !strings.Contains(got, want) {
+					t.Errorf("ending=%q: output missing %q:\n%s", tc.ending, want, got)
+				}
 			}
 			if tc.avoid != "" && strings.Contains(got, tc.avoid) {
 				t.Errorf("ending=%q: output must not contain %q (would read as a suspicious failure):\n%s", tc.ending, tc.avoid, got)

@@ -28,6 +28,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 
+	"github.com/bojanrajkovic/runny/internal/cycle"
 	"github.com/bojanrajkovic/runny/internal/home"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
@@ -831,15 +832,17 @@ func (c *ctl) why(ctx context.Context, slot string, cycles int) error {
 func (c *ctl) renderCycle(rec *runnyv1.CycleRecord) {
 	// Result — not Ending — gates the success verdict: runCycle always sets
 	// both together, but why exists to surface failure truthfully, so a
-	// desynced record must never render a false ✓.
+	// desynced record must never render a false ✓. The failure error rides
+	// along on every non-success verdict: for a recycle it carries the reason
+	// the operator typed — the whole point of recording one.
 	verdict := "✓ success"
 	if rec.GetResult() != "success" {
 		verdict = fmt.Sprintf("✗ failed in %s: %s", rec.GetFailureState(), rec.GetFailureError())
 		switch rec.GetEnding() {
-		case "recycle":
-			verdict = fmt.Sprintf("↻ recycled by operator in %s", rec.GetFailureState())
-		case "shutdown":
-			verdict = fmt.Sprintf("⏻ interrupted by daemon shutdown in %s", rec.GetFailureState())
+		case string(cycle.EndingRecycle):
+			verdict = fmt.Sprintf("↻ recycled by operator in %s: %s", rec.GetFailureState(), rec.GetFailureError())
+		case string(cycle.EndingShutdown):
+			verdict = fmt.Sprintf("⏻ interrupted by daemon shutdown in %s: %s", rec.GetFailureState(), rec.GetFailureError())
 		}
 	}
 	fmt.Fprintf(c.out, "cycle %s on %s — %s\n", rec.GetCycleId(), rec.GetSlot(), verdict)

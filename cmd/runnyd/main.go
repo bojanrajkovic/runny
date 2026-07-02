@@ -34,8 +34,13 @@ import (
 	"github.com/bojanrajkovic/runny/internal/sshx"
 	"github.com/bojanrajkovic/runny/internal/statemachine"
 	"github.com/bojanrajkovic/runny/internal/tart"
+	"github.com/bojanrajkovic/runny/internal/telemetry"
 	"github.com/bojanrajkovic/runny/internal/versioncore"
 )
+
+// otlpShutdownDeadline bounds provider flush at daemon exit: a dead
+// collector must not turn shutdown into a hang.
+const otlpShutdownDeadline = 5 * time.Second
 
 var version = "dev"
 
@@ -214,6 +219,21 @@ func run() error {
 		return err
 	}
 	logger.Info("runner namespace", "prefix", prefix)
+
+	// Off by default: cfg.Observability.OTLP.Endpoint == "" installs nothing
+	// and otlpShutdown is a no-op, so an unconfigured daemon runs identically
+	// to one built without this package.
+	otlpShutdown, err := telemetry.Setup(ctx, cfg.Observability.OTLP, version, prefix, logger)
+	if err != nil {
+		return fmt.Errorf("telemetry: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := bounded.WithTimeout(context.Background(), otlpShutdownDeadline)
+		defer cancel()
+		if err := otlpShutdown(shutdownCtx); err != nil {
+			logger.Error("telemetry shutdown", "err", err)
+		}
+	}()
 
 	// Registration sweep: cold start owns the world. Offline
 	// registrations carrying our prefix, on every target. (The vms-dir sweep

@@ -1293,7 +1293,7 @@ func TestStopFailureWedgesSlot(t *testing.T) {
 		t.Errorf("result = %s, want failure", rec.Result)
 	}
 	if rec.Ending != cycle.EndingWedge {
-		t.Errorf("Ending = %q, want %q — a wedge is never benign, even though the cycle succeeded before teardown", rec.Ending, cycle.EndingWedge)
+		t.Errorf("Ending = %q, want %q — the wedge outranks the AWAIT_IP failure that preceded it", rec.Ending, cycle.EndingWedge)
 	}
 	var tr *cycle.StateRecord
 	for i := range rec.States {
@@ -1307,6 +1307,56 @@ func TestStopFailureWedgesSlot(t *testing.T) {
 	// The undead guest still holds the clone bundle; it must not be deleted.
 	if _, err := os.Stat(h.dir.VMDir("runner-1")); err != nil {
 		t.Errorf("vm dir was deleted out from under a live guest: %v", err)
+	}
+}
+
+// TestSuccessThenWedgeIsWedge pins the ok && wedged corner: a cycle whose job
+// completed cleanly but whose teardown could not kill the guest is a wedge,
+// not a success — the zombie occupies a guest-cap slot regardless of how well
+// the job went. Result is failure (truthful timeline), Ending is wedge (not
+// success, which the pre-teardown cycle earned), and the failure streak
+// escalates: a wedge is never benign.
+func TestSuccessThenWedgeIsWedge(t *testing.T) {
+	h := newHarness(t, nil)
+	h.vmF.machine.stopErr = errors.New("force stop failed with guest still running")
+	cancel := h.start(t)
+	_ = cancel
+
+	h.waitState(t, StateProvision)
+	h.proc.say(markerListening)
+	h.waitState(t, StateListening)
+	h.proc.say("Running job: build")
+	h.waitState(t, StateJob)
+	h.proc.say("Job build completed with result: Succeeded")
+	h.proc.exit(0)
+	h.waitState(t, StateTeardown)
+
+	// The slot must park on its own — Run exits without ctx cancellation.
+	select {
+	case <-h.runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("slot did not park after the guest survived force-stop")
+	}
+
+	st := h.slot.Status()
+	if !st.Wedged {
+		t.Error("status.Wedged = false, want true")
+	}
+	if st.ConsecutiveFailures != 1 {
+		t.Errorf("failures = %d, want 1 — a wedge escalates the streak even after a clean job", st.ConsecutiveFailures)
+	}
+
+	rec := h.records(t)[0]
+	if rec.Result != cycle.ResultFailure {
+		t.Errorf("result = %s, want failure", rec.Result)
+	}
+	if rec.Ending != cycle.EndingWedge {
+		t.Errorf("Ending = %q, want %q — the wedge outranks the success the cycle earned before teardown", rec.Ending, cycle.EndingWedge)
+	}
+	// The job really did run and complete — that is what makes this the
+	// ok && wedged corner rather than a re-run of the failure-then-wedge test.
+	if rec.Job == nil {
+		t.Error("job not recorded; this test must exercise the success-then-wedge path")
 	}
 }
 

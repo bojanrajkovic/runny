@@ -3430,3 +3430,125 @@ func TestObsEventsNilHookIsNoop(t *testing.T) {
 		t.Errorf("got %d events with no Events hook installed, want 0", n)
 	}
 }
+
+// TestObsEventsTeardownActions pins the teardown action wrappers on a
+// failure path with degraded cleanups: stop succeeds while clone-remove and
+// deregister fail, and the action events carry those distinct outcomes —
+// the per-sub-step detail cycle.json can only express as one warn on
+// TEARDOWN.
+func TestObsEventsTeardownActions(t *testing.T) {
+	h := newHarness(t, nil)
+	h.gh.deleteErr = errors.New("github 500")
+
+	cancel := h.start(t)
+	h.waitState(t, StateProvision)
+	h.proc.say(markerListening)
+	h.waitState(t, StateListening)
+
+	// Fail the clone deletion only now — CLONE's own pre-clone cleanup
+	// routes through the same removeAll seam earlier in the cycle.
+	h.setRemoveAll(func(string) error { return errors.New("clone busy") })
+	t.Cleanup(func() { h.setRemoveAll(os.RemoveAll) })
+
+	// No job ran, but a runner is registered → teardown deregisters (and fails).
+	if !h.slot.Command(Command{Kind: CmdRecycle, Reason: "image bump"}) {
+		t.Fatal("command rejected")
+	}
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+	cancel()
+	<-h.runDone
+
+	var rec *cycle.Record
+	for _, r := range h.records(t) {
+		if r.Failure != nil && strings.Contains(r.Failure.Error, "recycled by operator") {
+			rec = r
+			break
+		}
+	}
+	if rec == nil {
+		t.Fatal("no operator-recycle record found")
+	}
+
+	got := map[string]obs.Outcome{}
+	for _, e := range h.eventsForCycle(rec.CycleID) {
+		if e.Kind != obs.KindActionEnded || e.Step != string(StateTeardown) {
+			continue
+		}
+		got[e.Action.Name] = e.Action.Outcome
+	}
+	want := map[string]obs.Outcome{
+		obs.ActionStop:        obs.OutcomeOK,
+		obs.ActionCloneRemove: obs.OutcomeError,
+		obs.ActionDeregister:  obs.OutcomeError,
+	}
+	for name, outcome := range want {
+		if got[name] != outcome {
+			t.Errorf("teardown action %q outcome = %q, want %q (all actions: %v)", name, got[name], outcome, got)
+		}
+	}
+}
+
+// TestObsEventsRotateActionAndRunnerInfo pins the SECURE_SSH rotate action
+// (with its hardening-mode attribute) and the MINT_JIT runner-info event on
+// a clean cycle.
+func TestObsEventsRotateActionAndRunnerInfo(t *testing.T) {
+	h := newHarness(t, nil)
+	cancel := h.start(t)
+
+	h.waitState(t, StateProvision)
+	h.proc.say(markerListening)
+	h.waitState(t, StateListening)
+	h.proc.say("Running job: build")
+	h.waitState(t, StateJob)
+	h.proc.say("Job build completed with result: Succeeded")
+	h.proc.exit(0)
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+	cancel()
+	<-h.runDone
+
+	recs := h.records(t)
+	var rec *cycle.Record
+	for _, r := range recs {
+		if r.Result == cycle.ResultSuccess {
+			rec = r
+		}
+	}
+	if rec == nil {
+		t.Fatalf("no success record in %d records", len(recs))
+	}
+
+	var sawRotate, sawRunnerID bool
+	for _, e := range h.eventsForCycle(rec.CycleID) {
+		switch {
+		case e.Kind == obs.KindActionEnded && e.Action.Name == obs.ActionRotate:
+			sawRotate = true
+			if e.Step != string(StateSecureSSH) {
+				t.Errorf("rotate action step = %q, want SECURE_SSH", e.Step)
+			}
+			if len(e.Action.Attrs) != 1 || e.Action.Attrs[0].Key != "runny.hardening" {
+				t.Errorf("rotate attrs = %+v, want the hardening mode", e.Action.Attrs)
+			}
+		case e.Kind == obs.KindRunnerInfo:
+			sawRunnerID = true
+			if e.Step != string(StateMintJIT) {
+				t.Errorf("runner-info step = %q, want MINT_JIT", e.Step)
+			}
+			if e.Runner.ID == 0 {
+				t.Error("runner-info carried a zero runner ID")
+			}
+		}
+		if e.Kind == obs.KindCycleStarted {
+			if e.Cycle.Pool == "" || e.Cycle.RunnerName == "" {
+				t.Errorf("CycleStarted ref missing pool/runner name: %+v", e.Cycle)
+			}
+		}
+	}
+	if !sawRotate {
+		t.Error("no rotate ActionEnded event")
+	}
+	if !sawRunnerID {
+		t.Error("no RunnerInfo event")
+	}
+}

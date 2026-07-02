@@ -163,12 +163,52 @@ func TestLoadConfigValidation(t *testing.T) {
 		{"bad ssh hardening", strings.Replace(minimalConfig, "count: 2", "count: 2\n    ssh_hardening: maybe", 1), `ssh_hardening must be "off", "rotate", or "scramble"`},
 		{"negative secure_ssh", minimalConfig + "deadlines:\n  secure_ssh: -15s\n", "secure_ssh must be positive"},
 		{"negative max_debug_hold", minimalConfig + "limits:\n  max_debug_hold: -1h\n", "max_debug_hold must be positive"},
+		{"malformed otlp endpoint", minimalConfig + "observability:\n  otlp:\n    endpoint: \"://bad\"\n", "observability.otlp.endpoint"},
+		{"bad otlp scheme", minimalConfig + "observability:\n  otlp:\n    endpoint: ftp://collector.example:4317\n", "observability.otlp.endpoint"},
+		{"otlp endpoint missing host", minimalConfig + "observability:\n  otlp:\n    endpoint: https://\n", "observability.otlp.endpoint"},
+		{"otlp endpoint missing scheme", minimalConfig + "observability:\n  otlp:\n    endpoint: collector.example:4317\n", "observability.otlp.endpoint"},
+		{"otlp metrics interval below floor", minimalConfig + "observability:\n  otlp:\n    endpoint: https://collector.example:4317\n    metrics_interval: 500ms\n", "observability.otlp.metrics_interval"},
 	}
 	for _, tc := range cases {
 		_, err := LoadConfig(writeConfig(t, tc.yaml))
 		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 			t.Errorf("%s: err = %v, want containing %q", tc.name, err, tc.wantErr)
 		}
+	}
+}
+
+func TestLoadConfigObservabilityAbsentIsOff(t *testing.T) {
+	c, err := LoadConfig(writeConfig(t, minimalConfig))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if c.Observability.OTLP.Endpoint != "" {
+		t.Errorf("Observability.OTLP.Endpoint = %q, want empty (off)", c.Observability.OTLP.Endpoint)
+	}
+}
+
+func TestLoadConfigObservabilityValid(t *testing.T) {
+	c, err := LoadConfig(writeConfig(t, minimalConfig+
+		"observability:\n  otlp:\n    endpoint: https://collector.example:4317\n    metrics_interval: 30s\n"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if c.Observability.OTLP.Endpoint != "https://collector.example:4317" {
+		t.Errorf("Observability.OTLP.Endpoint = %q", c.Observability.OTLP.Endpoint)
+	}
+	if got := c.Observability.OTLP.MetricsInterval.D(); got != 30*time.Second {
+		t.Errorf("Observability.OTLP.MetricsInterval = %v, want 30s", got)
+	}
+}
+
+func TestLoadConfigObservabilityDefaultMetricsInterval(t *testing.T) {
+	c, err := LoadConfig(writeConfig(t, minimalConfig+
+		"observability:\n  otlp:\n    endpoint: http://localhost:4317\n"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := c.Observability.OTLP.MetricsInterval.D(); got != 60*time.Second {
+		t.Errorf("Observability.OTLP.MetricsInterval = %v, want 60s default", got)
 	}
 }
 

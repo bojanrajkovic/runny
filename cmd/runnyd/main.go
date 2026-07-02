@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel"
+
 	"github.com/bojanrajkovic/runny/internal/bounded"
 	"github.com/bojanrajkovic/runny/internal/clonefile"
 	"github.com/bojanrajkovic/runny/internal/cycle"
@@ -28,6 +30,7 @@ import (
 	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/images"
 	"github.com/bojanrajkovic/runny/internal/logring"
+	"github.com/bojanrajkovic/runny/internal/obs"
 	"github.com/bojanrajkovic/runny/internal/oci"
 	"github.com/bojanrajkovic/runny/internal/respawn"
 	"github.com/bojanrajkovic/runny/internal/socket"
@@ -234,6 +237,14 @@ func run() error {
 			logger.Error("telemetry shutdown", "err", err)
 		}
 	}()
+	// Same off-by-default rule as Setup itself: an emitter costs real work
+	// on every obs.Emit call (map lookups, span bookkeeping) even against a
+	// no-op tracer, so only install one when there's somewhere for the
+	// trace to go.
+	var events obs.Emitter
+	if cfg.Observability.OTLP.Enabled() {
+		events = telemetry.NewTraceConsumer(otel.Tracer("runnyd"))
+	}
 
 	// Registration sweep: cold start owns the world. Offline
 	// registrations carrying our prefix, on every target. (The vms-dir sweep
@@ -258,6 +269,7 @@ func run() error {
 			Config:         cfg,
 			Pool:           p,
 			InstancePrefix: prefix,
+			Events:         events,
 			VM:             vmManager(),
 			Images: &images.Ensurer{
 				Home: dir,

@@ -38,6 +38,7 @@ go_library(
         "//internal/images",
         "//internal/launchd",
         "//internal/logring",
+        "//internal/obs",
         "//internal/oci",
         "//internal/respawn",
         "//internal/socket",
@@ -48,6 +49,7 @@ go_library(
         "//internal/telemetry",
         "//internal/versioncore",
         "//proto/runny/v1:runny",
+        "@io_opentelemetry_go_otel//:otel",
         "@org_golang_x_sys//unix",
     ] + select({
         "@rules_go//go/platform:aix": [

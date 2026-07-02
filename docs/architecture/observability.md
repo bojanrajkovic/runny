@@ -58,13 +58,46 @@ nothing:
   daemon exit into a hang, the same guarantee [ADR-0011](../architecture-decisions/0011-bounded-contexts.md)
   gives every other guest-facing operation.
 
+### The trace emitter
+
+`telemetry.NewTraceConsumer` folds one cycle's `obs.Event` stream into an
+OTLP span tree: root `runny.cycle` → child `cycle.step <STATE>` per FSM step
+→ grandchild `cycle.step.action <name>` per action within a step. Step and
+action spans start and end on `StepEntered`/`StepLeft` and
+`ActionStarted`/`ActionEnded`, stamped with the event's own timestamp so
+span times match `cycle.json` exactly; a failed step or action carries
+`Status=Error` with the recorded error, and the root mirrors `result` while
+a benign ending (operator recycle, daemon shutdown) leaves the root
+`Status=Unset` with the `ending` attribute carrying the story. Audit events
+land as span events on the root, not as spans of their own — operator
+access is visible in the trace with no key material attached.
+
+A step's action children are conditional on that step's own implementation:
+`cycle.step.action` spans exist only where the FSM code for that state wraps
+a sub-step in `obs.Action` (`internal/obs`'s doc comment covers the wrapper
+itself). A step whose implementation never calls it stays a leaf.
+
+Trace and span IDs are deterministic, derived by the OTEL-free
+`internal/traceid` package from a cycle's own identity
+(`instancePrefix`/`slot`/`cycleID`/`started` for the trace ID; the trace ID
+plus the span's kind/step/action for each span ID — inputs a `cycle.json`
+record fully determines, deliberately excluding the live stream's event
+sequence numbers, which the record does not persist). A retained cycle
+always maps to the same trace *and* the same spans, so re-emitting it is
+idempotent, and the same derivation is available to `runnyctl` without
+linking the OTEL SDK.
+
+The consumer is wired into `cmd/runnyd` only when an endpoint is configured
+— the same off-by-default rule as `Setup` itself, since an emitter costs
+real bookkeeping on every `obs.Emit` call even against a no-op tracer.
+
 ### What this is not
 
-`internal/telemetry` owns providers, resource attribution, and bounded
-shutdown — not emission. The trace emitter and metrics emitter in the
-diagram above, which fold `obs.Event` into actual spans and metrics, are
-separate consumers that install onto the providers this runtime sets up;
-they do not live in this package. Until they exist, a configured endpoint
-gets a live OTLP connection carrying no traffic — the connection and its
-resource attributes are real, the data isn't yet. An unconfigured daemon is
-unaffected either way: no SDK, no goroutines, no egress.
+`internal/telemetry` owns providers, resource attribution, bounded
+shutdown, and the trace emitter — not metrics. The metrics emitter in the
+diagram above, which folds `obs.Event` into OTLP metrics, is a separate
+consumer that installs onto the providers this runtime sets up; it does not
+exist yet. Until it does, a configured endpoint's metric exporter carries no
+traffic — the connection and its resource attributes are real, the data
+isn't yet. An unconfigured daemon is unaffected either way: no SDK, no
+goroutines, no egress.

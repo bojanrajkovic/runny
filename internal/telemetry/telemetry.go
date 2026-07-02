@@ -42,7 +42,7 @@ func noop(context.Context) error { return nil }
 // OTEL providers, so call it at most once per process — cmd/runnyd does, at
 // startup, before any goroutine could observe the providers mid-swap.
 func Setup(ctx context.Context, cfg home.OTLPConfig, version, instanceID string, log *slog.Logger) (Shutdown, error) {
-	if cfg.Endpoint == "" {
+	if !cfg.Enabled() {
 		return noop, nil
 	}
 
@@ -98,6 +98,7 @@ func Setup(ctx context.Context, cfg home.OTLPConfig, version, instanceID string,
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithResource(res),
 		sdktrace.WithBatcher(traceExp), // default batcher drops on a full queue; never blocks the caller
+		sdktrace.WithIDGenerator(idGenerator{}),
 	)
 	mp := metric.NewMeterProvider(
 		metric.WithResource(res),

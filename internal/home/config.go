@@ -203,6 +203,11 @@ type OTLPConfig struct {
 	MetricsInterval Duration `yaml:"metrics_interval"`
 }
 
+// Enabled reports whether this config turns telemetry on — the one
+// definition of "is telemetry configured" every caller (validation, the
+// OTLP runtime, the trace consumer's wiring) shares, so they can't drift.
+func (c OTLPConfig) Enabled() bool { return c.Endpoint != "" }
+
 // otlpMetricsIntervalFloor is the minimum observability.otlp.metrics_interval
 // — below this, an exporter tick could hot-loop.
 const otlpMetricsIntervalFloor = time.Second
@@ -331,7 +336,7 @@ func (c *Config) applyDefaults() {
 	}
 	// Only defaulted when telemetry is actually enabled — an absent endpoint
 	// must stay the all-zero, fully-off value.
-	if c.Observability.OTLP.Endpoint != "" {
+	if c.Observability.OTLP.Enabled() {
 		def(&c.Observability.OTLP.MetricsInterval, 60*time.Second)
 	}
 }
@@ -430,7 +435,7 @@ func (c *Config) validate() error {
 	// it's validated only when telemetry is on. Empty endpoint means
 	// telemetry is off; the rest of the block is only meaningful, and only
 	// validated, when it's set.
-	if ep := c.Observability.OTLP.Endpoint; ep != "" {
+	if ep := c.Observability.OTLP.Endpoint; c.Observability.OTLP.Enabled() {
 		u, err := url.Parse(ep)
 		switch {
 		case err != nil:

@@ -1147,10 +1147,13 @@ func (s *Slot) runJob(ctx context.Context, rec *cycle.Record, proc Proc, guest G
 		jrec.Outcome, jrec.Error = cycle.OutcomeError, jobErr.Error()
 	}
 	rec.States = append(rec.States, jrec)
+	// JobEnded before StepLeft, mirroring JobStarted's position after
+	// StepEntered: both bracket the JOB step from inside its span, so a
+	// consumer never sees a job event for a step that's already closed.
+	obs.Emit(ctx, obs.Event{Kind: obs.KindJobEnded, Job: &obs.JobEvent{Name: jobName, Outcome: obs.Outcome(jrec.Outcome)}})
 	obs.Emit(ctx, obs.Event{Kind: obs.KindStepLeft, StepInfo: &obs.StepEvent{
 		State: string(StateJob), Outcome: obs.Outcome(jrec.Outcome), Error: jrec.Error,
 	}})
-	obs.Emit(ctx, obs.Event{Kind: obs.KindJobEnded, Job: &obs.JobEvent{Name: jobName, Outcome: obs.Outcome(jrec.Outcome)}})
 
 	switch {
 	case !arm.armed:

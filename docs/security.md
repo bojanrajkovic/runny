@@ -201,6 +201,35 @@ long-lived registration token
 ([ADR-0003](architecture-decisions/0003-jit-runner-config.md)). The JIT config
 is single-use.
 
+## Observability (OTLP egress)
+
+`runnyd` makes outbound OTLP gRPC calls to a collector only when the operator
+configures `observability.otlp.endpoint`; the default is fully off. See
+[the observability architecture doc](architecture/observability.md) and
+[ADR-0024](architecture-decisions/0024-observability-event-seam.md) for the
+event seam this exports. Its security posture:
+
+- **Off by default, opt-in only.** An absent endpoint installs no SDK, no
+  goroutines, and makes no outbound connection — identical to a daemon built
+  without `internal/telemetry` at all.
+- **No listening socket.** Export is push-only, to the one collector the
+  operator names. The daemon's attack surface gains no new inbound port.
+- **Transport security follows the scheme.** `https://` selects TLS;
+  `http://` is accepted only for a local/trusted collector on the operator's
+  own network, the same rule `internal/home` enforces when it validates the
+  config.
+- **No credentials in the payload.** Traces and metrics carry cycle/slot
+  identity and timing, not GitHub tokens, SSH credentials, or job secrets —
+  the same boundary the cycle record and `runnyctl why` already respect.
+  Guest-controlled strings (job names) are bounded on the record path before
+  they can become telemetry, so they cannot inflate metric label
+  cardinality.
+- **Bounded, non-blocking.** Export uses the SDK's drop-on-queue-full
+  batching — a slow or unreachable collector drops telemetry rather than
+  stalling a cycle. Exporter errors are logged, never silent. Shutdown flush
+  runs under a fixed wall-clock deadline, so a dead collector cannot turn
+  daemon exit into a hang.
+
 ## App update check (outbound network call)
 
 The Runny app makes one **first-party** outbound HTTPS call: the self-update

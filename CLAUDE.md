@@ -21,6 +21,7 @@ Go 1.26 (mise-managed) for daemon + CLI; cgo to Virtualization.framework via `Co
 - `cmd/runnyd`, `cmd/runnyctl` — binaries; thin mains over `internal/`.
 - `internal/bounded` — `bounded.Context`: the no-unbounded-operations invariant as a type (ADR-0011); wall-clock and progress-stall bounds.
 - `internal/obs` — the structured observability event stream (ADR-0024): `Event`/`Kind`, the context-carried scope, and `Action(ctx, name, fn)`; the seam every OTLP/actions-artifact consumer builds on, with no telemetry SDK imports.
+- `internal/telemetry` — runny's only OTEL importer (ADR-0024): installs OTLP trace + metric providers from `observability.otlp` config, resource attribution, bounded shutdown; installs nothing when the config block is absent.
 - `internal/statemachine` — the crash-only FSM (ADR-0004); per-state deadlines, backoff, cycle.json.
 - `internal/clonefile` — the APFS clonefile(2) wrapper: single-file copy-on-write clone (darwin-tagged), used by both the tart bundle clone and the per-cycle runner-tarball clone.
 - `internal/tart` — the tart bundle format: config.json parsing, validation, bundle clone (delegates per file to `internal/clonefile`).

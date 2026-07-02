@@ -107,15 +107,16 @@ func (a *traceAssembler) emit(e obs.Event) {
 		a.detail(e)
 	case obs.KindVMInfo:
 		a.vmInfo(e)
+	case obs.KindRunnerInfo:
+		a.runnerInfo(e)
 	case obs.KindJobStarted:
 		a.jobStarted(e)
+	case obs.KindJobEnded:
+		a.jobEnded(e)
 	case obs.KindAuditAppend, obs.KindAuditUpdate:
 		a.audit(e)
 	case obs.KindCycleFinished:
 		a.cycleFinished(e)
-		// KindJobEnded is intentionally dropped: it fires before StepLeft,
-		// but its Outcome duplicates the JOB step's own StepLeft outcome,
-		// so there's nothing here it would add to the span.
 	}
 }
 
@@ -125,7 +126,9 @@ func (a *traceAssembler) cycleStarted(e obs.Event) {
 	ctx := withIDs(context.Background(), trace.TraceID(tid), trace.SpanID(sid))
 	ctx, span := a.tracer.Start(ctx, "runny.cycle", trace.WithTimestamp(e.Time), trace.WithAttributes(
 		attribute.String("runny.slot", e.Cycle.Slot),
+		attribute.String("runny.pool", e.Cycle.Pool),
 		attribute.String("runny.cycle_id", e.Cycle.CycleID),
+		attribute.String("runny.runner_name", e.Cycle.RunnerName),
 	))
 
 	a.mu.Lock()
@@ -167,8 +170,13 @@ func (a *traceAssembler) actionStarted(e obs.Event) {
 	a.withStep(e, func(cs *cycleSpans, ss *stepSpans) {
 		sid := traceid.Span(cs.traceID, "action", e.Step, e.Action.Name)
 		ctx := withIDs(ss.ctx, trace.TraceID(cs.traceID), trace.SpanID(sid))
+		attrs := make([]attribute.KeyValue, 0, len(e.Action.Attrs))
+		for _, kv := range e.Action.Attrs {
+			attrs = append(attrs, attribute.String(kv.Key, kv.Value))
+		}
 		// No span ever parents off an action, so its context isn't kept.
-		_, span := a.tracer.Start(ctx, "cycle.step.action "+e.Action.Name, trace.WithTimestamp(e.Time))
+		_, span := a.tracer.Start(ctx, "cycle.step.action "+e.Action.Name,
+			trace.WithTimestamp(e.Time), trace.WithAttributes(attrs...))
 		h := &spanHandle{span: span}
 		ss.actions[e.Action.Name] = h
 		ss.current = h
@@ -234,6 +242,15 @@ func (a *traceAssembler) vmInfo(e obs.Event) {
 	})
 }
 
+func (a *traceAssembler) runnerInfo(e obs.Event) {
+	if e.Runner == nil {
+		return
+	}
+	a.withStep(e, func(cs *cycleSpans, ss *stepSpans) {
+		ss.span.SetAttributes(attribute.Int64("runny.runner.id", e.Runner.ID))
+	})
+}
+
 func (a *traceAssembler) jobStarted(e obs.Event) {
 	if e.Job == nil {
 		return
@@ -243,16 +260,43 @@ func (a *traceAssembler) jobStarted(e obs.Event) {
 	})
 }
 
+// jobEnded adds only what StepLeft (which follows it) doesn't carry: the
+// job's operator-key audit. Its Outcome duplicates the step's own and is
+// deliberately not re-attached.
+func (a *traceAssembler) jobEnded(e obs.Event) {
+	if e.Job == nil || len(e.Job.OperatorKeys) == 0 {
+		return
+	}
+	a.withStep(e, func(cs *cycleSpans, ss *stepSpans) {
+		ss.span.SetAttributes(attribute.StringSlice("runny.job.operator_keys", e.Job.OperatorKeys))
+	})
+}
+
 func (a *traceAssembler) audit(e obs.Event) {
 	if e.Audit == nil {
 		return
 	}
 	a.withCycle(e, func(cs *cycleSpans) {
-		cs.root.AddEvent(string(e.Kind), trace.WithTimestamp(e.Time), trace.WithAttributes(
+		attrs := []attribute.KeyValue{
 			attribute.String("runny.audit.fingerprint", e.Audit.Fingerprint),
 			attribute.String("runny.audit.outcome", e.Audit.Outcome),
 			attribute.String("runny.audit.state", e.Audit.State),
-		))
+		}
+		if e.Audit.Comment != "" {
+			attrs = append(attrs, attribute.String("runny.audit.comment", e.Audit.Comment))
+		}
+		if e.Audit.Reason != "" {
+			attrs = append(attrs, attribute.String("runny.audit.reason", e.Audit.Reason))
+		}
+		// nil OperatorUID means the peer's uid could not be read — absent
+		// attribute, distinct from a recorded uid 0 (root is a real peer).
+		if e.Audit.OperatorUID != nil {
+			attrs = append(attrs, attribute.Int64("runny.audit.operator_uid", int64(*e.Audit.OperatorUID)))
+		}
+		if e.Audit.OperatorUser != "" {
+			attrs = append(attrs, attribute.String("runny.audit.operator_user", e.Audit.OperatorUser))
+		}
+		cs.root.AddEvent(string(e.Kind), trace.WithTimestamp(e.Time), trace.WithAttributes(attrs...))
 	})
 }
 

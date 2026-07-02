@@ -231,8 +231,12 @@ type Event struct {
 // drop-with-logged-counter response to backpressure — the FSM goroutine
 // that calls Emit or Action can never be made to wait on a slow consumer.
 // All events for one cycle scope are emitted from a single goroutine (the
-// slot's FSM goroutine); Seq is the durable per-cycle order consumers sort
-// and correlate by, not a concurrency serializer.
+// slot's FSM goroutine) with two exceptions an emitter must tolerate: the
+// shared image puller's KindDetail progress (see internal/statemachine),
+// and KindHTTP from a scoped context handed to concurrent requests (the
+// scope's Seq counter is atomic, so order stays coherent). Seq is the
+// durable per-cycle order consumers sort and correlate by, not a
+// concurrency serializer.
 type Emitter func(Event)
 
 // scope is the context-carried identity: which cycle/step is active, where

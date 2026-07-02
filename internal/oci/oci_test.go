@@ -602,14 +602,27 @@ func TestPullInProgress(t *testing.T) {
 }
 
 // scopedCtx returns a bounded context carrying an obs cycle scope inside an
-// ENSURE_IMAGE step, capturing events into the given slice.
-func scopedCtx(t *testing.T, events *[]obs.Event) bounded.Context {
+// ENSURE_IMAGE step, and a snapshot accessor for the captured events. The
+// capture is locked: PullTo fans blob GETs across an errgroup, so a scoped
+// pull emits KindHTTP events from several goroutines at once.
+func scopedCtx(t *testing.T) (bounded.Context, func() []obs.Event) {
 	t.Helper()
-	base := obs.WithStep(obs.WithCycle(t.Context(), func(e obs.Event) { *events = append(*events, e) },
+	var mu sync.Mutex
+	var events []obs.Event
+	emit := func(e obs.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, e)
+	}
+	base := obs.WithStep(obs.WithCycle(t.Context(), emit,
 		obs.CycleRef{Slot: "slot-0", CycleID: "cafe"}), "ENSURE_IMAGE")
 	ctx, cancel := bounded.WithTimeout(base, time.Minute)
 	t.Cleanup(cancel)
-	return ctx
+	return ctx, func() []obs.Event {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]obs.Event(nil), events...)
+	}
 }
 
 // A scoped Resolve narrates the whole auth dance, each round trip with its
@@ -620,15 +633,14 @@ func TestResolveEmitsClassedHTTPEvents(t *testing.T) {
 	srv, ref := f.start()
 	defer srv.Close()
 
-	var events []obs.Event
-	ctx := scopedCtx(t, &events)
+	ctx, captured := scopedCtx(t)
 
 	if _, err := NewClient().Resolve(ctx, ref); err != nil {
 		t.Fatal(err)
 	}
 
 	var got []string
-	for _, e := range events {
+	for _, e := range captured() {
 		if e.Kind == obs.KindHTTP {
 			got = append(got, fmt.Sprintf("%s:%d", e.HTTP.Class, e.HTTP.Status))
 		}
@@ -651,15 +663,14 @@ func TestPullToEmitsBlobClass(t *testing.T) {
 	srv, ref := f.start()
 	defer srv.Close()
 
-	var events []obs.Event
-	ctx := scopedCtx(t, &events)
+	ctx, captured := scopedCtx(t)
 
 	if _, err := NewClient().PullTo(ctx, ref, t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
 
 	blobs := 0
-	for _, e := range events {
+	for _, e := range captured() {
 		if e.Kind != obs.KindHTTP {
 			continue
 		}

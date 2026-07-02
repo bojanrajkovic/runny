@@ -1,9 +1,11 @@
-// Package telemetry is runny's only OTEL importer (ADR-0024). It installs
-// OTLP trace and metric providers when the daemon's observability.otlp
-// config block names a collector endpoint, and installs nothing — leaving
-// the SDK's global no-op providers in place — when it doesn't. This package
-// owns providers, resource attribution, and bounded shutdown only; turning
-// obs.Event into spans and metrics is separate, later work (ADR-0024).
+// Package telemetry is runny's only OTEL importer, so domain packages never
+// take an SDK dependency of their own. It installs OTLP trace and metric
+// providers when the daemon's observability.otlp config block names a
+// collector endpoint, and installs nothing — leaving the SDK's global
+// no-op providers in place — when it doesn't. This package owns providers,
+// resource attribution, and bounded shutdown only; turning obs.Event into
+// spans and metrics is a separate consumer that installs onto the
+// providers set up here.
 package telemetry
 
 import (

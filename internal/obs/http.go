@@ -9,11 +9,14 @@ import (
 	"time"
 )
 
-// KindHTTP is one HTTP round trip through an HTTPTransport, emitted at
-// completion (response headers received, or a transport error). A single
-// event, not a started/ended pair: HTTP calls repeat freely (retries, token
-// refreshes, redirect hops), so there is no name-pairing contract to honor —
-// consumers reconstruct the start as Time − Duration.
+// KindHTTP is one HTTP round trip through an HTTPTransport, emitted when
+// the exchange completes: at body EOF or the caller's Close (whichever
+// comes first), or immediately on a transport error — so for streaming
+// responses the event arrives after the transfer, carrying its full
+// duration. A single event, not a started/ended pair: HTTP calls repeat
+// freely (retries, token refreshes, redirect hops), so there is no
+// name-pairing contract to honor — consumers reconstruct the start as
+// Time − Duration.
 const KindHTTP Kind = "http"
 
 // HTTPClass is the endpoint class of one round trip — the closed set of

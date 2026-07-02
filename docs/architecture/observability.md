@@ -83,6 +83,28 @@ verbatim to its span; a skipped sub-step (a teardown cleanup its cycle
 didn't need) emits no action at all, so absence in the trace means the
 sub-step didn't run.
 
+Below the actions sits the HTTP egress layer: every outbound client
+(GitHub API, registry, tarball CDN) routes through `obs.HTTPTransport`, an
+`http.RoundTripper` that emits one `KindHTTP` event per round trip on
+requests whose context carries an obs scope, which the trace consumer
+renders as a completed client span — `http <class>` — under whatever was
+innermost when the round trip finished (the open action, else the step,
+else the root). Endpoint classes are a closed const set in `internal/obs`,
+annotated at each call site via `WithHTTPClass`; no code classifies by
+parsing a URL, so paths and queries (which can carry org/repo names and
+credentials) never reach telemetry by construction. The span records
+method, status code, and the request host; a transport-level failure
+(status 0) carries error status, while an HTTP-level answer like the
+registry's 401 token challenge stays a healthy round trip. Three caveats
+are load-bearing: the span measures to response *headers* — body transfer
+time (the multi-GiB pull, the tarball) stays on the enclosing action; the
+shared pull actor's blob traffic emits nothing because its context carries
+no scope (the same attribution rule that keeps its pull out of any single
+cycle); and HTTP spans are live-only — their span IDs fold in the event
+sequence number precisely because round trips repeat within a step, which
+is the input the record-determined derivation excludes, so a replayed
+`cycle.json` reproduces the deterministic tree without them.
+
 Beyond the step tree, the trace carries the cycle's identity and audit
 detail: the root's attributes include the pool, the assembled runner name,
 the configured image ref, and — as they're learned mid-cycle — the VM's

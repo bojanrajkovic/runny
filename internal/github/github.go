@@ -24,6 +24,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
+	"github.com/bojanrajkovic/runny/internal/obs"
 )
 
 // ErrMissingRunnerPerm is returned when the App's installation token does
@@ -133,7 +134,10 @@ func New(cfg Config, target Target) (*Client, error) {
 	if cfg.APIBase == "" {
 		cfg.APIBase = "https://api.github.com"
 	}
-	return &Client{cfg: cfg, target: target, key: key, hc: &http.Client{Timeout: 30 * time.Second}}, nil
+	return &Client{
+		cfg: cfg, target: target, key: key,
+		hc: &http.Client{Timeout: 30 * time.Second, Transport: &obs.HTTPTransport{}},
+	}, nil
 }
 
 // appJWT mints the short-lived RS256 App JWT (iss=app_id, ≤10min).
@@ -151,6 +155,7 @@ func (c *Client) appJWT() (string, error) {
 // installationToken returns a cached installation token, minting a fresh one
 // when within 5 minutes of expiry.
 func (c *Client) installationToken(ctx context.Context) (string, error) {
+	ctx = obs.WithHTTPClass(ctx, obs.HTTPGitHubToken)
 	cached := func() (string, bool) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -256,7 +261,7 @@ func (c *Client) GenerateJITConfig(ctx bounded.Context, name string, labels []st
 		} `json:"runner"`
 		EncodedJITConfig string `json:"encoded_jit_config"`
 	}
-	err = c.doRetry(ctx, http.MethodPost,
+	err = c.doRetry(obs.WithHTTPClass(ctx, obs.HTTPGitHubJIT), http.MethodPost,
 		c.target.base()+"/actions/runners/generate-jitconfig",
 		"token "+tok, body, &resp)
 	if err != nil {
@@ -294,7 +299,7 @@ func (c *Client) RunnerDownload(ctx bounded.Context, goos string) (filename, url
 		Filename     string `json:"filename"`
 		SHA256       string `json:"sha256_checksum"`
 	}
-	err = c.doRetry(ctx, http.MethodGet,
+	err = c.doRetry(obs.WithHTTPClass(ctx, obs.HTTPGitHubRunnerDownload), http.MethodGet,
 		c.target.base()+"/actions/runners/downloads",
 		"token "+tok, nil, &downloads)
 	if err != nil {
@@ -334,7 +339,7 @@ func (c *Client) ListRunners(ctx bounded.Context) ([]Runner, error) {
 			TotalCount int      `json:"total_count"`
 			Runners    []Runner `json:"runners"`
 		}
-		err := c.doRetry(ctx, http.MethodGet,
+		err := c.doRetry(obs.WithHTTPClass(ctx, obs.HTTPGitHubRunnerList), http.MethodGet,
 			fmt.Sprintf("%s/actions/runners?per_page=100&page=%d", c.target.base(), page),
 			"token "+tok, nil, &resp)
 		if err != nil {
@@ -354,7 +359,7 @@ func (c *Client) DeleteRunner(ctx bounded.Context, id int64) error {
 	if err != nil {
 		return err
 	}
-	err = c.doRetry(ctx, http.MethodDelete,
+	err = c.doRetry(obs.WithHTTPClass(ctx, obs.HTTPGitHubRunnerDelete), http.MethodDelete,
 		fmt.Sprintf("%s/actions/runners/%d", c.target.base(), id),
 		"token "+tok, nil, nil)
 	var se *statusError

@@ -141,9 +141,11 @@ A shared image pull serves many subscribing slots and belongs to no single
 cycle, so its duration and bytes are per-underlying-work truths recorded
 once at the pull's terminal outcome — never once per subscriber, and never
 fabricated for a pull cancelled before it finished. Each subscribing
-cycle's *experience* of that pull stays on the event side, as its
-`wait-for-pull` action. Instrument meanings and label sets live as doc
-comments on the instruments, alongside the event-derived ones.
+cycle's *experience* of that pull is its `wait-for-pull` action, which the
+event fold exports like any other action (a per-cycle duration, one point
+per waiting slot) — the two views measure different things and must not be
+summed. Instrument meanings and label sets live as doc comments on the
+instruments, alongside the event-derived ones.
 
 Alongside the event-derived instruments, `telemetry.RegisterGauges`
 installs the status-polled side: observable gauges the SDK's periodic

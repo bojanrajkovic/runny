@@ -82,16 +82,7 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string), onDigestResol
 
 	resolve := e.resolve
 	if resolve == nil {
-		resolve = func(ctx context.Context) (string, error) {
-			client := oci.NewClient()
-			// ENSURE_IMAGE deliberately runs with no state deadline (pull
-			// duration is unknowable), so this quick metadata round-trip needs
-			// its own wall-clock bound — without one, a registry that accepts
-			// TCP and goes silent hangs the slot forever.
-			rctx, rcancel := bounded.WithTimeout(ctx, e.resolveBudget())
-			defer rcancel()
-			return client.Resolve(rctx, e.Ref)
-		}
+		resolve = e.defaultResolve
 	}
 	err = obs.Action(ctx, obs.ActionResolve, func(ctx context.Context) error {
 		var rerr error
@@ -122,9 +113,7 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string), onDigestResol
 	pinned.Digest = digest // pull exactly what we resolved
 	acquire := e.acquire
 	if acquire == nil {
-		acquire = func(dir string, ref oci.Ref, report func(string)) (*subscription, func()) {
-			return acquireImagePull(dir, ref, e.StallBudget, e.log(), e.Metrics, report)
-		}
+		acquire = e.defaultAcquire
 	}
 	// wait-for-pull is this cycle's experience of the shared pull — the time
 	// spent subscribed, whether or not this slot triggered it. The pull's own
@@ -160,6 +149,24 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string), onDigestResol
 	}
 	e.log().Info("image cached", "digest", digest)
 	return digest, runnerVersion, bundle, nil
+}
+
+// defaultResolve is the real registry manifest round-trip (the e.resolve
+// test seam's production value). ENSURE_IMAGE deliberately runs with no
+// state deadline (pull duration is unknowable), so this quick metadata
+// round-trip needs its own wall-clock bound — without one, a registry that
+// accepts TCP and goes silent hangs the slot forever.
+func (e *Ensurer) defaultResolve(ctx context.Context) (string, error) {
+	client := oci.NewClient()
+	rctx, rcancel := bounded.WithTimeout(ctx, e.resolveBudget())
+	defer rcancel()
+	return client.Resolve(rctx, e.Ref)
+}
+
+// defaultAcquire subscribes to the shared pull of dir (the e.acquire test
+// seam's production value).
+func (e *Ensurer) defaultAcquire(dir string, ref oci.Ref, report func(string)) (*subscription, func()) {
+	return acquireImagePull(dir, ref, e.StallBudget, e.log(), e.Metrics, report)
 }
 
 // pullID is the shared pull's identity: a short hash of the
@@ -381,7 +388,13 @@ func ensureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 	// cache hit or a slot that waited out a peer's download records nothing.
 	start := time.Now()
 	err = downloadTarball(ctx, dest, assetName, assetURL, wantSHA, stallBudget, report, log)
-	metrics.tarballDownloadDone(outcomeOf(err), time.Since(start))
+	// A download truncated by the caller's own cancellation (operator
+	// recycle, daemon shutdown) is not a download outcome — record nothing,
+	// the same rule the pull side follows. A stall kill still records: its
+	// watcher cancels only the inner watch context, not ctx.
+	if err == nil || ctx.Err() == nil {
+		metrics.tarballDownloadDone(outcomeOf(err), time.Since(start))
+	}
 	if err != nil {
 		return "", "", err
 	}

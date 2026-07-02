@@ -214,12 +214,17 @@ func (p *imagePuller) run() {
 			return // last subscriber left, or shutting down
 		}
 		dig, err := p.attempt(p.ctx)
-		if p.ctx.Err() != nil {
-			return // cancelled during the attempt; nobody is waiting
-		}
 		if err == nil {
+			// Finish even if the last subscriber left mid-attempt: the bundle
+			// really landed (the next cycle cache-hits it), so the terminal
+			// outcome — and its pull metric — must exist. Nobody waits on the
+			// broadcast (subs is empty), and finish's registry delete is
+			// guarded, so a successor puller for the same dir is untouched.
 			p.finish(ensureResult{digest: dig, bundle: tart.Bundle(p.destDir)})
 			return
+		}
+		if p.ctx.Err() != nil {
+			return // cancelled during the attempt; nobody is waiting
 		}
 		var dh *oci.DiskHeadroomError
 		if errors.As(err, &dh) {

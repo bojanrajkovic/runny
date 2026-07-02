@@ -185,12 +185,14 @@ runny_slot_paused == 1
 # daemon logs the statfs failure); alert on absent() as well as low values.
 runny_home_disk_free_bytes
 
-# Image pull health: failed pulls per window, and p95 pull time. These
-# record once per underlying pull (concurrent slots share one), so they
-# count pulls, not waiting slots; duration is the pull's whole lifetime,
-# including disk holds and re-attempts. A cycle's own time at the mercy
-# of a pull is the wait-for-pull action on its trace, not a metric.
-histogram_count(sum(rate(runny_image_pull_duration_seconds{outcome="error"}[6h])))
+# Image pull health: failed pulls over the window, and p95 pull time.
+# These record once per underlying pull (concurrent slots share one), so
+# they count pulls, not waiting slots; duration is the pull's whole
+# lifetime, including disk holds and re-attempts. A cycle's own time at
+# the mercy of a pull is its wait-for-pull action — on its trace, and in
+# runny_action_duration_seconds{action="wait-for-pull"}, which counts
+# per waiting cycle and so double-counts against these per-pull series.
+histogram_count(sum(increase(runny_image_pull_duration_seconds{outcome="error"}[6h])))
 histogram_quantile(0.95, sum(rate(runny_image_pull_duration_seconds[6h])))
 
 # Effective pull bandwidth: bytes moved over time spent, across pulls.

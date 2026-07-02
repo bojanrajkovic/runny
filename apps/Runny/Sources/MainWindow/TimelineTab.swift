@@ -136,8 +136,7 @@ struct TimelineTab: View {
 
     private func pickerLabel(_ cycle: Runny_V1_CycleRecord) -> String {
         let started = Self.started.string(from: cycle.started.dateValue)
-        let mark = cycle.result == "success" ? "✓" : "✗"
-        return "\(mark) \(cycle.cycleID) · \(started)"
+        return "\(CycleVerdict(cycle).mark) \(cycle.cycleID) · \(started)"
     }
 
     static let started: DateFormatter = {
@@ -296,6 +295,67 @@ struct PipelineRow: View {
     }
 }
 
+/// Mirrors `runnyctl why`'s verdict: Result — not Ending — gates success (a
+/// desynced record must never render a false ✓); Ending picks the verb for
+/// the benign non-success endings. A wedge, an unknown ending, and a record
+/// from an older daemon (no ending at all) all stay plain failures.
+enum CycleVerdict {
+    case success, recycle, shutdown, failure
+
+    init(_ cycle: Runny_V1_CycleRecord) {
+        if cycle.result == "success" {
+            self = .success
+        } else {
+            switch cycle.ending {
+            case "recycle": self = .recycle
+            case "shutdown": self = .shutdown
+            default: self = .failure
+            }
+        }
+    }
+
+    /// The cycle-picker glyph — runnyctl's vocabulary.
+    var mark: String {
+        switch self {
+        case .success: "✓"
+        case .recycle: "↻"
+        case .shutdown: "⏻"
+        case .failure: "✗"
+        }
+    }
+
+    /// The verb of the summary line: "<verb> in STATE: error". FailureError
+    /// rides along on every non-success verdict, exactly as in runnyctl —
+    /// for a recycle it carries the reason the operator typed.
+    var verb: String {
+        switch self {
+        case .success: "success"
+        case .recycle: "recycled by operator"
+        case .shutdown: "interrupted by daemon shutdown"
+        case .failure: "failed"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .success: "checkmark.circle.fill"
+        case .recycle: "arrow.clockwise.circle.fill"
+        case .shutdown: "power.circle.fill"
+        case .failure: "xmark.circle.fill"
+        }
+    }
+
+    /// Benign endings are neutral, not red: the summary's color carries the
+    /// health signal, and an operator recycle isn't unhealth.
+    var tint: Color {
+        switch self {
+        case .success: .green
+        case .recycle, .shutdown: .secondary
+        case .failure: .red
+        }
+    }
+}
+
 struct CycleView: View {
     let cycle: Runny_V1_CycleRecord
 
@@ -320,17 +380,18 @@ struct CycleView: View {
     }
 
     private var summary: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        let verdict = CycleVerdict(cycle)
+        return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
-                if cycle.result == "success" {
-                    Label("success", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
+                if verdict == .success {
+                    Label(verdict.verb, systemImage: verdict.icon)
+                        .foregroundStyle(verdict.tint)
                 } else {
                     Label(
-                        "failed in \(failureStateName): \(cycle.failureError)",
-                        systemImage: "xmark.circle.fill"
+                        "\(verdict.verb) in \(failureStateName): \(cycle.failureError)",
+                        systemImage: verdict.icon
                     )
-                    .foregroundStyle(.red)
+                    .foregroundStyle(verdict.tint)
                     .lineLimit(3)
                 }
                 Spacer()

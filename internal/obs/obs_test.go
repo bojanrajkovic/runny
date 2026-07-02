@@ -258,3 +258,34 @@ func TestSeqIsPerCycleNotGlobal(t *testing.T) {
 		t.Fatalf("seqsB should start at 1 independently: %v", seqsB)
 	}
 }
+
+func TestActionAttrsPassThrough(t *testing.T) {
+	var events []Event
+	ctx := WithCycle(context.Background(), func(e Event) { events = append(events, e) }, CycleRef{CycleID: "c1"})
+
+	err := Action(ctx, "rotate", func(context.Context) error { return nil },
+		Attr{Key: "runny.hardening", Value: "scramble"})
+	if err != nil {
+		t.Fatalf("Action: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("got %d events, want ActionStarted+ActionEnded", len(events))
+	}
+	for _, e := range events {
+		if len(e.Action.Attrs) != 1 || e.Action.Attrs[0] != (Attr{Key: "runny.hardening", Value: "scramble"}) {
+			t.Errorf("%s attrs = %+v, want the rotate attr on both events", e.Kind, e.Action.Attrs)
+		}
+	}
+}
+
+func TestActionNoAttrsIsNil(t *testing.T) {
+	var events []Event
+	ctx := WithCycle(context.Background(), func(e Event) { events = append(events, e) }, CycleRef{CycleID: "c1"})
+
+	_ = Action(ctx, "stop", func(context.Context) error { return nil })
+	for _, e := range events {
+		if len(e.Action.Attrs) != 0 {
+			t.Errorf("%s attrs = %+v, want none", e.Kind, e.Action.Attrs)
+		}
+	}
+}

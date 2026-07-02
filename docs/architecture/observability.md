@@ -75,7 +75,20 @@ access is visible in the trace with no key material attached.
 A step's action children are conditional on that step's own implementation:
 `cycle.step.action` spans exist only where the FSM code for that state wraps
 a sub-step in `obs.Action` (`internal/obs`'s doc comment covers the wrapper
-itself). A step whose implementation never calls it stays a leaf.
+itself). A step whose implementation never calls it stays a leaf. Action
+names are a closed set declared in `internal/obs` — read the const block
+there for the current inventory — because each becomes a span name and a
+metric label. An action can carry attributes (`obs.Attr`), passed through
+verbatim to its span; a skipped sub-step (a teardown cleanup its cycle
+didn't need) emits no action at all, so absence in the trace means the
+sub-step didn't run.
+
+Beyond the step tree, the trace carries the cycle's identity and audit
+detail: the root's attributes include the pool, the assembled runner name,
+and the VM's MAC/IP as they're learned; the owning step picks up the GitHub
+runner ID at mint time and the job's operator-key fingerprints at job end;
+audit span events mirror the record's full `InjectedKey` detail (comment,
+reason, operator uid/user) — never key material.
 
 Trace and span IDs are deterministic, derived by the OTEL-free
 `internal/traceid` package from a cycle's own identity

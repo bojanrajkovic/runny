@@ -20,7 +20,9 @@ var (
 	testCycle = obs.CycleRef{
 		InstancePrefix: "host-abcd1234",
 		Slot:           "pool-0",
+		Pool:           "macos-arm",
 		CycleID:        "a1b2c3d4",
+		RunnerName:     "host-abcd1234-pool-0-a1b2c3d4",
 		Started:        time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC),
 	}
 	testTraceID = traceid.Trace(testCycle.InstancePrefix, testCycle.Slot, testCycle.CycleID, testCycle.Started)
@@ -41,9 +43,9 @@ func at(seconds int) time.Time { return testCycle.Started.Add(time.Duration(seco
 
 // TestTraceConsumerGolden walks a representative successful-cycle event
 // stream through the consumer and checks the resulting span tree: names,
-// parentage, deterministic IDs, attributes, and status — the golden test
-// the issue's "Done when" asks for, covering a step-level Detail, an
-// in-action Detail, VM info, an audit event, and JobEnded's deliberate drop.
+// parentage, deterministic IDs, attributes, and status — covering a
+// step-level Detail, an in-action Detail, action attrs, VM and runner info,
+// the job's operator-key audit, and a fully-populated audit event.
 func TestTraceConsumerGolden(t *testing.T) {
 	emit, exp := newTestAssembler(t)
 
@@ -62,7 +64,7 @@ func TestTraceConsumerGolden(t *testing.T) {
 	dialSeq := next()
 	emit(obs.Event{
 		Seq: dialSeq, Time: at(2), Cycle: testCycle, Step: "BOOT", Kind: obs.KindActionStarted,
-		Action: &obs.ActionEvent{Name: "dial"},
+		Action: &obs.ActionEvent{Name: "dial", Attrs: []obs.Attr{{Key: "runny.hardening", Value: "scramble"}}},
 	})
 
 	emit(obs.Event{
@@ -90,6 +92,10 @@ func TestTraceConsumerGolden(t *testing.T) {
 		Seq: next(), Time: at(7), Cycle: testCycle, Step: "BOOT", Kind: obs.KindVMInfo,
 		VM: &obs.VMEvent{IP: "10.0.0.5"},
 	})
+	emit(obs.Event{
+		Seq: next(), Time: at(7), Cycle: testCycle, Step: "BOOT", Kind: obs.KindRunnerInfo,
+		Runner: &obs.RunnerEvent{ID: 424242},
+	})
 
 	emit(obs.Event{
 		Seq: next(), Time: at(8), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepLeft,
@@ -105,20 +111,24 @@ func TestTraceConsumerGolden(t *testing.T) {
 		Seq: next(), Time: at(10), Cycle: testCycle, Step: "JOB", Kind: obs.KindJobStarted,
 		Job: &obs.JobEvent{Name: "build"},
 	})
+	// JobEnded fires before StepLeft (the FSM brackets job events inside the
+	// step) and carries the job's operator-key audit.
 	emit(obs.Event{
-		Seq: next(), Time: at(11), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepLeft,
+		Seq: next(), Time: at(11), Cycle: testCycle, Step: "JOB", Kind: obs.KindJobEnded,
+		Job: &obs.JobEvent{Name: "build", Outcome: obs.OutcomeOK, OperatorKeys: []string{"SHA256:testfp"}},
+	})
+	emit(obs.Event{
+		Seq: next(), Time: at(12), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepLeft,
 		StepInfo: &obs.StepEvent{State: "JOB", Outcome: obs.OutcomeOK},
 	})
-	// JobEnded arrives after StepLeft closed the JOB span — must not panic,
-	// must not resurrect a span, must not appear anywhere in the output.
-	emit(obs.Event{
-		Seq: next(), Time: at(12), Cycle: testCycle, Step: "JOB", Kind: obs.KindJobEnded,
-		Job: &obs.JobEvent{Name: "build", Outcome: obs.OutcomeOK},
-	})
 
+	opUID := uint32(501)
 	emit(obs.Event{
 		Seq: next(), Time: at(13), Cycle: testCycle, Kind: obs.KindAuditAppend,
-		Audit: &obs.AuditEvent{Fingerprint: "SHA256:testfp", Outcome: "pending", State: "JOB"},
+		Audit: &obs.AuditEvent{
+			Fingerprint: "SHA256:testfp", Comment: "oncall laptop", Reason: "flaky dns",
+			Outcome: "pending", State: "JOB", OperatorUID: &opUID, OperatorUser: "brajkovic",
+		},
 	})
 
 	emit(obs.Event{
@@ -169,6 +179,9 @@ func TestTraceConsumerGolden(t *testing.T) {
 	if got := attrString(boot.Attributes, "runny.progress.last"); got != "booted" {
 		t.Errorf("BOOT progress.last = %q, want %q (the step-level Detail, not the in-action one)", got, "booted")
 	}
+	if got := attrInt64(boot.Attributes, "runny.runner.id"); got != 424242 {
+		t.Errorf("BOOT runny.runner.id = %d, want 424242 (from the RunnerInfo event)", got)
+	}
 
 	dial, ok := byName["cycle.step.action dial"]
 	if !ok {
@@ -184,11 +197,23 @@ func TestTraceConsumerGolden(t *testing.T) {
 	if got := attrString(dial.Attributes, "runny.progress.last"); got != "dialing 10.0.0.5:22" {
 		t.Errorf("dial progress.last = %q, want the in-action Detail text", got)
 	}
+	if got := attrString(dial.Attributes, "runny.hardening"); got != "scramble" {
+		t.Errorf("dial runny.hardening = %q, want the action attr passed through", got)
+	}
 
 	if _, ok := byName["cycle.step JOB"]; !ok {
 		t.Fatal("missing step span cycle.step JOB")
 	}
+	if got := attr(root.Attributes, "runny.job.operator_keys").AsStringSlice(); len(got) != 1 || got[0] != "SHA256:testfp" {
+		t.Errorf("root runny.job.operator_keys = %v, want [SHA256:testfp]", got)
+	}
 
+	if got := attrString(root.Attributes, "runny.pool"); got != "macos-arm" {
+		t.Errorf("root runny.pool = %q", got)
+	}
+	if got := attrString(root.Attributes, "runny.runner_name"); got != testCycle.RunnerName {
+		t.Errorf("root runny.runner_name = %q", got)
+	}
 	if got := attrString(root.Attributes, "vm.mac"); got != "aa:bb:cc:dd:ee:ff" {
 		t.Errorf("root vm.mac = %q", got)
 	}
@@ -201,11 +226,21 @@ func TestTraceConsumerGolden(t *testing.T) {
 
 	foundAudit := false
 	for _, ev := range root.Events {
-		if ev.Name == string(obs.KindAuditAppend) {
-			foundAudit = true
+		if ev.Name != string(obs.KindAuditAppend) {
+			continue
 		}
-		if ev.Name == "job_ended" {
-			t.Error("JobEnded must not appear as a root span event — it should be dropped entirely")
+		foundAudit = true
+		if got := attrString(ev.Attributes, "runny.audit.comment"); got != "oncall laptop" {
+			t.Errorf("audit comment = %q", got)
+		}
+		if got := attrString(ev.Attributes, "runny.audit.reason"); got != "flaky dns" {
+			t.Errorf("audit reason = %q", got)
+		}
+		if got := attrInt64(ev.Attributes, "runny.audit.operator_uid"); got != 501 {
+			t.Errorf("audit operator_uid = %d, want 501", got)
+		}
+		if got := attrString(ev.Attributes, "runny.audit.operator_user"); got != "brajkovic" {
+			t.Errorf("audit operator_user = %q", got)
 		}
 	}
 	if !foundAudit {
@@ -213,14 +248,16 @@ func TestTraceConsumerGolden(t *testing.T) {
 	}
 }
 
-func attrString(attrs []attribute.KeyValue, key string) string {
-	for _, a := range attrs {
-		if string(a.Key) == key {
-			return a.Value.AsString()
-		}
-	}
-	return ""
+// attr returns the value for key (zero Value when absent — AsString gives
+// "", AsInt64 gives 0, AsStringSlice gives nil).
+func attr(attrs []attribute.KeyValue, key string) attribute.Value {
+	set := attribute.NewSet(attrs...)
+	v, _ := set.Value(attribute.Key(key))
+	return v
 }
+
+func attrString(attrs []attribute.KeyValue, key string) string { return attr(attrs, key).AsString() }
+func attrInt64(attrs []attribute.KeyValue, key string) int64   { return attr(attrs, key).AsInt64() }
 
 // TestTraceConsumerConcurrentDetail exercises the one documented exception
 // to obs's single-goroutine-per-cycle contract: ENSURE_IMAGE progress
@@ -292,4 +329,47 @@ func TestTraceConsumerDeadlineIsFailure(t *testing.T) {
 		return
 	}
 	t.Fatal("missing step span cycle.step BOOT")
+}
+
+// TestTraceConsumerLateJobEndedStillLandsOnRoot pins the ordering immunity
+// jobEnded gets from attaching to the root: a journal replayed from a
+// daemon that emitted JobEnded after StepLeft (the pre-reorder shape) must
+// still record the operator keys, not silently drop them, and must not
+// panic or resurrect the closed step span.
+func TestTraceConsumerLateJobEndedStillLandsOnRoot(t *testing.T) {
+	emit, exp := newTestAssembler(t)
+
+	emit(obs.Event{Seq: 1, Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
+	emit(obs.Event{
+		Seq: 2, Time: at(1), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepEntered,
+		StepInfo: &obs.StepEvent{State: "JOB"},
+	})
+	emit(obs.Event{
+		Seq: 3, Time: at(2), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepLeft,
+		StepInfo: &obs.StepEvent{State: "JOB", Outcome: obs.OutcomeOK},
+	})
+	// The old order: JobEnded after its step closed.
+	emit(obs.Event{
+		Seq: 4, Time: at(3), Cycle: testCycle, Step: "JOB", Kind: obs.KindJobEnded,
+		Job: &obs.JobEvent{Name: "build", Outcome: obs.OutcomeOK, OperatorKeys: []string{"SHA256:latefp"}},
+	})
+	emit(obs.Event{
+		Seq: 5, Time: at(4), Cycle: testCycle, Kind: obs.KindCycleFinished,
+		Finish: &obs.FinishEvent{Result: "success", Ending: "success"},
+	})
+
+	spans := exp.GetSpans()
+	if len(spans) != 2 {
+		t.Fatalf("got %d spans, want 2 (root, JOB step) — a late JobEnded must not mint a span", len(spans))
+	}
+	for _, s := range spans {
+		if s.Name != "runny.cycle" {
+			continue
+		}
+		if got := attr(s.Attributes, "runny.job.operator_keys").AsStringSlice(); len(got) != 1 || got[0] != "SHA256:latefp" {
+			t.Errorf("root runny.job.operator_keys = %v, want [SHA256:latefp] even when JobEnded arrives late", got)
+		}
+		return
+	}
+	t.Fatal("missing root span")
 }

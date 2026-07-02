@@ -28,11 +28,35 @@ const (
 	KindActionEnded   Kind = "action_ended"
 	KindDetail        Kind = "detail"
 	KindVMInfo        Kind = "vm_info"
+	KindRunnerInfo    Kind = "runner_info"
 	KindJobStarted    Kind = "job_started"
 	KindJobEnded      Kind = "job_ended"
 	KindAuditAppend   Kind = "audit_append"
 	KindAuditUpdate   Kind = "audit_update"
 	KindCycleFinished Kind = "cycle_finished"
+)
+
+// Action names are a closed set: each becomes a span name on the trace side
+// and an `action` metric label, so an inline string at a call site would
+// mint unbounded label cardinality. Add here, never inline.
+const (
+	// TEARDOWN sub-steps.
+	ActionStop             = "stop"               // stop escalation (request-stop → force)
+	ActionDeregister       = "deregister"         // GitHub runner delete
+	ActionDiagPull         = "diag-pull"          // post-mortem _diag tail fetch
+	ActionDebugSessionPull = "debug-session-pull" // operator session recording fetch
+	ActionCloneRemove      = "clone-remove"       // vmDir cleanup
+	// SECURE_SSH.
+	ActionRotate = "rotate" // key mint + install + sshd flip + keyed reconnect
+	// PROVISION.
+	ActionStartRunner = "start-runner" // stage tarball + exec run.sh (one guest exec)
+)
+
+// Attr keys are closed-set for the same reason action names are: a typo'd
+// inline key silently forks an attribute name.
+const (
+	// AttrHardening is the SSH hardening mode a rotate action ran under.
+	AttrHardening = "runny.hardening"
 )
 
 // Outcome classifies how a step or action ended. Deliberately a plain
@@ -47,11 +71,16 @@ const (
 	OutcomeError Outcome = "error"
 )
 
-// CycleRef identifies the cycle an event belongs to.
+// CycleRef identifies the cycle an event belongs to, plus the cycle-static
+// identity consumers attach to everything derived from it (the trace root's
+// attributes, the metrics side's pool label): all of it is known at cycle
+// start, so it rides the ref instead of needing events of its own.
 type CycleRef struct {
 	InstancePrefix string
 	Slot           string
+	Pool           string
 	CycleID        string
+	RunnerName     string
 	Started        time.Time
 }
 
@@ -65,10 +94,23 @@ type StepEvent struct {
 	Error   string
 }
 
+// Attr is one action attribute. Keys are fully-qualified constants declared
+// in this package (see AttrHardening) and consumers pass them through
+// verbatim; values must come from small closed sets — never a
+// guest-controlled string. The slice a caller passes to Action is retained
+// by both emitted events, so it must not be mutated after the call.
+type Attr struct {
+	Key   string
+	Value string
+}
+
 // ActionEvent is the payload for ActionStarted/ActionEnded. The step the
-// action ran under is the Event's top-level Step, not repeated here.
+// action ran under is the Event's top-level Step, not repeated here. Attrs
+// (nil when the action has none) appear identically on both events; check
+// with len, never against nil.
 type ActionEvent struct {
 	Name     string
+	Attrs    []Attr
 	Outcome  Outcome
 	Error    string
 	Duration time.Duration
@@ -85,19 +127,35 @@ type VMEvent struct {
 	IP  string
 }
 
-// JobEvent is the payload for JobStarted/JobEnded.
+// RunnerEvent carries the GitHub runner registration learned at MINT_JIT.
+type RunnerEvent struct {
+	ID int64
+}
+
+// JobEvent is the payload for JobStarted/JobEnded. OperatorKeys (JobEnded
+// only) are the operator debug-key fingerprints present in — or ambiguously
+// attempted against — the guest while the job ran, mirroring
+// cycle.JobInfo.OperatorKeys: "did this job run with a credential
+// installed" answerable from the event stream alone.
 type JobEvent struct {
-	Name    string
-	Outcome Outcome
+	Name         string
+	Outcome      Outcome
+	OperatorKeys []string
 }
 
 // AuditEvent mirrors an operator debug-key audit append/update
 // (cycle.InjectedKey) — observational only, obs is not the audit's system
-// of record.
+// of record. OperatorUID is nil when the peer's uid could not be read,
+// distinct from a recorded uid 0 (root is a real possible peer).
 type AuditEvent struct {
-	Fingerprint string
-	Outcome     string
-	State       string
+	Fingerprint  string
+	Comment      string
+	Reason       string
+	Error        string
+	Outcome      string
+	State        string
+	OperatorUID  *uint32
+	OperatorUser string
 }
 
 // FinishEvent is the payload for CycleFinished.
@@ -125,6 +183,7 @@ type Event struct {
 	Action   *ActionEvent
 	Detail   *DetailEvent
 	VM       *VMEvent
+	Runner   *RunnerEvent
 	Job      *JobEvent
 	Audit    *AuditEvent
 	Finish   *FinishEvent
@@ -204,18 +263,18 @@ func Emit(ctx context.Context, e Event) {
 // duration, outcome, and fn's error — sugar over Emit. An action name must
 // appear at most once per step: consumers pair ActionStarted/ActionEnded by
 // (step, name), so a caller that runs the same action twice in one step
-// (say, a retried dial) must disambiguate the name itself. On a context
-// with no scope (never passed through WithCycle) or a scope with a nil
-// emitter, Action degrades to a plain fn(ctx) call — zero events, no
-// allocation beyond what fn does. Domain packages call Action without
-// knowing or caring which case applies.
-func Action(ctx context.Context, name string, fn func(context.Context) error) error {
+// (say, a retried dial) must disambiguate the name itself. attrs (see Attr)
+// appear on both events. On a context with no scope (never passed through
+// WithCycle) or a scope with a nil emitter, Action degrades to a plain
+// fn(ctx) call — zero events, no emitter work. Domain packages call Action
+// without knowing or caring which case applies.
+func Action(ctx context.Context, name string, fn func(context.Context) error, attrs ...Attr) error {
 	s, _ := ctx.Value(scopeKey{}).(*scope)
 	if s == nil || s.emit == nil {
 		return fn(ctx)
 	}
 
-	Emit(ctx, Event{Kind: KindActionStarted, Action: &ActionEvent{Name: name}})
+	Emit(ctx, Event{Kind: KindActionStarted, Action: &ActionEvent{Name: name, Attrs: attrs}})
 
 	start := time.Now()
 	err := fn(ctx)
@@ -227,6 +286,7 @@ func Action(ctx context.Context, name string, fn func(context.Context) error) er
 	}
 	Emit(ctx, Event{Kind: KindActionEnded, Action: &ActionEvent{
 		Name:     name,
+		Attrs:    attrs,
 		Outcome:  outcome,
 		Error:    errText,
 		Duration: dur,

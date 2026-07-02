@@ -2,7 +2,6 @@ package telemetry
 
 import (
 	"context"
-	"crypto/rand"
 	"sync"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -67,6 +66,31 @@ func (a *traceAssembler) get(e obs.Event) *cycleSpans {
 	return a.cycles[cycleKey{e.Cycle.Slot, e.Cycle.CycleID}]
 }
 
+// withCycle looks up e's cycle and runs fn with it locked; a no-op if the
+// cycle isn't tracked (already finished, or a stray event before it
+// started).
+func (a *traceAssembler) withCycle(e obs.Event, fn func(cs *cycleSpans)) {
+	cs := a.get(e)
+	if cs == nil {
+		return
+	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	fn(cs)
+}
+
+// withStep is withCycle plus an e.Step lookup; a no-op if the step isn't
+// open (already left, or a stray event before it started).
+func (a *traceAssembler) withStep(e obs.Event, fn func(cs *cycleSpans, ss *stepSpans)) {
+	a.withCycle(e, func(cs *cycleSpans) {
+		ss := cs.steps[e.Step]
+		if ss == nil {
+			return
+		}
+		fn(cs, ss)
+	})
+}
+
 func (a *traceAssembler) emit(e obs.Event) {
 	switch e.Kind {
 	case obs.KindCycleStarted:
@@ -112,94 +136,63 @@ func (a *traceAssembler) cycleStarted(e obs.Event) {
 }
 
 func (a *traceAssembler) stepEntered(e obs.Event) {
-	cs := a.get(e)
-	if cs == nil {
-		return
-	}
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-
-	sid := traceid.Span(cs.traceID, "step", e.Step, "", e.Seq)
-	ctx := withIDs(cs.ctx, trace.TraceID(cs.traceID), trace.SpanID(sid))
-	ctx, span := a.tracer.Start(ctx, "cycle.step "+e.Step, trace.WithTimestamp(e.Time))
-	cs.steps[e.Step] = &stepSpans{
-		spanHandle: &spanHandle{ctx: ctx, span: span},
-		actions:    map[string]*spanHandle{},
-	}
+	a.withCycle(e, func(cs *cycleSpans) {
+		sid := traceid.Span(cs.traceID, "step", e.Step, "", e.Seq)
+		ctx := withIDs(cs.ctx, trace.TraceID(cs.traceID), trace.SpanID(sid))
+		ctx, span := a.tracer.Start(ctx, "cycle.step "+e.Step, trace.WithTimestamp(e.Time))
+		cs.steps[e.Step] = &stepSpans{
+			spanHandle: &spanHandle{ctx: ctx, span: span},
+			actions:    map[string]*spanHandle{},
+		}
+	})
 }
 
 func (a *traceAssembler) stepLeft(e obs.Event) {
-	cs := a.get(e)
-	if cs == nil {
-		return
-	}
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-
-	ss := cs.steps[e.Step]
-	if ss == nil {
-		return
-	}
-	if ss.lastDetail != "" {
-		ss.span.SetAttributes(attribute.String("runny.progress.last", ss.lastDetail))
-	}
-	if e.StepInfo != nil {
-		ss.span.SetAttributes(attribute.String("runny.outcome", string(e.StepInfo.Outcome)))
-		if outcomeIsFailure(e.StepInfo.Outcome) {
-			ss.span.SetStatus(codes.Error, e.StepInfo.Error)
+	a.withStep(e, func(cs *cycleSpans, ss *stepSpans) {
+		if ss.lastDetail != "" {
+			ss.span.SetAttributes(attribute.String("runny.progress.last", ss.lastDetail))
 		}
-	}
-	ss.span.End(trace.WithTimestamp(e.Time))
-	delete(cs.steps, e.Step)
+		if e.StepInfo != nil {
+			ss.span.SetAttributes(attribute.String("runny.outcome", string(e.StepInfo.Outcome)))
+			if outcomeIsFailure(e.StepInfo.Outcome) {
+				ss.span.SetStatus(codes.Error, e.StepInfo.Error)
+			}
+		}
+		ss.span.End(trace.WithTimestamp(e.Time))
+		delete(cs.steps, e.Step)
+	})
 }
 
 func (a *traceAssembler) actionStarted(e obs.Event) {
-	cs := a.get(e)
-	if cs == nil {
-		return
-	}
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-
-	ss := cs.steps[e.Step]
-	if ss == nil {
-		return
-	}
-	sid := traceid.Span(cs.traceID, "action", e.Step, e.Action.Name, e.Seq)
-	ctx := withIDs(ss.ctx, trace.TraceID(cs.traceID), trace.SpanID(sid))
-	ctx, span := a.tracer.Start(ctx, "cycle.step.action "+e.Action.Name, trace.WithTimestamp(e.Time))
-	h := &spanHandle{ctx: ctx, span: span}
-	ss.actions[e.Action.Name] = h
-	ss.current = h
+	a.withStep(e, func(cs *cycleSpans, ss *stepSpans) {
+		sid := traceid.Span(cs.traceID, "action", e.Step, e.Action.Name, e.Seq)
+		ctx := withIDs(ss.ctx, trace.TraceID(cs.traceID), trace.SpanID(sid))
+		// No span ever parents off an action, so its context isn't kept.
+		_, span := a.tracer.Start(ctx, "cycle.step.action "+e.Action.Name, trace.WithTimestamp(e.Time))
+		h := &spanHandle{span: span}
+		ss.actions[e.Action.Name] = h
+		ss.current = h
+	})
 }
 
 func (a *traceAssembler) actionEnded(e obs.Event) {
-	cs := a.get(e)
-	if cs == nil {
-		return
-	}
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-
-	ss := cs.steps[e.Step]
-	if ss == nil {
-		return
-	}
-	h := ss.actions[e.Action.Name]
-	if h == nil {
-		return
-	}
-	if h.lastDetail != "" {
-		h.span.SetAttributes(attribute.String("runny.progress.last", h.lastDetail))
-	}
-	if outcomeIsFailure(e.Action.Outcome) {
-		h.span.SetStatus(codes.Error, e.Action.Error)
-	}
-	h.span.End(trace.WithTimestamp(e.Time))
-	delete(ss.actions, e.Action.Name)
-	if ss.current == h {
-		ss.current = nil
-	}
+	a.withStep(e, func(cs *cycleSpans, ss *stepSpans) {
+		h := ss.actions[e.Action.Name]
+		if h == nil {
+			return
+		}
+		if h.lastDetail != "" {
+			h.span.SetAttributes(attribute.String("runny.progress.last", h.lastDetail))
+		}
+		if outcomeIsFailure(e.Action.Outcome) {
+			h.span.SetStatus(codes.Error, e.Action.Error)
+		}
+		h.span.End(trace.WithTimestamp(e.Time))
+		delete(ss.actions, e.Action.Name)
+		if ss.current == h {
+			ss.current = nil
+		}
+	})
 }
 
 // detail attaches the latest progress annotation to whichever span is
@@ -208,69 +201,59 @@ func (a *traceAssembler) actionEnded(e obs.Event) {
 // at 41 MiB/s" style updates land as one summarizing attribute on the span
 // that closes next, instead of one span event per tick.
 func (a *traceAssembler) detail(e obs.Event) {
-	cs := a.get(e)
-	if cs == nil || e.Detail == nil {
+	if e.Detail == nil {
 		return
 	}
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-
-	ss := cs.steps[e.Step]
-	switch {
-	case ss == nil:
-		cs.root.SetAttributes(attribute.String("runny.progress.last", e.Detail.Text))
-	case ss.current != nil:
-		ss.current.lastDetail = e.Detail.Text
-	default:
-		ss.lastDetail = e.Detail.Text
-	}
+	a.withCycle(e, func(cs *cycleSpans) {
+		ss := cs.steps[e.Step]
+		switch {
+		case ss == nil:
+			cs.root.SetAttributes(attribute.String("runny.progress.last", e.Detail.Text))
+		case ss.current != nil:
+			ss.current.lastDetail = e.Detail.Text
+		default:
+			ss.lastDetail = e.Detail.Text
+		}
+	})
 }
 
 func (a *traceAssembler) vmInfo(e obs.Event) {
-	cs := a.get(e)
-	if cs == nil || e.VM == nil {
+	if e.VM == nil {
 		return
 	}
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-
-	var attrs []attribute.KeyValue
-	if e.VM.MAC != "" {
-		attrs = append(attrs, attribute.String("vm.mac", e.VM.MAC))
-	}
-	if e.VM.IP != "" {
-		attrs = append(attrs, attribute.String("vm.ip", e.VM.IP))
-	}
-	cs.root.SetAttributes(attrs...)
-	cs.root.AddEvent("vm_info", trace.WithTimestamp(e.Time), trace.WithAttributes(attrs...))
+	a.withCycle(e, func(cs *cycleSpans) {
+		var attrs []attribute.KeyValue
+		if e.VM.MAC != "" {
+			attrs = append(attrs, attribute.String("vm.mac", e.VM.MAC))
+		}
+		if e.VM.IP != "" {
+			attrs = append(attrs, attribute.String("vm.ip", e.VM.IP))
+		}
+		cs.root.SetAttributes(attrs...)
+		cs.root.AddEvent("vm_info", trace.WithTimestamp(e.Time), trace.WithAttributes(attrs...))
+	})
 }
 
 func (a *traceAssembler) jobStarted(e obs.Event) {
-	cs := a.get(e)
-	if cs == nil || e.Job == nil {
+	if e.Job == nil {
 		return
 	}
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-
-	if ss := cs.steps[e.Step]; ss != nil {
+	a.withStep(e, func(cs *cycleSpans, ss *stepSpans) {
 		ss.span.SetAttributes(attribute.String("runny.job.name", e.Job.Name))
-	}
+	})
 }
 
 func (a *traceAssembler) audit(e obs.Event) {
-	cs := a.get(e)
-	if cs == nil || e.Audit == nil {
+	if e.Audit == nil {
 		return
 	}
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-
-	cs.root.AddEvent(string(e.Kind), trace.WithTimestamp(e.Time), trace.WithAttributes(
-		attribute.String("runny.audit.fingerprint", e.Audit.Fingerprint),
-		attribute.String("runny.audit.outcome", e.Audit.Outcome),
-		attribute.String("runny.audit.state", e.Audit.State),
-	))
+	a.withCycle(e, func(cs *cycleSpans) {
+		cs.root.AddEvent(string(e.Kind), trace.WithTimestamp(e.Time), trace.WithAttributes(
+			attribute.String("runny.audit.fingerprint", e.Audit.Fingerprint),
+			attribute.String("runny.audit.outcome", e.Audit.Outcome),
+			attribute.String("runny.audit.state", e.Audit.State),
+		))
+	})
 }
 
 // outcomeIsFailure mirrors cycle.OutcomeError/OutcomeDeadline's wire values —
@@ -306,18 +289,6 @@ func (a *traceAssembler) cycleFinished(e obs.Event) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
-	// A step still open here means teardown never ran its course (a panic,
-	// or a bug); close it honestly at the cycle's own end time rather than
-	// leaking the span.
-	for state, ss := range cs.steps {
-		for name, h := range ss.actions {
-			h.span.End(trace.WithTimestamp(e.Time))
-			delete(ss.actions, name)
-		}
-		ss.span.End(trace.WithTimestamp(e.Time))
-		delete(cs.steps, state)
-	}
-
 	if e.Finish != nil {
 		cs.root.SetAttributes(
 			attribute.String("runny.result", e.Finish.Result),
@@ -348,31 +319,27 @@ func withIDs(ctx context.Context, tid trace.TraceID, sid trace.SpanID) context.C
 }
 
 // idGenerator hands back the deterministic IDs the trace assembler
-// precomputed and stashed on the context passed to Tracer.Start, falling
-// back to random IDs for any span this package didn't start itself —
-// nothing else in the process starts spans today, but a generator that
-// only works for its own caller is a landmine for whatever changes that
-// next.
+// precomputed and stashed on the context passed to Tracer.Start. It is
+// installed as this process's IDGenerator only alongside NewTraceConsumer,
+// and nothing else starts spans — a context arriving without stashed IDs
+// means some caller bypassed the assembler, which should fail loudly
+// rather than hand back a span with the wrong identity.
 type idGenerator struct{}
 
 func (idGenerator) NewIDs(ctx context.Context) (trace.TraceID, trace.SpanID) {
-	if ids, ok := ctx.Value(idsKey{}).(computedIDs); ok {
-		return ids.trace, ids.span
+	ids, ok := ctx.Value(idsKey{}).(computedIDs)
+	if !ok {
+		panic("telemetry: span started without traceAssembler-computed IDs")
 	}
-	var tid trace.TraceID
-	var sid trace.SpanID
-	_, _ = rand.Read(tid[:])
-	_, _ = rand.Read(sid[:])
-	return tid, sid
+	return ids.trace, ids.span
 }
 
 func (idGenerator) NewSpanID(ctx context.Context, _ trace.TraceID) trace.SpanID {
-	if ids, ok := ctx.Value(idsKey{}).(computedIDs); ok {
-		return ids.span
+	ids, ok := ctx.Value(idsKey{}).(computedIDs)
+	if !ok {
+		panic("telemetry: span started without traceAssembler-computed IDs")
 	}
-	var sid trace.SpanID
-	_, _ = rand.Read(sid[:])
-	return sid
+	return ids.span
 }
 
 var _ sdktrace.IDGenerator = idGenerator{}

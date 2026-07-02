@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
@@ -61,6 +62,17 @@ type metricsConsumer struct {
 	open map[cycleKey]*openCycle
 }
 
+// openFor returns key's tracking entry, creating it on first use. Callers
+// must hold m.mu.
+func (m *metricsConsumer) openFor(key cycleKey) *openCycle {
+	oc := m.open[key]
+	if oc == nil {
+		oc = &openCycle{stepEntered: map[string]time.Time{}}
+		m.open[key] = oc
+	}
+	return oc
+}
+
 func (m *metricsConsumer) instruments(meter metric.Meter) error {
 	var errs []error
 	var err error
@@ -100,12 +112,7 @@ func (m *metricsConsumer) emit(e obs.Event) {
 	switch e.Kind {
 	case obs.KindStepEntered:
 		m.mu.Lock()
-		oc := m.open[key]
-		if oc == nil {
-			oc = &openCycle{stepEntered: map[string]time.Time{}}
-			m.open[key] = oc
-		}
-		oc.stepEntered[e.Step] = e.Time
+		m.openFor(key).stepEntered[e.Step] = e.Time
 		m.mu.Unlock()
 
 	case obs.KindStepLeft:
@@ -127,11 +134,7 @@ func (m *metricsConsumer) emit(e obs.Event) {
 
 	case obs.KindJobStarted:
 		m.mu.Lock()
-		if oc := m.open[key]; oc != nil {
-			oc.jobStarted = e.Time
-		} else {
-			m.open[key] = &openCycle{stepEntered: map[string]time.Time{}, jobStarted: e.Time}
-		}
+		m.openFor(key).jobStarted = e.Time
 		m.mu.Unlock()
 
 	case obs.KindJobEnded:
@@ -170,17 +173,25 @@ func (m *metricsConsumer) emit(e obs.Event) {
 			return
 		}
 		result := attribute.String("result", e.Finish.Result)
-		m.cycleCount.Add(ctx, 1, metric.WithAttributes(pool, slot, result,
-			attribute.String("ending", e.Finish.Ending)))
-		m.cycleDuration.Record(ctx, e.Time.Sub(e.Cycle.Started).Seconds(),
-			metric.WithAttributes(pool, result))
+		ending := attribute.String("ending", e.Finish.Ending)
+		m.cycleCount.Add(ctx, 1, metric.WithAttributes(pool, slot, result, ending))
+		// The duration carries `ending` too: an operator recycle or a daemon
+		// shutdown truncates a cycle and records it result=failure, and
+		// without the ending label those benign truncations would pollute
+		// the real failure-duration distribution unfixably. The zero-Started
+		// guard is the same no-fabricated-duration rule steps and jobs
+		// follow.
+		if !e.Cycle.Started.IsZero() {
+			m.cycleDuration.Record(ctx, e.Time.Sub(e.Cycle.Started).Seconds(),
+				metric.WithAttributes(pool, result, ending))
+		}
 	}
 }
 
 // SlotSnapshot is the neutral per-slot view the gauge callback polls —
 // telemetry stays free of an internal/statemachine import, and tests fake a
-// fleet with plain values. cmd/runnyd adapts each slot's Status() (plus the
-// pool name, which the status snapshot doesn't carry) into one of these.
+// fleet with plain values. cmd/runnyd adapts each slot's Status() into one
+// of these.
 type SlotSnapshot struct {
 	Pool, Slot, State   string
 	StateEntered        time.Time
@@ -193,8 +204,12 @@ type SlotSnapshot struct {
 // on the old series instead of going stale), state-entered time, failure
 // streak, wedged/paused flags, and free bytes on the runny home filesystem.
 // Collection cost is one poll() (a Status() snapshot per slot) plus one
-// statfs — no FSM involvement, no other I/O. A statfs failure surfaces as a
-// callback error (routed to the OTEL error handler), never a fake zero.
+// statfs — no FSM involvement, no other I/O. A statfs failure is reported to
+// the OTEL error handler and the disk gauge is omitted for that collection —
+// never a fake zero, and never a callback error: the SDK skips exporting the
+// ENTIRE collection when any callback errors, so returning it would black
+// out every runny metric during exactly the disk incident the slot gauges
+// need to narrate.
 func RegisterGauges(meter metric.Meter, poll func() []SlotSnapshot, states []string, homePath string) error {
 	var errs []error
 	state, err := meter.Int64ObservableGauge("runny.slot.state",
@@ -250,7 +265,8 @@ func RegisterGauges(meter metric.Meter, poll func() []SlotSnapshot, states []str
 		}
 		free, err := diskfree.AvailableBytes(homePath)
 		if err != nil {
-			return fmt.Errorf("telemetry: disk free on %s: %w", homePath, err)
+			otel.Handle(fmt.Errorf("telemetry: disk free on %s: %w", homePath, err))
+			return nil
 		}
 		o.ObserveInt64(disk, int64(free))
 		return nil

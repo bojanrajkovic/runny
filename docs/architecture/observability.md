@@ -108,11 +108,10 @@ real bookkeeping on every `obs.Emit` call even against a no-op tracer.
 
 `telemetry.NewMetricsConsumer` is the second `obs.Event` consumer, sharing
 the emitter fan-out with the trace consumer under the same off-by-default
-wiring. It folds the stream into two counters (finished cycles, finished
-jobs) and four seconds histograms (cycle, step, job, and action durations) —
-the instrument inventory, each instrument's meaning, and its exact label set
-live as doc comments on the instruments in `internal/telemetry/metrics.go`.
-Two properties define the fold:
+wiring. It folds the stream into counters and seconds-denominated duration
+histograms; the instrument inventory, each instrument's meaning, and its
+exact label set live as doc comments on the instruments in
+`internal/telemetry/metrics.go`. Two properties define the fold:
 
 - **Durations are event-time arithmetic, never clock reads.** A step's
   duration is its `StepLeft` timestamp minus its `StepEntered` timestamp; a
@@ -131,14 +130,16 @@ Two properties define the fold:
 Alongside the event-derived instruments, `telemetry.RegisterGauges`
 installs the status-polled side: observable gauges the SDK's periodic
 reader collects on its own schedule, with zero FSM involvement — a poll of
-each slot's status snapshot (the slot-state 0/1 matrix, state-entered time,
-failure streak, wedged/paused flags) plus one free-space check on the runny
-home filesystem. The state gauge reports 0/1 for **every** state per slot,
+each slot's status snapshot plus one free-space check on the runny home
+filesystem. The slot-state gauge reports 0/1 for **every** state per slot,
 not just the current one, so a state change reports 0 on the old series
-instead of letting it go stale. A disk-read failure surfaces as a callback
-error through the OTEL error handler — never a silent skip, never a fake
-zero. The gauges poll through a neutral snapshot seam, so `telemetry` never
-imports the state machine.
+instead of letting it go stale. A disk-read failure is reported to the OTEL
+error handler and the disk point is omitted for that collection — never a
+fake zero, and never a callback error, because the SDK skips exporting the
+*entire* collection when any observable callback errors, which would black
+out every runny metric during exactly the disk incident the slot gauges
+need to narrate. The gauges poll through a neutral snapshot seam, so
+`telemetry` never imports the state machine.
 
 Series from different daemons never collide: identity (which daemon, which
 host) rides the resource attributes `Setup` installs — instrument labels

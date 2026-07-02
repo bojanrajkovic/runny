@@ -125,14 +125,20 @@ gauges. The architecture is described in
 instruments themselves are documented where they're created, in
 `internal/telemetry/metrics.go`.
 
-**Series identity is resource + labels.** Metric labels carry only pool,
-slot, and closed vocabularies (state, outcome, result, ending, step,
-action); *which daemon* emitted a series rides the OTLP resource attributes
-(`service.instance.id`, `host.name`). A collector pipeline that drops
-resource attributes on the way to a Prometheus-family backend will silently
-merge series from different hosts — preserve `service.instance.id`
-(resource-to-label promotion, or a `target_info` join) when more than one
-runnyd reports to the same backend.
+**Series identity is resource + labels.** Metric labels carry only the pool,
+the slot, and closed vocabularies; *which daemon* emitted a series rides the
+OTLP resource attributes (`service.instance.id`, `host.name`). A collector
+pipeline that drops resource attributes on the way to a Prometheus-family
+backend will silently merge series from different hosts — preserve
+`service.instance.id` (resource-to-label promotion, or a `target_info`
+join) when more than one runnyd reports to the same backend.
+
+**Duration histograms are exponential (native), not fixed-bucket.** Every
+`runny.*.duration` instrument exports as an OTLP exponential histogram, so
+a Prometheus-family backend ingests them as native histograms — there are
+no `_bucket`/`le` series. The backend must have native-histogram ingestion
+enabled (e.g. Prometheus `--enable-feature=native-histograms`), and
+`histogram_quantile` takes the bare series, as below.
 
 #### Querying the metrics
 
@@ -149,15 +155,21 @@ sum by (pool, state) (runny_slot_state)
 sum by (pool) (runny_slot_state{state="JOB"})
   / count by (pool) (count by (pool, slot) (runny_slot_state))
 
-# Job throughput and p95 duration.
+# Job throughput and p95 duration (native-histogram form: no le/_bucket).
 sum by (pool) (rate(runny_job_count_total[15m]))
-histogram_quantile(0.95,
-  sum by (pool, le) (rate(runny_job_duration_seconds_bucket[1h])))
+histogram_quantile(0.95, sum by (pool) (rate(runny_job_duration_seconds[1h])))
 
-# Cycle failure ratio — endings classify why: `failure` and `wedge` are
-# health problems; `shutdown` and operator-caused endings are benign.
+# Cycle failure ratio. `shutdown` and `recycle` are benign truncations;
+# `failure` and `wedge` read as health signals — with one caveat: a debug
+# hold that expires also ends its cycle as `failure` by design, so heavy
+# runnyctl debug use shows up here even though backoff treats it as benign.
 sum by (pool) (rate(runny_cycle_count_total{ending=~"failure|wedge"}[1h]))
   / sum by (pool) (rate(runny_cycle_count_total[1h]))
+
+# Real failure durations, excluding benign truncations — the duration
+# histogram carries `ending` for exactly this filter.
+histogram_quantile(0.95, sum by (pool) (
+  rate(runny_cycle_duration_seconds{result="failure",ending!~"shutdown|recycle"}[6h])))
 
 # Time in current state — alert when a slot sits anywhere too long
 # (a stuck slot is exactly the silent failure runny exists to kill).
@@ -168,6 +180,8 @@ runny_slot_wedged == 1
 runny_slot_paused == 1
 
 # Disk headroom on the runny home filesystem, as ENSURE_IMAGE sees it.
+# If the home filesystem becomes unreadable this series goes absent (the
+# daemon logs the statfs failure); alert on absent() as well as low values.
 runny_home_disk_free_bytes
 ```
 

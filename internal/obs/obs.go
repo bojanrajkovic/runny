@@ -1,0 +1,236 @@
+// Package obs is the structured observability event stream for a runner
+// cycle: the one seam every telemetry consumer (OTLP traces, OTLP metrics,
+// the per-cycle actions artifact) builds on. The FSM's record helpers emit
+// these events at the same instant they append to cycle.Record — one code
+// path, two outputs — so telemetry can never disagree with the record.
+//
+// obs imports nothing beyond the standard library: domain packages call
+// Action without importing any telemetry SDK, and the emitter installed by
+// the daemon is just a func(Event). Fan-out, buffering, and the
+// must-not-block contract belong to whatever installs the emitter, not to
+// this package — see the Emitter doc comment.
+package obs
+
+import (
+	"context"
+	"sync/atomic"
+	"time"
+)
+
+// Kind discriminates which payload field on Event is populated.
+type Kind string
+
+const (
+	KindCycleStarted  Kind = "cycle_started"
+	KindStepEntered   Kind = "step_entered"
+	KindStepLeft      Kind = "step_left"
+	KindActionStarted Kind = "action_started"
+	KindActionEnded   Kind = "action_ended"
+	KindDetail        Kind = "detail"
+	KindVMInfo        Kind = "vm_info"
+	KindJobStarted    Kind = "job_started"
+	KindJobEnded      Kind = "job_ended"
+	KindAuditAppend   Kind = "audit_append"
+	KindAuditUpdate   Kind = "audit_update"
+	KindCycleFinished Kind = "cycle_finished"
+)
+
+// Outcome classifies how a step or action ended. Deliberately a plain
+// string, not cycle.Outcome: obs does not import internal/cycle, so the FSM
+// is free to record its richer outcome vocabulary (warn, deadline) on the
+// cycle record while obs events carry whatever string the emitting call
+// site passes.
+type Outcome string
+
+const (
+	OutcomeOK    Outcome = "ok"
+	OutcomeError Outcome = "error"
+)
+
+// CycleRef identifies the cycle an event belongs to.
+type CycleRef struct {
+	InstancePrefix string
+	Slot           string
+	CycleID        string
+	Started        time.Time
+}
+
+// StepEvent is the payload for StepEntered/StepLeft. A state is entered at
+// most once per cycle — the FSM never revisits a state within a cycle (a
+// broken guest means a new cycle, not an in-place retry) — so State alone
+// correlates a StepLeft with its StepEntered.
+type StepEvent struct {
+	State   string
+	Outcome Outcome
+	Error   string
+}
+
+// ActionEvent is the payload for ActionStarted/ActionEnded. The step the
+// action ran under is the Event's top-level Step, not repeated here.
+type ActionEvent struct {
+	Name     string
+	Outcome  Outcome
+	Error    string
+	Duration time.Duration
+}
+
+// DetailEvent carries a live annotation ("2.1 GiB at 41 MiB/s").
+type DetailEvent struct {
+	Text string
+}
+
+// VMEvent carries VM identity learned mid-cycle (MAC, then IP).
+type VMEvent struct {
+	MAC string
+	IP  string
+}
+
+// JobEvent is the payload for JobStarted/JobEnded.
+type JobEvent struct {
+	Name    string
+	Outcome Outcome
+}
+
+// AuditEvent mirrors an operator debug-key audit append/update
+// (cycle.InjectedKey) — observational only, obs is not the audit's system
+// of record.
+type AuditEvent struct {
+	Fingerprint string
+	Outcome     string
+	State       string
+}
+
+// FinishEvent is the payload for CycleFinished.
+type FinishEvent struct {
+	Result       string
+	Ending       string
+	FailureState string
+	Error        string
+}
+
+// Event is one entry in a cycle's observability stream. Exactly one
+// kind-specific payload is populated, selected by Kind. Step is the FSM
+// step active when the event was emitted — stamped by Emit from the scope,
+// empty for cycle-level events emitted outside any step scope — so every
+// kind carries its step attribution without consumers folding
+// StepEntered/StepLeft brackets to recover it.
+type Event struct {
+	Seq   uint64
+	Time  time.Time
+	Cycle CycleRef
+	Step  string
+	Kind  Kind
+
+	StepInfo *StepEvent
+	Action   *ActionEvent
+	Detail   *DetailEvent
+	VM       *VMEvent
+	Job      *JobEvent
+	Audit    *AuditEvent
+	Finish   *FinishEvent
+}
+
+// Emitter receives every event a scope produces. Installed by the daemon;
+// nil means no-op (see WithCycle). It must not block: an installer that
+// wires an Emitter to real consumers is responsible for fan-out and for a
+// drop-with-logged-counter response to backpressure — the FSM goroutine
+// that calls Emit or Action can never be made to wait on a slow consumer.
+// All events for one cycle scope are emitted from a single goroutine (the
+// slot's FSM goroutine); Seq is the durable per-cycle order consumers sort
+// and correlate by, not a concurrency serializer.
+type Emitter func(Event)
+
+// scope is the context-carried identity: which cycle/step is active, where
+// events go, and the per-cycle Seq counter. The counter belongs to the
+// cycle scope established by WithCycle; step scopes derived by WithStep
+// share it — that sharing is what keeps Seq totally ordered across a whole
+// cycle. Unexported so it can only be built through WithCycle/WithStep.
+type scope struct {
+	emit  Emitter
+	cycle CycleRef
+	step  string
+	seq   *atomic.Uint64
+}
+
+type scopeKey struct{}
+
+// WithCycle establishes the observability scope for one cycle: every Emit
+// and Action on the returned context (or a context derived from it,
+// including through bounded.Context, whose Value delegates to its parent)
+// emits through emit against cycle, stamped from the single per-cycle Seq
+// counter this call creates. emit may be nil, which makes every Emit and
+// Action on this scope a no-op — the shape used when telemetry is
+// unconfigured.
+func WithCycle(ctx context.Context, emit Emitter, cycle CycleRef) context.Context {
+	return context.WithValue(ctx, scopeKey{}, &scope{
+		emit:  emit,
+		cycle: cycle,
+		seq:   new(atomic.Uint64),
+	})
+}
+
+// WithStep derives a scope for one FSM step: same cycle, same emitter, and
+// crucially the same per-cycle Seq counter — entering a new step never
+// resets the cycle's event order. On a context with no scope it returns
+// ctx unchanged.
+func WithStep(ctx context.Context, step string) context.Context {
+	s, _ := ctx.Value(scopeKey{}).(*scope)
+	if s == nil {
+		return ctx
+	}
+	child := *s
+	child.step = step
+	return context.WithValue(ctx, scopeKey{}, &child)
+}
+
+// Emit stamps e with the scope's next Seq, the current time, the scope's
+// CycleRef, and the scope's step, then hands it to the emitter. The caller
+// supplies Kind and the kind-specific payload; Seq, Time, Cycle, and Step
+// are overwritten. On a context with no scope, or a scope with a nil
+// emitter, Emit is a safe no-op.
+func Emit(ctx context.Context, e Event) {
+	s, _ := ctx.Value(scopeKey{}).(*scope)
+	if s == nil || s.emit == nil {
+		return
+	}
+	e.Seq = s.seq.Add(1)
+	e.Time = time.Now()
+	e.Cycle = s.cycle
+	e.Step = s.step
+	s.emit(e)
+}
+
+// Action runs fn, emitting ActionStarted before and ActionEnded after with
+// duration, outcome, and fn's error — sugar over Emit. An action name must
+// appear at most once per step: consumers pair ActionStarted/ActionEnded by
+// (step, name), so a caller that runs the same action twice in one step
+// (say, a retried dial) must disambiguate the name itself. On a context
+// with no scope (never passed through WithCycle) or a scope with a nil
+// emitter, Action degrades to a plain fn(ctx) call — zero events, no
+// allocation beyond what fn does. Domain packages call Action without
+// knowing or caring which case applies.
+func Action(ctx context.Context, name string, fn func(context.Context) error) error {
+	s, _ := ctx.Value(scopeKey{}).(*scope)
+	if s == nil || s.emit == nil {
+		return fn(ctx)
+	}
+
+	Emit(ctx, Event{Kind: KindActionStarted, Action: &ActionEvent{Name: name}})
+
+	start := time.Now()
+	err := fn(ctx)
+	dur := time.Since(start)
+
+	outcome, errText := OutcomeOK, ""
+	if err != nil {
+		outcome, errText = OutcomeError, err.Error()
+	}
+	Emit(ctx, Event{Kind: KindActionEnded, Action: &ActionEvent{
+		Name:     name,
+		Outcome:  outcome,
+		Error:    errText,
+		Duration: dur,
+	}})
+
+	return err
+}

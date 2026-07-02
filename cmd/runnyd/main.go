@@ -243,7 +243,12 @@ func run() error {
 	// trace to go.
 	var events obs.Emitter
 	if cfg.Observability.OTLP.Enabled() {
-		events = telemetry.NewTraceConsumer(otel.Tracer("runnyd"))
+		traces := telemetry.NewTraceConsumer(otel.Tracer("runnyd"))
+		metrics, err := telemetry.NewMetricsConsumer(otel.Meter("runnyd"))
+		if err != nil {
+			return fmt.Errorf("telemetry: %w", err)
+		}
+		events = func(e obs.Event) { traces(e); metrics(e) }
 	}
 
 	// Registration sweep: cold start owns the world. Offline
@@ -306,6 +311,32 @@ func run() error {
 		}
 		for i := 1; i <= p.Count; i++ {
 			slots = append(slots, statemachine.NewSlot(fmt.Sprintf("%s-%d", p.Name, i), deps))
+		}
+	}
+
+	if cfg.Observability.OTLP.Enabled() {
+		stateNames := make([]string, len(statemachine.States))
+		for i, s := range statemachine.States {
+			stateNames[i] = string(s)
+		}
+		poll := func() []telemetry.SlotSnapshot {
+			out := make([]telemetry.SlotSnapshot, 0, len(slots))
+			for _, s := range slots {
+				st := s.Status()
+				out = append(out, telemetry.SlotSnapshot{
+					Pool:                st.Pool,
+					Slot:                s.Name(),
+					State:               string(st.State),
+					StateEntered:        st.StateEntered,
+					ConsecutiveFailures: st.ConsecutiveFailures,
+					Wedged:              st.Wedged,
+					Paused:              st.Paused,
+				})
+			}
+			return out
+		}
+		if err := telemetry.RegisterGauges(otel.Meter("runnyd"), poll, stateNames, dir.String()); err != nil {
+			return fmt.Errorf("telemetry: %w", err)
 		}
 	}
 

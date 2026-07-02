@@ -278,7 +278,10 @@ func (c Command) reply(r DebugKeyReply) {
 
 // Status is the live snapshot the control surface renders.
 type Status struct {
-	Slot         string
+	Slot string
+	// Pool is the owning pool's configured name; slot-constant identity,
+	// like Slot and Image.
+	Pool         string
 	State        State
 	StateEntered time.Time
 	CycleID      string
@@ -356,12 +359,12 @@ func NewSlot(name string, deps Deps) *Slot {
 		name: name,
 		deps: deps,
 		cmds: make(chan Command, 8),
-		// Slot and Image are slot-constant identity (the name and the configured
-		// ref), not cycle state. Seeded here so a slot that hasn't transitioned
-		// yet still renders a complete row, and re-set on every transition by
-		// setState — so neither depends on this seed surviving a future
-		// struct-replace refactor.
-		status: Status{Slot: name, Image: deps.Pool.Image},
+		// Slot, Pool, and Image are slot-constant identity (the name, the
+		// owning pool, and the configured ref), not cycle state. Seeded here
+		// so a slot that hasn't transitioned yet still renders a complete
+		// row, and re-set on every transition by setState — so none depends
+		// on this seed surviving a future struct-replace refactor.
+		status: Status{Slot: name, Pool: deps.Pool.Name, Image: deps.Pool.Image},
 	}
 }
 
@@ -407,6 +410,7 @@ func (s *Slot) Status() Status {
 func (s *Slot) setState(state State, mut func(*Status)) {
 	s.mu.Lock()
 	s.status.Slot = s.name
+	s.status.Pool = s.deps.Pool.Name   // slot-constant identity, like Slot
 	s.status.Image = s.deps.Pool.Image // slot-constant identity, like Slot
 	s.status.State = state
 	s.status.StateEntered = time.Now()

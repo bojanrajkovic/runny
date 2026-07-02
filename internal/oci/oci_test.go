@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,7 @@ import (
 	"github.com/pierrec/lz4/v4"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
+	"github.com/bojanrajkovic/runny/internal/obs"
 )
 
 // testCtx satisfies the bounded.Context the pull API demands.
@@ -596,5 +598,74 @@ func TestPullInProgress(t *testing.T) {
 	<-sem // release
 	if PullInProgress(dest) {
 		t.Fatal("PullInProgress returned true after semaphore released")
+	}
+}
+
+// A scoped Resolve narrates the whole auth dance, each round trip with its
+// own class: the anonymous manifest GET answered 401, the token fetch, the
+// authenticated retry — nothing classed "other", nothing invisible.
+func TestResolveEmitsClassedHTTPEvents(t *testing.T) {
+	f := newFakeRegistry(t, []byte(`{"os":"darwin"}`), []byte{1}, bytes.Repeat([]byte{7}, 4096))
+	srv, ref := f.start()
+	defer srv.Close()
+
+	var events []obs.Event
+	base := obs.WithStep(obs.WithCycle(t.Context(), func(e obs.Event) { events = append(events, e) },
+		obs.CycleRef{Slot: "slot-0", CycleID: "cafe"}), "ENSURE_IMAGE")
+	ctx, cancel := bounded.WithTimeout(base, time.Minute)
+	defer cancel()
+
+	if _, err := NewClient().Resolve(ctx, ref); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []string
+	for _, e := range events {
+		if e.Kind == obs.KindHTTP {
+			got = append(got, fmt.Sprintf("%s:%d", e.HTTP.Class, e.HTTP.Status))
+		}
+	}
+	want := []string{
+		obs.HTTPRegistryManifest + ":401",
+		obs.HTTPRegistryToken + ":200",
+		obs.HTTPRegistryManifest + ":200",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("round trips = %v, want %v", got, want)
+	}
+}
+
+// Blob GETs carry the blob class when the context is scoped. (The production
+// pull actor's context carries no scope, so its blob traffic emits nothing —
+// the transport's passthrough contract, tested in internal/obs.)
+func TestPullToEmitsBlobClass(t *testing.T) {
+	f := newFakeRegistry(t, []byte(`{"os":"darwin"}`), []byte{1}, bytes.Repeat([]byte{7}, 4096))
+	srv, ref := f.start()
+	defer srv.Close()
+
+	var events []obs.Event
+	base := obs.WithStep(obs.WithCycle(t.Context(), func(e obs.Event) { events = append(events, e) },
+		obs.CycleRef{Slot: "slot-0", CycleID: "cafe"}), "ENSURE_IMAGE")
+	ctx, cancel := bounded.WithTimeout(base, time.Minute)
+	defer cancel()
+
+	if _, err := NewClient().PullTo(ctx, ref, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+
+	blobs := 0
+	for _, e := range events {
+		if e.Kind != obs.KindHTTP {
+			continue
+		}
+		if e.HTTP.Class == obs.HTTPOther {
+			t.Errorf("a registry round trip fell through to %q", obs.HTTPOther)
+		}
+		if e.HTTP.Class == obs.HTTPRegistryBlob && e.HTTP.Status == http.StatusOK {
+			blobs++
+		}
+	}
+	if blobs != 4 { // config + two disk layers + nvram
+		t.Errorf("got %d ok blob round trips, want 4", blobs)
 	}
 }

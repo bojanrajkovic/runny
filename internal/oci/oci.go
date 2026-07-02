@@ -27,6 +27,7 @@ import (
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
 	"github.com/bojanrajkovic/runny/internal/diskfree"
+	"github.com/bojanrajkovic/runny/internal/obs"
 	"github.com/bojanrajkovic/runny/internal/tart"
 )
 
@@ -150,7 +151,8 @@ type Client struct {
 }
 
 func NewClient() *Client {
-	return &Client{hc: &http.Client{Timeout: 0}, tokens: map[string]string{}} // no global timeout: pulls are long; ctx bounds them
+	// No global timeout: pulls are long; ctx bounds them.
+	return &Client{hc: &http.Client{Timeout: 0, Transport: &obs.HTTPTransport{}}, tokens: map[string]string{}}
 }
 
 // Resolve returns the manifest digest for a ref (tag → digest, or the pinned
@@ -385,7 +387,7 @@ func (c *Client) fetchManifest(ctx context.Context, ref Ref) (*manifest, []byte,
 		target = ref.Digest
 	}
 	u := fmt.Sprintf("%s://%s/v2/%s/manifests/%s", scheme(ref.Host), ref.Host, ref.Name, target)
-	resp, err := c.get(ctx, ref, u, manifestAccept)
+	resp, err := c.get(obs.WithHTTPClass(ctx, obs.HTTPRegistryManifest), ref, u, manifestAccept)
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("fetching manifest %s: %w", ref, err)
 	}
@@ -415,7 +417,7 @@ func (c *Client) pullBlobToFile(ctx context.Context, ref Ref, d descriptor, path
 	if d.Size <= 0 || d.Size > maxSmallBlobSize {
 		return fmt.Errorf("blob %s declares implausible size %d", d.Digest, d.Size)
 	}
-	resp, err := c.get(ctx, ref, blobURL(ref, d.Digest), "")
+	resp, err := c.get(obs.WithHTTPClass(ctx, obs.HTTPRegistryBlob), ref, blobURL(ref, d.Digest), "")
 	if err != nil {
 		return fmt.Errorf("pulling %s: %w", d.Digest, err)
 	}
@@ -450,7 +452,7 @@ func (c *Client) pullDiskLayer(ctx context.Context, ref Ref, d descriptor, diskP
 	if d.Size <= 0 {
 		return fmt.Errorf("disk layer %s declares non-positive size %d", d.Digest, d.Size)
 	}
-	resp, err := c.get(ctx, ref, blobURL(ref, d.Digest), "")
+	resp, err := c.get(obs.WithHTTPClass(ctx, obs.HTTPRegistryBlob), ref, blobURL(ref, d.Digest), "")
 	if err != nil {
 		return fmt.Errorf("pulling disk layer %s: %w", d.Digest, err)
 	}
@@ -542,6 +544,7 @@ func (c *Client) get(ctx context.Context, ref Ref, u, accept string) (*http.Resp
 
 // fetchToken handles `WWW-Authenticate: Bearer realm="...",service="...",scope="..."`.
 func (c *Client) fetchToken(ctx context.Context, ref Ref, challenge string) error {
+	ctx = obs.WithHTTPClass(ctx, obs.HTTPRegistryToken)
 	params := parseChallenge(challenge)
 	realm := params["realm"]
 	if realm == "" {

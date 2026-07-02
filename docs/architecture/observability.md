@@ -80,8 +80,10 @@ itself). A step whose implementation never calls it stays a leaf.
 Trace and span IDs are deterministic, derived by the OTEL-free
 `internal/traceid` package from a cycle's own identity
 (`instancePrefix`/`slot`/`cycleID`/`started` for the trace ID; the trace ID
-plus the emitting event's kind/step/action/seq for each span ID). A
-retained cycle always maps to the same trace, so re-emitting it is
+plus the span's kind/step/action for each span ID — inputs a `cycle.json`
+record fully determines, deliberately excluding the live stream's event
+sequence numbers, which the record does not persist). A retained cycle
+always maps to the same trace *and* the same spans, so re-emitting it is
 idempotent, and the same derivation is available to `runnyctl` without
 linking the OTEL SDK.
 

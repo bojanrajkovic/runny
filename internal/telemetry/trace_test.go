@@ -144,7 +144,7 @@ func TestTraceConsumerGolden(t *testing.T) {
 	if root.SpanContext.TraceID() != wantRootTrace {
 		t.Errorf("root trace ID = %x, want %x", root.SpanContext.TraceID(), wantRootTrace)
 	}
-	wantRootSpan := trace.SpanID(traceid.Span(testTraceID, "cycle", "", "", cycleStartSeq))
+	wantRootSpan := trace.SpanID(traceid.Span(testTraceID, "cycle", "", ""))
 	if root.SpanContext.SpanID() != wantRootSpan {
 		t.Errorf("root span ID = %x, want %x", root.SpanContext.SpanID(), wantRootSpan)
 	}
@@ -162,7 +162,7 @@ func TestTraceConsumerGolden(t *testing.T) {
 	if boot.Parent.SpanID() != root.SpanContext.SpanID() {
 		t.Errorf("BOOT step's parent span ID = %x, want root's %x", boot.Parent.SpanID(), root.SpanContext.SpanID())
 	}
-	wantBootSpan := trace.SpanID(traceid.Span(testTraceID, "step", "BOOT", "", bootSeq))
+	wantBootSpan := trace.SpanID(traceid.Span(testTraceID, "step", "BOOT", ""))
 	if boot.SpanContext.SpanID() != wantBootSpan {
 		t.Errorf("BOOT span ID = %x, want %x", boot.SpanContext.SpanID(), wantBootSpan)
 	}
@@ -177,7 +177,7 @@ func TestTraceConsumerGolden(t *testing.T) {
 	if dial.Parent.SpanID() != boot.SpanContext.SpanID() {
 		t.Errorf("dial action's parent span ID = %x, want BOOT's %x", dial.Parent.SpanID(), boot.SpanContext.SpanID())
 	}
-	wantDialSpan := trace.SpanID(traceid.Span(testTraceID, "action", "BOOT", "dial", dialSeq))
+	wantDialSpan := trace.SpanID(traceid.Span(testTraceID, "action", "BOOT", "dial"))
 	if dial.SpanContext.SpanID() != wantDialSpan {
 		t.Errorf("dial span ID = %x, want %x", dial.SpanContext.SpanID(), wantDialSpan)
 	}

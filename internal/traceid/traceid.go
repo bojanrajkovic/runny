@@ -8,7 +8,6 @@ package traceid
 
 import (
 	"crypto/sha256"
-	"fmt"
 	"time"
 )
 
@@ -21,11 +20,15 @@ func Trace(instancePrefix, slot, cycleID string, started time.Time) [16]byte {
 
 // Span derives a span ID scoped to traceID. kind distinguishes the span's
 // place in the tree ("cycle", "step", or "action") so root/step/action
-// spans never collide even when step or action is empty; seq is the
-// originating obs.Event's Seq, unique within the cycle.
-func Span(traceID [16]byte, kind, step, action string, seq uint64) [8]byte {
+// spans never collide even when step or action is empty. (kind, step,
+// action) alone identifies a span: a state is entered at most once per
+// cycle and an action name at most once per step (internal/obs documents
+// both), and deriving from nothing else is what makes re-emitting a
+// retained cycle.json — which persists no event sequence — reproduce the
+// live emission's span IDs exactly.
+func Span(traceID [16]byte, kind, step, action string) [8]byte {
 	var out [8]byte
-	copy(out[:], digest(string(traceID[:]), kind, step, action, fmt.Sprintf("%d", seq)))
+	copy(out[:], digest(string(traceID[:]), kind, step, action))
 	return out
 }
 

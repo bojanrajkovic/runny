@@ -121,7 +121,7 @@ func (a *traceAssembler) emit(e obs.Event) {
 
 func (a *traceAssembler) cycleStarted(e obs.Event) {
 	tid := traceid.Trace(e.Cycle.InstancePrefix, e.Cycle.Slot, e.Cycle.CycleID, e.Cycle.Started)
-	sid := traceid.Span(tid, "cycle", "", "", e.Seq)
+	sid := traceid.Span(tid, "cycle", "", "")
 	ctx := withIDs(context.Background(), trace.TraceID(tid), trace.SpanID(sid))
 	ctx, span := a.tracer.Start(ctx, "runny.cycle", trace.WithTimestamp(e.Time), trace.WithAttributes(
 		attribute.String("runny.slot", e.Cycle.Slot),
@@ -137,7 +137,7 @@ func (a *traceAssembler) cycleStarted(e obs.Event) {
 
 func (a *traceAssembler) stepEntered(e obs.Event) {
 	a.withCycle(e, func(cs *cycleSpans) {
-		sid := traceid.Span(cs.traceID, "step", e.Step, "", e.Seq)
+		sid := traceid.Span(cs.traceID, "step", e.Step, "")
 		ctx := withIDs(cs.ctx, trace.TraceID(cs.traceID), trace.SpanID(sid))
 		ctx, span := a.tracer.Start(ctx, "cycle.step "+e.Step, trace.WithTimestamp(e.Time))
 		cs.steps[e.Step] = &stepSpans{
@@ -165,7 +165,7 @@ func (a *traceAssembler) stepLeft(e obs.Event) {
 
 func (a *traceAssembler) actionStarted(e obs.Event) {
 	a.withStep(e, func(cs *cycleSpans, ss *stepSpans) {
-		sid := traceid.Span(cs.traceID, "action", e.Step, e.Action.Name, e.Seq)
+		sid := traceid.Span(cs.traceID, "action", e.Step, e.Action.Name)
 		ctx := withIDs(ss.ctx, trace.TraceID(cs.traceID), trace.SpanID(sid))
 		// No span ever parents off an action, so its context isn't kept.
 		_, span := a.tracer.Start(ctx, "cycle.step.action "+e.Action.Name, trace.WithTimestamp(e.Time))

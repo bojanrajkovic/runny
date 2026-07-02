@@ -35,8 +35,8 @@ func TestTraceDiscriminatesInputs(t *testing.T) {
 
 func TestSpanDeterministic(t *testing.T) {
 	tid := Trace("host-abcd1234", "pool-0", "a1b2c3d4", started)
-	a := Span(tid, "step", "BOOT", "", 3)
-	b := Span(tid, "step", "BOOT", "", 3)
+	a := Span(tid, "step", "BOOT", "")
+	b := Span(tid, "step", "BOOT", "")
 	if a != b {
 		t.Fatalf("Span not deterministic: %x != %x", a, b)
 	}
@@ -47,12 +47,11 @@ func TestSpanDeterministic(t *testing.T) {
 
 func TestSpanDiscriminatesInputs(t *testing.T) {
 	tid := Trace("host-abcd1234", "pool-0", "a1b2c3d4", started)
-	base := Span(tid, "step", "BOOT", "", 3)
+	base := Span(tid, "step", "BOOT", "")
 	cases := map[string][8]byte{
-		"kind":   Span(tid, "action", "BOOT", "", 3),
-		"step":   Span(tid, "step", "CLONE", "", 3),
-		"action": Span(tid, "step", "BOOT", "dial", 3),
-		"seq":    Span(tid, "step", "BOOT", "", 4),
+		"kind":   Span(tid, "action", "BOOT", ""),
+		"step":   Span(tid, "step", "CLONE", ""),
+		"action": Span(tid, "step", "BOOT", "dial"),
 	}
 	for name, got := range cases {
 		if got == base {
@@ -64,7 +63,7 @@ func TestSpanDiscriminatesInputs(t *testing.T) {
 func TestSpanScopedToTrace(t *testing.T) {
 	tidA := Trace("host-a", "pool-0", "a1b2c3d4", started)
 	tidB := Trace("host-b", "pool-0", "a1b2c3d4", started)
-	if Span(tidA, "step", "BOOT", "", 1) == Span(tidB, "step", "BOOT", "", 1) {
+	if Span(tidA, "step", "BOOT", "") == Span(tidB, "step", "BOOT", "") {
 		t.Fatal("Span did not incorporate the trace ID: same span ID across different traces")
 	}
 }

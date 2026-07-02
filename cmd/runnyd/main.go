@@ -242,6 +242,7 @@ func run() error {
 	// no-op tracer, so only install one when there's somewhere for the
 	// trace to go.
 	var events obs.Emitter
+	var ensurerMetrics *images.Metrics // nil when OTLP is off — the ensurer records nothing
 	if cfg.Observability.OTLP.Enabled() {
 		traces := telemetry.NewTraceConsumer(otel.Tracer("runnyd"))
 		metrics, err := telemetry.NewMetricsConsumer(otel.Meter("runnyd"))
@@ -249,6 +250,9 @@ func run() error {
 			return fmt.Errorf("telemetry: %w", err)
 		}
 		events = func(e obs.Event) { traces(e); metrics(e) }
+		if ensurerMetrics, err = telemetry.NewEnsurerMetrics(otel.Meter("runnyd")); err != nil {
+			return fmt.Errorf("telemetry: %w", err)
+		}
 	}
 
 	// Registration sweep: cold start owns the world. Offline
@@ -284,6 +288,7 @@ func run() error {
 				},
 				StallBudget:   cfg.Deadlines.PullStall.D(),
 				ResolveBudget: cfg.Deadlines.Resolve.D(),
+				Metrics:       ensurerMetrics,
 				Log:           logger,
 			},
 			Clone: func(src tart.Bundle, dst string) error {

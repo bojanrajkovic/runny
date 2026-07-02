@@ -104,13 +104,53 @@ The consumer is wired into `cmd/runnyd` only when an endpoint is configured
 — the same off-by-default rule as `Setup` itself, since an emitter costs
 real bookkeeping on every `obs.Emit` call even against a no-op tracer.
 
+### The metrics emitter
+
+`telemetry.NewMetricsConsumer` is the second `obs.Event` consumer, sharing
+the emitter fan-out with the trace consumer under the same off-by-default
+wiring. It folds the stream into two counters (finished cycles, finished
+jobs) and four seconds histograms (cycle, step, job, and action durations) —
+the instrument inventory, each instrument's meaning, and its exact label set
+live as doc comments on the instruments in `internal/telemetry/metrics.go`.
+Two properties define the fold:
+
+- **Durations are event-time arithmetic, never clock reads.** A step's
+  duration is its `StepLeft` timestamp minus its `StepEntered` timestamp; a
+  cycle's is `CycleFinished` minus the cycle's recorded start. The fold is a
+  pure function of the stream, so a replayed stream produces the live
+  stream's numbers, and an event whose start was never observed produces no
+  duration point rather than a fabricated one. The cycle's `result` and
+  `ending` labels are the persisted record classification, passed through
+  `FinishEvent` — metrics can never disagree with `cycle.json` about how a
+  cycle ended.
+- **Every label is a closed set.** States, outcomes, endings, and action
+  names are fixed vocabularies; pools and slots come from config. Job names
+  and any other guest-controlled string never become labels — they exist
+  only as span attributes on the trace side.
+
+Alongside the event-derived instruments, `telemetry.RegisterGauges`
+installs the status-polled side: observable gauges the SDK's periodic
+reader collects on its own schedule, with zero FSM involvement — a poll of
+each slot's status snapshot (the slot-state 0/1 matrix, state-entered time,
+failure streak, wedged/paused flags) plus one free-space check on the runny
+home filesystem. The state gauge reports 0/1 for **every** state per slot,
+not just the current one, so a state change reports 0 on the old series
+instead of letting it go stale. A disk-read failure surfaces as a callback
+error through the OTEL error handler — never a silent skip, never a fake
+zero. The gauges poll through a neutral snapshot seam, so `telemetry` never
+imports the state machine.
+
+Series from different daemons never collide: identity (which daemon, which
+host) rides the resource attributes `Setup` installs — instrument labels
+deliberately carry only pool/slot/vocabulary dimensions. Operator-facing
+query recipes and the pipeline contract this implies live in
+[deploy.md](../deploy.md).
+
 ### What this is not
 
 `internal/telemetry` owns providers, resource attribution, bounded
-shutdown, and the trace emitter — not metrics. The metrics emitter in the
-diagram above, which folds `obs.Event` into OTLP metrics, is a separate
-consumer that installs onto the providers this runtime sets up; it does not
-exist yet. Until it does, a configured endpoint's metric exporter carries no
-traffic — the connection and its resource attributes are real, the data
-isn't yet. An unconfigured daemon is unaffected either way: no SDK, no
-goroutines, no egress.
+shutdown, and the trace and metrics emitters. The remaining consumers in
+the diagram above — the per-cycle actions artifact and anything else built
+on the seam — are separate consumers that install onto the same emitter
+fan-out; they do not exist yet. An unconfigured daemon is unaffected either
+way: no SDK, no goroutines, no egress.

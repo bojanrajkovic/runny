@@ -117,9 +117,62 @@ are no per-signal endpoints. See
 [ADR-0024](architecture-decisions/0024-observability-event-seam.md) for the
 design this enables.
 
-This config surface validates and loads today; the exporter that reads it and
-actually emits traces and metrics ships separately. Until then, setting
-`endpoint` is accepted but has no observable effect.
+Traces arrive as one span tree per runner cycle (root `runny.cycle`, a child
+per FSM step, a grandchild per sub-step action); metrics as `runny.*`
+instruments — cycle/job counters, duration histograms, and per-slot state
+gauges. The architecture is described in
+[docs/architecture/observability.md](architecture/observability.md); the
+instruments themselves are documented where they're created, in
+`internal/telemetry/metrics.go`.
+
+**Series identity is resource + labels.** Metric labels carry only pool,
+slot, and closed vocabularies (state, outcome, result, ending, step,
+action); *which daemon* emitted a series rides the OTLP resource attributes
+(`service.instance.id`, `host.name`). A collector pipeline that drops
+resource attributes on the way to a Prometheus-family backend will silently
+merge series from different hosts — preserve `service.instance.id`
+(resource-to-label promotion, or a `target_info` join) when more than one
+runnyd reports to the same backend.
+
+#### Querying the metrics
+
+Recipes for the questions the instruments were designed to answer, in
+PromQL (after the usual OTLP→Prometheus name mapping, `runny.cycle.count` →
+`runny_cycle_count_total` and so on):
+
+```promql
+# Fleet by state — "5 in JOB": the state gauge is a 0/1 matrix per
+# (pool, slot, state), so counting is a sum, not a separate metric.
+sum by (pool, state) (runny_slot_state)
+
+# Utilization: fraction of a pool's slots running a job.
+sum by (pool) (runny_slot_state{state="JOB"})
+  / count by (pool) (count by (pool, slot) (runny_slot_state))
+
+# Job throughput and p95 duration.
+sum by (pool) (rate(runny_job_count_total[15m]))
+histogram_quantile(0.95,
+  sum by (pool, le) (rate(runny_job_duration_seconds_bucket[1h])))
+
+# Cycle failure ratio — endings classify why: `failure` and `wedge` are
+# health problems; `shutdown` and operator-caused endings are benign.
+sum by (pool) (rate(runny_cycle_count_total{ending=~"failure|wedge"}[1h]))
+  / sum by (pool) (rate(runny_cycle_count_total[1h]))
+
+# Time in current state — alert when a slot sits anywhere too long
+# (a stuck slot is exactly the silent failure runny exists to kill).
+time() - runny_slot_state_entered_time_seconds
+
+# Wedged slots (parked until daemon restart) and operator pauses.
+runny_slot_wedged == 1
+runny_slot_paused == 1
+
+# Disk headroom on the runny home filesystem, as ENSURE_IMAGE sees it.
+runny_home_disk_free_bytes
+```
+
+Where a step or action is slow, switch to traces: the cycle's span tree
+carries per-step and per-action timing with the exact error text.
 
 ## Production install (via the tap)
 

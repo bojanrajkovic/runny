@@ -163,6 +163,16 @@ func TestRecordToProtoCarriesOperatorUID(t *testing.T) {
 	}
 }
 
+// TestRecordToProtoCarriesEnding pins that the ending classification
+// (issue #229) survives the disk→wire conversion `runnyctl why` reads.
+func TestRecordToProtoCarriesEnding(t *testing.T) {
+	r := &cycle.Record{CycleID: "abcd1234", Slot: "mac-1", Ending: cycle.EndingRecycle}
+	pb := recordToProto(r)
+	if pb.GetEnding() != string(cycle.EndingRecycle) {
+		t.Errorf("Ending dropped: got %q, want %q", pb.GetEnding(), cycle.EndingRecycle)
+	}
+}
+
 // TestLookupUsernameResolvesQuickly pins that lookupUsername's bounded
 // goroutine plumbing delivers a fast local resolution well within its
 // timeout, rather than always falling through to the "" timeout path.

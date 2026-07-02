@@ -404,6 +404,12 @@ message CycleRecord {
   // Clients MUST NOT synthesize this from started+cycle_id: crash-orphan
   // records have a Started that does not match the directory name.
   string cycle_dir = 16;
+  // Why the cycle ended: "success" | "failure" | "recycle" (operator) |
+  // "shutdown" (daemon exit) | "wedge" (teardown could not kill the guest).
+  // Distinct from result: a recycled or shutdown cycle has result "failure"
+  // (the timeline stays truthful) but ending names the benign cause instead
+  // of a health signal. Empty in records written by older daemons.
+  string ending = 17;
 }
 
 message InjectedKey {

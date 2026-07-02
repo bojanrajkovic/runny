@@ -900,20 +900,29 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 
 	// A cycle ended by operator recycle or daemon shutdown is recorded as a
 	// failure (the timeline is truthful) but is benign for backoff: neither
-	// says anything about the slot's health. A wedge is never benign.
+	// says anything about the slot's health. A wedge is never benign. ending
+	// names which of those two (or a plain failure) it was, for cycle.json.
 	benign := false
+	ending := cycle.EndingFailure
 	if !ok {
 		if cause := context.Cause(cctx); errors.Is(cause, errOperatorRecycle) {
 			// Surface the recycle as the failure text instead of the bare
 			// "context canceled" the interrupted state reported.
 			failErr = cause
 			benign = true
-		} else if errors.Is(failErr, errOperatorRecycle) || ctx.Err() != nil {
+			ending = cycle.EndingRecycle
+		} else if errors.Is(failErr, errOperatorRecycle) {
 			benign = true
+			ending = cycle.EndingRecycle
+		} else if ctx.Err() != nil {
+			benign = true
+			ending = cycle.EndingShutdown
 		} else if errors.Is(failErr, errDebugExpired) || errors.Is(failErr, errDebugRacedJob) {
 			// A DEBUG hold that ran out, or a job that raced the LISTENING
 			// freeze and died with the verified kill: operator-caused, not a
-			// health signal (issue #39, §5.6).
+			// health signal (issue #39, §5.6). Not its own Ending class — it
+			// still reads as "failure" (Result agrees); benign is what exempts
+			// it from backoff.
 			benign = true
 		}
 	}
@@ -923,6 +932,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	switch {
 	case ok && !wedged:
 		rec.Result = cycle.ResultSuccess
+		ending = cycle.EndingSuccess
 	case !ok:
 		rec.Result = cycle.ResultFailure
 		rec.Failure = &cycle.Failure{State: string(failState), Error: failErr.Error()}
@@ -930,6 +940,10 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 		rec.Result = cycle.ResultFailure
 		rec.Failure = &cycle.Failure{State: string(StateTeardown), Error: "vm stop escalation failed; guest still running"}
 	}
+	if wedged {
+		ending = cycle.EndingWedge
+	}
+	rec.Ending = ending
 	return rec, wedged, benign
 }
 

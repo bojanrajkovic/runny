@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/bojanrajkovic/runny/internal/cycle"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
@@ -387,6 +388,85 @@ func TestRenderCycleShowsImageRef(t *testing.T) {
 	})
 	if got := buf.String(); !strings.Contains(got, "image ghcr.io/test/image @ sha256:ab12cd34ef56") || strings.Count(got, "sha256:") != 1 {
 		t.Errorf("resolved pinned cycle must show the ref once and the short digest once, not the digest twice:\n%s", got)
+	}
+}
+
+// TestRenderCycleShowsEnding pins issue #229's `why` requirement: a recycled
+// or shutdown-interrupted cycle must read as such at a glance, not as a
+// failure with a suspicious error string, even though Result is "failure"
+// for both (the timeline stays truthful). The reason the operator typed
+// (carried in FailureError) must survive: `runnyctl recycle -reason` exists
+// so `why` can answer "why was this healthy slot recycled". The ending values
+// come from the real cycle constants, not string literals — renaming a
+// constant must turn this red, not silently unstyle `why`.
+func TestRenderCycleShowsEnding(t *testing.T) {
+	now := timestamppb.New(time.Now())
+
+	cases := []struct {
+		name   string
+		ending string
+		wants  []string
+		avoid  string
+	}{
+		{"recycle", string(cycle.EndingRecycle), []string{"recycled by operator", "image bump"}, "✗"},
+		{"shutdown", string(cycle.EndingShutdown), []string{"daemon shutdown", "image bump"}, "✗"},
+		{"wedge still reads as a failure", string(cycle.EndingWedge), []string{"✗"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			c := &ctl{out: &buf}
+			c.renderCycle(&runnyv1.CycleRecord{
+				CycleId: "abcd1234", Slot: "mac-1", Result: "failure", Ending: tc.ending,
+				FailureState: "TEARDOWN", FailureError: "recycled by operator: image bump",
+				Started: now, Finished: now,
+			})
+			got := buf.String()
+			for _, want := range tc.wants {
+				if !strings.Contains(got, want) {
+					t.Errorf("ending=%q: output missing %q:\n%s", tc.ending, want, got)
+				}
+			}
+			if tc.avoid != "" && strings.Contains(got, tc.avoid) {
+				t.Errorf("ending=%q: output must not contain %q (would read as a suspicious failure):\n%s", tc.ending, tc.avoid, got)
+			}
+		})
+	}
+}
+
+// TestRenderCycleResultIsAuthoritativeForSuccess pins that Result — not
+// Ending — gates the success verdict. runCycle always sets both together, so
+// this desync shouldn't occur from the current write path, but why's whole
+// purpose is truthful failure surfacing: a corrupted or hand-edited
+// cycle.json with Ending="success" alongside Result="failure" must still
+// render as a failure, never silently as a green checkmark.
+func TestRenderCycleResultIsAuthoritativeForSuccess(t *testing.T) {
+	now := timestamppb.New(time.Now())
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	c.renderCycle(&runnyv1.CycleRecord{
+		CycleId: "abcd1234", Slot: "mac-1", Result: "failure", Ending: "success",
+		FailureState: "TEARDOWN", FailureError: "vm stop escalation failed",
+		Started: now, Finished: now,
+	})
+	if got := buf.String(); !strings.Contains(got, "✗") || strings.Contains(got, "✓") {
+		t.Errorf("Result=failure with a desynced Ending=success must still render as a failure:\n%s", got)
+	}
+}
+
+// A record from an older daemon (no Ending field at all) must still render —
+// falling back to Result alone, exactly as it did before this field existed.
+func TestRenderCycleFallsBackWithoutEnding(t *testing.T) {
+	now := timestamppb.New(time.Now())
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	c.renderCycle(&runnyv1.CycleRecord{
+		CycleId: "abcd1234", Slot: "mac-1", Result: "failure",
+		FailureState: "TEARDOWN", FailureError: "recycled by operator: image bump",
+		Started: now, Finished: now,
+	})
+	if got := buf.String(); !strings.Contains(got, "✗ failed in TEARDOWN") {
+		t.Errorf("no-Ending record must fall back to the old ✗ failed rendering:\n%s", got)
 	}
 }
 

@@ -934,6 +934,111 @@ func TestEndingShutdown(t *testing.T) {
 	}
 }
 
+// TestEndingDebugExpiryBeatsShutdown pins the classification precedence when
+// a daemon shutdown lands during teardown of a cycle whose DEBUG hold already
+// expired: failErr was fixed at errDebugExpired before the shutdown arrived,
+// so the record keeps Ending "failure" (whose verdict carries the expiry
+// text) instead of being relabeled "shutdown".
+func TestEndingDebugExpiryBeatsShutdown(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	cancel := h.reachListening(t)
+
+	// Deterministic mid-teardown shutdown: after DEBUG, the only RemoveAll
+	// is teardown's clone removal, which runs before the classification.
+	h.setRemoveAll(func(path string) error {
+		cancel()
+		return os.RemoveAll(path)
+	})
+
+	if r := h.debugCmd(t, func(c *Command) { c.Hold = 50 * time.Millisecond }); r.Err != nil {
+		t.Fatalf("freeze: %v", r.Err)
+	}
+	h.waitState(t, StateDebug)
+	<-h.runDone
+
+	recs := h.records(t)
+	if len(recs) != 1 {
+		t.Fatalf("got %d records, want 1", len(recs))
+	}
+	rec := recs[0]
+	// Precondition: the cycle really ended on the expiry, not something else.
+	if rec.Failure == nil || !strings.Contains(rec.Failure.Error, "debug hold expired") {
+		t.Fatalf("failure = %+v, want the debug expiry", rec.Failure)
+	}
+	if rec.Ending != cycle.EndingFailure {
+		t.Errorf("Ending = %q, want %q — the expiry ended this cycle before the shutdown arrived", rec.Ending, cycle.EndingFailure)
+	}
+}
+
+// TestEndingDebugRacedJobBeatsShutdown pins the branch's other sentinel: a
+// job that raced the LISTENING freeze and died with the verified kill,
+// followed by a shutdown during teardown, keeps Ending "failure" for the
+// same reason as the expiry above.
+func TestEndingDebugRacedJobBeatsShutdown(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	h.guest.stopSayMarker = "Running job: raced"
+	cancel := h.reachListening(t)
+
+	h.setRemoveAll(func(path string) error {
+		cancel()
+		return os.RemoveAll(path)
+	})
+
+	if r := h.debugCmd(t, nil); r.Err == nil || !strings.Contains(r.Err.Error(), "killed by the freeze") {
+		t.Fatalf("want the raced-kill refusal, got %v", r.Err)
+	}
+	<-h.runDone
+
+	recs := h.records(t)
+	if len(recs) != 1 {
+		t.Fatalf("got %d records, want 1", len(recs))
+	}
+	rec := recs[0]
+	if rec.Failure == nil || !strings.Contains(rec.Failure.Error, "job raced the debug freeze") {
+		t.Fatalf("failure = %+v, want the raced-job kill", rec.Failure)
+	}
+	if rec.Ending != cycle.EndingFailure {
+		t.Errorf("Ending = %q, want %q", rec.Ending, cycle.EndingFailure)
+	}
+}
+
+// TestEndingPlainFailureBeatsShutdown pins the same precedence for a plain
+// failure: a runner that dies on its own seals the cycle's fate before
+// teardown starts, so a shutdown landing during teardown must not relabel
+// the record "shutdown" (hiding a real health signal), nor exempt it from
+// the failure streak as benign.
+func TestEndingPlainFailureBeatsShutdown(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	cancel := h.reachListening(t)
+
+	h.setRemoveAll(func(path string) error {
+		cancel()
+		return os.RemoveAll(path)
+	})
+
+	// A real failure, not shutdown-caused: the runner exits while idle.
+	h.proc.exit(1)
+	<-h.runDone
+
+	recs := h.records(t)
+	if len(recs) != 1 {
+		t.Fatalf("got %d records, want 1", len(recs))
+	}
+	rec := recs[0]
+	if rec.Failure == nil || !strings.Contains(rec.Failure.Error, "runner exited") {
+		t.Fatalf("failure = %+v, want the runner exit", rec.Failure)
+	}
+	if rec.Ending != cycle.EndingFailure {
+		t.Errorf("Ending = %q, want %q — the runner died before the shutdown arrived", rec.Ending, cycle.EndingFailure)
+	}
+	if st := h.slot.Status(); st.ConsecutiveFailures != 1 {
+		t.Errorf("a real failure must count even when shutdown races its teardown; failures=%d", st.ConsecutiveFailures)
+	}
+}
+
 // teardownRecord returns the TEARDOWN StateRecord from a cycle record.
 func teardownRecord(t *testing.T, r *cycle.Record) cycle.StateRecord {
 	t.Helper()

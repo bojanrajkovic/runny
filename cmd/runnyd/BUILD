@@ -45,6 +45,7 @@ go_library(
         "//internal/statemachine",
         "//internal/sysdaemon",
         "//internal/tart",
+        "//internal/telemetry",
         "//internal/versioncore",
         "//proto/runny/v1:runny",
         "@org_golang_x_sys//unix",

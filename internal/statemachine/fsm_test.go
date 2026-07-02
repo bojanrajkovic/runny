@@ -562,6 +562,7 @@ func newHarnessPool(t *testing.T, mutate func(*home.Config), mutatePool func(*ho
 		default:
 		}
 	})
+	h.verifyObsParityOnCleanup(t)
 	return h
 }
 
@@ -588,6 +589,79 @@ func (h *harness) records(t *testing.T) []*cycle.Record {
 		t.Fatal(err)
 	}
 	return recs
+}
+
+// obsStateCoverage accumulates, across every test in this package's run,
+// which States actually appeared in a cycle.Record whose obs events were
+// verified to match it. TestMain fails the whole binary if any non-BACKOFF
+// State never showed up here — the only way a state lands in the set is by
+// being driven end-to-end AND passing assertStepEventsMatchRecord, so this
+// catches both "nothing tests this state" and "something tests it but its
+// StepEntered/StepLeft pair was never wired" without any source inspection.
+var (
+	obsStateCoverageMu sync.Mutex
+	obsStateCoverage   = map[State]bool{}
+)
+
+// verifyObsParityOnCleanup registers a t.Cleanup that runs after every test
+// built on this harness (LIFO: after h.start's own cancel-and-wait-for-
+// runDone cleanup, since that's registered later, by the test itself,
+// whenever it calls h.start). Once the slot is stopped, it reads every
+// cycle.Record the test produced and asserts the obs stream matches it —
+// automatically, for every existing and future test that uses newHarness,
+// not only ones that opt in by calling the assertion helpers themselves.
+func (h *harness) verifyObsParityOnCleanup(t *testing.T) {
+	t.Cleanup(func() {
+		if t.Failed() {
+			return // the test already failed on its own terms; don't pile on
+		}
+		recs, err := cycle.Store{SlotDir: h.dir.SlotCyclesDir("runner-1")}.Recent(0, "")
+		if err != nil {
+			return
+		}
+		for _, rec := range recs {
+			events := h.eventsForCycle(rec.CycleID)
+			if len(events) == 0 {
+				continue // no Events hook wired for this test (e.g. the nil-hook test)
+			}
+			assertStepEventsMatchRecord(t, events, rec)
+			obsStateCoverageMu.Lock()
+			for _, sr := range rec.States {
+				obsStateCoverage[State(sr.State)] = true
+			}
+			obsStateCoverageMu.Unlock()
+		}
+	})
+}
+
+// TestMain gates the whole package's test run on obs event coverage: every
+// State this FSM can report (statemachine.States, the same exhaustive list
+// socket_test.go's proto-mapping check keys off) must have been driven
+// through at least one verified cycle. A new state added to States without a
+// test that reaches it — or reached by a test but missing its
+// StepEntered/StepLeft wiring — fails the build here, not silently.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if code == 0 {
+		obsStateCoverageMu.Lock()
+		var missing []State
+		for _, st := range States {
+			if st == StateBackoff {
+				continue // never part of a cycle; no StateRecord exists for it either
+			}
+			if !obsStateCoverage[st] {
+				missing = append(missing, st)
+			}
+		}
+		obsStateCoverageMu.Unlock()
+		if len(missing) > 0 {
+			fmt.Fprintf(os.Stderr,
+				"obs event coverage gap: no test drove these states through a verified StepEntered/StepLeft pair: %v\n"+
+					"add a test scenario that reaches each one (see newHarness/verifyObsParityOnCleanup)\n", missing)
+			code = 1
+		}
+	}
+	os.Exit(code)
 }
 
 // eventsForCycle returns the obs events emitted for one cycle, in emission

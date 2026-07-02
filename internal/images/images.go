@@ -45,7 +45,10 @@ type Ensurer struct {
 	// ResolveBudget bounds the metadata round-trips that precede the pull
 	// (Deadlines.Resolve); zero takes the default.
 	ResolveBudget time.Duration
-	Log           *slog.Logger
+	// Metrics receives the ensurer-scope pull/download outcomes (see the
+	// Metrics doc); nil records nothing.
+	Metrics *Metrics
+	Log     *slog.Logger
 
 	// Test seams, nil → the real implementations (the imagePuller
 	// attempt/diskFree pattern): resolve is the registry manifest
@@ -65,7 +68,7 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string), onDigestResol
 	// Runner tarball first: small, fails fast, and shared across slots
 	// (per-file locking inside).
 	if e.Runner != nil {
-		_, runnerVersion, err = EnsureRunnerTarball(ctx, e.Home.RunnerCacheDir(), e.Runner, e.resolveBudget(), e.StallBudget, report, e.log())
+		_, runnerVersion, err = EnsureRunnerTarball(ctx, e.Home.RunnerCacheDir(), e.Runner, e.resolveBudget(), e.StallBudget, report, e.Metrics, e.log())
 		if err != nil {
 			return "", "", "", fmt.Errorf("ensuring runner tarball: %w", err)
 		}
@@ -120,7 +123,7 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string), onDigestResol
 	acquire := e.acquire
 	if acquire == nil {
 		acquire = func(dir string, ref oci.Ref, report func(string)) (*subscription, func()) {
-			return acquireImagePull(dir, ref, e.StallBudget, e.log(), report)
+			return acquireImagePull(dir, ref, e.StallBudget, e.log(), e.Metrics, report)
 		}
 	}
 	// wait-for-pull is this cycle's experience of the shared pull — the time
@@ -333,16 +336,16 @@ func ProtectActiveTarballs(protect map[string]bool) {
 // The whole body — resolve + download, or the cache hit — runs under a
 // tarball-ensure action, so a cache-hit cycle's trace shows an honest
 // near-zero duration for this sub-step.
-func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerResolver, resolveBudget, stallBudget time.Duration, report func(string), log *slog.Logger) (path, asset string, err error) {
+func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerResolver, resolveBudget, stallBudget time.Duration, report func(string), metrics *Metrics, log *slog.Logger) (path, asset string, err error) {
 	err = obs.Action(ctx, obs.ActionTarballEnsure, func(ctx context.Context) error {
 		var ierr error
-		path, asset, ierr = ensureRunnerTarball(ctx, cacheDir, resolve, resolveBudget, stallBudget, report, log)
+		path, asset, ierr = ensureRunnerTarball(ctx, cacheDir, resolve, resolveBudget, stallBudget, report, metrics, log)
 		return ierr
 	})
 	return path, asset, err
 }
 
-func ensureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerResolver, resolveBudget, stallBudget time.Duration, report func(string), log *slog.Logger) (string, string, error) {
+func ensureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerResolver, resolveBudget, stallBudget time.Duration, report func(string), metrics *Metrics, log *slog.Logger) (string, string, error) {
 	if resolveBudget <= 0 {
 		resolveBudget = defaultResolveTimeout
 	}
@@ -374,6 +377,24 @@ func ensureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 		return dest, assetName, nil // already cached
 	}
 
+	// A real download starts here — the metric brackets exactly this, so a
+	// cache hit or a slot that waited out a peer's download records nothing.
+	start := time.Now()
+	err = downloadTarball(ctx, dest, assetName, assetURL, wantSHA, stallBudget, report, log)
+	metrics.tarballDownloadDone(outcomeOf(err), time.Since(start))
+	if err != nil {
+		return "", "", err
+	}
+	if log != nil {
+		log.Info("runner tarball cached", "asset", assetName)
+	}
+	return dest, assetName, nil
+}
+
+// downloadTarball fetches assetURL to dest via a .partial temp file, with
+// stall watching, progress reporting, and the service-declared checksum
+// verification.
+func downloadTarball(ctx context.Context, dest, assetName, assetURL, wantSHA string, stallBudget time.Duration, report func(string), log *slog.Logger) error {
 	if log != nil {
 		log.Info("downloading runner tarball", "asset", assetName)
 	}
@@ -386,20 +407,20 @@ func ensureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 
 	dreq, err := http.NewRequestWithContext(wctx, http.MethodGet, assetURL, nil)
 	if err != nil {
-		return "", "", err
+		return err
 	}
 	dresp, err := http.DefaultClient.Do(dreq)
 	if err != nil {
-		return "", "", stallErr(wctx, err, "downloading runner tarball")
+		return stallErr(wctx, err, "downloading runner tarball")
 	}
 	defer dresp.Body.Close()
 	if dresp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("downloading runner tarball: HTTP %d", dresp.StatusCode)
+		return fmt.Errorf("downloading runner tarball: HTTP %d", dresp.StatusCode)
 	}
 	tmp := dest + ".partial"
 	f, err := os.Create(tmp)
 	if err != nil {
-		return "", "", err
+		return err
 	}
 	prog := newProgress(report, log, stallBudget)
 	body := io.TeeReader(dresp.Body, progressWriter(func(n int64) {
@@ -412,11 +433,11 @@ func ensureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 	if err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
-		return "", "", stallErr(wctx, err, "downloading runner tarball")
+		return stallErr(wctx, err, "downloading runner tarball")
 	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
-		return "", "", err
+		return err
 	}
 	// The tarball is staged into every guest and executed; verify it against
 	// the service-declared checksum when one was given (older GHES may omit
@@ -424,17 +445,14 @@ func ensureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 	if wantSHA != "" {
 		if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, wantSHA) {
 			_ = os.Remove(tmp)
-			return "", "", fmt.Errorf("runner tarball checksum mismatch: downloads endpoint says %s, got %s", wantSHA, got)
+			return fmt.Errorf("runner tarball checksum mismatch: downloads endpoint says %s, got %s", wantSHA, got)
 		}
 	}
 	if err := os.Rename(tmp, dest); err != nil {
 		_ = os.Remove(tmp)
-		return "", "", err
+		return err
 	}
-	if log != nil {
-		log.Info("runner tarball cached", "asset", assetName)
-	}
-	return dest, assetName, nil
+	return nil
 }
 
 // stallErr surfaces the stall cause when the watcher killed a transfer —

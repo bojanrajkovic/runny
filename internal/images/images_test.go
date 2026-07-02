@@ -187,7 +187,7 @@ func TestEnsureRunnerTarballEmitsAction(t *testing.T) {
 	resolve, _ := tarballServer(t, http.StatusOK)
 
 	for i := 0; i < 2; i++ { // download, then cache hit — both emit the action
-		_, asset, err := EnsureRunnerTarball(scopedCtx(cap), dir, resolve, time.Second, time.Minute, nil, nil)
+		_, asset, err := EnsureRunnerTarball(scopedCtx(cap), dir, resolve, time.Second, time.Minute, nil, nil, nil)
 		if err != nil || asset == "" {
 			t.Fatalf("EnsureRunnerTarball #%d: (%q, %v)", i, asset, err)
 		}

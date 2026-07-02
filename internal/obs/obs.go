@@ -278,21 +278,37 @@ func WithStep(ctx context.Context, step string) context.Context {
 	return context.WithValue(ctx, scopeKey{}, &child)
 }
 
+// liveScope returns ctx's scope when it can actually emit, nil otherwise —
+// the one definition of the degradation predicate Emit, Action, and
+// HTTPTransport all share, so "no scope or nil emitter means no-op" cannot
+// fork between them.
+func liveScope(ctx context.Context) *scope {
+	s, _ := ctx.Value(scopeKey{}).(*scope)
+	if s == nil || s.emit == nil {
+		return nil
+	}
+	return s
+}
+
+// emitEvent stamps e with the scope's next Seq, the current time, the
+// scope's CycleRef, and the scope's step, then hands it to the emitter.
+func (s *scope) emitEvent(e Event) {
+	e.Seq = s.seq.Add(1)
+	e.Time = time.Now()
+	e.Cycle = s.cycle
+	e.Step = s.step
+	s.emit(e)
+}
+
 // Emit stamps e with the scope's next Seq, the current time, the scope's
 // CycleRef, and the scope's step, then hands it to the emitter. The caller
 // supplies Kind and the kind-specific payload; Seq, Time, Cycle, and Step
 // are overwritten. On a context with no scope, or a scope with a nil
 // emitter, Emit is a safe no-op.
 func Emit(ctx context.Context, e Event) {
-	s, _ := ctx.Value(scopeKey{}).(*scope)
-	if s == nil || s.emit == nil {
-		return
+	if s := liveScope(ctx); s != nil {
+		s.emitEvent(e)
 	}
-	e.Seq = s.seq.Add(1)
-	e.Time = time.Now()
-	e.Cycle = s.cycle
-	e.Step = s.step
-	s.emit(e)
 }
 
 // Action runs fn, emitting ActionStarted before and ActionEnded after with
@@ -305,8 +321,7 @@ func Emit(ctx context.Context, e Event) {
 // fn(ctx) call — zero events, no emitter work. Domain packages call Action
 // without knowing or caring which case applies.
 func Action(ctx context.Context, name string, fn func(context.Context) error, attrs ...Attr) error {
-	s, _ := ctx.Value(scopeKey{}).(*scope)
-	if s == nil || s.emit == nil {
+	if liveScope(ctx) == nil {
 		return fn(ctx)
 	}
 

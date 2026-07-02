@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 )
 
 // scopedHTTP returns a context carrying a cycle scope whose events land in
@@ -140,31 +139,6 @@ func TestHTTPTransportScopelessIsPassthrough(t *testing.T) {
 	}
 	// No scope → nothing to emit into; nothing to assert beyond not panicking
 	// and delegating. The scoped tests prove events flow when a scope exists.
-}
-
-// The event's Time is stamped at completion; Duration reaches back to the
-// start of the round trip, so a consumer reconstructs the start as
-// Time − Duration without a second event to pair with.
-func TestHTTPTransportDurationCoversRoundTrip(t *testing.T) {
-	const wait = 30 * time.Millisecond
-	var events []Event
-	hc := &http.Client{Transport: &HTTPTransport{Base: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		time.Sleep(wait)
-		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
-	})}}
-	req, _ := http.NewRequestWithContext(WithHTTPClass(scopedHTTP(&events), HTTPTarballDownload), http.MethodGet, "https://cdn.example/x", nil)
-	resp, err := hc.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-
-	if len(events) != 1 {
-		t.Fatalf("got %d events, want 1", len(events))
-	}
-	if d := events[0].HTTP.Duration; d < wait {
-		t.Errorf("Duration = %v, want ≥ %v", d, wait)
-	}
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

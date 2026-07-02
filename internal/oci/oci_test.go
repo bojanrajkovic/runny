@@ -601,6 +601,17 @@ func TestPullInProgress(t *testing.T) {
 	}
 }
 
+// scopedCtx returns a bounded context carrying an obs cycle scope inside an
+// ENSURE_IMAGE step, capturing events into the given slice.
+func scopedCtx(t *testing.T, events *[]obs.Event) bounded.Context {
+	t.Helper()
+	base := obs.WithStep(obs.WithCycle(t.Context(), func(e obs.Event) { *events = append(*events, e) },
+		obs.CycleRef{Slot: "slot-0", CycleID: "cafe"}), "ENSURE_IMAGE")
+	ctx, cancel := bounded.WithTimeout(base, time.Minute)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 // A scoped Resolve narrates the whole auth dance, each round trip with its
 // own class: the anonymous manifest GET answered 401, the token fetch, the
 // authenticated retry — nothing classed "other", nothing invisible.
@@ -610,10 +621,7 @@ func TestResolveEmitsClassedHTTPEvents(t *testing.T) {
 	defer srv.Close()
 
 	var events []obs.Event
-	base := obs.WithStep(obs.WithCycle(t.Context(), func(e obs.Event) { events = append(events, e) },
-		obs.CycleRef{Slot: "slot-0", CycleID: "cafe"}), "ENSURE_IMAGE")
-	ctx, cancel := bounded.WithTimeout(base, time.Minute)
-	defer cancel()
+	ctx := scopedCtx(t, &events)
 
 	if _, err := NewClient().Resolve(ctx, ref); err != nil {
 		t.Fatal(err)
@@ -626,9 +634,9 @@ func TestResolveEmitsClassedHTTPEvents(t *testing.T) {
 		}
 	}
 	want := []string{
-		obs.HTTPRegistryManifest + ":401",
-		obs.HTTPRegistryToken + ":200",
-		obs.HTTPRegistryManifest + ":200",
+		string(obs.HTTPRegistryManifest) + ":401",
+		string(obs.HTTPRegistryToken) + ":200",
+		string(obs.HTTPRegistryManifest) + ":200",
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("round trips = %v, want %v", got, want)
@@ -644,10 +652,7 @@ func TestPullToEmitsBlobClass(t *testing.T) {
 	defer srv.Close()
 
 	var events []obs.Event
-	base := obs.WithStep(obs.WithCycle(t.Context(), func(e obs.Event) { events = append(events, e) },
-		obs.CycleRef{Slot: "slot-0", CycleID: "cafe"}), "ENSURE_IMAGE")
-	ctx, cancel := bounded.WithTimeout(base, time.Minute)
-	defer cancel()
+	ctx := scopedCtx(t, &events)
 
 	if _, err := NewClient().PullTo(ctx, ref, t.TempDir()); err != nil {
 		t.Fatal(err)

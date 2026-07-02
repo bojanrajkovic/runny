@@ -2,7 +2,7 @@ package telemetry
 
 import (
 	"context"
-	"fmt"
+	"strconv"
 	"sync"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -233,7 +233,7 @@ func (a *traceAssembler) httpRoundTrip(e obs.Event) {
 			}
 		}
 		h := e.HTTP
-		sid := traceid.Span(cs.traceID, "http", e.Step, fmt.Sprintf("%s#%d", h.Class, e.Seq))
+		sid := traceid.Span(cs.traceID, "http", e.Step, string(h.Class)+"#"+strconv.FormatUint(e.Seq, 10))
 		ctx := withIDs(parent, trace.TraceID(cs.traceID), trace.SpanID(sid))
 		attrs := []attribute.KeyValue{
 			attribute.String("http.request.method", h.Method),
@@ -242,12 +242,21 @@ func (a *traceAssembler) httpRoundTrip(e obs.Event) {
 		if h.Status != 0 {
 			attrs = append(attrs, attribute.Int("http.response.status_code", h.Status))
 		}
-		_, span := a.tracer.Start(ctx, "http "+h.Class,
+		_, span := a.tracer.Start(ctx, "http "+string(h.Class),
 			trace.WithTimestamp(e.Time.Add(-h.Duration)),
 			trace.WithSpanKind(trace.SpanKindClient),
 			trace.WithAttributes(attrs...))
-		if h.Error != "" {
+		// Client-span status follows the HTTP semconv rule: any 4xx/5xx is an
+		// error, not just transport failures — a 503 retry storm or a 403
+		// mint must not render as a row of healthy spans under a red action.
+		// (The registry's routine 401 token challenge renders as an errored
+		// hop too; its resolve action staying green is what says the dance
+		// succeeded.)
+		switch {
+		case h.Error != "":
 			span.SetStatus(codes.Error, h.Error)
+		case h.Status >= 400:
+			span.SetStatus(codes.Error, "HTTP "+strconv.Itoa(h.Status))
 		}
 		span.End(trace.WithTimestamp(e.Time))
 	})

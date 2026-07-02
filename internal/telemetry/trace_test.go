@@ -532,8 +532,13 @@ func TestTraceConsumerHTTPSpans(t *testing.T) {
 	if got, want := manifests[1].EndTime, at(5); !got.Equal(want) {
 		t.Errorf("manifest[1] end = %v, want %v", got, want)
 	}
-	if s := manifests[0].Status; s.Code == codes.Error {
-		t.Error("a 401 answered by the token dance is a completed round trip, not span error")
+	// Semconv client rule: 4xx is span error even when the dance recovers —
+	// the enclosing action's green status is what says recovery happened.
+	if s := manifests[0].Status; s.Code != codes.Error || s.Description != "HTTP 401" {
+		t.Errorf("401 challenge status = %+v, want Error \"HTTP 401\"", s)
+	}
+	if s := manifests[1].Status; s.Code == codes.Error {
+		t.Error("the authenticated 200 retry must not carry error status")
 	}
 
 	if got := jit.Parent.SpanID(); got != trace.SpanID(stepSID) {

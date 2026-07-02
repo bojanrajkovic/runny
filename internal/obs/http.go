@@ -13,36 +13,43 @@ import (
 // consumers reconstruct the start as Time − Duration.
 const KindHTTP Kind = "http"
 
-// HTTP endpoint classes — the closed set of what a round trip may be called,
-// same rule as action names: each becomes a span name ("http <class>") on
-// the trace side, so an inline string would mint unbounded cardinality, and
-// a URL path must never appear (paths carry org/repo; queries can carry
-// credentials). Add here, never inline.
+// HTTPClass is the endpoint class of one round trip — the closed set of
+// what a round trip may be called, same rule as action names: each becomes
+// a span name ("http <class>") on the trace side, so an inline string would
+// mint unbounded cardinality, and a URL path must never appear (paths carry
+// org/repo; queries can carry credentials). The distinct type makes an
+// inline literal require a visible conversion; add a constant here, never
+// inline.
+type HTTPClass string
+
 const (
-	HTTPGitHubToken          = "github.token"            // installation resolve + installation-token mint
-	HTTPGitHubJIT            = "github.jit"              // generate-jitconfig
-	HTTPGitHubRunnerList     = "github.runner-list"      // runner listing (teardown safety check, sweeps)
-	HTTPGitHubRunnerDelete   = "github.runner-delete"    // runner deregistration
-	HTTPGitHubRunnerDownload = "github.runner-downloads" // runner-tarball asset resolve
-	HTTPRegistryToken        = "registry.token"          // registry bearer-token challenge
-	HTTPRegistryManifest     = "registry.manifest"       // manifest GET (resolve)
-	HTTPRegistryBlob         = "registry.blob"           // layer blob GET (scope-less from the pull actor)
-	HTTPTarballDownload      = "tarball.download"        // the runner-tarball GET itself
+	HTTPGitHubToken          HTTPClass = "github.token"            // installation resolve + installation-token mint
+	HTTPGitHubJIT            HTTPClass = "github.jit"              // generate-jitconfig
+	HTTPGitHubRunnerList     HTTPClass = "github.runner-list"      // runner listing (teardown safety check, sweeps)
+	HTTPGitHubRunnerDelete   HTTPClass = "github.runner-delete"    // runner deregistration
+	HTTPGitHubRunnerDownload HTTPClass = "github.runner-downloads" // runner-tarball asset resolve
+	HTTPRegistryToken        HTTPClass = "registry.token"          // registry bearer-token challenge
+	HTTPRegistryManifest     HTTPClass = "registry.manifest"       // manifest GET (resolve)
+	HTTPRegistryBlob         HTTPClass = "registry.blob"           // layer blob GET (scope-less from the pull actor)
+	HTTPTarballDownload      HTTPClass = "tarball.download"        // the runner-tarball GET itself
 	// HTTPOther is what an unannotated request through an HTTPTransport
 	// reports as: still visible, never a raw URL. A round trip landing here
 	// means a call site forgot its WithHTTPClass annotation.
-	HTTPOther = "other"
+	HTTPOther HTTPClass = "other"
 )
 
 // HTTPEvent is the payload for KindHTTP: one round trip's class, protocol
-// facts, and duration. Host is req.URL.Hostname() — config-controlled
-// (api.github.com, the registry, the tarball CDN), never the path or query.
-// Status is 0 when the round trip failed below HTTP (dial, TLS, deadline);
-// Error then carries the transport-level error text. That text is safe to
-// record: the *url.Error that embeds the full request URL is wrapped on by
-// http.Client above RoundTrip, so a RoundTripper never sees it.
+// facts, and duration. Host is req.URL.Hostname() — never the path or
+// query. It is service-controlled at worst, not guest-controlled: usually
+// the configured endpoint (api.github.com, the registry), but a redirect
+// hop goes through RoundTrip again as its own event, so a CDN a service
+// redirects to reports the CDN's hostname. Status is 0 when the round trip
+// failed below HTTP (dial, TLS, deadline); Error then carries the
+// transport-level error text. That text is safe to record: the *url.Error
+// that embeds the full request URL is wrapped on by http.Client above
+// RoundTrip, so a RoundTripper never sees it.
 type HTTPEvent struct {
-	Class    string
+	Class    HTTPClass
 	Method   string
 	Host     string
 	Status   int
@@ -57,7 +64,7 @@ type httpClassKey struct{}
 // annotate rather than transports parsing URLs: the class is
 // closed-by-construction and no code ever inspects a path or query to
 // classify.
-func WithHTTPClass(ctx context.Context, class string) context.Context {
+func WithHTTPClass(ctx context.Context, class HTTPClass) context.Context {
 	return context.WithValue(ctx, httpClassKey{}, class)
 }
 
@@ -79,11 +86,12 @@ func (t *HTTPTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	ctx := req.Context()
-	if s, _ := ctx.Value(scopeKey{}).(*scope); s == nil || s.emit == nil {
+	s := liveScope(ctx)
+	if s == nil {
 		return base.RoundTrip(req)
 	}
 
-	class, _ := ctx.Value(httpClassKey{}).(string)
+	class, _ := ctx.Value(httpClassKey{}).(HTTPClass)
 	if class == "" {
 		class = HTTPOther
 	}
@@ -102,7 +110,7 @@ func (t *HTTPTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	} else {
 		h.Status = resp.StatusCode
 	}
-	Emit(ctx, Event{Kind: KindHTTP, HTTP: h})
+	s.emitEvent(Event{Kind: KindHTTP, HTTP: h})
 
 	return resp, err
 }

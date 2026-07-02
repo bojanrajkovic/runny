@@ -89,13 +89,19 @@ Below the actions sits the HTTP egress layer: every outbound client
 requests whose context carries an obs scope, which the trace consumer
 renders as a completed client span — `http <class>` — under whatever was
 innermost when the round trip finished (the open action, else the step,
-else the root). Endpoint classes are a closed const set in `internal/obs`,
-annotated at each call site via `WithHTTPClass`; no code classifies by
-parsing a URL, so paths and queries (which can carry org/repo names and
-credentials) never reach telemetry by construction. The span records
-method, status code, and the request host; a transport-level failure
-(status 0) carries error status, while an HTTP-level answer like the
-registry's 401 token challenge stays a healthy round trip. Three caveats
+else the root). Endpoint classes are a closed typed const set
+(`obs.HTTPClass`) in `internal/obs`; in the GitHub and registry clients the
+class is a parameter of the request choke point, so a new endpoint cannot
+compile without stating one, and no code classifies by parsing a URL — so
+paths and queries (which can carry org/repo names and credentials) never
+reach telemetry by construction. The span records method, status code, and
+the request host (service-controlled at worst — a redirect hop is its own
+round trip and reports the host it actually hit); span status follows the
+HTTP client semconv rule: any 4xx/5xx or transport failure is an error, so
+a 503 retry storm can't render as healthy spans under a red action — which
+means the registry's routine 401 token challenge shows as an errored hop
+whose enclosing `resolve` action staying green is what says the dance
+succeeded. Three caveats
 are load-bearing: the span measures to response *headers* — body transfer
 time (the multi-GiB pull, the tarball) stays on the enclosing action; the
 shared pull actor's blob traffic emits nothing because its context carries

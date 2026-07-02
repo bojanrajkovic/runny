@@ -282,8 +282,8 @@ func scopedCtx(t *testing.T, events *[]obs.Event) bounded.Context {
 	return ctx
 }
 
-func httpClasses(events []obs.Event) []string {
-	var got []string
+func httpClasses(events []obs.Event) []obs.HTTPClass {
+	var got []obs.HTTPClass
 	for _, e := range events {
 		if e.Kind == obs.KindHTTP {
 			got = append(got, e.HTTP.Class)
@@ -305,7 +305,7 @@ func TestGenerateJITConfigEmitsHTTPEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []string{obs.HTTPGitHubToken, obs.HTTPGitHubToken, obs.HTTPGitHubJIT}
+	want := []obs.HTTPClass{obs.HTTPGitHubToken, obs.HTTPGitHubToken, obs.HTTPGitHubJIT}
 	if got := httpClasses(events); !slices.Equal(got, want) {
 		t.Errorf("classes = %v, want %v", got, want)
 	}
@@ -342,9 +342,11 @@ func TestListAndDeleteRunnersEmitHTTPEvents(t *testing.T) {
 	}
 }
 
-// An unscoped context — startup doctor checks, the cold-start sweep — emits
-// nothing and changes nothing: the transport is passthrough without a scope.
-func TestUnscopedContextEmitsNothing(t *testing.T) {
+// An unscoped context — startup doctor checks, the cold-start sweep — still
+// works end to end through the real client and transport. (That nothing is
+// emitted without a scope is the transport's own contract, tested in
+// internal/obs.)
+func TestUnscopedContextStillWorks(t *testing.T) {
 	f := &fakeGitHub{}
 	c := newTestClient(t, f)
 	if _, err := c.GenerateJITConfig(testCtx(t), "runner-1", nil, 1); err != nil {

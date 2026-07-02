@@ -155,7 +155,6 @@ func (c *Client) appJWT() (string, error) {
 // installationToken returns a cached installation token, minting a fresh one
 // when within 5 minutes of expiry.
 func (c *Client) installationToken(ctx context.Context) (string, error) {
-	ctx = obs.WithHTTPClass(ctx, obs.HTTPGitHubToken)
 	cached := func() (string, bool) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -189,7 +188,7 @@ func (c *Client) installationToken(ctx context.Context) (string, error) {
 		var inst struct {
 			ID int64 `json:"id"`
 		}
-		err := c.do(ctx, http.MethodGet, c.target.base()+"/installation",
+		err := c.do(ctx, obs.HTTPGitHubToken, http.MethodGet, c.target.base()+"/installation",
 			"Bearer "+jwtStr, nil, &inst)
 		if err != nil {
 			return "", fmt.Errorf("resolving installation for %s: %w", c.target, err)
@@ -202,7 +201,7 @@ func (c *Client) installationToken(ctx context.Context) (string, error) {
 		ExpiresAt   time.Time         `json:"expires_at"`
 		Permissions map[string]string `json:"permissions"`
 	}
-	err = c.do(ctx, http.MethodPost,
+	err = c.do(ctx, obs.HTTPGitHubToken, http.MethodPost,
 		fmt.Sprintf("/app/installations/%d/access_tokens", instID),
 		"Bearer "+jwtStr, nil, &tok)
 	if err != nil {
@@ -261,7 +260,7 @@ func (c *Client) GenerateJITConfig(ctx bounded.Context, name string, labels []st
 		} `json:"runner"`
 		EncodedJITConfig string `json:"encoded_jit_config"`
 	}
-	err = c.doRetry(obs.WithHTTPClass(ctx, obs.HTTPGitHubJIT), http.MethodPost,
+	err = c.doRetry(ctx, obs.HTTPGitHubJIT, http.MethodPost,
 		c.target.base()+"/actions/runners/generate-jitconfig",
 		"token "+tok, body, &resp)
 	if err != nil {
@@ -299,7 +298,7 @@ func (c *Client) RunnerDownload(ctx bounded.Context, goos string) (filename, url
 		Filename     string `json:"filename"`
 		SHA256       string `json:"sha256_checksum"`
 	}
-	err = c.doRetry(obs.WithHTTPClass(ctx, obs.HTTPGitHubRunnerDownload), http.MethodGet,
+	err = c.doRetry(ctx, obs.HTTPGitHubRunnerDownload, http.MethodGet,
 		c.target.base()+"/actions/runners/downloads",
 		"token "+tok, nil, &downloads)
 	if err != nil {
@@ -339,7 +338,7 @@ func (c *Client) ListRunners(ctx bounded.Context) ([]Runner, error) {
 			TotalCount int      `json:"total_count"`
 			Runners    []Runner `json:"runners"`
 		}
-		err := c.doRetry(obs.WithHTTPClass(ctx, obs.HTTPGitHubRunnerList), http.MethodGet,
+		err := c.doRetry(ctx, obs.HTTPGitHubRunnerList, http.MethodGet,
 			fmt.Sprintf("%s/actions/runners?per_page=100&page=%d", c.target.base(), page),
 			"token "+tok, nil, &resp)
 		if err != nil {
@@ -359,7 +358,7 @@ func (c *Client) DeleteRunner(ctx bounded.Context, id int64) error {
 	if err != nil {
 		return err
 	}
-	err = c.doRetry(obs.WithHTTPClass(ctx, obs.HTTPGitHubRunnerDelete), http.MethodDelete,
+	err = c.doRetry(ctx, obs.HTTPGitHubRunnerDelete, http.MethodDelete,
 		fmt.Sprintf("%s/actions/runners/%d", c.target.base(), id),
 		"token "+tok, nil, nil)
 	var se *statusError
@@ -385,7 +384,7 @@ func retryable(err error) bool {
 	return err != nil
 }
 
-func (c *Client) doRetry(ctx context.Context, method, path, auth string, body, out any) error {
+func (c *Client) doRetry(ctx context.Context, class obs.HTTPClass, method, path, auth string, body, out any) error {
 	var err error
 	for attempt := range 3 {
 		if attempt > 0 {
@@ -395,7 +394,7 @@ func (c *Client) doRetry(ctx context.Context, method, path, auth string, body, o
 			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
 			}
 		}
-		err = c.do(ctx, method, path, auth, body, out)
+		err = c.do(ctx, class, method, path, auth, body, out)
 		if err == nil || !retryable(err) {
 			return err
 		}
@@ -403,7 +402,7 @@ func (c *Client) doRetry(ctx context.Context, method, path, auth string, body, o
 	return err
 }
 
-func (c *Client) do(ctx context.Context, method, path, auth string, body, out any) error {
+func (c *Client) do(ctx context.Context, class obs.HTTPClass, method, path, auth string, body, out any) error {
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -412,7 +411,7 @@ func (c *Client) do(ctx context.Context, method, path, auth string, body, out an
 		}
 		rdr = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.cfg.APIBase+path, rdr)
+	req, err := http.NewRequestWithContext(obs.WithHTTPClass(ctx, class), method, c.cfg.APIBase+path, rdr)
 	if err != nil {
 		return err
 	}

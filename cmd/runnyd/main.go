@@ -263,7 +263,6 @@ func run() error {
 	// why-visibility. Startup network work blocked the socket and once
 	// dead-stalled silently — never again.
 	var slots []*statemachine.Slot
-	var slotPools []string // pool name per slots[i]; Status() doesn't carry it
 	for _, p := range cfg.Pools {
 		ref, err := oci.ParseRef(p.Image)
 		if err != nil {
@@ -312,7 +311,6 @@ func run() error {
 		}
 		for i := 1; i <= p.Count; i++ {
 			slots = append(slots, statemachine.NewSlot(fmt.Sprintf("%s-%d", p.Name, i), deps))
-			slotPools = append(slotPools, p.Name)
 		}
 	}
 
@@ -323,10 +321,10 @@ func run() error {
 		}
 		poll := func() []telemetry.SlotSnapshot {
 			out := make([]telemetry.SlotSnapshot, 0, len(slots))
-			for i, s := range slots {
+			for _, s := range slots {
 				st := s.Status()
 				out = append(out, telemetry.SlotSnapshot{
-					Pool:                slotPools[i],
+					Pool:                st.Pool,
 					Slot:                s.Name(),
 					State:               string(st.State),
 					StateEntered:        st.StateEntered,

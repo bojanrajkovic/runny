@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"time"
@@ -14,10 +15,11 @@ import (
 // Config is runnyd's one configuration file (~/.runny/config.yaml). The Zod
 // of this repo: parse, default, validate here — nothing downstream re-checks.
 type Config struct {
-	Pools     []PoolConfig `yaml:"pools"`
-	Deadlines Deadlines    `yaml:"deadlines"`
-	Limits    Limits       `yaml:"limits"`
-	Retention Retention    `yaml:"retention"`
+	Pools         []PoolConfig        `yaml:"pools"`
+	Deadlines     Deadlines           `yaml:"deadlines"`
+	Limits        Limits              `yaml:"limits"`
+	Retention     Retention           `yaml:"retention"`
+	Observability ObservabilityConfig `yaml:"observability"`
 }
 
 // GitHubConfig is one pool's App credentials. Each pool carries its own —
@@ -178,6 +180,33 @@ type Retention struct {
 	MaxAge        Duration `yaml:"max_age"`
 }
 
+// ObservabilityConfig is the opt-in telemetry block. The zero value (absent
+// from config.yaml) means telemetry is fully off: no SDK installed, no
+// egress. This is the config surface only — the OTLP emitter that consumes
+// it is a separate, later addition.
+type ObservabilityConfig struct {
+	OTLP OTLPConfig `yaml:"otlp"`
+}
+
+// OTLPConfig is the single OTLP export target for both traces and metrics.
+// There are deliberately no per-signal endpoints or headers — nothing here
+// yet needs them, and they're easy to add later without a breaking change. A
+// non-empty Endpoint enables export; its scheme selects transport security.
+type OTLPConfig struct {
+	// Endpoint is the collector URL. https selects TLS, http selects an
+	// insecure connection (for a local collector); any other scheme, an
+	// empty host, or a malformed URL, is rejected. Empty (the default) means
+	// telemetry is off.
+	Endpoint string `yaml:"endpoint"`
+	// MetricsInterval is the metrics export period. Zero takes the default;
+	// validate() enforces a floor so a typo can't hot-loop the exporter.
+	MetricsInterval Duration `yaml:"metrics_interval"`
+}
+
+// otlpMetricsIntervalFloor is the minimum observability.otlp.metrics_interval
+// — below this, an exporter tick could hot-loop.
+const otlpMetricsIntervalFloor = time.Second
+
 // Duration is a time.Duration that unmarshals from YAML strings like "90s".
 type Duration time.Duration
 
@@ -300,6 +329,11 @@ func (c *Config) applyDefaults() {
 	if c.Retention.MaxAge == 0 {
 		c.Retention.MaxAge = Duration(30 * 24 * time.Hour)
 	}
+	// Only defaulted when telemetry is actually enabled — an absent endpoint
+	// must stay the all-zero, fully-off value.
+	if c.Observability.OTLP.Endpoint != "" {
+		def(&c.Observability.OTLP.MetricsInterval, 60*time.Second)
+	}
 }
 
 // PoolNamePattern is the regex a pool name must match: it becomes the slot-name
@@ -388,6 +422,34 @@ func (c *Config) validate() error {
 	for i, p := range c.Pools {
 		if p.SSHTimeout <= 0 {
 			errs = append(errs, fmt.Errorf("pools[%d]: ssh_timeout must be positive, got %v", i, p.SSHTimeout.D()))
+		}
+	}
+
+	// Separate from the positive-duration map above: MetricsInterval's floor
+	// is >= 1s, not merely positive, and — unlike every field in that map —
+	// it's validated only when telemetry is on. Empty endpoint means
+	// telemetry is off; the rest of the block is only meaningful, and only
+	// validated, when it's set.
+	if ep := c.Observability.OTLP.Endpoint; ep != "" {
+		u, err := url.Parse(ep)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("observability.otlp.endpoint %q: %w", ep, err))
+		case u.Hostname() == "":
+			// Hostname (not Host) so a port-only "https://:4317" is caught
+			// too — its Host is a non-empty ":4317" with nothing to dial.
+			// This also catches a bare "host:port" with no "://": url.Parse
+			// reads that as an opaque URL with the host packed into Scheme,
+			// not as a parse error, so checking the hostname first gives a
+			// clearer message than reporting "host:port" back as an invalid
+			// scheme.
+			errs = append(errs, fmt.Errorf("observability.otlp.endpoint %q: missing host (use https://host:port or http://host:port)", ep))
+		case u.Scheme != "https" && u.Scheme != "http":
+			errs = append(errs, fmt.Errorf("observability.otlp.endpoint %q: scheme must be https or http, got %q", ep, u.Scheme))
+		}
+		if c.Observability.OTLP.MetricsInterval.D() < otlpMetricsIntervalFloor {
+			errs = append(errs, fmt.Errorf("observability.otlp.metrics_interval must be >= %v, got %v",
+				otlpMetricsIntervalFloor, c.Observability.OTLP.MetricsInterval.D()))
 		}
 	}
 

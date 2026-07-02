@@ -161,6 +161,32 @@
       "additionalProperties": false,
       "type": "object"
     },
+    "OTLPConfig": {
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        },
+        "metrics_interval": {
+          "type": "string",
+          "examples": [
+            "90s",
+            "2h",
+            "500ms"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ObservabilityConfig": {
+      "properties": {
+        "otlp": {
+          "$ref": "#/$defs/OTLPConfig"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
     "PoolConfig": {
       "properties": {
         "name": {
@@ -315,6 +341,9 @@
     },
     "retention": {
       "$ref": "#/$defs/Retention"
+    },
+    "observability": {
+      "$ref": "#/$defs/ObservabilityConfig"
     }
   },
   "additionalProperties": false,

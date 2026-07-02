@@ -12,6 +12,18 @@ import (
 	"github.com/bojanrajkovic/runny/internal/oci"
 )
 
+// testProto is the canonical test puller: stubbed-seam-ready, with short
+// hold/poll budgets. Both this file's testAcquire and metrics_test.go's
+// metricAcquire build on it so the two suites exercise identically-configured
+// pullers.
+func testProto(dir string) *imagePuller {
+	return &imagePuller{
+		destDir: dir, ref: oci.Ref{Host: "h", Name: "n", Tag: "t"},
+		stall: time.Second, log: slog.Default(),
+		holdBudget: 40 * time.Millisecond, pollInterval: 5 * time.Millisecond,
+	}
+}
+
 // testAcquire subscribes to a puller for dir with stubbed seams (attempt /
 // diskFree), exercising the registry + run-loop without a live registry or a
 // real filesystem.
@@ -20,12 +32,9 @@ func testAcquire(t *testing.T, dir string, report func(string),
 	diskFree func(string) (uint64, error),
 ) (*subscription, func()) {
 	t.Helper()
-	proto := &imagePuller{
-		destDir: dir, ref: oci.Ref{Host: "h", Name: "n", Tag: "t"},
-		stall: time.Second, log: slog.Default(),
-		attempt: attempt, diskFree: diskFree,
-		holdBudget: 40 * time.Millisecond, pollInterval: 5 * time.Millisecond,
-	}
+	proto := testProto(dir)
+	proto.attempt = attempt
+	proto.diskFree = diskFree
 	return acquirePuller(dir, report, proto)
 }
 

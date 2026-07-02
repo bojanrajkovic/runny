@@ -163,19 +163,16 @@ func TestEnsureResolveFailureActionOutcome(t *testing.T) {
 }
 
 // tarballServer serves one fake runner tarball and returns its resolver.
-func tarballServer(t *testing.T, status int) (RunnerResolver, func() int) {
+func tarballServer(t *testing.T, status int) RunnerResolver {
 	t.Helper()
-	var hits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte("tarball-bytes"))
 	}))
 	t.Cleanup(srv.Close)
-	resolve := func(bounded.Context) (string, string, string, error) {
+	return func(bounded.Context) (string, string, string, error) {
 		return "actions-runner-osx-arm64-9.9.9.tar.gz", srv.URL + "/runner.tar.gz", "", nil
 	}
-	return resolve, func() int { return hits }
 }
 
 // EnsureRunnerTarball brackets its whole body — resolve + download, or the
@@ -184,7 +181,7 @@ func tarballServer(t *testing.T, status int) (RunnerResolver, func() int) {
 func TestEnsureRunnerTarballEmitsAction(t *testing.T) {
 	cap := &eventCapture{}
 	dir := t.TempDir()
-	resolve, _ := tarballServer(t, http.StatusOK)
+	resolve := tarballServer(t, http.StatusOK)
 
 	for i := 0; i < 2; i++ { // download, then cache hit — both emit the action
 		_, asset, err := EnsureRunnerTarball(scopedCtx(cap), dir, resolve, time.Second, time.Minute, nil, nil, nil)
@@ -196,9 +193,10 @@ func TestEnsureRunnerTarballEmitsAction(t *testing.T) {
 	if len(got) != 4 {
 		t.Fatalf("tarball-ensure emitted %d events, want 4 (started+ended twice)", len(got))
 	}
-	for _, e := range got[1:2] {
-		if e.Action.Outcome != obs.OutcomeOK {
-			t.Errorf("tarball-ensure outcome = %q, want ok", e.Action.Outcome)
+	// Both ended events — the download (index 1) and the cache hit (index 3).
+	for _, i := range []int{1, 3} {
+		if e := got[i]; e.Kind != obs.KindActionEnded || e.Action.Outcome != obs.OutcomeOK {
+			t.Errorf("tarball-ensure event %d = (%s, %q), want ended ok", i, e.Kind, e.Action.Outcome)
 		}
 	}
 }

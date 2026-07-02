@@ -81,6 +81,16 @@ const (
 	OutcomeError Outcome = "error"
 )
 
+// OutcomeOf maps an error to the ok/error vocabulary — the one definition of
+// that mapping, shared by Action and by metric recorders outside this
+// package, so the vocabulary can't fork.
+func OutcomeOf(err error) Outcome {
+	if err != nil {
+		return OutcomeError
+	}
+	return OutcomeOK
+}
+
 // CycleRef identifies the cycle an event belongs to, plus the cycle-static
 // identity consumers attach to everything derived from it (the trace root's
 // attributes, the metrics side's pool label): all of it is known at cycle
@@ -304,9 +314,9 @@ func Action(ctx context.Context, name string, fn func(context.Context) error, at
 	err := fn(ctx)
 	dur := time.Since(start)
 
-	outcome, errText := OutcomeOK, ""
+	outcome, errText := OutcomeOf(err), ""
 	if err != nil {
-		outcome, errText = OutcomeError, err.Error()
+		errText = err.Error()
 	}
 	Emit(ctx, Event{Kind: KindActionEnded, Action: &ActionEvent{
 		Name:     name,

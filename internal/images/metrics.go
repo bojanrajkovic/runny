@@ -39,11 +39,8 @@ func (m *Metrics) tarballDownloadDone(outcome string, d time.Duration) {
 	m.TarballDownloadDone(outcome, d)
 }
 
-// outcomeOf maps an error to the closed ok/error outcome vocabulary shared
-// with obs.
+// outcomeOf is obs's err→outcome mapping as the plain string the seam
+// speaks.
 func outcomeOf(err error) string {
-	if err != nil {
-		return string(obs.OutcomeError)
-	}
-	return string(obs.OutcomeOK)
+	return string(obs.OutcomeOf(err))
 }

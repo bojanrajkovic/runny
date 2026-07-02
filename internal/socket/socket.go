@@ -917,6 +917,7 @@ func recordToProto(r *cycle.Record) *runnyv1.CycleRecord {
 		Started:       timestamppb.New(r.Started),
 		Finished:      timestamppb.New(r.Finished),
 		Result:        string(r.Result),
+		Ending:        string(r.Ending),
 		Artifacts:     r.Artifacts,
 		CycleDir:      r.CycleDir,
 	}

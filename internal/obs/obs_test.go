@@ -13,14 +13,13 @@ func testCycle() CycleRef {
 	return CycleRef{InstancePrefix: "host-ab12cd34", Slot: "slot-0", CycleID: "deadbeef", Started: time.Now()}
 }
 
-// Seq is per-cycle monotonic: two scopes built from the same cycle start
-// point must hand out a strictly increasing sequence across every event
-// emitted through either of them.
+// Seq is per-cycle monotonic: every event emitted through one cycle scope
+// hands out a strictly increasing sequence.
 func TestSeqMonotonicPerCycle(t *testing.T) {
 	var got []uint64
 	emit := func(e Event) { got = append(got, e.Seq) }
 
-	ctx := WithScope(context.Background(), emit, testCycle(), "BOOT")
+	ctx := WithStep(WithCycle(context.Background(), emit, testCycle()), "BOOT")
 	for range 3 {
 		_ = Action(ctx, "step", func(context.Context) error { return nil })
 	}
@@ -35,10 +34,64 @@ func TestSeqMonotonicPerCycle(t *testing.T) {
 	}
 }
 
+// The counter belongs to the cycle scope: step scopes derived from it share
+// it, so Seq stays strictly monotonic across the whole cycle no matter how
+// many step scopes the FSM layers on, interleaving Emit and Action.
+func TestSeqSharedAcrossStepScopes(t *testing.T) {
+	var got []Event
+	emit := func(e Event) { got = append(got, e) }
+
+	cctx := WithCycle(context.Background(), emit, testCycle())
+	boot := WithStep(cctx, "BOOT")
+	prov := WithStep(cctx, "PROVISION")
+
+	Emit(cctx, Event{Kind: KindCycleStarted})
+	Emit(boot, Event{Kind: KindStepEntered, Step: &StepEvent{State: "BOOT"}})
+	_ = Action(boot, "clone", func(context.Context) error { return nil })
+	Emit(boot, Event{Kind: KindStepLeft, Step: &StepEvent{State: "BOOT", Outcome: OutcomeOK}})
+	Emit(prov, Event{Kind: KindStepEntered, Step: &StepEvent{State: "PROVISION"}})
+	_ = Action(prov, "install-runner", func(context.Context) error { return nil })
+	Emit(cctx, Event{Kind: KindCycleFinished, Finish: &FinishEvent{Result: "success"}})
+
+	if len(got) != 9 {
+		t.Fatalf("got %d events, want 9", len(got))
+	}
+	for i, e := range got {
+		if e.Seq != uint64(i+1) {
+			t.Fatalf("event %d has Seq %d, want %d (per-cycle order broken): %+v", i, e.Seq, i+1, got)
+		}
+		if e.Cycle.CycleID != "deadbeef" {
+			t.Fatalf("event %d lost cycle identity: %+v", i, e)
+		}
+		if e.Time.IsZero() {
+			t.Fatalf("event %d has zero Time", i)
+		}
+	}
+	// Action picked up the step from its derived scope.
+	if got[2].Action.Step != "BOOT" || got[6].Action.Step != "PROVISION" {
+		t.Fatalf("Action step stamping wrong: %+v / %+v", got[2].Action, got[6].Action)
+	}
+}
+
+// Emit on a context that never saw WithCycle, and on a scope with a nil
+// emitter, must be a safe no-op.
+func TestEmitWithoutScopeOrEmitterIsNoop(t *testing.T) {
+	Emit(context.Background(), Event{Kind: KindDetail, Detail: &DetailEvent{Text: "x"}}) // must not panic
+
+	nilCtx := WithCycle(context.Background(), nil, testCycle())
+	Emit(nilCtx, Event{Kind: KindDetail, Detail: &DetailEvent{Text: "x"}}) // must not panic
+
+	// WithStep without a scope leaves the context untouched.
+	base := context.Background()
+	if got := WithStep(base, "BOOT"); got != base {
+		t.Fatal("WithStep on a scope-less context should return it unchanged")
+	}
+}
+
 // A nil emitter must never be called and Action must still run fn and
 // return its result — the no-op path used when telemetry is unconfigured.
 func TestNilEmitterIsNoop(t *testing.T) {
-	ctx := WithScope(context.Background(), nil, testCycle(), "BOOT")
+	ctx := WithCycle(context.Background(), nil, testCycle())
 
 	called := false
 	err := Action(ctx, "step", func(context.Context) error {
@@ -53,7 +106,7 @@ func TestNilEmitterIsNoop(t *testing.T) {
 	}
 }
 
-// A context that never went through WithScope must degrade to a plain fn()
+// A context that never went through WithCycle must degrade to a plain fn()
 // call: zero events, no panic. Domain packages that don't know telemetry
 // exists must be able to call Action safely on any context.
 func TestScopelessContextIsPlainCall(t *testing.T) {
@@ -75,7 +128,7 @@ func TestScopelessContextIsPlainCall(t *testing.T) {
 func TestActionCapturesOutcomeErrorDuration(t *testing.T) {
 	var events []Event
 	emit := func(e Event) { events = append(events, e) }
-	ctx := WithScope(context.Background(), emit, testCycle(), "PROVISION")
+	ctx := WithStep(WithCycle(context.Background(), emit, testCycle()), "PROVISION")
 
 	sentinel := errors.New("boom")
 	err := Action(ctx, "install-runner", func(context.Context) error {
@@ -122,7 +175,7 @@ func TestActionCapturesOutcomeErrorDuration(t *testing.T) {
 func TestActionSuccessOutcomeOK(t *testing.T) {
 	var events []Event
 	emit := func(e Event) { events = append(events, e) }
-	ctx := WithScope(context.Background(), emit, testCycle(), "BOOT")
+	ctx := WithCycle(context.Background(), emit, testCycle())
 
 	if err := Action(ctx, "clone", func(context.Context) error { return nil }); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -145,7 +198,7 @@ func TestScopePropagatesThroughBoundedContext(t *testing.T) {
 	var events []Event
 	emit := func(e Event) { events = append(events, e) }
 
-	scoped := WithScope(context.Background(), emit, testCycle(), "AWAIT_SSH")
+	scoped := WithStep(WithCycle(context.Background(), emit, testCycle()), "AWAIT_SSH")
 	bctx, cancel := bounded.WithTimeout(scoped, time.Second)
 	defer cancel()
 
@@ -161,12 +214,12 @@ func TestScopePropagatesThroughBoundedContext(t *testing.T) {
 	}
 }
 
-// Every emitted event must carry the cycle identity set at WithScope time.
+// Every emitted event must carry the cycle identity set at WithCycle time.
 func TestEventCarriesCycleIdentity(t *testing.T) {
 	var got Event
 	emit := func(e Event) { got = e }
 	cycle := testCycle()
-	ctx := WithScope(context.Background(), emit, cycle, "JOB")
+	ctx := WithCycle(context.Background(), emit, cycle)
 
 	_ = Action(ctx, "run", func(context.Context) error { return nil })
 
@@ -175,14 +228,15 @@ func TestEventCarriesCycleIdentity(t *testing.T) {
 	}
 }
 
-// Two independent scopes (two cycles/slots) must not share a Seq counter.
-func TestSeqIsPerScopeNotGlobal(t *testing.T) {
+// Two independent cycle scopes (two cycles/slots) must not share a Seq
+// counter.
+func TestSeqIsPerCycleNotGlobal(t *testing.T) {
 	var seqsA, seqsB []uint64
 	emitA := func(e Event) { seqsA = append(seqsA, e.Seq) }
 	emitB := func(e Event) { seqsB = append(seqsB, e.Seq) }
 
-	ctxA := WithScope(context.Background(), emitA, testCycle(), "BOOT")
-	ctxB := WithScope(context.Background(), emitB, testCycle(), "BOOT")
+	ctxA := WithCycle(context.Background(), emitA, testCycle())
+	ctxB := WithCycle(context.Background(), emitB, testCycle())
 
 	_ = Action(ctxA, "a1", func(context.Context) error { return nil })
 	_ = Action(ctxB, "b1", func(context.Context) error { return nil })

@@ -123,15 +123,17 @@ type Event struct {
 }
 
 // Emitter receives every event a scope produces. Installed by the daemon;
-// nil means no-op (see WithScope). Emit must not block: an installer that
+// nil means no-op (see WithCycle). It must not block: an installer that
 // wires an Emitter to real consumers is responsible for fan-out and for a
 // drop-with-logged-counter response to backpressure — the FSM goroutine
-// that calls Action can never be made to wait on a slow consumer.
+// that calls Emit or Action can never be made to wait on a slow consumer.
 type Emitter func(Event)
 
 // scope is the context-carried identity: which cycle/step is active, where
-// events go, and the per-cycle Seq counter. Unexported so it can only be
-// built through WithScope.
+// events go, and the per-cycle Seq counter. The counter belongs to the
+// cycle scope established by WithCycle; step scopes derived by WithStep
+// share it — that sharing is what keeps Seq totally ordered across a whole
+// cycle. Unexported so it can only be built through WithCycle/WithStep.
 type scope struct {
 	emit  Emitter
 	cycle CycleRef
@@ -141,42 +143,56 @@ type scope struct {
 
 type scopeKey struct{}
 
-// WithScope attaches observability identity to ctx: every Action called on
-// the returned context (or a context derived from it, including through
-// bounded.Context, whose Value delegates to its parent) emits through emit
-// against cycle/step. emit may be nil, which makes every Action on this
-// scope a no-op passthrough — the shape used when telemetry is
+// WithCycle establishes the observability scope for one cycle: every Emit
+// and Action on the returned context (or a context derived from it,
+// including through bounded.Context, whose Value delegates to its parent)
+// emits through emit against cycle, stamped from the single per-cycle Seq
+// counter this call creates. emit may be nil, which makes every Emit and
+// Action on this scope a no-op — the shape used when telemetry is
 // unconfigured.
-func WithScope(ctx context.Context, emit Emitter, cycle CycleRef, step string) context.Context {
+func WithCycle(ctx context.Context, emit Emitter, cycle CycleRef) context.Context {
 	return context.WithValue(ctx, scopeKey{}, &scope{
 		emit:  emit,
 		cycle: cycle,
-		step:  step,
 		seq:   new(atomic.Uint64),
 	})
 }
 
-func (s *scope) nextSeq() uint64 {
-	return s.seq.Add(1)
+// WithStep derives a scope for one FSM step: same cycle, same emitter, and
+// crucially the same per-cycle Seq counter — entering a new step never
+// resets the cycle's event order. On a context with no scope it returns
+// ctx unchanged.
+func WithStep(ctx context.Context, step string) context.Context {
+	s, _ := ctx.Value(scopeKey{}).(*scope)
+	if s == nil {
+		return ctx
+	}
+	child := *s
+	child.step = step
+	return context.WithValue(ctx, scopeKey{}, &child)
 }
 
-func (s *scope) emitEvent(kind Kind, action *ActionEvent) {
-	if s.emit == nil {
+// Emit stamps e with the scope's next Seq, the current time, and the
+// scope's CycleRef, then hands it to the emitter. The caller supplies Kind
+// and the kind-specific payload; Seq, Time, and Cycle are overwritten. On
+// a context with no scope, or a scope with a nil emitter, Emit is a safe
+// no-op.
+func Emit(ctx context.Context, e Event) {
+	s, _ := ctx.Value(scopeKey{}).(*scope)
+	if s == nil || s.emit == nil {
 		return
 	}
-	s.emit(Event{
-		Seq:    s.nextSeq(),
-		Time:   time.Now(),
-		Cycle:  s.cycle,
-		Kind:   kind,
-		Action: action,
-	})
+	e.Seq = s.seq.Add(1)
+	e.Time = time.Now()
+	e.Cycle = s.cycle
+	s.emit(e)
 }
 
 // Action runs fn, emitting ActionStarted before and ActionEnded after with
-// duration, outcome, and fn's error. On a context with no scope (never
-// passed through WithScope) or a scope with a nil emitter, Action degrades
-// to a plain fn(ctx) call — zero events, no allocation beyond what fn does.
+// duration, outcome, and fn's error — sugar over Emit that also stamps the
+// scope's step onto the payload. On a context with no scope (never passed
+// through WithCycle) or a scope with a nil emitter, Action degrades to a
+// plain fn(ctx) call — zero events, no allocation beyond what fn does.
 // Domain packages call Action without knowing or caring which case applies.
 func Action(ctx context.Context, name string, fn func(context.Context) error) error {
 	s, _ := ctx.Value(scopeKey{}).(*scope)
@@ -184,7 +200,7 @@ func Action(ctx context.Context, name string, fn func(context.Context) error) er
 		return fn(ctx)
 	}
 
-	s.emitEvent(KindActionStarted, &ActionEvent{Step: s.step, Name: name})
+	Emit(ctx, Event{Kind: KindActionStarted, Action: &ActionEvent{Step: s.step, Name: name}})
 
 	start := time.Now()
 	err := fn(ctx)
@@ -194,13 +210,13 @@ func Action(ctx context.Context, name string, fn func(context.Context) error) er
 	if err != nil {
 		outcome, errText = OutcomeError, err.Error()
 	}
-	s.emitEvent(KindActionEnded, &ActionEvent{
+	Emit(ctx, Event{Kind: KindActionEnded, Action: &ActionEvent{
 		Step:     s.step,
 		Name:     name,
 		Outcome:  outcome,
 		Error:    errText,
 		Duration: dur,
-	})
+	}})
 
 	return err
 }

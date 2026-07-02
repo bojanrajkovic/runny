@@ -25,6 +25,20 @@ const (
 	ResultFailure Result = "failure"
 )
 
+// Ending classifies *why* a cycle ended — the detail Result's binary
+// success/failure can't carry. Derived in runCycle (internal/statemachine) at
+// the same point "benign" is computed for backoff accounting; empty (zero
+// value) in records written before this field existed.
+type Ending string
+
+const (
+	EndingSuccess  Ending = "success"
+	EndingFailure  Ending = "failure"
+	EndingRecycle  Ending = "recycle"  // operator-initiated (runnyctl recycle)
+	EndingShutdown Ending = "shutdown" // daemon exit (ctx cancelled)
+	EndingWedge    Ending = "wedge"    // teardown could not kill the guest
+)
+
 // Outcome classifies how a state was left.
 type Outcome string
 
@@ -52,14 +66,18 @@ type Record struct {
 	// this cycle (e.g. "actions-runner-osx-arm64-2.320.0.tar.gz"); empty when
 	// the runner tarball step was skipped (no Runner configured) or the cycle
 	// failed before ENSURE_IMAGE completed.
-	RunnerVersion string        `json:"runner_version,omitempty"`
-	Started       time.Time     `json:"started"`
-	Finished      time.Time     `json:"finished"`
-	Result        Result        `json:"result"`
-	States        []StateRecord `json:"states"`
-	VM            VMInfo        `json:"vm,omitzero"`
-	Job           *JobInfo      `json:"job,omitempty"`
-	Failure       *Failure      `json:"failure,omitempty"`
+	RunnerVersion string    `json:"runner_version,omitempty"`
+	Started       time.Time `json:"started"`
+	Finished      time.Time `json:"finished"`
+	Result        Result    `json:"result"`
+	// Ending is the why behind Result: success, failure, recycle (operator),
+	// shutdown (daemon exit), or wedge (teardown couldn't kill the guest).
+	// Empty in records written before this field existed.
+	Ending  Ending        `json:"ending,omitempty"`
+	States  []StateRecord `json:"states"`
+	VM      VMInfo        `json:"vm,omitzero"`
+	Job     *JobInfo      `json:"job,omitempty"`
+	Failure *Failure      `json:"failure,omitempty"`
 	// Artifacts are file names retained next to cycle.json (failure cycles).
 	Artifacts []string `json:"artifacts,omitempty"`
 	// InjectedKeys is the operator debug-key audit trail for this cycle: one

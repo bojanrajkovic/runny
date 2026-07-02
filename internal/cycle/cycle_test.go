@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -339,5 +340,51 @@ func TestNewIDShape(t *testing.T) {
 	}
 	if id == NewID() {
 		t.Error("two NewID() calls returned the same value")
+	}
+}
+
+// TestEndingRoundTrips pins the on-disk shape of the new field: omitempty on
+// write, and present on read-back.
+func TestEndingRoundTrips(t *testing.T) {
+	s := Store{SlotDir: filepath.Join(t.TempDir(), "runner-1")}
+	base := time.Date(2026, 6, 9, 22, 0, 0, 0, time.UTC)
+	rec := record("runner-1", "aaaa0001", base, ResultFailure)
+	rec.Ending = EndingRecycle
+	if err := s.Write(rec); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	recs, err := s.Recent(0, "")
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("Recent: %v, %d", err, len(recs))
+	}
+	if recs[0].Ending != EndingRecycle {
+		t.Errorf("Ending = %q, want %q", recs[0].Ending, EndingRecycle)
+	}
+}
+
+// TestEndingZeroValueTolerated pins that a cycle.json written before this
+// field existed (no "ending" key at all) deserializes fine, with Ending
+// simply empty — older records must not fail to parse or fail Why.
+func TestEndingZeroValueTolerated(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "runner-1")
+	s := Store{SlotDir: dir}
+	base := time.Date(2026, 6, 9, 22, 0, 0, 0, time.UTC)
+	rec := record("runner-1", "aaaa0001", base, ResultSuccess)
+	if err := s.Write(rec); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(rec.CycleDir, "cycle.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"ending"`) {
+		t.Errorf("cycle.json carries an empty ending key, want omitempty: %s", raw)
+	}
+	var got Record
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got.Ending != "" {
+		t.Errorf("Ending = %q, want empty (zero value)", got.Ending)
 	}
 }

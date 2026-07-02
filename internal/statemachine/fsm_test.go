@@ -900,6 +900,38 @@ func TestOperatorRecycle(t *testing.T) {
 	if !strings.Contains(recs[0].Failure.Error, "recycled by operator") {
 		t.Errorf("failure = %+v", recs[0].Failure)
 	}
+	if recs[0].Ending != cycle.EndingRecycle {
+		t.Errorf("Ending = %q, want %q", recs[0].Ending, cycle.EndingRecycle)
+	}
+}
+
+// TestEndingShutdown pins that a cycle interrupted by daemon shutdown (the
+// outer ctx cancelled, not an operator recycle) records Ending "shutdown" —
+// distinct from "recycle" even though both are benign for backoff.
+func TestEndingShutdown(t *testing.T) {
+	h := newHarness(t, nil)
+	cancel := h.start(t)
+
+	h.waitState(t, StateProvision)
+	h.proc.say(markerListening)
+	h.waitState(t, StateListening)
+
+	// Cancel the daemon-lifetime ctx directly (not CmdRecycle): this is the
+	// shutdown path, ctx.Err() != nil, distinct from errOperatorRecycle.
+	cancel()
+	<-h.runDone
+
+	recs := h.records(t)
+	if len(recs) == 0 {
+		t.Fatal("no records")
+	}
+	rec := recs[0]
+	if rec.Result != cycle.ResultFailure {
+		t.Fatalf("result = %s, want failure (the timeline stays truthful)", rec.Result)
+	}
+	if rec.Ending != cycle.EndingShutdown {
+		t.Errorf("Ending = %q, want %q", rec.Ending, cycle.EndingShutdown)
+	}
 }
 
 // teardownRecord returns the TEARDOWN StateRecord from a cycle record.
@@ -921,6 +953,64 @@ func teardownRecord(t *testing.T, r *cycle.Record) cycle.StateRecord {
 // gap (#151). The warn is non-fatal — it must not escalate the slot's failure
 // streak, since the local destruction succeeded and the orphan self-heals on
 // the next cold-start sweep.
+// TestEndingSuccess pins that a clean cycle records Ending "success" — the
+// baseline every other ending class is judged against.
+func TestEndingSuccess(t *testing.T) {
+	h := newHarness(t, nil)
+	cancel := h.start(t)
+	_ = cancel
+
+	h.waitState(t, StateProvision)
+	h.proc.say(markerListening)
+	h.waitState(t, StateListening)
+	h.proc.say("Running job: build")
+	h.waitState(t, StateJob)
+	h.proc.say("Job build completed with result: Succeeded")
+	h.proc.exit(0)
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+	cancel()
+	<-h.runDone
+
+	var rec *cycle.Record
+	for _, r := range h.records(t) {
+		if r.Result == cycle.ResultSuccess {
+			rec = r
+			break
+		}
+	}
+	if rec == nil {
+		t.Fatal("no success record")
+	}
+	if rec.Ending != cycle.EndingSuccess {
+		t.Errorf("Ending = %q, want %q", rec.Ending, cycle.EndingSuccess)
+	}
+}
+
+// TestEndingFailure pins that a per-state failure (not operator- or
+// shutdown-caused) records Ending "failure" — distinguishable from a benign
+// recycle/shutdown even though Result is "failure" in both cases.
+func TestEndingFailure(t *testing.T) {
+	h := newHarness(t, nil)
+	h.vmF.machine.ip = "" // lease never arrives → AWAIT_IP deadline
+	cancel := h.start(t)
+	_ = cancel
+
+	h.waitState(t, StateAwaitIP)
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+	cancel()
+
+	recs := h.records(t)
+	rec := recs[0]
+	if rec.Result != cycle.ResultFailure {
+		t.Fatalf("result = %s", rec.Result)
+	}
+	if rec.Ending != cycle.EndingFailure {
+		t.Errorf("Ending = %q, want %q", rec.Ending, cycle.EndingFailure)
+	}
+}
+
 func TestTeardownRecordsFailedCleanupsAsWarn(t *testing.T) {
 	h := newHarness(t, nil)
 	h.gh.deleteErr = errors.New("github 500")
@@ -1201,6 +1291,9 @@ func TestStopFailureWedgesSlot(t *testing.T) {
 	rec := recs[0]
 	if rec.Result != cycle.ResultFailure {
 		t.Errorf("result = %s, want failure", rec.Result)
+	}
+	if rec.Ending != cycle.EndingWedge {
+		t.Errorf("Ending = %q, want %q — a wedge is never benign, even though the cycle succeeded before teardown", rec.Ending, cycle.EndingWedge)
 	}
 	var tr *cycle.StateRecord
 	for i := range rec.States {

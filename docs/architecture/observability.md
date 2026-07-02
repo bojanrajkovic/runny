@@ -93,9 +93,11 @@ joining cycle.json); the owning step picks up the GitHub runner ID at mint
 time and the job's operator-key fingerprints at job end; audit span events
 mirror the record's full `InjectedKey` detail (comment, reason, operator
 uid/user) — never key material. Identity learned mid-cycle always travels
-as a typed event emitted where the record learns the same fact; attributes
-on actions are reserved for action-local facts like the pull id
-([ADR-0025](../architecture-decisions/0025-typed-identity-events.md)).
+as a typed event emitted where the record learns the same fact — typed
+payloads and explicit per-fact consumer routing, and a replayed record
+determines the event by construction; attributes on actions are reserved
+for action-local facts like the pull id, values that describe one
+execution of one action and die with its span.
 
 Trace and span IDs are deterministic, derived by the OTEL-free
 `internal/traceid` package from a cycle's own identity

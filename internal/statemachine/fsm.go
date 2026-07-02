@@ -19,6 +19,7 @@ import (
 	"github.com/bojanrajkovic/runny/internal/cycle"
 	"github.com/bojanrajkovic/runny/internal/github"
 	"github.com/bojanrajkovic/runny/internal/home"
+	"github.com/bojanrajkovic/runny/internal/obs"
 	"github.com/bojanrajkovic/runny/internal/tart"
 	"github.com/bojanrajkovic/runny/internal/vm"
 )
@@ -201,6 +202,12 @@ type Deps struct {
 	// must not block (sink into a logring.Ring, whose fan-out drops on slow
 	// subscribers).
 	OnRunnerLine func(slot, cycleID, line string)
+	// Events, when set, receives the observability event stream (ADR-0024)
+	// for every cycle this slot runs: the same record helpers that build
+	// cycle.Record emit these at the same instant, so the two can't
+	// disagree. nil = no-op — obs.WithCycle/Emit/Action degrade safely, so
+	// every existing test and caller is untouched.
+	Events obs.Emitter
 }
 
 // Command is an operator injection (from runnyctl via the socket).
@@ -525,7 +532,7 @@ func (s *Slot) handleIdleCommand(cmd Command) {
 }
 
 // setDetail publishes a live annotation for the current state.
-func (s *Slot) setDetail(detail string) {
+func (s *Slot) setDetail(ctx context.Context, detail string) {
 	s.mu.Lock()
 	if s.status.Detail == detail {
 		s.mu.Unlock()
@@ -535,6 +542,7 @@ func (s *Slot) setDetail(detail string) {
 	snap := s.status
 	fns := slices.Clone(s.onChange)
 	s.mu.Unlock()
+	obs.Emit(ctx, obs.Event{Kind: obs.KindDetail, Detail: &obs.DetailEvent{Text: detail}})
 	s.notify(fns, snap)
 }
 
@@ -624,6 +632,13 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	// two never consume from cmds concurrently.
 	cctx, ccancel := context.WithCancelCause(ctx)
 	defer ccancel(nil)
+	cctx = obs.WithCycle(cctx, s.deps.Events, obs.CycleRef{
+		InstancePrefix: s.deps.InstancePrefix,
+		Slot:           s.name,
+		CycleID:        rec.CycleID,
+		Started:        rec.Started,
+	})
+	obs.Emit(cctx, obs.Event{Kind: obs.KindCycleStarted})
 	stopWatch := make(chan struct{})
 	watchDone := make(chan struct{})
 	go func() {
@@ -682,6 +697,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 			st.RunnerName = runnerName
 			st.ActiveCycleStates = completed
 		})
+		obs.Emit(sctx, obs.Event{Kind: obs.KindStepEntered, StepInfo: &obs.StepEvent{State: string(state)}})
 		sr := cycle.StateRecord{State: string(state), Entered: time.Now()}
 		err := f()
 		sr.Left = time.Now()
@@ -694,6 +710,9 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 			sr.Outcome, sr.Error = cycle.OutcomeError, err.Error()
 		}
 		rec.States = append(rec.States, sr)
+		obs.Emit(sctx, obs.Event{Kind: obs.KindStepLeft, StepInfo: &obs.StepEvent{
+			State: string(state), Outcome: obs.Outcome(sr.Outcome), Error: sr.Error,
+		}})
 		if err != nil {
 			failState, failErr = state, err
 			return false
@@ -704,9 +723,11 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	// enter runs one deadline-bounded state. The state function receives the
 	// deadline as a bounded.Context it can hand straight to the guest and
 	// network seams — the per-state deadline is the contract, and the type
-	// system carries it to the call sites.
+	// system carries it to the call sites. The obs step scope is attached
+	// here too, so it rides the same bounded.Context into every seam.
 	enter := func(state State, d time.Duration, f func(bounded.Context) error) bool {
-		bctx, cancel := bounded.WithTimeout(cctx, d)
+		sctx := obs.WithStep(cctx, string(state))
+		bctx, cancel := bounded.WithTimeout(sctx, d)
 		ok := runState(state, bctx, func() error { return f(bctx) })
 		cancel()
 		return ok
@@ -716,8 +737,18 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	// ENSURE_IMAGE is the one state with no wall-clock deadline — pull
 	// duration is unknowable — so it runs under the cycle context; its
 	// operations carry their own bounds (resolve timeout, stall watcher).
-	ok := runState(StateEnsureImage, cctx, func() error {
-		digest, runnerVersion, bundle, err := s.deps.Images.Ensure(cctx, s.setDetail, func(d string) {
+	esctx := obs.WithStep(cctx, string(StateEnsureImage))
+	ok := runState(StateEnsureImage, esctx, func() error {
+		// The report callback fires on the shared image puller's own goroutine
+		// (internal/images: every pull, shared or not, runs its own `go
+		// p.run()`), not this cycle's FSM goroutine — an exception to "events
+		// for one cycle are emitted from a single goroutine" (ADR-0024). Safe
+		// regardless: obs's scope is immutable after WithStep/WithCycle and Seq
+		// is atomic, so Detail events still land with a valid, unique Seq — just
+		// not necessarily Time-ordered relative to this goroutine's other
+		// events. Proper shared-pull attribution (a wait-for-pull action
+		// correlated by pull id) is issue #230's job, not this one.
+		digest, runnerVersion, bundle, err := s.deps.Images.Ensure(esctx, func(d string) { s.setDetail(esctx, d) }, func(d string) {
 			// Fires as soon as the registry round-trip resolves the digest —
 			// before the pull starts. Publish immediately so WatchStatus
 			// subscribers see the digest mid-pull, not only at CLONE entry.
@@ -791,6 +822,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 			s.status.VM.MAC = m.MAC()
 			s.mu.Unlock()
 			rec.VM.MAC = m.MAC()
+			obs.Emit(c, obs.Event{Kind: obs.KindVMInfo, VM: &obs.VMEvent{MAC: m.MAC()}})
 			return nil
 		})
 	}
@@ -806,6 +838,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 			s.status.VM.IP = ip
 			s.mu.Unlock()
 			rec.VM.IP = ip
+			obs.Emit(c, obs.Event{Kind: obs.KindVMInfo, VM: &obs.VMEvent{IP: ip}})
 			return nil
 		})
 	}
@@ -961,6 +994,13 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 		ending = cycle.EndingWedge
 	}
 	rec.Ending = ending
+
+	finish := obs.FinishEvent{Result: string(rec.Result), Ending: string(rec.Ending)}
+	if rec.Failure != nil {
+		finish.FailureState, finish.Error = rec.Failure.State, rec.Failure.Error
+	}
+	obs.Emit(cctx, obs.Event{Kind: obs.KindCycleFinished, Finish: &finish})
+
 	return rec, wedged, benign
 }
 
@@ -969,6 +1009,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 // (issue #39) is reported as a benign failure carrying StateDebug.
 func (s *Slot) listenAndRunJob(ctx context.Context, rec *cycle.Record, proc Proc, guest Guest, runnerName string) (bool, State, error) {
 	cfg := s.deps.Config
+	ctx = obs.WithStep(ctx, string(StateListening))
 	completed := slices.Clone(rec.States)
 	s.setState(StateListening, func(st *Status) {
 		st.ActiveCycleStates = completed
@@ -981,6 +1022,7 @@ func (s *Slot) listenAndRunJob(ctx context.Context, rec *cycle.Record, proc Proc
 		st.ConsecutiveFailures = 0
 		s.failures = 0
 	})
+	obs.Emit(ctx, obs.Event{Kind: obs.KindStepEntered, StepInfo: &obs.StepEvent{State: string(StateListening)}})
 	lrec := cycle.StateRecord{State: string(StateListening), Entered: time.Now()}
 
 	reconcile := time.NewTicker(cfg.Limits.ReconcileInterval.D())
@@ -991,6 +1033,9 @@ func (s *Slot) listenAndRunJob(ctx context.Context, rec *cycle.Record, proc Proc
 	finishListening := func(outcome cycle.Outcome, err string) {
 		lrec.Left, lrec.Outcome, lrec.Error = time.Now(), outcome, err
 		rec.States = append(rec.States, lrec)
+		obs.Emit(ctx, obs.Event{Kind: obs.KindStepLeft, StepInfo: &obs.StepEvent{
+			State: string(StateListening), Outcome: obs.Outcome(outcome), Error: err,
+		}})
 	}
 
 	for {
@@ -1078,6 +1123,7 @@ func (s *Slot) listenAndRunJob(ctx context.Context, rec *cycle.Record, proc Proc
 // operator's mid-job work (§3).
 func (s *Slot) runJob(ctx context.Context, rec *cycle.Record, proc Proc, guest Guest, markerLine string) (bool, State, error) {
 	cfg := s.deps.Config
+	ctx = obs.WithStep(ctx, string(StateJob))
 	jobName := jobNameFromMarker(markerLine)
 	job := &cycle.JobInfo{Name: jobName, Started: time.Now()}
 	rec.Job = job
@@ -1086,6 +1132,8 @@ func (s *Slot) runJob(ctx context.Context, rec *cycle.Record, proc Proc, guest G
 		st.Job = job
 		st.ActiveCycleStates = completedBeforeJob
 	})
+	obs.Emit(ctx, obs.Event{Kind: obs.KindStepEntered, StepInfo: &obs.StepEvent{State: string(StateJob)}})
+	obs.Emit(ctx, obs.Event{Kind: obs.KindJobStarted, Job: &obs.JobEvent{Name: jobName}})
 	jrec := cycle.StateRecord{State: string(StateJob), Entered: time.Now()}
 
 	arm := &debugArm{}
@@ -1099,21 +1147,25 @@ func (s *Slot) runJob(ctx context.Context, rec *cycle.Record, proc Proc, guest G
 		jrec.Outcome, jrec.Error = cycle.OutcomeError, jobErr.Error()
 	}
 	rec.States = append(rec.States, jrec)
+	obs.Emit(ctx, obs.Event{Kind: obs.KindStepLeft, StepInfo: &obs.StepEvent{
+		State: string(StateJob), Outcome: obs.Outcome(jrec.Outcome), Error: jrec.Error,
+	}})
+	obs.Emit(ctx, obs.Event{Kind: obs.KindJobEnded, Job: &obs.JobEvent{Name: jobName, Outcome: obs.Outcome(jrec.Outcome)}})
 
 	switch {
 	case !arm.armed:
 		// Never armed, or disarmed mid-job: today's returns, verbatim.
 	case errors.Is(jobErr, errOperatorRecycle):
 		// Cancel consent killed the job: recycle means destroy, hold included.
-		s.auditDisarm(rec, "operator recycle canceled the job", slog.LevelInfo)
+		s.auditDisarm(ctx, rec, "operator recycle canceled the job", slog.LevelInfo)
 	case ctx.Err() != nil:
 		// Daemon shutdown / cycle cancel: a hold would record a fake DEBUG
 		// window.
-		s.auditDisarm(rec, "daemon shutdown", slog.LevelInfo)
+		s.auditDisarm(ctx, rec, "daemon shutdown", slog.LevelInfo)
 	case s.isPaused():
 		// Decision 19 backstop (a re-arm after pause's disarm, or pause racing
 		// the very last loop iteration): pause wins.
-		s.auditDisarm(rec, "slot paused", slog.LevelError)
+		s.auditDisarm(ctx, rec, "slot paused", slog.LevelError)
 	default:
 		holdState, holdErr := s.enterPostJobDebug(ctx, rec, proc, guest, arm)
 		if !jobOK {
@@ -1169,7 +1221,7 @@ func (s *Slot) watchJob(jctx, cctx context.Context, rec *cycle.Record, proc Proc
 			case CmdPause:
 				s.setPaused(true, cmd.ID)
 				if arm.armed { // disarm NOW + audit + clear status (decision 19)
-					s.auditDisarm(rec, "slot paused", slog.LevelError)
+					s.auditDisarm(cctx, rec, "slot paused", slog.LevelError)
 					s.clearArmedStatus(arm, jobDetail(rec))
 				}
 			case CmdResume:
@@ -1177,13 +1229,13 @@ func (s *Slot) watchJob(jctx, cctx context.Context, rec *cycle.Record, proc Proc
 			case CmdRecycle:
 				if cmd.CancelJob {
 					if arm.armed { // cancel consent destroys the job AND the armed hold
-						s.auditDisarm(rec, "operator recycle canceled the job", slog.LevelInfo)
+						s.auditDisarm(cctx, rec, "operator recycle canceled the job", slog.LevelInfo)
 						s.clearArmedStatus(arm, jobDetail(rec))
 					}
 					return false, fmt.Errorf("%w: %s (running job canceled)", errOperatorRecycle, cmd.Reason)
 				}
 				if arm.armed { // plain recycle disarms + audit + clear status (§0)
-					s.auditDisarm(rec, "recycled without cancel consent", slog.LevelWarn)
+					s.auditDisarm(cctx, rec, "recycled without cancel consent", slog.LevelWarn)
 					s.clearArmedStatus(arm, jobDetail(rec))
 				}
 			case CmdDebugKey:
@@ -1238,7 +1290,7 @@ func (s *Slot) writeAuditSidecar(rec *cycle.Record) error {
 // writes the sidecar BEFORE any byte reaches the guest. The returned index
 // addresses the entry for later updates. On write failure it removes the
 // entry and returns ok=false: "no audit, no injection" (decision 4).
-func (s *Slot) appendPending(rec *cycle.Record, cmd Command, state State) (int, bool) {
+func (s *Slot) appendPending(ctx context.Context, rec *cycle.Record, cmd Command, state State) (int, bool) {
 	rec.InjectedKeys = append(rec.InjectedKeys, cycle.InjectedKey{
 		Fingerprint:  cmd.Fingerprint,
 		Comment:      cmd.Comment,
@@ -1255,23 +1307,31 @@ func (s *Slot) appendPending(rec *cycle.Record, cmd Command, state State) (int, 
 		s.deps.Log.Error("debug: write-ahead audit failed; injection refused", "err", err)
 		return 0, false
 	}
+	obs.Emit(ctx, obs.Event{Kind: obs.KindAuditAppend, Audit: &obs.AuditEvent{
+		Fingerprint: cmd.Fingerprint, Outcome: "pending", State: string(state),
+	}})
 	return idx, true
 }
 
 // updateAudit sets an entry's outcome/error and rewrites the sidecar
 // (best-effort; the guest already changed, so a write failure only loses the
-// on-disk copy until finishCycle rewrites from memory — decision 4).
-func (s *Slot) updateAudit(rec *cycle.Record, idx int, outcome, errStr string) {
+// on-disk copy until finishCycle rewrites from memory — decision 4). The obs
+// event mirrors the in-memory entry regardless of the sidecar write's
+// success: rec.InjectedKeys, not the sidecar, is cycle.json's eventual truth.
+func (s *Slot) updateAudit(ctx context.Context, rec *cycle.Record, idx int, outcome, errStr string) {
 	rec.InjectedKeys[idx].Outcome = outcome
 	rec.InjectedKeys[idx].Error = errStr
 	if err := s.writeAuditSidecar(rec); err != nil {
 		s.deps.Log.Error("debug: post-exec audit rewrite failed", "err", err)
 	}
+	obs.Emit(ctx, obs.Event{Kind: obs.KindAuditUpdate, Audit: &obs.AuditEvent{
+		Fingerprint: rec.InjectedKeys[idx].Fingerprint, Outcome: outcome, State: rec.InjectedKeys[idx].State,
+	}})
 }
 
 // auditDisarm appends a "disarmed" entry recording why an armed hold was
 // cancelled without DEBUG entry, and rewrites the sidecar (best-effort).
-func (s *Slot) auditDisarm(rec *cycle.Record, cause string, level slog.Level) {
+func (s *Slot) auditDisarm(ctx context.Context, rec *cycle.Record, cause string, level slog.Level) {
 	rec.InjectedKeys = append(rec.InjectedKeys, cycle.InjectedKey{
 		Injected: time.Now(),
 		Outcome:  "disarmed",
@@ -1281,6 +1341,9 @@ func (s *Slot) auditDisarm(rec *cycle.Record, cause string, level slog.Level) {
 	if err := s.writeAuditSidecar(rec); err != nil {
 		s.deps.Log.Error("debug: disarm audit rewrite failed", "err", err)
 	}
+	obs.Emit(ctx, obs.Event{Kind: obs.KindAuditAppend, Audit: &obs.AuditEvent{
+		Outcome: "disarmed", State: string(StateJob),
+	}})
 	s.deps.Log.Log(context.Background(), level, "debug hold disarmed", "cause", cause)
 }
 
@@ -1364,7 +1427,7 @@ func (s *Slot) freezeForDebug(ctx context.Context, rec *cycle.Record, proc Proc,
 	}
 
 	// 1. Write-ahead audit.
-	idx, ok := s.appendPending(rec, cmd, StateListening)
+	idx, ok := s.appendPending(ctx, rec, cmd, StateListening)
 	if !ok {
 		cmd.reply(DebugKeyReply{Err: errors.New("audit write failed; injection refused")})
 		return false, "", "", nil
@@ -1372,14 +1435,14 @@ func (s *Slot) freezeForDebug(ctx context.Context, rec *cycle.Record, proc Proc,
 
 	// 2. Drain-check for a raced job marker / idle runner-exit.
 	if line, closed, marker := s.drainListeningLines(proc, rec.CycleID); marker {
-		s.updateAudit(rec, idx, "refused", "job started before service")
+		s.updateAudit(ctx, rec, idx, "refused", "job started before service")
 		cmd.reply(DebugKeyReply{Err: errors.New(
 			"a job started before your request was serviced; nothing was injected — re-run debug to inject into the running job",
 		)})
 		return false, line, "", nil
 	} else if closed {
 		code, _ := proc.Wait()
-		s.updateAudit(rec, idx, "refused", "runner exited while idle")
+		s.updateAudit(ctx, rec, idx, "refused", "runner exited while idle")
 		cmd.reply(DebugKeyReply{Err: errors.New("the runner exited before the key could be installed; nothing was injected")})
 		finishListening(cycle.OutcomeError, fmt.Sprintf("runner exited (code %d) while idle", code))
 		return true, "", StateListening, fmt.Errorf("runner exited (code %d) while listening", code)
@@ -1388,7 +1451,7 @@ func (s *Slot) freezeForDebug(ctx context.Context, rec *cycle.Record, proc Proc,
 	// 3. Verified kill — before install, so the operator key never coexists
 	// with a live (or ambiguously alive) runner.
 	if err := s.boundedGuest(ctx, secureSSH, guest.StopRunner); err != nil {
-		s.updateAudit(rec, idx, "error", err.Error())
+		s.updateAudit(ctx, rec, idx, "error", err.Error())
 		cmd.reply(DebugKeyReply{Err: fmt.Errorf("could not verify the runner is dead; nothing was injected: %w", err)})
 		finishListening(cycle.OutcomeError, "debug freeze: runner kill unproven")
 		return true, "", StateListening, fmt.Errorf("debug freeze kill: %w", errDebugInjectFailed)
@@ -1398,12 +1461,12 @@ func (s *Slot) freezeForDebug(ctx context.Context, rec *cycle.Record, proc Proc,
 	// marker here means a job raced and died with the kill — benign.
 	if marker, closed := s.drainToClose(proc, rec.CycleID, 5*time.Second); marker {
 		rec.Job = &cycle.JobInfo{Name: "(raced the debug freeze)", Started: time.Now()}
-		s.updateAudit(rec, idx, "refused", "job raced the freeze and died with the kill")
+		s.updateAudit(ctx, rec, idx, "refused", "job raced the freeze and died with the kill")
 		cmd.reply(DebugKeyReply{Err: errors.New("a job started and was killed by the freeze; nothing was injected")})
 		finishListening(cycle.OutcomeOK, "")
 		return true, "", StateJob, fmt.Errorf("%w", errDebugRacedJob)
 	} else if !closed {
-		s.updateAudit(rec, idx, "error", "runner output did not close after kill")
+		s.updateAudit(ctx, rec, idx, "error", "runner output did not close after kill")
 		cmd.reply(DebugKeyReply{Err: errors.New("the runner did not close after the kill; nothing was injected")})
 		finishListening(cycle.OutcomeError, "debug freeze: runner did not close")
 		return true, "", StateListening, fmt.Errorf("debug freeze drain: %w", errDebugInjectFailed)
@@ -1411,14 +1474,14 @@ func (s *Slot) freezeForDebug(ctx context.Context, rec *cycle.Record, proc Proc,
 
 	// 5. Install.
 	if err := s.boundedGuestArg(ctx, secureSSH, cmd.PubKey, guest.InstallAuthorizedKey); err != nil {
-		s.updateAudit(rec, idx, "error", err.Error())
+		s.updateAudit(ctx, rec, idx, "error", err.Error())
 		cmd.reply(DebugKeyReply{Err: fmt.Errorf("installing the key failed: %w", err)})
 		finishListening(cycle.OutcomeError, "debug freeze: key install failed")
 		return true, "", StateListening, fmt.Errorf("debug freeze install: %w", errDebugInjectFailed)
 	}
 
 	// 6. Success → DEBUG.
-	s.updateAudit(rec, idx, "ok", "")
+	s.updateAudit(ctx, rec, idx, "ok", "")
 	holdUntil := time.Now().Add(cmd.Hold)
 	cmd.reply(DebugKeyReply{User: s.deps.Pool.SSHUser, HostKeys: guest.HostKeys(), HoldUntil: holdUntil})
 	finishListening(cycle.OutcomeOK, "")
@@ -1454,6 +1517,9 @@ func (s *Slot) midJobInject(ctx context.Context, rec *cycle.Record, guest Guest,
 			OperatorUser: cmd.OperatorUser,
 		})
 		_ = s.writeAuditSidecar(rec)
+		obs.Emit(ctx, obs.Event{Kind: obs.KindAuditAppend, Audit: &obs.AuditEvent{
+			Fingerprint: fp, Outcome: "refused", State: string(StateJob),
+		}})
 		cmd.reply(DebugKeyReply{Err: errors.New(
 			"a job started before your request was serviced; nothing was injected — re-run debug to inject into the running job",
 		)})
@@ -1469,13 +1535,16 @@ func (s *Slot) midJobInject(ctx context.Context, rec *cycle.Record, guest Guest,
 			OperatorUID: cmd.OperatorUID, OperatorUser: cmd.OperatorUser,
 		})
 		_ = s.writeAuditSidecar(rec)
+		obs.Emit(ctx, obs.Event{Kind: obs.KindAuditAppend, Audit: &obs.AuditEvent{
+			Fingerprint: fp, Outcome: "re-armed", State: string(StateJob),
+		}})
 		s.setArmedStatus(s.armedDetail(fp, arm.hold))
 		cmd.reply(s.armedReply(guest))
 		return
 	}
 
 	// 2. Write-ahead audit.
-	idx, ok := s.appendPending(rec, cmd, StateJob)
+	idx, ok := s.appendPending(ctx, rec, cmd, StateJob)
 	if !ok {
 		cmd.reply(DebugKeyReply{Err: errors.New("audit write failed; injection refused")})
 		return
@@ -1491,20 +1560,20 @@ func (s *Slot) midJobInject(ctx context.Context, rec *cycle.Record, guest Guest,
 		arm.hold = cmd.Hold
 		arm.keys = append(arm.keys, armedKey{fingerprint: fp, landed: true})
 		s.recordOperatorKey(rec, fp)
-		s.updateAudit(rec, idx, "armed", "")
+		s.updateAudit(ctx, rec, idx, "armed", "")
 		s.setArmedStatus(s.armedDetail(fp, arm.hold))
 		cmd.reply(s.armedReply(guest))
 	case errors.Is(err, ErrGuestUnreachable):
 		// NO Redial (decision 18); record not-landed so a retry re-proves.
 		arm.keys = append(arm.keys, armedKey{fingerprint: fp, landed: false})
-		s.updateAudit(rec, idx, "unreachable", err.Error())
+		s.updateAudit(ctx, rec, idx, "unreachable", err.Error())
 		cmd.reply(DebugKeyReply{Err: fmt.Errorf("guest session unreachable; nothing was injected and the job continues: %w", err)})
 	default:
 		// Ambiguous: the key may or may not have landed. Record contamination,
 		// do NOT arm, the job continues (decision 18).
 		arm.keys = append(arm.keys, armedKey{fingerprint: fp, landed: false})
 		s.recordOperatorKey(rec, fp)
-		s.updateAudit(rec, idx, "error", err.Error())
+		s.updateAudit(ctx, rec, idx, "error", err.Error())
 		cmd.reply(DebugKeyReply{Err: fmt.Errorf("install failed (key state unknown); the job continues: %w", err)})
 	}
 }
@@ -1537,6 +1606,9 @@ func (s *Slot) enterPostJobDebug(ctx context.Context, rec *cycle.Record, proc Pr
 			Error: "post-job kill unproven: " + err.Error(),
 		})
 		_ = s.writeAuditSidecar(rec)
+		obs.Emit(ctx, obs.Event{Kind: obs.KindAuditAppend, Audit: &obs.AuditEvent{
+			Outcome: "error", State: string(StateJob),
+		}})
 		// The hold is NOT entered — an unproven kill must not hold a
 		// job-eligible guest. Clear the armed status now so DebugHoldArmed can't
 		// linger into teardown.
@@ -1560,16 +1632,21 @@ func (s *Slot) enterPostJobDebug(ctx context.Context, rec *cycle.Record, proc Pr
 // max-idle is gone by construction; release is destruction.
 func (s *Slot) holdForDebug(ctx context.Context, rec *cycle.Record, guest Guest, holdUntil time.Time) (State, error) {
 	secureSSH := s.deps.Config.Deadlines.SecureSSH.D()
+	ctx = obs.WithStep(ctx, string(StateDebug))
 	completedBeforeDebug := slices.Clone(rec.States)
 	s.setState(StateDebug, func(st *Status) {
 		st.DebugHoldExpires = holdUntil
 		st.Detail = fmt.Sprintf("held for debug; release: runnyctl recycle %s", s.name)
 		st.ActiveCycleStates = completedBeforeDebug
 	})
+	obs.Emit(ctx, obs.Event{Kind: obs.KindStepEntered, StepInfo: &obs.StepEvent{State: string(StateDebug)}})
 	dr := cycle.StateRecord{State: string(StateDebug), Entered: time.Now()}
 	finish := func(outcome cycle.Outcome, errStr string) {
 		dr.Left, dr.Outcome, dr.Error = time.Now(), outcome, errStr
 		rec.States = append(rec.States, dr)
+		obs.Emit(ctx, obs.Event{Kind: obs.KindStepLeft, StepInfo: &obs.StepEvent{
+			State: string(StateDebug), Outcome: obs.Outcome(outcome), Error: errStr,
+		}})
 	}
 
 	hold := time.NewTimer(time.Until(holdUntil))
@@ -1640,12 +1717,15 @@ func (s *Slot) debugReArm(ctx context.Context, rec *cycle.Record, guest Guest, c
 			OperatorUID: cmd.OperatorUID, OperatorUser: cmd.OperatorUser,
 		})
 		_ = s.writeAuditSidecar(rec)
+		obs.Emit(ctx, obs.Event{Kind: obs.KindAuditAppend, Audit: &obs.AuditEvent{
+			Fingerprint: cmd.Fingerprint, Outcome: "re-armed", State: string(StateDebug),
+		}})
 		cmd.reply(DebugKeyReply{User: s.deps.Pool.SSHUser, HostKeys: guest.HostKeys(), HoldUntil: newUntil})
 		return
 	}
 
 	// NEW KEY: write-ahead, then install with a one-shot Redial retry.
-	idx, ok := s.appendPending(rec, cmd, StateDebug)
+	idx, ok := s.appendPending(ctx, rec, cmd, StateDebug)
 	if !ok {
 		cmd.reply(DebugKeyReply{Err: errors.New("audit write failed; injection refused")})
 		return
@@ -1659,15 +1739,15 @@ func (s *Slot) debugReArm(ctx context.Context, rec *cycle.Record, guest Guest, c
 	switch {
 	case err == nil:
 		newUntil := reset()
-		s.updateAudit(rec, idx, "ok", "")
+		s.updateAudit(ctx, rec, idx, "ok", "")
 		cmd.reply(DebugKeyReply{User: s.deps.Pool.SSHUser, HostKeys: guest.HostKeys(), HoldUntil: newUntil})
 	case errors.Is(err, ErrGuestUnreachable):
-		s.updateAudit(rec, idx, "unreachable", err.Error())
+		s.updateAudit(ctx, rec, idx, "unreachable", err.Error())
 		cmd.reply(DebugKeyReply{Err: errors.New(
 			"guest session is down (rebooted?); hold unchanged — extend with the already-installed key, or release with recycle",
 		)})
 	default:
-		s.updateAudit(rec, idx, "error", err.Error())
+		s.updateAudit(ctx, rec, idx, "error", err.Error())
 		cmd.reply(DebugKeyReply{Err: fmt.Errorf("installing the key failed: %w", err)})
 		finish(cycle.OutcomeError, "debug hold: key install failed")
 	}
@@ -1813,10 +1893,14 @@ func anyKeyLanded(rec *cycle.Record) bool {
 // absorb, because releasing an in-process VM takes a process exit.
 func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInputs) bool {
 	cfg := s.deps.Config
+	ctx = obs.WithStep(ctx, string(StateTeardown))
 	completedBeforeTeardown := slices.Clone(rec.States)
 	s.setState(StateTeardown, func(st *Status) { st.ActiveCycleStates = completedBeforeTeardown })
+	obs.Emit(ctx, obs.Event{Kind: obs.KindStepEntered, StepInfo: &obs.StepEvent{State: string(StateTeardown)}})
 	tr := cycle.StateRecord{State: string(StateTeardown), Entered: time.Now()}
 	// Teardown must run even when ctx (daemon shutdown) is done: detach.
+	// context.WithoutCancel still forwards Value lookups to ctx, so the obs
+	// scope survives detachment.
 	tctx, cancel := bounded.WithTimeout(context.WithoutCancel(ctx), cfg.Deadlines.Teardown.D())
 	defer cancel()
 
@@ -1919,6 +2003,9 @@ func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInput
 		tr.Outcome = cycle.OutcomeOK
 	}
 	rec.States = append(rec.States, tr)
+	obs.Emit(ctx, obs.Event{Kind: obs.KindStepLeft, StepInfo: &obs.StepEvent{
+		State: string(StateTeardown), Outcome: obs.Outcome(tr.Outcome), Error: tr.Error,
+	}})
 	return wedged
 }
 

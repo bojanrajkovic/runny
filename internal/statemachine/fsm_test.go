@@ -18,6 +18,7 @@ import (
 	"github.com/bojanrajkovic/runny/internal/cycle"
 	"github.com/bojanrajkovic/runny/internal/github"
 	"github.com/bojanrajkovic/runny/internal/home"
+	"github.com/bojanrajkovic/runny/internal/obs"
 	"github.com/bojanrajkovic/runny/internal/tart"
 	"github.com/bojanrajkovic/runny/internal/vm"
 )
@@ -420,6 +421,9 @@ type harness struct {
 	linesMu     sync.Mutex
 	runnerLines []string // "slot cycle line" per OnRunnerLine call
 
+	eventsMu sync.Mutex
+	events   []obs.Event // every obs event this slot has emitted, across all cycles
+
 	cloneMu    sync.Mutex
 	cloneFiles [][2]string // {src, dst} per CloneFile call
 
@@ -545,6 +549,11 @@ func newHarnessPool(t *testing.T, mutate func(*home.Config), mutatePool func(*ho
 			h.runnerLines = append(h.runnerLines, slot+" "+cycleID+" "+line)
 			h.linesMu.Unlock()
 		},
+		Events: func(e obs.Event) {
+			h.eventsMu.Lock()
+			h.events = append(h.events, e)
+			h.eventsMu.Unlock()
+		},
 	}
 	h.slot = NewSlot("runner-1", deps)
 	h.slot.OnChange(func(st Status) {
@@ -579,6 +588,88 @@ func (h *harness) records(t *testing.T) []*cycle.Record {
 		t.Fatal(err)
 	}
 	return recs
+}
+
+// eventsForCycle returns the obs events emitted for one cycle, in emission
+// (Seq) order. A harness accumulates events across every cycle the slot
+// runs (including a gated cycle that starts before a test's cancel lands),
+// so assertions on one cycle's shape must filter to it first.
+func (h *harness) eventsForCycle(cycleID string) []obs.Event {
+	h.eventsMu.Lock()
+	defer h.eventsMu.Unlock()
+	var out []obs.Event
+	for _, e := range h.events {
+		if e.Cycle.CycleID == cycleID {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// assertStepEventsMatchRecord verifies that events carries exactly one
+// StepEntered/StepLeft pair per rec.States entry, in the same order, with
+// the same (state, outcome, error) triple — the event stream and cycle.json
+// are built from the same code path and must never disagree about a
+// cycle's shape (ADR-0024).
+func assertStepEventsMatchRecord(t *testing.T, events []obs.Event, rec *cycle.Record) {
+	t.Helper()
+	var entered, left []obs.StepEvent
+	for _, e := range events {
+		switch e.Kind {
+		case obs.KindStepEntered:
+			entered = append(entered, *e.StepInfo)
+		case obs.KindStepLeft:
+			left = append(left, *e.StepInfo)
+		}
+	}
+	if len(entered) != len(rec.States) {
+		t.Fatalf("got %d StepEntered events, want %d (one per StateRecord): %+v", len(entered), len(rec.States), entered)
+	}
+	if len(left) != len(rec.States) {
+		t.Fatalf("got %d StepLeft events, want %d (one per StateRecord): %+v", len(left), len(rec.States), left)
+	}
+	for i, sr := range rec.States {
+		if entered[i].State != sr.State {
+			t.Errorf("StepEntered[%d].State = %q, want %q", i, entered[i].State, sr.State)
+		}
+		got := left[i]
+		if got.State != sr.State || got.Outcome != obs.Outcome(sr.Outcome) || got.Error != sr.Error {
+			t.Errorf("StepLeft[%d] = %+v, want state=%q outcome=%q error=%q", i, got, sr.State, sr.Outcome, sr.Error)
+		}
+	}
+}
+
+// assertCycleFramed verifies the cycle's event stream starts with
+// CycleStarted and ends with CycleFinished, and that CycleFinished's payload
+// matches the record's own result/ending/failure fields.
+func assertCycleFramed(t *testing.T, events []obs.Event, rec *cycle.Record) {
+	t.Helper()
+	if len(events) < 2 {
+		t.Fatalf("got %d events, want at least CycleStarted+CycleFinished", len(events))
+	}
+	if events[0].Kind != obs.KindCycleStarted {
+		t.Errorf("first event = %v, want CycleStarted", events[0].Kind)
+	}
+	last := events[len(events)-1]
+	if last.Kind != obs.KindCycleFinished {
+		t.Fatalf("last event = %v, want CycleFinished", last.Kind)
+	}
+	if last.Finish == nil {
+		t.Fatal("CycleFinished payload is nil")
+	}
+	if last.Finish.Result != string(rec.Result) {
+		t.Errorf("Finish.Result = %q, want %q", last.Finish.Result, rec.Result)
+	}
+	if last.Finish.Ending != string(rec.Ending) {
+		t.Errorf("Finish.Ending = %q, want %q", last.Finish.Ending, rec.Ending)
+	}
+	wantState, wantErr := "", ""
+	if rec.Failure != nil {
+		wantState, wantErr = rec.Failure.State, rec.Failure.Error
+	}
+	if last.Finish.FailureState != wantState || last.Finish.Error != wantErr {
+		t.Errorf("Finish failure = (%q, %q), want (%q, %q)", last.Finish.FailureState, last.Finish.Error, wantState, wantErr)
+	}
 }
 
 // ---- tests -------------------------------------------------------------------
@@ -2995,5 +3086,273 @@ func TestJobNameFromMarker(t *testing.T) {
 	}
 	if !utf8.ValidString(got) {
 		t.Errorf("capped job name is not valid UTF-8: %q", got)
+	}
+}
+
+// ---- observability events (ADR-0024, issue #224) ---------------------------
+
+// TestObsEventsCleanSuccessCycle pins the event shape of a cycle that runs a
+// job to completion: framed by CycleStarted/CycleFinished, one
+// StepEntered/StepLeft pair per StateRecord matching cycle.json exactly,
+// VMInfo published at BOOT (MAC) and AWAIT_IP (IP), a Detail from the image
+// ensurer's report callback, and JobStarted/JobEnded bracketing the job.
+func TestObsEventsCleanSuccessCycle(t *testing.T) {
+	h := newHarness(t, nil)
+	cancel := h.start(t)
+
+	h.waitState(t, StateProvision)
+	h.proc.say("Listening for Jobs")
+	h.waitState(t, StateListening)
+	h.proc.say("Running job: build (mac, self-hosted)")
+	h.waitState(t, StateJob)
+	h.proc.say("Job build completed with result: Succeeded")
+	h.proc.exit(0)
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+	cancel()
+	<-h.runDone
+
+	recs := h.records(t)
+	var rec *cycle.Record
+	for _, r := range recs {
+		if r.Result == cycle.ResultSuccess {
+			rec = r
+		}
+	}
+	if rec == nil {
+		t.Fatalf("no success record in %d records", len(recs))
+	}
+
+	events := h.eventsForCycle(rec.CycleID)
+	assertCycleFramed(t, events, rec)
+	assertStepEventsMatchRecord(t, events, rec)
+
+	var sawMAC, sawIP, sawDetail, sawJobStarted, sawJobEnded bool
+	for _, e := range events {
+		switch e.Kind {
+		case obs.KindVMInfo:
+			if e.VM.MAC != "" {
+				sawMAC = true
+			}
+			if e.VM.IP != "" {
+				sawIP = true
+			}
+		case obs.KindDetail:
+			sawDetail = true
+		case obs.KindJobStarted:
+			sawJobStarted = true
+			if e.Job.Name != "build (mac, self-hosted)" {
+				t.Errorf("JobStarted name = %q", e.Job.Name)
+			}
+			if e.Step != string(StateJob) {
+				t.Errorf("JobStarted step = %q, want JOB", e.Step)
+			}
+		case obs.KindJobEnded:
+			sawJobEnded = true
+			if e.Job.Outcome != obs.OutcomeOK {
+				t.Errorf("JobEnded outcome = %q, want ok", e.Job.Outcome)
+			}
+		}
+	}
+	if !sawMAC {
+		t.Error("no VMInfo event carried a MAC")
+	}
+	if !sawIP {
+		t.Error("no VMInfo event carried an IP")
+	}
+	if !sawDetail {
+		t.Error("no Detail event from the image ensurer's report callback")
+	}
+	if !sawJobStarted || !sawJobEnded {
+		t.Errorf("JobStarted=%v JobEnded=%v, want both", sawJobStarted, sawJobEnded)
+	}
+}
+
+// TestObsEventsErrorOutcome pins a plain (non-deadline) failure's StepLeft:
+// the runner exiting before reaching LISTENING fails PROVISION with
+// cycle.OutcomeError, and the obs stream must classify it the same way.
+func TestObsEventsErrorOutcome(t *testing.T) {
+	h := newHarness(t, nil)
+	cancel := h.start(t)
+	defer cancel()
+
+	h.waitState(t, StateProvision)
+	h.proc.exit(2) // runner dies before listening
+	h.waitState(t, StateBackoff)
+
+	recs := h.records(t)
+	rec := recs[0]
+	if rec.Failure == nil || rec.Failure.State != string(StateProvision) {
+		t.Fatalf("failure = %+v, want PROVISION", rec.Failure)
+	}
+
+	events := h.eventsForCycle(rec.CycleID)
+	assertCycleFramed(t, events, rec)
+	assertStepEventsMatchRecord(t, events, rec)
+}
+
+// TestObsEventsDeadlineOutcome pins a deadline failure's StepLeft: AWAIT_IP
+// timing out classifies as cycle.OutcomeDeadline in cycle.json, and the obs
+// stream carries the same outcome string (obs.Outcome is a plain string, not
+// restricted to ok/error — see internal/obs).
+func TestObsEventsDeadlineOutcome(t *testing.T) {
+	h := newHarness(t, nil)
+	h.vmF.machine.ip = "" // WaitIP never resolves -> AWAIT_IP deadline
+	cancel := h.start(t)
+	defer cancel()
+
+	h.waitState(t, StateAwaitIP)
+	h.waitState(t, StateBackoff)
+
+	recs := h.records(t)
+	rec := recs[0]
+	if rec.Failure == nil || rec.Failure.State != string(StateAwaitIP) {
+		t.Fatalf("failure = %+v, want AWAIT_IP", rec.Failure)
+	}
+
+	events := h.eventsForCycle(rec.CycleID)
+	assertCycleFramed(t, events, rec)
+	assertStepEventsMatchRecord(t, events, rec)
+}
+
+// TestObsEventsOperatorRecycle pins the benign-recycle shape: Ending
+// "recycle" on both the record and CycleFinished, with the LISTENING step
+// left "ok" (the recycle interrupts between states, not mid-state).
+func TestObsEventsOperatorRecycle(t *testing.T) {
+	h := newHarness(t, nil)
+	cancel := h.start(t)
+	defer cancel()
+
+	h.waitState(t, StateProvision)
+	h.proc.say(markerListening)
+	h.waitState(t, StateListening)
+
+	if !h.slot.Command(Command{Kind: CmdRecycle, Reason: "image bump"}) {
+		t.Fatal("command rejected")
+	}
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+
+	recs := h.records(t)
+	rec := recs[0]
+	if rec.Ending != cycle.EndingRecycle {
+		t.Fatalf("Ending = %q, want %q", rec.Ending, cycle.EndingRecycle)
+	}
+
+	events := h.eventsForCycle(rec.CycleID)
+	assertCycleFramed(t, events, rec)
+	assertStepEventsMatchRecord(t, events, rec)
+}
+
+// TestObsEventsDebugHold pins a debug-hold cycle's shape: the DEBUG
+// StepEntered/StepLeft pair, plus the audit trail's AuditAppend (write-ahead
+// "pending") and AuditUpdate ("ok") events carrying the operator's
+// fingerprint — the audit events are observational copies of
+// rec.InjectedKeys, never the system of record.
+func TestObsEventsDebugHold(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	cancel := h.reachListening(t)
+	defer cancel()
+
+	r := h.debugCmd(t, nil)
+	if r.Err != nil {
+		t.Fatalf("freeze failed: %v", r.Err)
+	}
+	h.waitState(t, StateDebug)
+	h.slot.Command(Command{Kind: CmdRecycle, Reason: "done debugging"})
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+
+	recs := h.records(t)
+	rec := recs[0]
+	var sawDebug bool
+	for _, sr := range rec.States {
+		if sr.State == string(StateDebug) {
+			sawDebug = true
+		}
+	}
+	if !sawDebug {
+		t.Fatalf("no DEBUG StateRecord: %+v", rec.States)
+	}
+
+	events := h.eventsForCycle(rec.CycleID)
+	assertCycleFramed(t, events, rec)
+	assertStepEventsMatchRecord(t, events, rec)
+
+	var sawPending, sawOK bool
+	for _, e := range events {
+		if e.Kind != obs.KindAuditAppend && e.Kind != obs.KindAuditUpdate {
+			continue
+		}
+		if e.Audit.Fingerprint != "SHA256:testfp" {
+			t.Errorf("audit event fingerprint = %q, want SHA256:testfp", e.Audit.Fingerprint)
+		}
+		switch e.Audit.Outcome {
+		case "pending":
+			sawPending = true
+		case "ok":
+			sawOK = true
+		}
+	}
+	if !sawPending || !sawOK {
+		t.Errorf("sawPending=%v sawOK=%v, want both", sawPending, sawOK)
+	}
+}
+
+// TestObsEventsWedge pins a wedge's shape: TEARDOWN's StepLeft outcome
+// "error" (force-stop failed, guest still running) with Ending "wedge" on
+// both the record and CycleFinished.
+func TestObsEventsWedge(t *testing.T) {
+	h := newHarness(t, nil)
+	h.vmF.machine.stopErr = errors.New("force stop failed with guest still running")
+	h.vmF.machine.ip = "" // fail at AWAIT_IP so teardown owns a booted machine
+	cancel := h.start(t)
+	_ = cancel
+
+	h.waitState(t, StateTeardown)
+	select {
+	case <-h.runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("slot did not park after the guest survived force-stop")
+	}
+
+	recs := h.records(t)
+	rec := recs[0]
+	if rec.Ending != cycle.EndingWedge {
+		t.Fatalf("Ending = %q, want %q", rec.Ending, cycle.EndingWedge)
+	}
+
+	events := h.eventsForCycle(rec.CycleID)
+	assertCycleFramed(t, events, rec)
+	assertStepEventsMatchRecord(t, events, rec)
+}
+
+// TestObsEventsNilHookIsNoop pins that a Deps with no Events hook (the
+// zero-value default every other test in this file already exercises)
+// drives a cycle exactly as before: obs.WithCycle/Emit/Action degrade to
+// no-ops on a nil emitter, so nothing here should ever observe an event.
+func TestObsEventsNilHookIsNoop(t *testing.T) {
+	h := newHarness(t, nil)
+	h.slot.deps.Events = nil // the harness wires one by default; unwire it
+
+	cancel := h.start(t)
+	h.waitState(t, StateProvision)
+	h.proc.say("Listening for Jobs")
+	h.waitState(t, StateListening)
+	h.proc.say("Running job: build")
+	h.waitState(t, StateJob)
+	h.proc.say("Job build completed with result: Succeeded")
+	h.proc.exit(0)
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+	cancel()
+	<-h.runDone
+
+	h.eventsMu.Lock()
+	n := len(h.events)
+	h.eventsMu.Unlock()
+	if n != 0 {
+		t.Errorf("got %d events with no Events hook installed, want 0", n)
 	}
 }

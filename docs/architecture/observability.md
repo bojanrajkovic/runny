@@ -72,9 +72,10 @@ a benign ending (operator recycle, daemon shutdown) leaves the root
 land as span events on the root, not as spans of their own — operator
 access is visible in the trace with no key material attached.
 
-The action layer only appears once a state actually wraps its sub-steps in
-`obs.Action` — a trace against today's FSM has steps but no actions, since
-no call site does that yet.
+A step's action children are conditional on that step's own implementation:
+`cycle.step.action` spans exist only where the FSM code for that state wraps
+a sub-step in `obs.Action` (`internal/obs`'s doc comment covers the wrapper
+itself). A step whose implementation never calls it stays a leaf.
 
 Trace and span IDs are deterministic, derived by the OTEL-free
 `internal/traceid` package from a cycle's own identity

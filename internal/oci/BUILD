@@ -11,6 +11,7 @@ go_library(
     deps = [
         "//internal/bounded",
         "//internal/diskfree",
+        "//internal/obs",
         "//internal/tart",
         "@com_github_pierrec_lz4_v4//:lz4",
         "@org_golang_x_sync//errgroup",
@@ -27,6 +28,7 @@ go_test(
     embed = [":oci"],
     deps = [
         "//internal/bounded",
+        "//internal/obs",
         "@com_github_pierrec_lz4_v4//:lz4",
     ],
 )

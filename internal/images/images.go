@@ -418,11 +418,11 @@ func downloadTarball(ctx context.Context, dest, assetName, assetURL, wantSHA str
 	wctx, cancel := stall.Watch(ctx, stallBudget)
 	defer cancel()
 
-	dreq, err := http.NewRequestWithContext(wctx, http.MethodGet, assetURL, nil)
+	dreq, err := http.NewRequestWithContext(obs.WithHTTPClass(wctx, obs.HTTPTarballDownload), http.MethodGet, assetURL, nil)
 	if err != nil {
 		return err
 	}
-	dresp, err := http.DefaultClient.Do(dreq)
+	dresp, err := tarballClient.Do(dreq)
 	if err != nil {
 		return stallErr(wctx, err, "downloading runner tarball")
 	}
@@ -484,3 +484,7 @@ func (p progressWriter) Write(b []byte) (int, error) {
 	p(int64(len(b)))
 	return len(b), nil
 }
+
+// tarballClient is http.DefaultClient plus the obs transport: the runner
+// tarball GET is a classed, observable round trip like every other egress.
+var tarballClient = &http.Client{Transport: &obs.HTTPTransport{}}

@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"strconv"
 	"sync"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -103,6 +104,8 @@ func (a *traceAssembler) emit(e obs.Event) {
 		a.actionStarted(e)
 	case obs.KindActionEnded:
 		a.actionEnded(e)
+	case obs.KindHTTP:
+		a.httpRoundTrip(e)
 	case obs.KindDetail:
 		a.detail(e)
 	case obs.KindVMInfo:
@@ -177,10 +180,11 @@ func (a *traceAssembler) actionStarted(e obs.Event) {
 		for _, kv := range e.Action.Attrs {
 			attrs = append(attrs, attribute.String(kv.Key, kv.Value))
 		}
-		// No span ever parents off an action, so its context isn't kept.
-		_, span := a.tracer.Start(ctx, "cycle.step.action "+e.Action.Name,
+		// The action's context is kept so KindHTTP round trips that fire
+		// while it's open can parent under it.
+		ctx, span := a.tracer.Start(ctx, "cycle.step.action "+e.Action.Name,
 			trace.WithTimestamp(e.Time), trace.WithAttributes(attrs...))
-		h := &spanHandle{span: span}
+		h := &spanHandle{ctx: ctx, span: span}
 		ss.actions[e.Action.Name] = h
 		ss.current = h
 	})
@@ -203,6 +207,65 @@ func (a *traceAssembler) actionEnded(e obs.Event) {
 		if ss.current == h {
 			ss.current = nil
 		}
+	})
+}
+
+// httpRoundTrip renders one KindHTTP event as an already-completed child
+// span of whatever was innermost when the round trip finished: the open
+// action if one is running, else the step, else the root. The event is
+// emitted at completion carrying its own duration, so the span starts at
+// Time − Duration and ends at Time — no pairing state to hold. Span IDs
+// fold the event's per-cycle Seq into the derivation because round trips of
+// one class legitimately repeat within a step (retries, the registry's 401
+// token dance); Seq is exactly what internal/traceid excludes from the
+// record-determined spans, so HTTP spans are live-only — a replayed
+// cycle.json reproduces the deterministic tree without them, by design.
+func (a *traceAssembler) httpRoundTrip(e obs.Event) {
+	if e.HTTP == nil {
+		return
+	}
+	a.withCycle(e, func(cs *cycleSpans) {
+		parent := cs.ctx
+		if ss := cs.steps[e.Step]; ss != nil {
+			parent = ss.ctx
+			if ss.current != nil {
+				parent = ss.current.ctx
+			}
+		}
+		h := e.HTTP
+		sid := traceid.Span(cs.traceID, "http", e.Step, string(h.Class)+"#"+strconv.FormatUint(e.Seq, 10))
+		ctx := withIDs(parent, trace.TraceID(cs.traceID), trace.SpanID(sid))
+		attrs := []attribute.KeyValue{
+			attribute.String("http.request.method", h.Method),
+			attribute.String("server.address", h.Host),
+		}
+		if h.Status != 0 {
+			attrs = append(attrs, attribute.Int("http.response.status_code", h.Status))
+			attrs = append(attrs, attribute.Int64("runny.http.bytes", h.BytesRead))
+		}
+		start := e.Time.Add(-h.Duration)
+		_, span := a.tracer.Start(ctx, "http "+string(h.Class),
+			trace.WithTimestamp(start),
+			trace.WithSpanKind(trace.SpanKindClient),
+			trace.WithAttributes(attrs...))
+		// The span covers the whole exchange through body completion; the
+		// headers marker shows where waiting ended and transfer began.
+		if h.HeaderDuration > 0 {
+			span.AddEvent("headers", trace.WithTimestamp(start.Add(h.HeaderDuration)))
+		}
+		// Client-span status follows the HTTP semconv rule: any 4xx/5xx is an
+		// error, not just transport failures — a 503 retry storm or a 403
+		// mint must not render as a row of healthy spans under a red action.
+		// (The registry's routine 401 token challenge renders as an errored
+		// hop too; its resolve action staying green is what says the dance
+		// succeeded.)
+		switch {
+		case h.Error != "":
+			span.SetStatus(codes.Error, h.Error)
+		case h.Status >= 400:
+			span.SetStatus(codes.Error, "HTTP "+strconv.Itoa(h.Status))
+		}
+		span.End(trace.WithTimestamp(e.Time))
 	})
 }
 

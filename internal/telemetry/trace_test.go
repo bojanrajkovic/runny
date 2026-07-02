@@ -435,3 +435,142 @@ func TestTraceConsumerImageIdentity(t *testing.T) {
 		t.Errorf("step runny.runner_version = %q", got)
 	}
 }
+
+// TestTraceConsumerHTTPSpans covers the KindHTTP fold: an event during an
+// open action parents under that action's span; one with no action open
+// parents under the step; repeats of the same class get distinct
+// seq-derived span IDs; timing reconstructs start as Time − Duration; and a
+// transport-level failure (Status 0 + Error) sets span error status.
+func TestTraceConsumerHTTPSpans(t *testing.T) {
+	emit, exp := newTestAssembler(t)
+
+	emit(obs.Event{Seq: 1, Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
+	emit(obs.Event{
+		Seq: 2, Time: at(1), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepEntered,
+		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE"},
+	})
+	emit(obs.Event{
+		Seq: 3, Time: at(2), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindActionStarted,
+		Action: &obs.ActionEvent{Name: "resolve"},
+	})
+	// Two manifest round trips inside the resolve action: a 401 challenge
+	// answered by the token dance, then the authenticated retry.
+	emit(obs.Event{
+		Seq: 4, Time: at(3), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindHTTP,
+		HTTP: &obs.HTTPEvent{Class: obs.HTTPRegistryManifest, Method: "GET", Host: "ghcr.io", Status: 401, Duration: time.Second},
+	})
+	emit(obs.Event{
+		Seq: 5, Time: at(5), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindHTTP,
+		HTTP: &obs.HTTPEvent{
+			Class: obs.HTTPRegistryManifest, Method: "GET", Host: "ghcr.io", Status: 200,
+			Duration: time.Second, HeaderDuration: 200 * time.Millisecond, BytesRead: 2048,
+		},
+	})
+	emit(obs.Event{
+		Seq: 6, Time: at(6), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindActionEnded,
+		Action: &obs.ActionEvent{Name: "resolve", Outcome: obs.OutcomeOK, Duration: 4 * time.Second},
+	})
+	emit(obs.Event{
+		Seq: 7, Time: at(7), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepLeft,
+		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE", Outcome: obs.OutcomeOK},
+	})
+	// MINT_JIT has no actions: its round trips parent under the step span,
+	// and a transport-level failure carries error status.
+	emit(obs.Event{
+		Seq: 8, Time: at(8), Cycle: testCycle, Step: "MINT_JIT", Kind: obs.KindStepEntered,
+		StepInfo: &obs.StepEvent{State: "MINT_JIT"},
+	})
+	emit(obs.Event{
+		Seq: 9, Time: at(10), Cycle: testCycle, Step: "MINT_JIT", Kind: obs.KindHTTP,
+		HTTP: &obs.HTTPEvent{Class: obs.HTTPGitHubJIT, Method: "POST", Host: "api.github.com", Error: "context deadline exceeded", Duration: 2 * time.Second},
+	})
+	emit(obs.Event{
+		Seq: 10, Time: at(11), Cycle: testCycle, Step: "MINT_JIT", Kind: obs.KindStepLeft,
+		StepInfo: &obs.StepEvent{State: "MINT_JIT", Outcome: obs.OutcomeError, Error: "mint failed"},
+	})
+	emit(obs.Event{
+		Seq: 11, Time: at(12), Cycle: testCycle, Kind: obs.KindCycleFinished,
+		Finish: &obs.FinishEvent{Result: "failure", Ending: "failure"},
+	})
+
+	var manifests []tracetest.SpanStub
+	var jit *tracetest.SpanStub
+	for _, s := range exp.GetSpans() {
+		switch s.Name {
+		case "http registry.manifest":
+			manifests = append(manifests, s)
+		case "http github.jit":
+			jit = &s
+		}
+	}
+	if len(manifests) != 2 {
+		t.Fatalf("got %d registry.manifest spans, want 2", len(manifests))
+	}
+	if jit == nil {
+		t.Fatal("missing http github.jit span")
+	}
+
+	actionSID := traceid.Span(testTraceID, "action", "ENSURE_IMAGE", "resolve")
+	stepSID := traceid.Span(testTraceID, "step", "MINT_JIT", "")
+	for i, m := range manifests {
+		if got := m.Parent.SpanID(); got != trace.SpanID(actionSID) {
+			t.Errorf("manifest[%d] parent = %s, want the resolve action span", i, got)
+		}
+		if got := attrString(m.Attributes, "server.address"); got != "ghcr.io" {
+			t.Errorf("manifest[%d] server.address = %q", i, got)
+		}
+		if got := attrString(m.Attributes, "http.request.method"); got != "GET" {
+			t.Errorf("manifest[%d] method = %q", i, got)
+		}
+		if got := attrInt64(m.Attributes, "http.response.status_code"); got != [2]int64{401, 200}[i] {
+			t.Errorf("manifest[%d] status_code = %d", i, got)
+		}
+	}
+	if manifests[0].SpanContext.SpanID() == manifests[1].SpanContext.SpanID() {
+		t.Error("repeated round trips share a span ID; seq must uniquify")
+	}
+	if got, want := manifests[1].StartTime, at(4); !got.Equal(want) {
+		t.Errorf("manifest[1] start = %v, want Time − Duration = %v", got, want)
+	}
+	if got, want := manifests[1].EndTime, at(5); !got.Equal(want) {
+		t.Errorf("manifest[1] end = %v, want %v", got, want)
+	}
+	if got := attrInt64(manifests[1].Attributes, "runny.http.bytes"); got != 2048 {
+		t.Errorf("manifest[1] runny.http.bytes = %d, want 2048", got)
+	}
+	// The headers marker sits inside the span at start + HeaderDuration.
+	var headerEvents int
+	for _, ev := range manifests[1].Events {
+		if ev.Name != "headers" {
+			continue
+		}
+		headerEvents++
+		if want := at(4).Add(200 * time.Millisecond); !ev.Time.Equal(want) {
+			t.Errorf("headers event at %v, want %v", ev.Time, want)
+		}
+	}
+	if headerEvents != 1 {
+		t.Errorf("got %d headers events on manifest[1], want 1", headerEvents)
+	}
+	if len(jit.Events) != 0 {
+		t.Errorf("transport-error span carries %d events, want none (headers never arrived)", len(jit.Events))
+	}
+	// Semconv client rule: 4xx is span error even when the dance recovers —
+	// the enclosing action's green status is what says recovery happened.
+	if s := manifests[0].Status; s.Code != codes.Error || s.Description != "HTTP 401" {
+		t.Errorf("401 challenge status = %+v, want Error \"HTTP 401\"", s)
+	}
+	if s := manifests[1].Status; s.Code == codes.Error {
+		t.Error("the authenticated 200 retry must not carry error status")
+	}
+
+	if got := jit.Parent.SpanID(); got != trace.SpanID(stepSID) {
+		t.Errorf("jit parent = %s, want the MINT_JIT step span", got)
+	}
+	if jit.Status.Code != codes.Error || jit.Status.Description != "context deadline exceeded" {
+		t.Errorf("jit status = %+v, want transport error", jit.Status)
+	}
+	if got := attrInt64(jit.Attributes, "http.response.status_code"); got != 0 {
+		t.Errorf("jit carries status_code %d, want absent on transport error", got)
+	}
+}

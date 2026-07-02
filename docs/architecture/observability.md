@@ -83,6 +83,38 @@ verbatim to its span; a skipped sub-step (a teardown cleanup its cycle
 didn't need) emits no action at all, so absence in the trace means the
 sub-step didn't run.
 
+Below the actions sits the HTTP egress layer: every outbound client
+(GitHub API, registry, tarball CDN) routes through `obs.HTTPTransport`, an
+`http.RoundTripper` that emits one `KindHTTP` event per round trip on
+requests whose context carries an obs scope, which the trace consumer
+renders as a completed client span — `http <class>` — under whatever was
+innermost when the round trip finished (the open action, else the step,
+else the root). Endpoint classes are a closed typed const set
+(`obs.HTTPClass`) in `internal/obs`; in the GitHub and registry clients the
+class is a parameter of the request choke point, so a new endpoint cannot
+compile without stating one, and no code classifies by parsing a URL — so
+paths and queries (which can carry org/repo names and credentials) never
+reach telemetry by construction. The span records method, status code, and
+the request host (service-controlled at worst — a redirect hop is its own
+round trip and reports the host it actually hit); span status follows the
+HTTP client semconv rule: any 4xx/5xx or transport failure is an error, so
+a 503 retry storm can't render as healthy spans under a red action — which
+means the registry's routine 401 token challenge shows as an errored hop
+whose enclosing `resolve` action staying green is what says the dance
+succeeded. The span covers the *whole* exchange, not just the wait for
+headers: the transport wraps the response body and the event fires at body
+completion (EOF or close), so the span carries the transfer's true
+duration and byte count (`runny.http.bytes`), a `headers` span event marks
+where waiting ended and transfer began, and a body that dies mid-stream —
+the stall-kill shape — reports the status the headers claimed plus the
+read error as span error status. Two caveats are load-bearing: the shared
+pull actor's blob traffic emits nothing because its context carries no
+scope (the same attribution rule that keeps its pull out of any single
+cycle); and HTTP spans are live-only — their span IDs fold in the event
+sequence number precisely because round trips repeat within a step, which
+is the input the record-determined derivation excludes, so a replayed
+`cycle.json` reproduces the deterministic tree without them.
+
 Beyond the step tree, the trace carries the cycle's identity and audit
 detail: the root's attributes include the pool, the assembled runner name,
 the configured image ref, and — as they're learned mid-cycle — the VM's

@@ -12,12 +12,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
+	"github.com/bojanrajkovic/runny/internal/obs"
 
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -267,5 +269,87 @@ func TestListAndDeleteRunners(t *testing.T) {
 	// 404 is success — the runner already removed itself after its job.
 	if err := c.DeleteRunner(testCtx(t), 999); err != nil {
 		t.Errorf("DeleteRunner on missing id should be nil, got %v", err)
+	}
+}
+
+// scopedCtx wraps testCtx in an obs cycle+step scope capturing events.
+func scopedCtx(t *testing.T, events *[]obs.Event) bounded.Context {
+	t.Helper()
+	base := obs.WithStep(obs.WithCycle(t.Context(), func(e obs.Event) { *events = append(*events, e) },
+		obs.CycleRef{Slot: "slot-0", CycleID: "cafe"}), "MINT_JIT")
+	ctx, cancel := bounded.WithTimeout(base, time.Minute)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+func httpClasses(events []obs.Event) []obs.HTTPClass {
+	var got []obs.HTTPClass
+	for _, e := range events {
+		if e.Kind == obs.KindHTTP {
+			got = append(got, e.HTTP.Class)
+		}
+	}
+	return got
+}
+
+// Every GitHub API round trip a scoped mint performs is visible with its
+// endpoint class: the installation resolve and token mint as github.token,
+// the jitconfig POST as github.jit — no round trip classed "other", none
+// invisible.
+func TestGenerateJITConfigEmitsHTTPEvents(t *testing.T) {
+	f := &fakeGitHub{}
+	c := newTestClient(t, f)
+
+	var events []obs.Event
+	if _, err := c.GenerateJITConfig(scopedCtx(t, &events), "runner-1", []string{"self-hosted"}, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []obs.HTTPClass{obs.HTTPGitHubToken, obs.HTTPGitHubToken, obs.HTTPGitHubJIT}
+	if got := httpClasses(events); !slices.Equal(got, want) {
+		t.Errorf("classes = %v, want %v", got, want)
+	}
+	for _, e := range events {
+		if e.Kind == obs.KindHTTP && (e.HTTP.Status < 200 || e.HTTP.Status > 299) {
+			t.Errorf("class %s status = %d, want 2xx", e.HTTP.Class, e.HTTP.Status)
+		}
+	}
+}
+
+// List and delete report distinct classes, so a slow deregister is
+// attributable without method-attribute archaeology; the cached token mints
+// no extra token round trips.
+func TestListAndDeleteRunnersEmitHTTPEvents(t *testing.T) {
+	f := &fakeGitHub{}
+	f.runners = []Runner{{ID: 7, Name: "runner-1"}}
+	c := newTestClient(t, f)
+
+	var events []obs.Event
+	ctx := scopedCtx(t, &events)
+	if _, err := c.ListRunners(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DeleteRunner(ctx, 7); err != nil {
+		t.Fatal(err)
+	}
+
+	got := httpClasses(events)
+	if !slices.Contains(got, obs.HTTPGitHubRunnerList) || !slices.Contains(got, obs.HTTPGitHubRunnerDelete) {
+		t.Errorf("classes = %v, want runner-list and runner-delete present", got)
+	}
+	if slices.Contains(got, obs.HTTPOther) {
+		t.Errorf("classes = %v: a GitHub client round trip fell through to %q", got, obs.HTTPOther)
+	}
+}
+
+// An unscoped context — startup doctor checks, the cold-start sweep — still
+// works end to end through the real client and transport. (That nothing is
+// emitted without a scope is the transport's own contract, tested in
+// internal/obs.)
+func TestUnscopedContextStillWorks(t *testing.T) {
+	f := &fakeGitHub{}
+	c := newTestClient(t, f)
+	if _, err := c.GenerateJITConfig(testCtx(t), "runner-1", nil, 1); err != nil {
+		t.Fatal(err)
 	}
 }

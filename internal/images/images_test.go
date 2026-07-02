@@ -30,6 +30,13 @@ func (c *eventCapture) emit(e obs.Event) {
 	c.events = append(c.events, e)
 }
 
+// all returns a snapshot of every captured event, in order.
+func (c *eventCapture) all() []obs.Event {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]obs.Event(nil), c.events...)
+}
+
 // actionEvents returns the captured events for one action name, in order.
 func (c *eventCapture) actionEvents(name string) []obs.Event {
 	c.mu.Lock()
@@ -198,5 +205,33 @@ func TestEnsureRunnerTarballEmitsAction(t *testing.T) {
 		if e := got[i]; e.Kind != obs.KindActionEnded || e.Action.Outcome != obs.OutcomeOK {
 			t.Errorf("tarball-ensure event %d = (%s, %q), want ended ok", i, e.Kind, e.Action.Outcome)
 		}
+	}
+}
+
+// The tarball GET itself is a classed round trip inside the tarball-ensure
+// action: one tarball.download event on a real download, none on a cache
+// hit (no request happens at all).
+func TestEnsureRunnerTarballEmitsHTTPEvent(t *testing.T) {
+	cap := &eventCapture{}
+	dir := t.TempDir()
+	resolve := tarballServer(t, http.StatusOK)
+
+	for i := 0; i < 2; i++ { // download, then cache hit
+		if _, _, err := EnsureRunnerTarball(scopedCtx(cap), dir, resolve, time.Second, time.Minute, nil, nil, nil); err != nil {
+			t.Fatalf("EnsureRunnerTarball #%d: %v", i, err)
+		}
+	}
+
+	var got []obs.HTTPEvent
+	for _, e := range cap.all() {
+		if e.Kind == obs.KindHTTP {
+			got = append(got, *e.HTTP)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d HTTP events %v, want exactly 1 (download only, no cache-hit request)", len(got), got)
+	}
+	if got[0].Class != obs.HTTPTarballDownload || got[0].Status != http.StatusOK || got[0].Method != http.MethodGet {
+		t.Errorf("HTTP event = %+v, want GET %s 200", got[0], obs.HTTPTarballDownload)
 	}
 }

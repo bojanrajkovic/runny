@@ -7,6 +7,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/bounded",
+        "//internal/obs",
         "@com_github_golang_jwt_jwt_v5//:jwt",
     ],
 )
@@ -17,6 +18,7 @@ go_test(
     embed = [":github"],
     deps = [
         "//internal/bounded",
+        "//internal/obs",
         "@com_github_golang_jwt_jwt_v5//:jwt",
     ],
 )

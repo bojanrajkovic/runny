@@ -19,6 +19,7 @@ import (
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
 	"github.com/bojanrajkovic/runny/internal/home"
+	"github.com/bojanrajkovic/runny/internal/obs"
 	"github.com/bojanrajkovic/runny/internal/oci"
 	"github.com/bojanrajkovic/runny/internal/tart"
 )
@@ -44,7 +45,16 @@ type Ensurer struct {
 	// ResolveBudget bounds the metadata round-trips that precede the pull
 	// (Deadlines.Resolve); zero takes the default.
 	ResolveBudget time.Duration
-	Log           *slog.Logger
+	// Metrics receives the ensurer-scope pull/download outcomes (see the
+	// Metrics doc); nil records nothing.
+	Metrics *Metrics
+	Log     *slog.Logger
+
+	// Test seams, nil → the real implementations (the imagePuller
+	// attempt/diskFree pattern): resolve is the registry manifest
+	// round-trip, acquire subscribes to the shared pull of dir.
+	resolve func(ctx context.Context) (string, error)
+	acquire func(dir string, ref oci.Ref, report func(string)) (*subscription, func())
 }
 
 func (e *Ensurer) resolveBudget() time.Duration {
@@ -58,7 +68,7 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string), onDigestResol
 	// Runner tarball first: small, fails fast, and shared across slots
 	// (per-file locking inside).
 	if e.Runner != nil {
-		_, runnerVersion, err = EnsureRunnerTarball(ctx, e.Home.RunnerCacheDir(), e.Runner, e.resolveBudget(), e.StallBudget, report, e.log())
+		_, runnerVersion, err = EnsureRunnerTarball(ctx, e.Home.RunnerCacheDir(), e.Runner, e.resolveBudget(), e.StallBudget, report, e.Metrics, e.log())
 		if err != nil {
 			return "", "", "", fmt.Errorf("ensuring runner tarball: %w", err)
 		}
@@ -70,14 +80,15 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string), onDigestResol
 		defer tarballReserved.Delete(runnerVersion)
 	}
 
-	client := oci.NewClient()
-	// ENSURE_IMAGE deliberately runs with no state deadline (pull duration is
-	// unknowable), so this quick metadata round-trip needs its own wall-clock
-	// bound — without one, a registry that accepts TCP and goes silent hangs
-	// the slot forever.
-	rctx, rcancel := bounded.WithTimeout(ctx, e.resolveBudget())
-	digest, err = client.Resolve(rctx, e.Ref)
-	rcancel()
+	resolve := e.resolve
+	if resolve == nil {
+		resolve = e.defaultResolve
+	}
+	err = obs.Action(ctx, obs.ActionResolve, func(ctx context.Context) error {
+		var rerr error
+		digest, rerr = resolve(ctx)
+		return rerr
+	})
 	if err != nil {
 		return "", "", "", fmt.Errorf("resolving %s: %w", e.Ref, err)
 	}
@@ -100,27 +111,70 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string), onDigestResol
 	// addressed dir, so every subscriber necessarily wants this exact digest.
 	pinned := e.Ref
 	pinned.Digest = digest // pull exactly what we resolved
-	sub, release := acquireImagePull(dir, pinned, e.StallBudget, e.log(), report)
-	defer release()
-	// The subscriber has no stall watch of its own: its liveness is the puller's
-	// contract — the puller always reaches a terminal finish (a per-attempt stall
-	// watch bounds each pull, diskHoldBudget bounds the disk hold, and a panic is
-	// converted to a terminal error) — or this ctx is cancelled.
-	select {
-	case res := <-sub.done:
-		if res.err != nil {
-			return "", "", "", res.err
-		}
-		if err := res.bundle.Verify(); err != nil {
-			return "", "", "", fmt.Errorf("pulled image incomplete: %w", err)
-		}
-		e.log().Info("image cached", "digest", digest)
-		return digest, runnerVersion, res.bundle, nil
-	case <-ctx.Done():
-		// Operator recycle or daemon shutdown: leave the shared pull running for
-		// any sibling still waiting (release drops only this subscription).
-		return "", "", "", ctx.Err()
+	acquire := e.acquire
+	if acquire == nil {
+		acquire = e.defaultAcquire
 	}
+	// wait-for-pull is this cycle's experience of the shared pull — the time
+	// spent subscribed, whether or not this slot triggered it. The pull's own
+	// work belongs to no single cycle (the actor serves many subscribers);
+	// the pull id attribute is the correlation handle across them.
+	err = obs.Action(ctx, obs.ActionWaitForPull, func(ctx context.Context) error {
+		sub, release := acquire(dir, pinned, report)
+		defer release()
+		// The subscriber has no stall watch of its own: its liveness is the
+		// puller's contract — the puller always reaches a terminal finish (a
+		// per-attempt stall watch bounds each pull, diskHoldBudget bounds the
+		// disk hold, and a panic is converted to a terminal error) — or this
+		// ctx is cancelled.
+		select {
+		case res := <-sub.done:
+			if res.err != nil {
+				return res.err
+			}
+			if verr := res.bundle.Verify(); verr != nil {
+				return fmt.Errorf("pulled image incomplete: %w", verr)
+			}
+			bundle = res.bundle
+			return nil
+		case <-ctx.Done():
+			// Operator recycle or daemon shutdown: leave the shared pull
+			// running for any sibling still waiting (release drops only this
+			// subscription).
+			return ctx.Err()
+		}
+	}, obs.Attr{Key: obs.AttrPullID, Value: pullID(dir)})
+	if err != nil {
+		return "", "", "", err
+	}
+	e.log().Info("image cached", "digest", digest)
+	return digest, runnerVersion, bundle, nil
+}
+
+// defaultResolve is the real registry manifest round-trip (the e.resolve
+// test seam's production value). ENSURE_IMAGE deliberately runs with no
+// state deadline (pull duration is unknowable), so this quick metadata
+// round-trip needs its own wall-clock bound — without one, a registry that
+// accepts TCP and goes silent hangs the slot forever.
+func (e *Ensurer) defaultResolve(ctx context.Context) (string, error) {
+	client := oci.NewClient()
+	rctx, rcancel := bounded.WithTimeout(ctx, e.resolveBudget())
+	defer rcancel()
+	return client.Resolve(rctx, e.Ref)
+}
+
+// defaultAcquire subscribes to the shared pull of dir (the e.acquire test
+// seam's production value).
+func (e *Ensurer) defaultAcquire(dir string, ref oci.Ref, report func(string)) (*subscription, func()) {
+	return acquireImagePull(dir, ref, e.StallBudget, e.log(), e.Metrics, report)
+}
+
+// pullID is the shared pull's identity: a short hash of the
+// content-addressed bundle dir — exactly the registry key subscribers share
+// a puller on, so every cycle that waited on one pull carries the same id.
+func pullID(dir string) string {
+	sum := sha256.Sum256([]byte(dir))
+	return hex.EncodeToString(sum[:6])
 }
 
 // progress turns raw byte deltas into operator-visible pull progress: a
@@ -285,7 +339,20 @@ func ProtectActiveTarballs(protect map[string]bool) {
 // hung GitHub download with no timeout). Old versions accumulate in the shared
 // store and are reaped at cold start by PruneRunnerCache, not here: each cycle
 // clones its own tarball before boot, so this store has no live readers to race.
-func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerResolver, resolveBudget, stallBudget time.Duration, report func(string), log *slog.Logger) (string, string, error) {
+//
+// The whole body — resolve + download, or the cache hit — runs under a
+// tarball-ensure action, so a cache-hit cycle's trace shows an honest
+// near-zero duration for this sub-step.
+func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerResolver, resolveBudget, stallBudget time.Duration, report func(string), metrics *Metrics, log *slog.Logger) (path, asset string, err error) {
+	err = obs.Action(ctx, obs.ActionTarballEnsure, func(ctx context.Context) error {
+		var ierr error
+		path, asset, ierr = ensureRunnerTarball(ctx, cacheDir, resolve, resolveBudget, stallBudget, report, metrics, log)
+		return ierr
+	})
+	return path, asset, err
+}
+
+func ensureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerResolver, resolveBudget, stallBudget time.Duration, report func(string), metrics *Metrics, log *slog.Logger) (string, string, error) {
 	if resolveBudget <= 0 {
 		resolveBudget = defaultResolveTimeout
 	}
@@ -317,6 +384,30 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 		return dest, assetName, nil // already cached
 	}
 
+	// A real download starts here — the metric brackets exactly this, so a
+	// cache hit or a slot that waited out a peer's download records nothing.
+	start := time.Now()
+	err = downloadTarball(ctx, dest, assetName, assetURL, wantSHA, stallBudget, report, log)
+	// A download truncated by the caller's own cancellation (operator
+	// recycle, daemon shutdown) is not a download outcome — record nothing,
+	// the same rule the pull side follows. A stall kill still records: its
+	// watcher cancels only the inner watch context, not ctx.
+	if err == nil || ctx.Err() == nil {
+		metrics.tarballDownloadDone(outcomeOf(err), time.Since(start))
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if log != nil {
+		log.Info("runner tarball cached", "asset", assetName)
+	}
+	return dest, assetName, nil
+}
+
+// downloadTarball fetches assetURL to dest via a .partial temp file, with
+// stall watching, progress reporting, and the service-declared checksum
+// verification.
+func downloadTarball(ctx context.Context, dest, assetName, assetURL, wantSHA string, stallBudget time.Duration, report func(string), log *slog.Logger) error {
 	if log != nil {
 		log.Info("downloading runner tarball", "asset", assetName)
 	}
@@ -329,20 +420,20 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 
 	dreq, err := http.NewRequestWithContext(wctx, http.MethodGet, assetURL, nil)
 	if err != nil {
-		return "", "", err
+		return err
 	}
 	dresp, err := http.DefaultClient.Do(dreq)
 	if err != nil {
-		return "", "", stallErr(wctx, err, "downloading runner tarball")
+		return stallErr(wctx, err, "downloading runner tarball")
 	}
 	defer dresp.Body.Close()
 	if dresp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("downloading runner tarball: HTTP %d", dresp.StatusCode)
+		return fmt.Errorf("downloading runner tarball: HTTP %d", dresp.StatusCode)
 	}
 	tmp := dest + ".partial"
 	f, err := os.Create(tmp)
 	if err != nil {
-		return "", "", err
+		return err
 	}
 	prog := newProgress(report, log, stallBudget)
 	body := io.TeeReader(dresp.Body, progressWriter(func(n int64) {
@@ -355,11 +446,11 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 	if err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
-		return "", "", stallErr(wctx, err, "downloading runner tarball")
+		return stallErr(wctx, err, "downloading runner tarball")
 	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
-		return "", "", err
+		return err
 	}
 	// The tarball is staged into every guest and executed; verify it against
 	// the service-declared checksum when one was given (older GHES may omit
@@ -367,17 +458,14 @@ func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerRes
 	if wantSHA != "" {
 		if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, wantSHA) {
 			_ = os.Remove(tmp)
-			return "", "", fmt.Errorf("runner tarball checksum mismatch: downloads endpoint says %s, got %s", wantSHA, got)
+			return fmt.Errorf("runner tarball checksum mismatch: downloads endpoint says %s, got %s", wantSHA, got)
 		}
 	}
 	if err := os.Rename(tmp, dest); err != nil {
 		_ = os.Remove(tmp)
-		return "", "", err
+		return err
 	}
-	if log != nil {
-		log.Info("runner tarball cached", "asset", assetName)
-	}
-	return dest, assetName, nil
+	return nil
 }
 
 // stallErr surfaces the stall cause when the watcher killed a transfer —

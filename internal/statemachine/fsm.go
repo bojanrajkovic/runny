@@ -640,6 +640,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 		InstancePrefix: s.deps.InstancePrefix,
 		Slot:           s.name,
 		Pool:           s.deps.Pool.Name,
+		Image:          s.deps.Pool.Image,
 		CycleID:        rec.CycleID,
 		RunnerName:     runnerName,
 		Started:        rec.Started,
@@ -752,24 +753,34 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 		// regardless: obs's scope is immutable after WithStep/WithCycle and Seq
 		// is atomic, so Detail events still land with a valid, unique Seq — just
 		// not necessarily Time-ordered relative to this goroutine's other
-		// events. Proper shared-pull attribution (a wait-for-pull action
-		// correlated by pull id) is issue #230's job, not this one.
-		digest, runnerVersion, bundle, err := s.deps.Images.Ensure(esctx, func(d string) { s.setDetail(esctx, d) }, func(d string) {
+		// events. The ensurer's own wait-for-pull action (correlated across
+		// cycles by pull id) carries the proper shared-pull attribution.
+		// The returned digest is deliberately dropped: the resolve callback
+		// below already recorded it, at the moment it was learned.
+		_, runnerVersion, bundle, err := s.deps.Images.Ensure(esctx, func(d string) { s.setDetail(esctx, d) }, func(d string) {
 			// Fires as soon as the registry round-trip resolves the digest —
-			// before the pull starts. Publish immediately so WatchStatus
-			// subscribers see the digest mid-pull, not only at CLONE entry.
+			// before the pull starts, synchronously on this goroutine.
+			// Publish immediately so WatchStatus subscribers see the digest
+			// mid-pull, not only at CLONE entry. The record write and the
+			// image_info event sit together here so they can never disagree —
+			// a cycle whose pull fails after resolve still records (and
+			// emits) the digest it tried to pull.
+			rec.ImageDigest = d
 			s.mu.Lock()
 			s.status.ImageDigest = d
 			snap := s.status
 			fns := slices.Clone(s.onChange)
 			s.mu.Unlock()
 			s.notify(fns, snap)
+			obs.Emit(esctx, obs.Event{Kind: obs.KindImageInfo, Image: &obs.ImageEvent{Digest: d}})
 		})
 		if err != nil {
 			return err
 		}
-		rec.ImageDigest = digest
 		rec.RunnerVersion = runnerVersion
+		if runnerVersion != "" { // no resolver configured → no tarball, no event
+			obs.Emit(esctx, obs.Event{Kind: obs.KindImageInfo, Image: &obs.ImageEvent{RunnerVersion: runnerVersion}})
+		}
 		// RunnerVersion: no explicit notify needed — the next setState
 		// (ENSURE_IMAGE → CLONE) broadcasts it milliseconds later.
 		s.mu.Lock()

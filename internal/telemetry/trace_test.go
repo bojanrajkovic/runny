@@ -373,3 +373,65 @@ func TestTraceConsumerLateJobEndedStillLandsOnRoot(t *testing.T) {
 	}
 	t.Fatal("missing root span")
 }
+
+// TestTraceConsumerImageIdentity pins the image-identity lifting: the pool's
+// configured ref rides CycleRef onto the root at start, and the image_info
+// events (digest at resolve, runner version at tarball ensure) land on both
+// the cycle root and the owning ENSURE_IMAGE step span — traces are
+// queryable by image without joining against cycle.json.
+func TestTraceConsumerImageIdentity(t *testing.T) {
+	emit, exp := newTestAssembler(t)
+	ref := testCycle
+	ref.Image = "ghcr.io/test/image:1"
+
+	emit(obs.Event{Seq: 1, Time: at(0), Cycle: ref, Kind: obs.KindCycleStarted})
+	emit(obs.Event{
+		Seq: 2, Time: at(1), Cycle: ref, Step: "ENSURE_IMAGE", Kind: obs.KindStepEntered,
+		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE"},
+	})
+	emit(obs.Event{
+		Seq: 3, Time: at(2), Cycle: ref, Step: "ENSURE_IMAGE", Kind: obs.KindImageInfo,
+		Image: &obs.ImageEvent{Digest: "sha256:abc"},
+	})
+	emit(obs.Event{
+		Seq: 4, Time: at(3), Cycle: ref, Step: "ENSURE_IMAGE", Kind: obs.KindImageInfo,
+		Image: &obs.ImageEvent{RunnerVersion: "actions-runner-osx-arm64-2.320.0.tar.gz"},
+	})
+	emit(obs.Event{
+		Seq: 5, Time: at(4), Cycle: ref, Step: "ENSURE_IMAGE", Kind: obs.KindStepLeft,
+		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE", Outcome: obs.OutcomeOK},
+	})
+	emit(obs.Event{
+		Seq: 6, Time: at(5), Cycle: ref, Kind: obs.KindCycleFinished,
+		Finish: &obs.FinishEvent{Result: "success", Ending: "success"},
+	})
+
+	byName := map[string]tracetest.SpanStub{}
+	for _, s := range exp.GetSpans() {
+		byName[s.Name] = s
+	}
+	root, ok := byName["runny.cycle"]
+	if !ok {
+		t.Fatal("missing root span runny.cycle")
+	}
+	if got := attrString(root.Attributes, "runny.image.ref"); got != "ghcr.io/test/image:1" {
+		t.Errorf("root runny.image.ref = %q, want the configured ref", got)
+	}
+	if got := attrString(root.Attributes, "runny.image.digest"); got != "sha256:abc" {
+		t.Errorf("root runny.image.digest = %q", got)
+	}
+	if got := attrString(root.Attributes, "runny.runner_version"); got != "actions-runner-osx-arm64-2.320.0.tar.gz" {
+		t.Errorf("root runny.runner_version = %q", got)
+	}
+
+	step, ok := byName["cycle.step ENSURE_IMAGE"]
+	if !ok {
+		t.Fatal("missing step span cycle.step ENSURE_IMAGE")
+	}
+	if got := attrString(step.Attributes, "runny.image.digest"); got != "sha256:abc" {
+		t.Errorf("step runny.image.digest = %q", got)
+	}
+	if got := attrString(step.Attributes, "runny.runner_version"); got != "actions-runner-osx-arm64-2.320.0.tar.gz" {
+		t.Errorf("step runny.runner_version = %q", got)
+	}
+}

@@ -28,6 +28,7 @@ const (
 	KindActionEnded   Kind = "action_ended"
 	KindDetail        Kind = "detail"
 	KindVMInfo        Kind = "vm_info"
+	KindImageInfo     Kind = "image_info"
 	KindRunnerInfo    Kind = "runner_info"
 	KindJobStarted    Kind = "job_started"
 	KindJobEnded      Kind = "job_ended"
@@ -50,6 +51,10 @@ const (
 	ActionRotate = "rotate" // key mint + install + sshd flip + keyed reconnect
 	// PROVISION.
 	ActionStartRunner = "start-runner" // stage tarball + exec run.sh (one guest exec)
+	// ENSURE_IMAGE.
+	ActionResolve       = "resolve"        // registry manifest round-trip → digest
+	ActionTarballEnsure = "tarball-ensure" // runner-tarball resolve + download (or cache hit)
+	ActionWaitForPull   = "wait-for-pull"  // time subscribed to the shared pull actor
 )
 
 // Attr keys are closed-set for the same reason action names are: a typo'd
@@ -57,6 +62,11 @@ const (
 const (
 	// AttrHardening is the SSH hardening mode a rotate action ran under.
 	AttrHardening = "runny.hardening"
+	// AttrPullID identifies the shared image pull a wait-for-pull action was
+	// subscribed to — the correlation handle across the cycles that shared
+	// one pull. Action-local by design: identity a cycle LEARNS (digest,
+	// runner version) travels as a typed event (ImageEvent), not an attr.
+	AttrPullID = "runny.pull.id"
 )
 
 // Outcome classifies how a step or action ended. Deliberately a plain
@@ -71,6 +81,16 @@ const (
 	OutcomeError Outcome = "error"
 )
 
+// OutcomeOf maps an error to the ok/error vocabulary — the one definition of
+// that mapping, shared by Action and by metric recorders outside this
+// package, so the vocabulary can't fork.
+func OutcomeOf(err error) Outcome {
+	if err != nil {
+		return OutcomeError
+	}
+	return OutcomeOK
+}
+
 // CycleRef identifies the cycle an event belongs to, plus the cycle-static
 // identity consumers attach to everything derived from it (the trace root's
 // attributes, the metrics side's pool label): all of it is known at cycle
@@ -79,9 +99,12 @@ type CycleRef struct {
 	InstancePrefix string
 	Slot           string
 	Pool           string
-	CycleID        string
-	RunnerName     string
-	Started        time.Time
+	// Image is the pool's configured image ref (intent, from config) — the
+	// resolved digest is learned mid-cycle and travels as an ImageEvent.
+	Image      string
+	CycleID    string
+	RunnerName string
+	Started    time.Time
 }
 
 // StepEvent is the payload for StepEntered/StepLeft. A state is entered at
@@ -125,6 +148,16 @@ type DetailEvent struct {
 type VMEvent struct {
 	MAC string
 	IP  string
+}
+
+// ImageEvent carries image identity learned mid-cycle: the resolved
+// manifest digest (as soon as the registry round-trip yields it, before the
+// pull), then the runner tarball's asset filename (the record's
+// RunnerVersion). Emitted once per learned field, the VMEvent MAC-then-IP
+// pattern.
+type ImageEvent struct {
+	Digest        string
+	RunnerVersion string
 }
 
 // RunnerEvent carries the GitHub runner registration learned at MINT_JIT.
@@ -183,6 +216,7 @@ type Event struct {
 	Action   *ActionEvent
 	Detail   *DetailEvent
 	VM       *VMEvent
+	Image    *ImageEvent
 	Runner   *RunnerEvent
 	Job      *JobEvent
 	Audit    *AuditEvent
@@ -280,9 +314,9 @@ func Action(ctx context.Context, name string, fn func(context.Context) error, at
 	err := fn(ctx)
 	dur := time.Since(start)
 
-	outcome, errText := OutcomeOK, ""
+	outcome, errText := OutcomeOf(err), ""
 	if err != nil {
-		outcome, errText = OutcomeError, err.Error()
+		errText = err.Error()
 	}
 	Emit(ctx, Event{Kind: KindActionEnded, Action: &ActionEvent{
 		Name:     name,

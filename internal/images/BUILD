@@ -6,6 +6,7 @@ go_library(
         "disk_darwin.go",
         "disk_linux.go",
         "images.go",
+        "metrics.go",
         "prune.go",
         "puller.go",
     ],
@@ -15,6 +16,7 @@ go_library(
         "//internal/bounded",
         "//internal/diskfree",
         "//internal/home",
+        "//internal/obs",
         "//internal/oci",
         "//internal/tart",
         "//internal/versioncore",
@@ -24,10 +26,18 @@ go_library(
 go_test(
     name = "images_test",
     srcs = [
+        "images_test.go",
+        "metrics_test.go",
         "prune_test.go",
         "puller_test.go",
         "tarball_test.go",
     ],
     embed = [":images"],
-    deps = ["//internal/oci"],
+    deps = [
+        "//internal/bounded",
+        "//internal/home",
+        "//internal/obs",
+        "//internal/oci",
+        "//internal/tart",
+    ],
 )

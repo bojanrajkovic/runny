@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
@@ -55,6 +56,14 @@ type imagePuller struct {
 	ref     oci.Ref // pinned to the resolved digest
 	stall   time.Duration
 	log     *slog.Logger
+	metrics *Metrics // nil-safe; records the terminal pull outcome
+
+	// startedAt anchors the pull-duration metric; pullBytes accumulates
+	// transferred bytes across attempts (fed by realAttempt's progress
+	// callback, which runs on this goroutine — atomic because tests and
+	// future callers may feed from elsewhere).
+	startedAt time.Time
+	pullBytes atomic.Int64
 
 	// ctx is the puller's lifetime context, cancelled when the last subscriber
 	// leaves (or on terminal). Not a bounded.Context: the actual network ops get
@@ -92,9 +101,9 @@ var (
 // puller. ref must be digest-pinned; all subscribers of one dir necessarily
 // resolved the same digest because dir is content-addressed
 // (home.ImageBundleDir embeds the digest).
-func acquireImagePull(dir string, ref oci.Ref, stall time.Duration, log *slog.Logger, report func(string)) (*subscription, func()) {
+func acquireImagePull(dir string, ref oci.Ref, stall time.Duration, log *slog.Logger, metrics *Metrics, report func(string)) (*subscription, func()) {
 	proto := &imagePuller{
-		destDir: dir, ref: ref, stall: stall, log: log,
+		destDir: dir, ref: ref, stall: stall, log: log, metrics: metrics,
 		holdBudget: defaultDiskHoldBudget, pollInterval: defaultDiskPollInterval,
 	}
 	proto.attempt = proto.realAttempt
@@ -114,6 +123,7 @@ func acquirePuller(dir string, report func(string), proto *imagePuller) (*subscr
 		proto.ctx = pctx
 		proto.cancel = cancel
 		proto.subs = map[*subscription]func(string){}
+		proto.startedAt = time.Now()
 		p = proto
 		pullerRegistry[dir] = p
 		go p.run()
@@ -175,6 +185,10 @@ func (p *imagePuller) finish(res ensureResult) {
 	p.mu.Unlock()
 	pullerRegistryMu.Unlock()
 	p.cancel() // release the lifetime ctx; run() has returned by now
+	// Only the winner of the terminal==nil guard reaches here, so the pull
+	// metric records exactly once per underlying pull — subscriber count and
+	// finish/panic double-calls can't inflate it.
+	p.metrics.pullDone(outcomeOf(res.err), time.Since(p.startedAt), p.pullBytes.Load())
 	for sub := range subs {
 		sub.done <- res // buffered size 1, never blocks, delivered once
 	}
@@ -200,12 +214,17 @@ func (p *imagePuller) run() {
 			return // last subscriber left, or shutting down
 		}
 		dig, err := p.attempt(p.ctx)
-		if p.ctx.Err() != nil {
-			return // cancelled during the attempt; nobody is waiting
-		}
 		if err == nil {
+			// Finish even if the last subscriber left mid-attempt: the bundle
+			// really landed (the next cycle cache-hits it), so the terminal
+			// outcome — and its pull metric — must exist. Nobody waits on the
+			// broadcast (subs is empty), and finish's registry delete is
+			// guarded, so a successor puller for the same dir is untouched.
 			p.finish(ensureResult{digest: dig, bundle: tart.Bundle(p.destDir)})
 			return
+		}
+		if p.ctx.Err() != nil {
+			return // cancelled during the attempt; nobody is waiting
 		}
 		var dh *oci.DiskHeadroomError
 		if errors.As(err, &dh) {
@@ -238,6 +257,7 @@ func (p *imagePuller) realAttempt(ctx context.Context) (string, error) {
 	client.Progress = func(n int64) {
 		stall.Feed(n)
 		prog.feed(n)
+		p.pullBytes.Add(n)
 	}
 	dig, err := client.PullTo(wctx, p.ref, p.destDir)
 	if err != nil {

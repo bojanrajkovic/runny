@@ -85,10 +85,19 @@ sub-step didn't run.
 
 Beyond the step tree, the trace carries the cycle's identity and audit
 detail: the root's attributes include the pool, the assembled runner name,
-and the VM's MAC/IP as they're learned; the owning step picks up the GitHub
-runner ID at mint time and the job's operator-key fingerprints at job end;
-audit span events mirror the record's full `InjectedKey` detail (comment,
-reason, operator uid/user) — never key material.
+the configured image ref, and — as they're learned mid-cycle — the VM's
+MAC/IP, the resolved image digest, and the runner-tarball version (the
+digest and runner version also land on the ENSURE_IMAGE step span, next to
+the actions that produced them, so a trace is queryable by image without
+joining cycle.json); the owning step picks up the GitHub runner ID at mint
+time and the job's operator-key fingerprints at job end; audit span events
+mirror the record's full `InjectedKey` detail (comment, reason, operator
+uid/user) — never key material. Identity learned mid-cycle always travels
+as a typed event emitted where the record learns the same fact — typed
+payloads and explicit per-fact consumer routing, and a replayed record
+determines the event by construction; attributes on actions are reserved
+for action-local facts like the pull id, values that describe one
+execution of one action and die with its span.
 
 Trace and span IDs are deterministic, derived by the OTEL-free
 `internal/traceid` package from a cycle's own identity
@@ -126,6 +135,19 @@ exact label set live as doc comments on the instruments in
   names are fixed vocabularies; pools and slots come from config. Job names
   and any other guest-controlled string never become labels — they exist
   only as span attributes on the trace side.
+
+A third family records **outside the fold**: the image ensurer's pull and
+tarball-download instruments (`telemetry.NewEnsurerMetrics`, injected into
+`internal/images` behind a plain-func seam the way progress reporting is).
+A shared image pull serves many subscribing slots and belongs to no single
+cycle, so its duration and bytes are per-underlying-work truths recorded
+once at the pull's terminal outcome — never once per subscriber, and never
+fabricated for a pull cancelled before it finished. Each subscribing
+cycle's *experience* of that pull is its `wait-for-pull` action, which the
+event fold exports like any other action (a per-cycle duration, one point
+per waiting slot) — the two views measure different things and must not be
+summed. Instrument meanings and label sets live as doc comments on the
+instruments, alongside the event-derived ones.
 
 Alongside the event-derived instruments, `telemetry.RegisterGauges`
 installs the status-polled side: observable gauges the SDK's periodic

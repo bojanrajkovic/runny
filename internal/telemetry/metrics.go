@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/bojanrajkovic/runny/internal/diskfree"
+	"github.com/bojanrajkovic/runny/internal/images"
 	"github.com/bojanrajkovic/runny/internal/obs"
 )
 
@@ -186,6 +187,45 @@ func (m *metricsConsumer) emit(e obs.Event) {
 				metric.WithAttributes(pool, result, ending))
 		}
 	}
+}
+
+// NewEnsurerMetrics builds the ensurer-scope instruments and returns them
+// behind the images.Metrics seam — the image ensurer records pull and
+// tarball-download outcomes through it without importing any OTEL type.
+// These are per-underlying-work truths, not per-cycle ones (a shared pull
+// serves many subscribing slots and belongs to none of them), which is why
+// they record here instead of folding out of the cycle event stream.
+// `outcome` is the closed ok/error vocabulary; durations are seconds, bytes
+// are bytes, and the exponential-histogram view Setup installs applies to
+// all three.
+func NewEnsurerMetrics(meter metric.Meter) (*images.Metrics, error) {
+	var errs []error
+	pullDur, err := meter.Float64Histogram("runny.image.pull.duration",
+		metric.WithUnit("s"),
+		metric.WithDescription("Wall-clock lifetime of one underlying image pull, including disk holds and re-attempts, recorded once at its terminal outcome regardless of how many slots shared it."))
+	errs = append(errs, err)
+	pullBytes, err := meter.Float64Histogram("runny.image.pull.bytes",
+		metric.WithUnit("By"),
+		metric.WithDescription("Bytes transferred by one underlying image pull, cumulative across its attempts (can exceed the image size on retry)."))
+	errs = append(errs, err)
+	tarballDur, err := meter.Float64Histogram("runny.runner_tarball.download.duration",
+		metric.WithUnit("s"),
+		metric.WithDescription("Duration of one actual runner-tarball download — cache hits and slots that waited out a peer's download record nothing."))
+	errs = append(errs, err)
+	if err := errors.Join(errs...); err != nil {
+		return nil, err
+	}
+	return &images.Metrics{
+		PullDone: func(outcome string, d time.Duration, bytes int64) {
+			attrs := metric.WithAttributes(attribute.String("outcome", outcome))
+			pullDur.Record(context.Background(), d.Seconds(), attrs)
+			pullBytes.Record(context.Background(), float64(bytes), attrs)
+		},
+		TarballDownloadDone: func(outcome string, d time.Duration) {
+			tarballDur.Record(context.Background(), d.Seconds(),
+				metric.WithAttributes(attribute.String("outcome", outcome)))
+		},
+	}, nil
 }
 
 // SlotSnapshot is the neutral per-slot view the gauge callback polls —

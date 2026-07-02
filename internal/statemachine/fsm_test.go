@@ -28,6 +28,9 @@ import (
 type fakeImages struct {
 	bundle tart.Bundle
 	err    error
+	// resolvedBeforeErr: err models a pull failure after a successful
+	// resolve, so the digest callback still fires (see Ensure).
+	resolvedBeforeErr bool
 	// maxCalls > 0: calls beyond it block until ctx ends, so tests control
 	// exactly how many cycles run. blockAll blocks every call (a stuck pull).
 	maxCalls int
@@ -49,10 +52,12 @@ func (f *fakeImages) Ensure(ctx context.Context, report func(string), onDigestRe
 		<-ctx.Done()
 		return "", "", "", ctx.Err()
 	}
-	// Only fire the callback when Ensure will succeed: models the real
-	// Resolve-then-PullTo ordering where the callback fires iff the registry
-	// round-trip completed (a resolve failure leaves the digest unset).
-	if onDigestResolved != nil && err == nil {
+	// Two real failure shapes exist: a resolve failure leaves the digest
+	// unknown (callback never fires — the default err path), while a pull
+	// that fails AFTER the registry round-trip knows its digest
+	// (resolvedBeforeErr opts in to firing the callback before returning
+	// err).
+	if onDigestResolved != nil && (err == nil || f.resolvedBeforeErr) {
 		onDigestResolved("sha256:fake")
 	}
 	return "sha256:fake", "actions-runner-osx-arm64-2.320.0.tar.gz", f.bundle, err
@@ -919,6 +924,42 @@ func TestLastFailureClearedOnListening(t *testing.T) {
 	}
 	if st.ConsecutiveFailures != 0 {
 		t.Errorf("ConsecutiveFailures = %d after LISTENING entry, want 0", st.ConsecutiveFailures)
+	}
+}
+
+// A pull that fails after the registry resolve still records — and emits —
+// the digest it tried to pull: the record write and the image_info event
+// share one site (the resolve callback), so they can never disagree, and a
+// failed-pull cycle's record names the digest an operator wants to inspect.
+func TestFailedPullRecordsResolvedDigest(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.err = errors.New("simulated pull failure")
+	h.images.resolvedBeforeErr = true // the registry answered; the pull failed
+	cancel := h.start(t)
+	h.waitState(t, StateEnsureImage)
+	h.waitState(t, StateBackoff)
+	cancel()
+	<-h.runDone
+
+	recs := h.records(t)
+	if len(recs) == 0 {
+		t.Fatal("no cycle record written")
+	}
+	rec := recs[0]
+	if rec.Result != cycle.ResultFailure {
+		t.Fatalf("record result = %q, want failure", rec.Result)
+	}
+	if rec.ImageDigest != "sha256:fake" {
+		t.Errorf("failed cycle's record ImageDigest = %q, want the resolved digest", rec.ImageDigest)
+	}
+	var sawDigest bool
+	for _, e := range h.eventsForCycle(rec.CycleID) {
+		if e.Kind == obs.KindImageInfo && e.Image.Digest == "sha256:fake" {
+			sawDigest = true
+		}
+	}
+	if !sawDigest {
+		t.Error("failed cycle emitted no image_info event with the resolved digest")
 	}
 }
 
@@ -3226,9 +3267,24 @@ func TestObsEventsCleanSuccessCycle(t *testing.T) {
 	assertCycleFramed(t, events, rec)
 	assertStepEventsMatchRecord(t, events, rec)
 
+	if img := events[0].Cycle.Image; img != "ghcr.io/test/image:1" {
+		t.Errorf("CycleRef.Image = %q, want the pool's configured ref", img)
+	}
+
 	var sawMAC, sawIP, sawDetail, sawJobStarted, sawJobEnded, sawRotate, sawRunnerID bool
+	var sawImageDigest, sawRunnerVersion bool
 	for _, e := range events {
 		switch e.Kind {
+		case obs.KindImageInfo:
+			if e.Step != string(StateEnsureImage) {
+				t.Errorf("image-info step = %q, want ENSURE_IMAGE", e.Step)
+			}
+			if e.Image.Digest == "sha256:fake" {
+				sawImageDigest = true
+			}
+			if e.Image.RunnerVersion == "actions-runner-osx-arm64-2.320.0.tar.gz" {
+				sawRunnerVersion = true
+			}
 		case obs.KindVMInfo:
 			if e.VM.MAC != "" {
 				sawMAC = true
@@ -3286,6 +3342,12 @@ func TestObsEventsCleanSuccessCycle(t *testing.T) {
 	}
 	if !sawDetail {
 		t.Error("no Detail event from the image ensurer's report callback")
+	}
+	if !sawImageDigest {
+		t.Error("no ImageInfo event carried the resolved digest")
+	}
+	if !sawRunnerVersion {
+		t.Error("no ImageInfo event carried the runner version")
 	}
 	if !sawJobStarted || !sawJobEnded {
 		t.Errorf("JobStarted=%v JobEnded=%v, want both", sawJobStarted, sawJobEnded)

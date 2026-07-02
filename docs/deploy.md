@@ -133,8 +133,9 @@ backend will silently merge series from different hosts — preserve
 `service.instance.id` (resource-to-label promotion, or a `target_info`
 join) when more than one runnyd reports to the same backend.
 
-**Duration histograms are exponential (native), not fixed-bucket.** Every
-`runny.*.duration` instrument exports as an OTLP exponential histogram, so
+**Histograms are exponential (native), not fixed-bucket.** Every `runny.*`
+histogram (the durations and the pull-bytes one) exports as an OTLP
+exponential histogram, so
 a Prometheus-family backend ingests them as native histograms — there are
 no `_bucket`/`le` series. The backend must have native-histogram ingestion
 enabled (e.g. Prometheus `--enable-feature=native-histograms`), and
@@ -183,6 +184,23 @@ runny_slot_paused == 1
 # If the home filesystem becomes unreadable this series goes absent (the
 # daemon logs the statfs failure); alert on absent() as well as low values.
 runny_home_disk_free_bytes
+
+# Image pull health: failed pulls per window, and p95 pull time. These
+# record once per underlying pull (concurrent slots share one), so they
+# count pulls, not waiting slots; duration is the pull's whole lifetime,
+# including disk holds and re-attempts. A cycle's own time at the mercy
+# of a pull is the wait-for-pull action on its trace, not a metric.
+histogram_count(sum(rate(runny_image_pull_duration_seconds{outcome="error"}[6h])))
+histogram_quantile(0.95, sum(rate(runny_image_pull_duration_seconds[6h])))
+
+# Effective pull bandwidth: bytes moved over time spent, across pulls.
+histogram_sum(sum(rate(runny_image_pull_bytes[6h])))
+  / histogram_sum(sum(rate(runny_image_pull_duration_seconds[6h])))
+
+# Runner-tarball downloads — cache hits record nothing, so a sustained
+# rate here means runner versions are churning or the cache keeps
+# getting lost.
+histogram_count(sum(rate(runny_runner_tarball_download_duration_seconds[6h])))
 ```
 
 Where a step or action is slow, switch to traces: the cycle's span tree

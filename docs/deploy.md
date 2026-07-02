@@ -96,6 +96,31 @@ org-or-owner/repo target. The **semantic** rules it can't cleanly express
 daemon: `runnyd -doctor` and the load-time validation remain authoritative, and
 a config that passes the schema can still be refused there with a precise error.
 
+### Enabling OTLP telemetry
+
+`observability` is opt-in and absent by default: with no block, runnyd emits
+no telemetry and opens no OTEL SDK at all. Adding it turns on both traces and
+metrics export to one collector endpoint:
+
+```yaml
+observability:
+  otlp:
+    endpoint: https://collector.example:4317   # https = TLS, http = insecure
+    metrics_interval: 60s                        # optional; default 60s
+```
+
+Enabling it adds **outbound OTLP egress only** — the daemon still opens no
+listening TCP socket; it dials out to `endpoint` the same way it dials GitHub.
+`https` selects TLS, `http` is for a local/insecure collector. `endpoint` is
+the single switch: a non-empty value turns on export for both signals, there
+are no per-signal endpoints. See
+[ADR-0024](architecture-decisions/0024-observability-event-seam.md) for the
+design this enables.
+
+This config surface validates and loads today; the exporter that reads it and
+actually emits traces and metrics ships separately. Until then, setting
+`endpoint` is accepted but has no observable effect.
+
 ## Production install (via the tap)
 
 Install through the Homebrew tap. The formula is **delivery-only** — it installs

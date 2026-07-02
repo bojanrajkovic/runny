@@ -390,6 +390,59 @@ func TestRenderCycleShowsImageRef(t *testing.T) {
 	}
 }
 
+// TestRenderCycleShowsEnding pins issue #229's `why` requirement: a recycled
+// or shutdown-interrupted cycle must read as such at a glance, not as a
+// failure with a suspicious error string, even though Result is "failure"
+// for both (the timeline stays truthful).
+func TestRenderCycleShowsEnding(t *testing.T) {
+	now := timestamppb.New(time.Now())
+
+	cases := []struct {
+		name   string
+		ending string
+		want   string
+		avoid  string
+	}{
+		{"recycle", "recycle", "recycled by operator", "✗"},
+		{"shutdown", "shutdown", "daemon shutdown", "✗"},
+		{"wedge still reads as a failure", "wedge", "✗", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			c := &ctl{out: &buf}
+			c.renderCycle(&runnyv1.CycleRecord{
+				CycleId: "abcd1234", Slot: "mac-1", Result: "failure", Ending: tc.ending,
+				FailureState: "TEARDOWN", FailureError: "recycled by operator: image bump",
+				Started: now, Finished: now,
+			})
+			got := buf.String()
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("ending=%q: output missing %q:\n%s", tc.ending, tc.want, got)
+			}
+			if tc.avoid != "" && strings.Contains(got, tc.avoid) {
+				t.Errorf("ending=%q: output must not contain %q (would read as a suspicious failure):\n%s", tc.ending, tc.avoid, got)
+			}
+		})
+	}
+}
+
+// A record from an older daemon (no Ending field at all) must still render —
+// falling back to Result alone, exactly as it did before this field existed.
+func TestRenderCycleFallsBackWithoutEnding(t *testing.T) {
+	now := timestamppb.New(time.Now())
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	c.renderCycle(&runnyv1.CycleRecord{
+		CycleId: "abcd1234", Slot: "mac-1", Result: "failure",
+		FailureState: "TEARDOWN", FailureError: "recycled by operator: image bump",
+		Started: now, Finished: now,
+	})
+	if got := buf.String(); !strings.Contains(got, "✗ failed in TEARDOWN") {
+		t.Errorf("no-Ending record must fall back to the old ✗ failed rendering:\n%s", got)
+	}
+}
+
 // A "warn" state outcome (a teardown that destroyed the guest but left a
 // swept-later orphan) must render visibly in `why` — never be dropped the way
 // a bare "ok" drops its error text, which would hide the cleanup failure.

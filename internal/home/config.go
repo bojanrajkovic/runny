@@ -435,11 +435,14 @@ func (c *Config) validate() error {
 		switch {
 		case err != nil:
 			errs = append(errs, fmt.Errorf("observability.otlp.endpoint %q: %w", ep, err))
-		case u.Host == "":
-			// Also catches a bare "host:port" with no "://": url.Parse reads
-			// that as an opaque URL with the host packed into Scheme, not as
-			// a parse error, so checking Host first gives a clearer message
-			// than reporting "host:port" back as an invalid scheme.
+		case u.Hostname() == "":
+			// Hostname (not Host) so a port-only "https://:4317" is caught
+			// too — its Host is a non-empty ":4317" with nothing to dial.
+			// This also catches a bare "host:port" with no "://": url.Parse
+			// reads that as an opaque URL with the host packed into Scheme,
+			// not as a parse error, so checking the hostname first gives a
+			// clearer message than reporting "host:port" back as an invalid
+			// scheme.
 			errs = append(errs, fmt.Errorf("observability.otlp.endpoint %q: missing host (use https://host:port or http://host:port)", ep))
 		case u.Scheme != "https" && u.Scheme != "http":
 			errs = append(errs, fmt.Errorf("observability.otlp.endpoint %q: scheme must be https or http, got %q", ep, u.Scheme))

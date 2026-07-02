@@ -166,6 +166,7 @@ func TestLoadConfigValidation(t *testing.T) {
 		{"malformed otlp endpoint", minimalConfig + "observability:\n  otlp:\n    endpoint: \"://bad\"\n", "observability.otlp.endpoint"},
 		{"bad otlp scheme", minimalConfig + "observability:\n  otlp:\n    endpoint: ftp://collector.example:4317\n", "observability.otlp.endpoint"},
 		{"otlp endpoint missing host", minimalConfig + "observability:\n  otlp:\n    endpoint: https://\n", "observability.otlp.endpoint"},
+		{"otlp endpoint port only", minimalConfig + "observability:\n  otlp:\n    endpoint: \"https://:4317\"\n", "observability.otlp.endpoint"},
 		{"otlp endpoint missing scheme", minimalConfig + "observability:\n  otlp:\n    endpoint: collector.example:4317\n", "observability.otlp.endpoint"},
 		{"otlp metrics interval below floor", minimalConfig + "observability:\n  otlp:\n    endpoint: https://collector.example:4317\n    metrics_interval: 500ms\n", "observability.otlp.metrics_interval"},
 	}

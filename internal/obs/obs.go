@@ -55,16 +55,19 @@ type CycleRef struct {
 	Started        time.Time
 }
 
-// StepEvent is the payload for StepEntered/StepLeft.
+// StepEvent is the payload for StepEntered/StepLeft. A state is entered at
+// most once per cycle — the FSM never revisits a state within a cycle (a
+// broken guest means a new cycle, not an in-place retry) — so State alone
+// correlates a StepLeft with its StepEntered.
 type StepEvent struct {
 	State   string
 	Outcome Outcome
 	Error   string
 }
 
-// ActionEvent is the payload for ActionStarted/ActionEnded.
+// ActionEvent is the payload for ActionStarted/ActionEnded. The step the
+// action ran under is the Event's top-level Step, not repeated here.
 type ActionEvent struct {
-	Step     string
 	Name     string
 	Outcome  Outcome
 	Error    string
@@ -106,20 +109,25 @@ type FinishEvent struct {
 }
 
 // Event is one entry in a cycle's observability stream. Exactly one
-// kind-specific payload is populated, selected by Kind.
+// kind-specific payload is populated, selected by Kind. Step is the FSM
+// step active when the event was emitted — stamped by Emit from the scope,
+// empty for cycle-level events emitted outside any step scope — so every
+// kind carries its step attribution without consumers folding
+// StepEntered/StepLeft brackets to recover it.
 type Event struct {
 	Seq   uint64
 	Time  time.Time
 	Cycle CycleRef
+	Step  string
 	Kind  Kind
 
-	Step   *StepEvent
-	Action *ActionEvent
-	Detail *DetailEvent
-	VM     *VMEvent
-	Job    *JobEvent
-	Audit  *AuditEvent
-	Finish *FinishEvent
+	StepInfo *StepEvent
+	Action   *ActionEvent
+	Detail   *DetailEvent
+	VM       *VMEvent
+	Job      *JobEvent
+	Audit    *AuditEvent
+	Finish   *FinishEvent
 }
 
 // Emitter receives every event a scope produces. Installed by the daemon;
@@ -127,6 +135,9 @@ type Event struct {
 // wires an Emitter to real consumers is responsible for fan-out and for a
 // drop-with-logged-counter response to backpressure — the FSM goroutine
 // that calls Emit or Action can never be made to wait on a slow consumer.
+// All events for one cycle scope are emitted from a single goroutine (the
+// slot's FSM goroutine); Seq is the durable per-cycle order consumers sort
+// and correlate by, not a concurrency serializer.
 type Emitter func(Event)
 
 // scope is the context-carried identity: which cycle/step is active, where
@@ -172,11 +183,11 @@ func WithStep(ctx context.Context, step string) context.Context {
 	return context.WithValue(ctx, scopeKey{}, &child)
 }
 
-// Emit stamps e with the scope's next Seq, the current time, and the
-// scope's CycleRef, then hands it to the emitter. The caller supplies Kind
-// and the kind-specific payload; Seq, Time, and Cycle are overwritten. On
-// a context with no scope, or a scope with a nil emitter, Emit is a safe
-// no-op.
+// Emit stamps e with the scope's next Seq, the current time, the scope's
+// CycleRef, and the scope's step, then hands it to the emitter. The caller
+// supplies Kind and the kind-specific payload; Seq, Time, Cycle, and Step
+// are overwritten. On a context with no scope, or a scope with a nil
+// emitter, Emit is a safe no-op.
 func Emit(ctx context.Context, e Event) {
 	s, _ := ctx.Value(scopeKey{}).(*scope)
 	if s == nil || s.emit == nil {
@@ -185,22 +196,26 @@ func Emit(ctx context.Context, e Event) {
 	e.Seq = s.seq.Add(1)
 	e.Time = time.Now()
 	e.Cycle = s.cycle
+	e.Step = s.step
 	s.emit(e)
 }
 
 // Action runs fn, emitting ActionStarted before and ActionEnded after with
-// duration, outcome, and fn's error — sugar over Emit that also stamps the
-// scope's step onto the payload. On a context with no scope (never passed
-// through WithCycle) or a scope with a nil emitter, Action degrades to a
-// plain fn(ctx) call — zero events, no allocation beyond what fn does.
-// Domain packages call Action without knowing or caring which case applies.
+// duration, outcome, and fn's error — sugar over Emit. An action name must
+// appear at most once per step: consumers pair ActionStarted/ActionEnded by
+// (step, name), so a caller that runs the same action twice in one step
+// (say, a retried dial) must disambiguate the name itself. On a context
+// with no scope (never passed through WithCycle) or a scope with a nil
+// emitter, Action degrades to a plain fn(ctx) call — zero events, no
+// allocation beyond what fn does. Domain packages call Action without
+// knowing or caring which case applies.
 func Action(ctx context.Context, name string, fn func(context.Context) error) error {
 	s, _ := ctx.Value(scopeKey{}).(*scope)
 	if s == nil || s.emit == nil {
 		return fn(ctx)
 	}
 
-	Emit(ctx, Event{Kind: KindActionStarted, Action: &ActionEvent{Step: s.step, Name: name}})
+	Emit(ctx, Event{Kind: KindActionStarted, Action: &ActionEvent{Name: name}})
 
 	start := time.Now()
 	err := fn(ctx)
@@ -211,7 +226,6 @@ func Action(ctx context.Context, name string, fn func(context.Context) error) er
 		outcome, errText = OutcomeError, err.Error()
 	}
 	Emit(ctx, Event{Kind: KindActionEnded, Action: &ActionEvent{
-		Step:     s.step,
 		Name:     name,
 		Outcome:  outcome,
 		Error:    errText,

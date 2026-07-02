@@ -46,15 +46,16 @@ func TestSeqSharedAcrossStepScopes(t *testing.T) {
 	prov := WithStep(cctx, "PROVISION")
 
 	Emit(cctx, Event{Kind: KindCycleStarted})
-	Emit(boot, Event{Kind: KindStepEntered, Step: &StepEvent{State: "BOOT"}})
+	Emit(boot, Event{Kind: KindStepEntered, StepInfo: &StepEvent{State: "BOOT"}})
 	_ = Action(boot, "clone", func(context.Context) error { return nil })
-	Emit(boot, Event{Kind: KindStepLeft, Step: &StepEvent{State: "BOOT", Outcome: OutcomeOK}})
-	Emit(prov, Event{Kind: KindStepEntered, Step: &StepEvent{State: "PROVISION"}})
+	Emit(boot, Event{Kind: KindStepLeft, StepInfo: &StepEvent{State: "BOOT", Outcome: OutcomeOK}})
+	Emit(prov, Event{Kind: KindStepEntered, StepInfo: &StepEvent{State: "PROVISION"}})
+	Emit(prov, Event{Kind: KindDetail, Detail: &DetailEvent{Text: "2.1 GiB at 41 MiB/s"}})
 	_ = Action(prov, "install-runner", func(context.Context) error { return nil })
 	Emit(cctx, Event{Kind: KindCycleFinished, Finish: &FinishEvent{Result: "success"}})
 
-	if len(got) != 9 {
-		t.Fatalf("got %d events, want 9", len(got))
+	if len(got) != 10 {
+		t.Fatalf("got %d events, want 10", len(got))
 	}
 	for i, e := range got {
 		if e.Seq != uint64(i+1) {
@@ -67,9 +68,13 @@ func TestSeqSharedAcrossStepScopes(t *testing.T) {
 			t.Fatalf("event %d has zero Time", i)
 		}
 	}
-	// Action picked up the step from its derived scope.
-	if got[2].Action.Step != "BOOT" || got[6].Action.Step != "PROVISION" {
-		t.Fatalf("Action step stamping wrong: %+v / %+v", got[2].Action, got[6].Action)
+	// Cycle-scope events are stepless; step-scope events — Emit'd (the
+	// Detail at index 6) and Action-emitted alike — carry their step.
+	if got[0].Step != "" || got[9].Step != "" {
+		t.Fatalf("cycle-scope events should have empty Step: %q / %q", got[0].Step, got[9].Step)
+	}
+	if got[2].Step != "BOOT" || got[6].Step != "PROVISION" || got[7].Step != "PROVISION" {
+		t.Fatalf("step stamping wrong: action=%q detail=%q action=%q", got[2].Step, got[6].Step, got[7].Step)
 	}
 }
 
@@ -150,8 +155,8 @@ func TestActionCapturesOutcomeErrorDuration(t *testing.T) {
 	if started.Action == nil || started.Action.Name != "install-runner" {
 		t.Fatalf("ActionStarted payload = %+v", started.Action)
 	}
-	if started.Action.Step != "PROVISION" {
-		t.Fatalf("ActionStarted step = %q, want PROVISION", started.Action.Step)
+	if started.Step != "PROVISION" {
+		t.Fatalf("ActionStarted step = %q, want PROVISION", started.Step)
 	}
 
 	if ended.Kind != KindActionEnded {

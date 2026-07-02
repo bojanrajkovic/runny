@@ -3226,9 +3226,24 @@ func TestObsEventsCleanSuccessCycle(t *testing.T) {
 	assertCycleFramed(t, events, rec)
 	assertStepEventsMatchRecord(t, events, rec)
 
+	if img := events[0].Cycle.Image; img != "ghcr.io/test/image:1" {
+		t.Errorf("CycleRef.Image = %q, want the pool's configured ref", img)
+	}
+
 	var sawMAC, sawIP, sawDetail, sawJobStarted, sawJobEnded, sawRotate, sawRunnerID bool
+	var sawImageDigest, sawRunnerVersion bool
 	for _, e := range events {
 		switch e.Kind {
+		case obs.KindImageInfo:
+			if e.Step != string(StateEnsureImage) {
+				t.Errorf("image-info step = %q, want ENSURE_IMAGE", e.Step)
+			}
+			if e.Image.Digest == "sha256:fake" {
+				sawImageDigest = true
+			}
+			if e.Image.RunnerVersion == "actions-runner-osx-arm64-2.320.0.tar.gz" {
+				sawRunnerVersion = true
+			}
 		case obs.KindVMInfo:
 			if e.VM.MAC != "" {
 				sawMAC = true
@@ -3286,6 +3301,12 @@ func TestObsEventsCleanSuccessCycle(t *testing.T) {
 	}
 	if !sawDetail {
 		t.Error("no Detail event from the image ensurer's report callback")
+	}
+	if !sawImageDigest {
+		t.Error("no ImageInfo event carried the resolved digest")
+	}
+	if !sawRunnerVersion {
+		t.Error("no ImageInfo event carried the runner version")
 	}
 	if !sawJobStarted || !sawJobEnded {
 		t.Errorf("JobStarted=%v JobEnded=%v, want both", sawJobStarted, sawJobEnded)

@@ -1004,6 +1004,41 @@ func TestEndingDebugRacedJobBeatsShutdown(t *testing.T) {
 	}
 }
 
+// TestEndingPlainFailureBeatsShutdown pins the same precedence for a plain
+// failure: a runner that dies on its own seals the cycle's fate before
+// teardown starts, so a shutdown landing during teardown must not relabel
+// the record "shutdown" (hiding a real health signal), nor exempt it from
+// the failure streak as benign.
+func TestEndingPlainFailureBeatsShutdown(t *testing.T) {
+	h := newHarness(t, nil)
+	h.images.maxCalls = 1
+	cancel := h.reachListening(t)
+
+	h.setRemoveAll(func(path string) error {
+		cancel()
+		return os.RemoveAll(path)
+	})
+
+	// A real failure, not shutdown-caused: the runner exits while idle.
+	h.proc.exit(1)
+	<-h.runDone
+
+	recs := h.records(t)
+	if len(recs) != 1 {
+		t.Fatalf("got %d records, want 1", len(recs))
+	}
+	rec := recs[0]
+	if rec.Failure == nil || !strings.Contains(rec.Failure.Error, "runner exited") {
+		t.Fatalf("failure = %+v, want the runner exit", rec.Failure)
+	}
+	if rec.Ending != cycle.EndingFailure {
+		t.Errorf("Ending = %q, want %q — the runner died before the shutdown arrived", rec.Ending, cycle.EndingFailure)
+	}
+	if st := h.slot.Status(); st.ConsecutiveFailures != 1 {
+		t.Errorf("a real failure must count even when shutdown races its teardown; failures=%d", st.ConsecutiveFailures)
+	}
+}
+
 // teardownRecord returns the TEARDOWN StateRecord from a cycle record.
 func teardownRecord(t *testing.T, r *cycle.Record) cycle.StateRecord {
 	t.Helper()

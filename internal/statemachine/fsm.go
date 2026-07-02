@@ -887,6 +887,13 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	// TEARDOWN — unconditional. Force is the floor; a guest that survives
 	// even force-stop wedges the slot, and the record says so truthfully.
 	stopWatcher()
+	// The cycle's fate is sealed here — every state has returned and failErr
+	// is final — so sample shutdown NOW. Teardown below runs detached for
+	// tens of seconds (diag pull, stop escalation, clone removal); reading
+	// ctx.Err() after it would relabel a real failure "shutdown" whenever the
+	// daemon happens to stop mid-teardown, hiding the health signal and
+	// exempting it from the streak.
+	shutdown := ctx.Err() != nil
 	wedged := s.teardown(cctx, rec, teardownInputs{
 		machine:        machine,
 		guest:          guest,
@@ -919,16 +926,19 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 			// freeze and died with the verified kill: operator-caused, not a
 			// health signal (issue #39, §5.6). Not its own Ending class — it
 			// still reads as "failure" (Result agrees); benign is what exempts
-			// it from backoff. Checked before shutdown: these sentinels mean
-			// the cycle's fate was already decided when the state returned, so
-			// a shutdown landing during teardown must not relabel it — `why`
-			// suppresses the failure text on a "shutdown" ending. A shutdown
-			// during the hold surfaces as ctx.Err(), not a sentinel, so the
-			// shutdown branch still catches it; only a shutdown simultaneous
-			// with the expiry can land here, and then the expiry is the
-			// truthful, more actionable label.
+			// it from backoff. Checked before shutdown: the pre-teardown
+			// snapshot already excludes a shutdown that lands during teardown,
+			// so this ordering matters only when the daemon was stopping as
+			// the hold expired (or the freeze kill finished) and the sentinel
+			// still won the select — then the sentinel is the truthful, more
+			// actionable label, and a "shutdown" ending would make `why`
+			// suppress it.
 			benign = true
-		} else if ctx.Err() != nil {
+		} else if shutdown {
+			// Sampled before teardown: the daemon was already stopping when
+			// the fate was sealed, so the failure is cancellation-shaped
+			// (vendor seams don't reliably wrap context.Canceled, hence the
+			// ambient check rather than an errors.Is on failErr).
 			benign = true
 			ending = cycle.EndingShutdown
 		}

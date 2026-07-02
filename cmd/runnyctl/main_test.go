@@ -427,6 +427,26 @@ func TestRenderCycleShowsEnding(t *testing.T) {
 	}
 }
 
+// TestRenderCycleResultIsAuthoritativeForSuccess pins that Result — not
+// Ending — gates the success verdict. runCycle always sets both together, so
+// this desync shouldn't occur from the current write path, but why's whole
+// purpose is truthful failure surfacing: a corrupted or hand-edited
+// cycle.json with Ending="success" alongside Result="failure" must still
+// render as a failure, never silently as a green checkmark.
+func TestRenderCycleResultIsAuthoritativeForSuccess(t *testing.T) {
+	now := timestamppb.New(time.Now())
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	c.renderCycle(&runnyv1.CycleRecord{
+		CycleId: "abcd1234", Slot: "mac-1", Result: "failure", Ending: "success",
+		FailureState: "TEARDOWN", FailureError: "vm stop escalation failed",
+		Started: now, Finished: now,
+	})
+	if got := buf.String(); !strings.Contains(got, "✗") || strings.Contains(got, "✓") {
+		t.Errorf("Result=failure with a desynced Ending=success must still render as a failure:\n%s", got)
+	}
+}
+
 // A record from an older daemon (no Ending field at all) must still render —
 // falling back to Result alone, exactly as it did before this field existed.
 func TestRenderCycleFallsBackWithoutEnding(t *testing.T) {

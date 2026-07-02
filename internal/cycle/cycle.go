@@ -70,9 +70,8 @@ type Record struct {
 	Started       time.Time `json:"started"`
 	Finished      time.Time `json:"finished"`
 	Result        Result    `json:"result"`
-	// Ending is the why behind Result: success, failure, recycle (operator),
-	// shutdown (daemon exit), or wedge (teardown couldn't kill the guest).
-	// Empty in records written before this field existed.
+	// Ending is the why behind Result (see the Ending type). Empty in records
+	// written before this field existed.
 	Ending  Ending        `json:"ending,omitempty"`
 	States  []StateRecord `json:"states"`
 	VM      VMInfo        `json:"vm,omitzero"`
@@ -301,6 +300,7 @@ func (s Store) synthesizeOrphan(dir string) *Record {
 		Started:      started,
 		Finished:     started,
 		Result:       ResultFailure,
+		Ending:       EndingFailure,
 		Failure:      &Failure{State: "?", Error: "daemon died with operator credential evidence on disk"},
 		InjectedKeys: keys,
 		Artifacts:    []string{OperatorAccessFile},

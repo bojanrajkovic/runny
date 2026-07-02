@@ -829,20 +829,18 @@ func (c *ctl) why(ctx context.Context, slot string, cycles int) error {
 }
 
 func (c *ctl) renderCycle(rec *runnyv1.CycleRecord) {
+	// Result — not Ending — gates the success verdict: runCycle always sets
+	// both together, but why exists to surface failure truthfully, so a
+	// desynced record must never render a false ✓.
 	verdict := "✓ success"
-	switch rec.GetEnding() {
-	case "": // older daemon record, no ending: fall back to result alone
-		if rec.GetResult() != "success" {
-			verdict = fmt.Sprintf("✗ failed in %s: %s", rec.GetFailureState(), rec.GetFailureError())
-		}
-	case "recycle":
-		verdict = fmt.Sprintf("↻ recycled by operator in %s", rec.GetFailureState())
-	case "shutdown":
-		verdict = fmt.Sprintf("⏻ interrupted by daemon shutdown in %s", rec.GetFailureState())
-	case "success":
-		// verdict already "✓ success"
-	default: // "failure", "wedge"
+	if rec.GetResult() != "success" {
 		verdict = fmt.Sprintf("✗ failed in %s: %s", rec.GetFailureState(), rec.GetFailureError())
+		switch rec.GetEnding() {
+		case "recycle":
+			verdict = fmt.Sprintf("↻ recycled by operator in %s", rec.GetFailureState())
+		case "shutdown":
+			verdict = fmt.Sprintf("⏻ interrupted by daemon shutdown in %s", rec.GetFailureState())
+		}
 	}
 	fmt.Fprintf(c.out, "cycle %s on %s — %s\n", rec.GetCycleId(), rec.GetSlot(), verdict)
 	// The configured ref (intent) beside the resolved digest (truth). A

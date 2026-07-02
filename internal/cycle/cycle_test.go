@@ -225,6 +225,12 @@ func TestRecentSynthesizesOrphanedSidecar(t *testing.T) {
 	if len(stub.InjectedKeys) != 1 || stub.InjectedKeys[0].Fingerprint != "SHA256:abc" {
 		t.Errorf("orphan stub keys = %+v", stub.InjectedKeys)
 	}
+	// The stub is synthesized fresh by today's daemon code, not read off an
+	// old pre-Ending cycle.json — it must not be left at the Ending zero
+	// value, which is reserved for genuinely legacy records.
+	if stub.Ending != EndingFailure {
+		t.Errorf("orphan stub Ending = %q, want %q", stub.Ending, EndingFailure)
+	}
 }
 
 // A live in-progress cycle has a write-ahead sidecar but no cycle.json yet

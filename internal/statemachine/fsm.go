@@ -914,16 +914,23 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 		} else if errors.Is(failErr, errOperatorRecycle) {
 			benign = true
 			ending = cycle.EndingRecycle
-		} else if ctx.Err() != nil {
-			benign = true
-			ending = cycle.EndingShutdown
 		} else if errors.Is(failErr, errDebugExpired) || errors.Is(failErr, errDebugRacedJob) {
 			// A DEBUG hold that ran out, or a job that raced the LISTENING
 			// freeze and died with the verified kill: operator-caused, not a
 			// health signal (issue #39, §5.6). Not its own Ending class — it
 			// still reads as "failure" (Result agrees); benign is what exempts
-			// it from backoff.
+			// it from backoff. Checked before shutdown: these sentinels mean
+			// the cycle's fate was already decided when the state returned, so
+			// a shutdown landing during teardown must not relabel it — `why`
+			// suppresses the failure text on a "shutdown" ending. A shutdown
+			// during the hold surfaces as ctx.Err(), not a sentinel, so the
+			// shutdown branch still catches it; only a shutdown simultaneous
+			// with the expiry can land here, and then the expiry is the
+			// truthful, more actionable label.
 			benign = true
+		} else if ctx.Err() != nil {
+			benign = true
+			ending = cycle.EndingShutdown
 		}
 	}
 	benign = benign && !wedged

@@ -1351,7 +1351,7 @@ func (s *Slot) appendPending(ctx context.Context, rec *cycle.Record, cmd Command
 		s.deps.Log.Error("debug: write-ahead audit failed; injection refused", "err", err)
 		return 0, false
 	}
-	obs.Emit(ctx, obs.Event{Kind: obs.KindAuditAppend, Audit: auditEvent(rec.InjectedKeys[idx])})
+	emitAuditAppend(ctx, rec)
 	return idx, true
 }
 

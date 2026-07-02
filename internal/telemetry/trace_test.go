@@ -201,12 +201,11 @@ func TestTraceConsumerGolden(t *testing.T) {
 		t.Errorf("dial runny.hardening = %q, want the action attr passed through", got)
 	}
 
-	job, ok := byName["cycle.step JOB"]
-	if !ok {
+	if _, ok := byName["cycle.step JOB"]; !ok {
 		t.Fatal("missing step span cycle.step JOB")
 	}
-	if got := attrStringSlice(job.Attributes, "runny.job.operator_keys"); len(got) != 1 || got[0] != "SHA256:testfp" {
-		t.Errorf("JOB runny.job.operator_keys = %v, want [SHA256:testfp]", got)
+	if got := attr(root.Attributes, "runny.job.operator_keys").AsStringSlice(); len(got) != 1 || got[0] != "SHA256:testfp" {
+		t.Errorf("root runny.job.operator_keys = %v, want [SHA256:testfp]", got)
 	}
 
 	if got := attrString(root.Attributes, "runny.pool"); got != "macos-arm" {
@@ -249,32 +248,16 @@ func TestTraceConsumerGolden(t *testing.T) {
 	}
 }
 
-func attrString(attrs []attribute.KeyValue, key string) string {
-	for _, a := range attrs {
-		if string(a.Key) == key {
-			return a.Value.AsString()
-		}
-	}
-	return ""
+// attr returns the value for key (zero Value when absent — AsString gives
+// "", AsInt64 gives 0, AsStringSlice gives nil).
+func attr(attrs []attribute.KeyValue, key string) attribute.Value {
+	set := attribute.NewSet(attrs...)
+	v, _ := set.Value(attribute.Key(key))
+	return v
 }
 
-func attrInt64(attrs []attribute.KeyValue, key string) int64 {
-	for _, a := range attrs {
-		if string(a.Key) == key {
-			return a.Value.AsInt64()
-		}
-	}
-	return 0
-}
-
-func attrStringSlice(attrs []attribute.KeyValue, key string) []string {
-	for _, a := range attrs {
-		if string(a.Key) == key {
-			return a.Value.AsStringSlice()
-		}
-	}
-	return nil
-}
+func attrString(attrs []attribute.KeyValue, key string) string { return attr(attrs, key).AsString() }
+func attrInt64(attrs []attribute.KeyValue, key string) int64   { return attr(attrs, key).AsInt64() }
 
 // TestTraceConsumerConcurrentDetail exercises the one documented exception
 // to obs's single-goroutine-per-cycle contract: ENSURE_IMAGE progress
@@ -346,4 +329,47 @@ func TestTraceConsumerDeadlineIsFailure(t *testing.T) {
 		return
 	}
 	t.Fatal("missing step span cycle.step BOOT")
+}
+
+// TestTraceConsumerLateJobEndedStillLandsOnRoot pins the ordering immunity
+// jobEnded gets from attaching to the root: a journal replayed from a
+// daemon that emitted JobEnded after StepLeft (the pre-reorder shape) must
+// still record the operator keys, not silently drop them, and must not
+// panic or resurrect the closed step span.
+func TestTraceConsumerLateJobEndedStillLandsOnRoot(t *testing.T) {
+	emit, exp := newTestAssembler(t)
+
+	emit(obs.Event{Seq: 1, Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
+	emit(obs.Event{
+		Seq: 2, Time: at(1), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepEntered,
+		StepInfo: &obs.StepEvent{State: "JOB"},
+	})
+	emit(obs.Event{
+		Seq: 3, Time: at(2), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepLeft,
+		StepInfo: &obs.StepEvent{State: "JOB", Outcome: obs.OutcomeOK},
+	})
+	// The old order: JobEnded after its step closed.
+	emit(obs.Event{
+		Seq: 4, Time: at(3), Cycle: testCycle, Step: "JOB", Kind: obs.KindJobEnded,
+		Job: &obs.JobEvent{Name: "build", Outcome: obs.OutcomeOK, OperatorKeys: []string{"SHA256:latefp"}},
+	})
+	emit(obs.Event{
+		Seq: 5, Time: at(4), Cycle: testCycle, Kind: obs.KindCycleFinished,
+		Finish: &obs.FinishEvent{Result: "success", Ending: "success"},
+	})
+
+	spans := exp.GetSpans()
+	if len(spans) != 2 {
+		t.Fatalf("got %d spans, want 2 (root, JOB step) — a late JobEnded must not mint a span", len(spans))
+	}
+	for _, s := range spans {
+		if s.Name != "runny.cycle" {
+			continue
+		}
+		if got := attr(s.Attributes, "runny.job.operator_keys").AsStringSlice(); len(got) != 1 || got[0] != "SHA256:latefp" {
+			t.Errorf("root runny.job.operator_keys = %v, want [SHA256:latefp] even when JobEnded arrives late", got)
+		}
+		return
+	}
+	t.Fatal("missing root span")
 }

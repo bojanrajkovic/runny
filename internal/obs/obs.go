@@ -52,6 +52,13 @@ const (
 	ActionStartRunner = "start-runner" // stage tarball + exec run.sh (one guest exec)
 )
 
+// Attr keys are closed-set for the same reason action names are: a typo'd
+// inline key silently forks an attribute name.
+const (
+	// AttrHardening is the SSH hardening mode a rotate action ran under.
+	AttrHardening = "runny.hardening"
+)
+
 // Outcome classifies how a step or action ended. Deliberately a plain
 // string, not cycle.Outcome: obs does not import internal/cycle, so the FSM
 // is free to record its richer outcome vocabulary (warn, deadline) on the
@@ -87,9 +94,11 @@ type StepEvent struct {
 	Error   string
 }
 
-// Attr is one action attribute. Keys are written fully-qualified at the
-// call site ("runny.hardening") and consumers pass them through verbatim;
-// values must come from small closed sets — never a guest-controlled string.
+// Attr is one action attribute. Keys are fully-qualified constants declared
+// in this package (see AttrHardening) and consumers pass them through
+// verbatim; values must come from small closed sets — never a
+// guest-controlled string. The slice a caller passes to Action is retained
+// by both emitted events, so it must not be mutated after the call.
 type Attr struct {
 	Key   string
 	Value string
@@ -142,6 +151,7 @@ type AuditEvent struct {
 	Fingerprint  string
 	Comment      string
 	Reason       string
+	Error        string
 	Outcome      string
 	State        string
 	OperatorUID  *uint32
@@ -256,8 +266,8 @@ func Emit(ctx context.Context, e Event) {
 // (say, a retried dial) must disambiguate the name itself. attrs (see Attr)
 // appear on both events. On a context with no scope (never passed through
 // WithCycle) or a scope with a nil emitter, Action degrades to a plain
-// fn(ctx) call — zero events, no allocation beyond what fn does. Domain
-// packages call Action without knowing or caring which case applies.
+// fn(ctx) call — zero events, no emitter work. Domain packages call Action
+// without knowing or caring which case applies.
 func Action(ctx context.Context, name string, fn func(context.Context) error, attrs ...Attr) error {
 	s, _ := ctx.Value(scopeKey{}).(*scope)
 	if s == nil || s.emit == nil {

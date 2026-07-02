@@ -260,15 +260,19 @@ func (a *traceAssembler) jobStarted(e obs.Event) {
 	})
 }
 
-// jobEnded adds only what StepLeft (which follows it) doesn't carry: the
-// job's operator-key audit. Its Outcome duplicates the step's own and is
+// jobEnded adds only what StepLeft doesn't carry: the job's operator-key
+// audit. It lands on the root, not the JOB step span — a cycle has at most
+// one job, the root is where "did this cycle's job run with a credential
+// installed" is queried, and the root outlives any step-event ordering
+// (a replayed journal from a daemon that emitted JobEnded after StepLeft
+// still attaches it). The event's Outcome duplicates the step's own and is
 // deliberately not re-attached.
 func (a *traceAssembler) jobEnded(e obs.Event) {
 	if e.Job == nil || len(e.Job.OperatorKeys) == 0 {
 		return
 	}
-	a.withStep(e, func(cs *cycleSpans, ss *stepSpans) {
-		ss.span.SetAttributes(attribute.StringSlice("runny.job.operator_keys", e.Job.OperatorKeys))
+	a.withCycle(e, func(cs *cycleSpans) {
+		cs.root.SetAttributes(attribute.StringSlice("runny.job.operator_keys", e.Job.OperatorKeys))
 	})
 }
 
@@ -277,24 +281,22 @@ func (a *traceAssembler) audit(e obs.Event) {
 		return
 	}
 	a.withCycle(e, func(cs *cycleSpans) {
+		// String fields attach unconditionally — an empty value is just
+		// empty (a disarm entry has no fingerprint, a success no error).
+		// Only OperatorUID is conditional: nil means the peer's uid could
+		// not be read — absent attribute, distinct from a recorded uid 0
+		// (root is a real peer).
 		attrs := []attribute.KeyValue{
 			attribute.String("runny.audit.fingerprint", e.Audit.Fingerprint),
+			attribute.String("runny.audit.comment", e.Audit.Comment),
+			attribute.String("runny.audit.reason", e.Audit.Reason),
+			attribute.String("runny.audit.error", e.Audit.Error),
 			attribute.String("runny.audit.outcome", e.Audit.Outcome),
 			attribute.String("runny.audit.state", e.Audit.State),
+			attribute.String("runny.audit.operator_user", e.Audit.OperatorUser),
 		}
-		if e.Audit.Comment != "" {
-			attrs = append(attrs, attribute.String("runny.audit.comment", e.Audit.Comment))
-		}
-		if e.Audit.Reason != "" {
-			attrs = append(attrs, attribute.String("runny.audit.reason", e.Audit.Reason))
-		}
-		// nil OperatorUID means the peer's uid could not be read — absent
-		// attribute, distinct from a recorded uid 0 (root is a real peer).
 		if e.Audit.OperatorUID != nil {
 			attrs = append(attrs, attribute.Int64("runny.audit.operator_uid", int64(*e.Audit.OperatorUID)))
-		}
-		if e.Audit.OperatorUser != "" {
-			attrs = append(attrs, attribute.String("runny.audit.operator_user", e.Audit.OperatorUser))
 		}
 		cs.root.AddEvent(string(e.Kind), trace.WithTimestamp(e.Time), trace.WithAttributes(attrs...))
 	})

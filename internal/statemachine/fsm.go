@@ -870,7 +870,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 				}
 				guest = g
 				return nil
-			}, obs.Attr{Key: "runny.hardening", Value: string(s.deps.Pool.SSHHardening)})
+			}, obs.Attr{Key: obs.AttrHardening, Value: string(s.deps.Pool.SSHHardening)})
 		})
 	}
 	var jit *github.JITRunner
@@ -903,14 +903,13 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 			if err != nil {
 				return err
 			}
-			p := proc
 			for {
 				select {
 				case <-c.Done():
 					return fmt.Errorf("runner did not reach %q: %w", markerListening, context.Cause(c))
-				case line, open := <-p.Lines():
+				case line, open := <-proc.Lines():
 					if !open {
-						code, _ := p.Wait()
+						code, _ := proc.Wait()
 						return fmt.Errorf("runner exited (code %d) before listening", code)
 					}
 					s.emitRunnerLine(rec.CycleID, line)
@@ -1164,8 +1163,11 @@ func (s *Slot) runJob(ctx context.Context, rec *cycle.Record, proc Proc, guest G
 	// JobEnded before StepLeft, mirroring JobStarted's position after
 	// StepEntered: both bracket the JOB step from inside its span, so a
 	// consumer never sees a job event for a step that's already closed.
+	// rec.Job, not the local job pointer: recordOperatorKey is copy-on-write
+	// and rebinds rec.Job to a fresh JobInfo per appended key — the original
+	// this function captured never sees them.
 	obs.Emit(ctx, obs.Event{Kind: obs.KindJobEnded, Job: &obs.JobEvent{
-		Name: jobName, Outcome: obs.Outcome(jrec.Outcome), OperatorKeys: job.OperatorKeys,
+		Name: jobName, Outcome: obs.Outcome(jrec.Outcome), OperatorKeys: rec.Job.OperatorKeys,
 	}})
 	obs.Emit(ctx, obs.Event{Kind: obs.KindStepLeft, StepInfo: &obs.StepEvent{
 		State: string(StateJob), Outcome: obs.Outcome(jrec.Outcome), Error: jrec.Error,
@@ -1305,9 +1307,6 @@ func (s *Slot) writeAuditSidecar(rec *cycle.Record) error {
 	return store.WriteArtifact(rec, cycle.OperatorAccessFile, data)
 }
 
-// appendPending appends a write-AHEAD "pending" audit entry and atomically
-// writes the sidecar BEFORE any byte reaches the guest. The returned index
-// addresses the entry for later updates. On write failure it removes the
 // auditEvent mirrors one audit-trail entry into its observational obs copy,
 // field for field — the event stream must never carry less than the record
 // it shadows, or a trace's audit span events silently understate what
@@ -1317,6 +1316,7 @@ func auditEvent(k cycle.InjectedKey) *obs.AuditEvent {
 		Fingerprint:  k.Fingerprint,
 		Comment:      k.Comment,
 		Reason:       k.Reason,
+		Error:        k.Error,
 		Outcome:      k.Outcome,
 		State:        k.State,
 		OperatorUID:  k.OperatorUID,
@@ -1324,11 +1324,15 @@ func auditEvent(k cycle.InjectedKey) *obs.AuditEvent {
 	}
 }
 
-// lastAudit is the entry the enclosing helper just appended.
-func lastAudit(rec *cycle.Record) cycle.InjectedKey {
-	return rec.InjectedKeys[len(rec.InjectedKeys)-1]
+// emitAuditAppend mirrors the entry the enclosing helper just appended to
+// rec.InjectedKeys into an AuditAppend event.
+func emitAuditAppend(ctx context.Context, rec *cycle.Record) {
+	obs.Emit(ctx, obs.Event{Kind: obs.KindAuditAppend, Audit: auditEvent(rec.InjectedKeys[len(rec.InjectedKeys)-1])})
 }
 
+// appendPending appends a write-AHEAD "pending" audit entry and atomically
+// writes the sidecar BEFORE any byte reaches the guest. The returned index
+// addresses the entry for later updates. On write failure it removes the
 // entry and returns ok=false: "no audit, no injection" (decision 4).
 func (s *Slot) appendPending(ctx context.Context, rec *cycle.Record, cmd Command, state State) (int, bool) {
 	rec.InjectedKeys = append(rec.InjectedKeys, cycle.InjectedKey{
@@ -1377,7 +1381,7 @@ func (s *Slot) auditDisarm(ctx context.Context, rec *cycle.Record, cause string,
 	if err := s.writeAuditSidecar(rec); err != nil {
 		s.deps.Log.Error("debug: disarm audit rewrite failed", "err", err)
 	}
-	obs.Emit(ctx, obs.Event{Kind: obs.KindAuditAppend, Audit: auditEvent(lastAudit(rec))})
+	emitAuditAppend(ctx, rec)
 	s.deps.Log.Log(context.Background(), level, "debug hold disarmed", "cause", cause)
 }
 
@@ -1551,7 +1555,7 @@ func (s *Slot) midJobInject(ctx context.Context, rec *cycle.Record, guest Guest,
 			OperatorUser: cmd.OperatorUser,
 		})
 		_ = s.writeAuditSidecar(rec)
-		obs.Emit(ctx, obs.Event{Kind: obs.KindAuditAppend, Audit: auditEvent(lastAudit(rec))})
+		emitAuditAppend(ctx, rec)
 		cmd.reply(DebugKeyReply{Err: errors.New(
 			"a job started before your request was serviced; nothing was injected — re-run debug to inject into the running job",
 		)})
@@ -1567,7 +1571,7 @@ func (s *Slot) midJobInject(ctx context.Context, rec *cycle.Record, guest Guest,
 			OperatorUID: cmd.OperatorUID, OperatorUser: cmd.OperatorUser,
 		})
 		_ = s.writeAuditSidecar(rec)
-		obs.Emit(ctx, obs.Event{Kind: obs.KindAuditAppend, Audit: auditEvent(lastAudit(rec))})
+		emitAuditAppend(ctx, rec)
 		s.setArmedStatus(s.armedDetail(fp, arm.hold))
 		cmd.reply(s.armedReply(guest))
 		return
@@ -1636,7 +1640,7 @@ func (s *Slot) enterPostJobDebug(ctx context.Context, rec *cycle.Record, proc Pr
 			Error: "post-job kill unproven: " + err.Error(),
 		})
 		_ = s.writeAuditSidecar(rec)
-		obs.Emit(ctx, obs.Event{Kind: obs.KindAuditAppend, Audit: auditEvent(lastAudit(rec))})
+		emitAuditAppend(ctx, rec)
 		// The hold is NOT entered — an unproven kill must not hold a
 		// job-eligible guest. Clear the armed status now so DebugHoldArmed can't
 		// linger into teardown.
@@ -1745,7 +1749,7 @@ func (s *Slot) debugReArm(ctx context.Context, rec *cycle.Record, guest Guest, c
 			OperatorUID: cmd.OperatorUID, OperatorUser: cmd.OperatorUser,
 		})
 		_ = s.writeAuditSidecar(rec)
-		obs.Emit(ctx, obs.Event{Kind: obs.KindAuditAppend, Audit: auditEvent(lastAudit(rec))})
+		emitAuditAppend(ctx, rec)
 		cmd.reply(DebugKeyReply{User: s.deps.Pool.SSHUser, HostKeys: guest.HostKeys(), HoldUntil: newUntil})
 		return
 	}
@@ -1949,13 +1953,22 @@ func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInput
 				s.deps.Log.Debug("post-mortem pull failed", "err", err)
 				return err
 			}
-			if len(diag) > 0 {
-				if dir, derr := store.Dir(rec); derr == nil {
-					if werr := writeFile(dir, "runner-diag.log", diag); werr == nil {
-						rec.Artifacts = append(rec.Artifacts, "runner-diag.log")
-					}
-				}
+			if len(diag) == 0 {
+				return nil
 			}
+			// A pull that succeeded but whose artifact never landed must
+			// not report ok — the operator would go looking for a
+			// runner-diag.log that doesn't exist.
+			dir, derr := store.Dir(rec)
+			if derr != nil {
+				s.deps.Log.Debug("post-mortem dir lookup failed", "err", derr)
+				return derr
+			}
+			if werr := writeFile(dir, "runner-diag.log", diag); werr != nil {
+				s.deps.Log.Debug("post-mortem write failed", "err", werr)
+				return werr
+			}
+			rec.Artifacts = append(rec.Artifacts, "runner-diag.log")
 			return nil
 		})
 	}
@@ -1971,17 +1984,19 @@ func (s *Slot) teardown(ctx context.Context, rec *cycle.Record, in teardownInput
 				s.deps.Log.Debug("debug session pull failed", "err", err)
 				return err
 			}
-			if len(session) > 0 {
-				if dir, derr := store.Dir(rec); derr == nil {
-					if werr := writeFile(dir, "debug-session.log", stripTerminalCodes(session)); werr == nil {
-						rec.Artifacts = append(rec.Artifacts, "debug-session.log")
-					} else {
-						s.deps.Log.Debug("debug session write failed", "err", werr)
-					}
-				} else {
-					s.deps.Log.Debug("debug session dir lookup failed", "err", derr)
-				}
+			if len(session) == 0 {
+				return nil
 			}
+			dir, derr := store.Dir(rec)
+			if derr != nil {
+				s.deps.Log.Debug("debug session dir lookup failed", "err", derr)
+				return derr
+			}
+			if werr := writeFile(dir, "debug-session.log", stripTerminalCodes(session)); werr != nil {
+				s.deps.Log.Debug("debug session write failed", "err", werr)
+				return werr
+			}
+			rec.Artifacts = append(rec.Artifacts, "debug-session.log")
 			return nil
 		})
 	}

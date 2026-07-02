@@ -421,3 +421,44 @@ func TestRegisterGaugesDiskErrorBlastRadius(t *testing.T) {
 		t.Error("statfs error was not reported to the OTEL error handler; loss must never be silent")
 	}
 }
+
+// TestNewEnsurerMetrics pins the ensurer-scope seam: the three instruments,
+// their units, the outcome label, and second/byte denominations.
+func TestNewEnsurerMetrics(t *testing.T) {
+	meter, reader := newTestMeter(t)
+	m, err := NewEnsurerMetrics(meter)
+	if err != nil {
+		t.Fatalf("NewEnsurerMetrics: %v", err)
+	}
+
+	m.PullDone("ok", 90*time.Second, 5<<30)
+	m.TarballDownloadDone("error", 3*time.Second)
+
+	got := collect(t, reader)
+	okSet := attribute.NewSet(attribute.String("outcome", "ok"))
+	errSet := attribute.NewSet(attribute.String("outcome", "error"))
+
+	dur := got["runny.image.pull.duration"]
+	if dur.Unit != "s" {
+		t.Errorf("pull.duration unit = %q, want s", dur.Unit)
+	}
+	if p := histPoint(t, dur, okSet); p.Sum != 90 {
+		t.Errorf("pull.duration sum = %v, want 90", p.Sum)
+	}
+
+	bytes := got["runny.image.pull.bytes"]
+	if bytes.Unit != "By" {
+		t.Errorf("pull.bytes unit = %q, want By", bytes.Unit)
+	}
+	if p := histPoint(t, bytes, okSet); p.Sum != float64(int64(5<<30)) {
+		t.Errorf("pull.bytes sum = %v, want 5 GiB", p.Sum)
+	}
+
+	tb := got["runny.runner_tarball.download.duration"]
+	if tb.Unit != "s" {
+		t.Errorf("tarball duration unit = %q, want s", tb.Unit)
+	}
+	if p := histPoint(t, tb, errSet); p.Sum != 3 {
+		t.Errorf("tarball duration sum = %v, want 3", p.Sum)
+	}
+}

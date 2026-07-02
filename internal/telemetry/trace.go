@@ -107,6 +107,8 @@ func (a *traceAssembler) emit(e obs.Event) {
 		a.detail(e)
 	case obs.KindVMInfo:
 		a.vmInfo(e)
+	case obs.KindImageInfo:
+		a.imageInfo(e)
 	case obs.KindRunnerInfo:
 		a.runnerInfo(e)
 	case obs.KindJobStarted:
@@ -127,6 +129,7 @@ func (a *traceAssembler) cycleStarted(e obs.Event) {
 	ctx, span := a.tracer.Start(ctx, "runny.cycle", trace.WithTimestamp(e.Time), trace.WithAttributes(
 		attribute.String("runny.slot", e.Cycle.Slot),
 		attribute.String("runny.pool", e.Cycle.Pool),
+		attribute.String("runny.image.ref", e.Cycle.Image),
 		attribute.String("runny.cycle_id", e.Cycle.CycleID),
 		attribute.String("runny.runner_name", e.Cycle.RunnerName),
 	))
@@ -239,6 +242,29 @@ func (a *traceAssembler) vmInfo(e obs.Event) {
 		}
 		cs.root.SetAttributes(attrs...)
 		cs.root.AddEvent("vm_info", trace.WithTimestamp(e.Time), trace.WithAttributes(attrs...))
+	})
+}
+
+// imageInfo lifts mid-cycle image identity onto the cycle root AND the
+// owning step span (ENSURE_IMAGE, where it's learned): the root makes traces
+// queryable by image without joining cycle.json, the step keeps the identity
+// next to the resolve/wait-for-pull actions that produced it.
+func (a *traceAssembler) imageInfo(e obs.Event) {
+	if e.Image == nil {
+		return
+	}
+	var attrs []attribute.KeyValue
+	if e.Image.Digest != "" {
+		attrs = append(attrs, attribute.String("runny.image.digest", e.Image.Digest))
+	}
+	if e.Image.RunnerVersion != "" {
+		attrs = append(attrs, attribute.String("runny.runner_version", e.Image.RunnerVersion))
+	}
+	a.withCycle(e, func(cs *cycleSpans) {
+		cs.root.SetAttributes(attrs...)
+		if ss := cs.steps[e.Step]; ss != nil {
+			ss.span.SetAttributes(attrs...)
+		}
 	})
 }
 

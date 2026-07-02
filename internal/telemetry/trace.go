@@ -241,11 +241,18 @@ func (a *traceAssembler) httpRoundTrip(e obs.Event) {
 		}
 		if h.Status != 0 {
 			attrs = append(attrs, attribute.Int("http.response.status_code", h.Status))
+			attrs = append(attrs, attribute.Int64("runny.http.bytes", h.BytesRead))
 		}
+		start := e.Time.Add(-h.Duration)
 		_, span := a.tracer.Start(ctx, "http "+string(h.Class),
-			trace.WithTimestamp(e.Time.Add(-h.Duration)),
+			trace.WithTimestamp(start),
 			trace.WithSpanKind(trace.SpanKindClient),
 			trace.WithAttributes(attrs...))
+		// The span covers the whole exchange through body completion; the
+		// headers marker shows where waiting ended and transfer began.
+		if h.HeaderDuration > 0 {
+			span.AddEvent("headers", trace.WithTimestamp(start.Add(h.HeaderDuration)))
+		}
 		// Client-span status follows the HTTP semconv rule: any 4xx/5xx is an
 		// error, not just transport failures — a 503 retry storm or a 403
 		// mint must not render as a row of healthy spans under a red action.

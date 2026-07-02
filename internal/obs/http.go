@@ -2,7 +2,10 @@ package obs
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -43,18 +46,29 @@ const (
 // query. It is service-controlled at worst, not guest-controlled: usually
 // the configured endpoint (api.github.com, the registry), but a redirect
 // hop goes through RoundTrip again as its own event, so a CDN a service
-// redirects to reports the CDN's hostname. Status is 0 when the round trip
-// failed below HTTP (dial, TLS, deadline); Error then carries the
-// transport-level error text. That text is safe to record: the *url.Error
+// redirects to reports the CDN's hostname.
+//
+// Duration covers the whole exchange — request start to body completion
+// (EOF or the caller's Close, whichever comes first) — so a multi-GiB
+// download is a long event, not a fast one that "ended" at the headers;
+// HeaderDuration marks when the headers arrived within that window, and
+// BytesRead counts the body. Status is 0 when the round trip failed below
+// HTTP (dial, TLS, deadline); Error then carries the transport-level error
+// text, and Duration is start-to-failure with HeaderDuration zero. A body
+// that dies mid-transfer keeps the Status the headers claimed and carries
+// the read error in Error. Error text is safe to record: the *url.Error
 // that embeds the full request URL is wrapped on by http.Client above
-// RoundTrip, so a RoundTripper never sees it.
+// RoundTrip, and body-read errors are stream-level, so neither carries a
+// URL.
 type HTTPEvent struct {
-	Class    HTTPClass
-	Method   string
-	Host     string
-	Status   int
-	Error    string
-	Duration time.Duration
+	Class          HTTPClass
+	Method         string
+	Host           string
+	Status         int
+	Error          string
+	Duration       time.Duration
+	HeaderDuration time.Duration
+	BytesRead      int64
 }
 
 type httpClassKey struct{}
@@ -99,18 +113,65 @@ func (t *HTTPTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	start := time.Now()
 	resp, err := base.RoundTrip(req)
 
-	h := &HTTPEvent{
-		Class:    class,
-		Method:   req.Method,
-		Host:     req.URL.Hostname(),
-		Duration: time.Since(start),
+	h := HTTPEvent{
+		Class:  class,
+		Method: req.Method,
+		Host:   req.URL.Hostname(),
 	}
 	if err != nil {
 		h.Error = err.Error()
-	} else {
-		h.Status = resp.StatusCode
+		h.Duration = time.Since(start)
+		s.emitEvent(Event{Kind: KindHTTP, HTTP: &h})
+		return resp, err
 	}
-	s.emitEvent(Event{Kind: KindHTTP, HTTP: h})
 
-	return resp, err
+	// The event waits for the body: RoundTrip returns at the headers, but the
+	// exchange isn't over until the caller drains or closes resp.Body — for
+	// the streaming classes (blobs, the tarball) that is where nearly all the
+	// time and every byte lives. The wrapped body emits exactly once, at EOF
+	// or Close, whichever comes first; http.Client itself closes the body of
+	// each redirect hop, so no hop's event is lost.
+	h.Status = resp.StatusCode
+	h.HeaderDuration = time.Since(start)
+	resp.Body = &observedBody{rc: resp.Body, emit: func(n int64, readErr error) {
+		h.Duration = time.Since(start)
+		h.BytesRead = n
+		if readErr != nil {
+			h.Error = readErr.Error()
+		}
+		s.emitEvent(Event{Kind: KindHTTP, HTTP: &h})
+	}}
+	return resp, nil
+}
+
+// observedBody counts a response body's bytes and reports its completion —
+// EOF, a mid-stream read error, or the caller's Close — exactly once.
+type observedBody struct {
+	rc    io.ReadCloser
+	emit  func(bytes int64, readErr error)
+	once  sync.Once
+	bytes int64
+}
+
+func (b *observedBody) Read(p []byte) (int, error) {
+	n, err := b.rc.Read(p)
+	b.bytes += int64(n)
+	if err != nil {
+		readErr := err
+		if errors.Is(err, io.EOF) {
+			readErr = nil // a clean end, not a failure
+		}
+		b.finish(readErr)
+	}
+	return n, err
+}
+
+func (b *observedBody) Close() error {
+	err := b.rc.Close()
+	b.finish(nil)
+	return err
+}
+
+func (b *observedBody) finish(readErr error) {
+	b.once.Do(func() { b.emit(b.bytes, readErr) })
 }

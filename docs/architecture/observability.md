@@ -101,11 +101,15 @@ HTTP client semconv rule: any 4xx/5xx or transport failure is an error, so
 a 503 retry storm can't render as healthy spans under a red action — which
 means the registry's routine 401 token challenge shows as an errored hop
 whose enclosing `resolve` action staying green is what says the dance
-succeeded. Three caveats
-are load-bearing: the span measures to response *headers* — body transfer
-time (the multi-GiB pull, the tarball) stays on the enclosing action; the
-shared pull actor's blob traffic emits nothing because its context carries
-no scope (the same attribution rule that keeps its pull out of any single
+succeeded. The span covers the *whole* exchange, not just the wait for
+headers: the transport wraps the response body and the event fires at body
+completion (EOF or close), so the span carries the transfer's true
+duration and byte count (`runny.http.bytes`), a `headers` span event marks
+where waiting ended and transfer began, and a body that dies mid-stream —
+the stall-kill shape — reports the status the headers claimed plus the
+read error as span error status. Two caveats are load-bearing: the shared
+pull actor's blob traffic emits nothing because its context carries no
+scope (the same attribution rule that keeps its pull out of any single
 cycle); and HTTP spans are live-only — their span IDs fold in the event
 sequence number precisely because round trips repeat within a step, which
 is the input the record-determined derivation excludes, so a replayed

@@ -461,7 +461,10 @@ func TestTraceConsumerHTTPSpans(t *testing.T) {
 	})
 	emit(obs.Event{
 		Seq: 5, Time: at(5), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindHTTP,
-		HTTP: &obs.HTTPEvent{Class: obs.HTTPRegistryManifest, Method: "GET", Host: "ghcr.io", Status: 200, Duration: time.Second},
+		HTTP: &obs.HTTPEvent{
+			Class: obs.HTTPRegistryManifest, Method: "GET", Host: "ghcr.io", Status: 200,
+			Duration: time.Second, HeaderDuration: 200 * time.Millisecond, BytesRead: 2048,
+		},
 	})
 	emit(obs.Event{
 		Seq: 6, Time: at(6), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindActionEnded,
@@ -531,6 +534,26 @@ func TestTraceConsumerHTTPSpans(t *testing.T) {
 	}
 	if got, want := manifests[1].EndTime, at(5); !got.Equal(want) {
 		t.Errorf("manifest[1] end = %v, want %v", got, want)
+	}
+	if got := attrInt64(manifests[1].Attributes, "runny.http.bytes"); got != 2048 {
+		t.Errorf("manifest[1] runny.http.bytes = %d, want 2048", got)
+	}
+	// The headers marker sits inside the span at start + HeaderDuration.
+	var headerEvents int
+	for _, ev := range manifests[1].Events {
+		if ev.Name != "headers" {
+			continue
+		}
+		headerEvents++
+		if want := at(4).Add(200 * time.Millisecond); !ev.Time.Equal(want) {
+			t.Errorf("headers event at %v, want %v", ev.Time, want)
+		}
+	}
+	if headerEvents != 1 {
+		t.Errorf("got %d headers events on manifest[1], want 1", headerEvents)
+	}
+	if len(jit.Events) != 0 {
+		t.Errorf("transport-error span carries %d events, want none (headers never arrived)", len(jit.Events))
 	}
 	// Semconv client rule: 4xx is span error even when the dance recovers —
 	// the enclosing action's green status is what says recovery happened.

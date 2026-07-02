@@ -3,10 +3,12 @@ package obs
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // scopedHTTP returns a context carrying a cycle scope whose events land in
@@ -144,3 +146,110 @@ func TestHTTPTransportScopelessIsPassthrough(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// The event emits at body completion, not headers: Duration covers the full
+// transfer, BytesRead counts the body, and HeaderDuration marks when
+// headers arrived — a slow multi-hundred-MB download is a long span, not a
+// millisecond one.
+func TestHTTPTransportDurationCoversBodyTransfer(t *testing.T) {
+	const wait = 30 * time.Millisecond
+	body := []byte("0123456789")
+
+	var events []Event
+	hc := &http.Client{Transport: &HTTPTransport{Base: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(&slowReader{data: body, delay: wait})}, nil
+	})}}
+	req, _ := http.NewRequestWithContext(WithHTTPClass(scopedHTTP(&events), HTTPTarballDownload), http.MethodGet, "https://cdn.example/x", nil)
+	resp, err := hc.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("event emitted at headers; want none until the body completes (got %+v)", events)
+	}
+	if _, err := io.ReadAll(resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if len(events) != 1 {
+		t.Fatalf("got %d events after body close, want 1", len(events))
+	}
+	h := events[0].HTTP
+	if h.Duration < wait {
+		t.Errorf("Duration = %v, want ≥ %v (the body transfer)", h.Duration, wait)
+	}
+	if h.HeaderDuration <= 0 || h.HeaderDuration > h.Duration {
+		t.Errorf("HeaderDuration = %v, want in (0, %v]", h.HeaderDuration, h.Duration)
+	}
+	if h.BytesRead != int64(len(body)) {
+		t.Errorf("BytesRead = %d, want %d", h.BytesRead, len(body))
+	}
+	if h.Status != http.StatusOK || h.Error != "" {
+		t.Errorf("event = %+v, want clean 200", h)
+	}
+}
+
+// A body that dies mid-transfer (the stall-kill shape) still emits exactly
+// once, with the bytes that made it, the 200 the headers claimed, and the
+// read error — a killed download must not render as a fast healthy span.
+func TestHTTPTransportBodyErrorIsReported(t *testing.T) {
+	var events []Event
+	hc := &http.Client{Transport: &HTTPTransport{Base: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(&failingReader{data: []byte("abc")})}, nil
+	})}}
+	req, _ := http.NewRequestWithContext(WithHTTPClass(scopedHTTP(&events), HTTPTarballDownload), http.MethodGet, "https://cdn.example/x", nil)
+	resp, err := hc.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(resp.Body); err == nil {
+		t.Fatal("want mid-body read error")
+	}
+	resp.Body.Close()
+	resp.Body.Close() // double close must not double-emit
+
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want exactly 1", len(events))
+	}
+	h := events[0].HTTP
+	if h.Status != http.StatusOK {
+		t.Errorf("Status = %d, want the 200 the headers claimed", h.Status)
+	}
+	if h.Error == "" || !strings.Contains(h.Error, "stream torn") {
+		t.Errorf("Error = %q, want the mid-body read error", h.Error)
+	}
+	if h.BytesRead != 3 {
+		t.Errorf("BytesRead = %d, want 3", h.BytesRead)
+	}
+}
+
+// slowReader yields its data after a delay, then EOF.
+type slowReader struct {
+	data  []byte
+	delay time.Duration
+	done  bool
+}
+
+func (r *slowReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	time.Sleep(r.delay)
+	r.done = true
+	return copy(p, r.data), nil
+}
+
+// failingReader yields its data, then a non-EOF error.
+type failingReader struct {
+	data []byte
+	done bool
+}
+
+func (r *failingReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, errors.New("stream torn")
+	}
+	r.done = true
+	return copy(p, r.data), nil
+}

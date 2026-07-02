@@ -26,6 +26,7 @@ const (
 	KindStepLeft      Kind = "step_left"
 	KindActionStarted Kind = "action_started"
 	KindActionEnded   Kind = "action_ended"
+	// KindHTTP is declared in http.go beside the transport that emits it.
 	KindDetail        Kind = "detail"
 	KindVMInfo        Kind = "vm_info"
 	KindImageInfo     Kind = "image_info"
@@ -214,6 +215,7 @@ type Event struct {
 
 	StepInfo *StepEvent
 	Action   *ActionEvent
+	HTTP     *HTTPEvent
 	Detail   *DetailEvent
 	VM       *VMEvent
 	Image    *ImageEvent

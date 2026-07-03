@@ -54,9 +54,9 @@ service RunnyService {
   // System-daemon deployments only; a per-user home has a single owner.
   rpc GrantOperator(GrantOperatorRequest) returns (OperatorMutation);
   // Revoke an account's operator status. Refuses to remove the last
-  // operator (recover via `install-daemon`). New connections are refused
-  // immediately; a read-only stream already open (WatchStatus) may linger
-  // until it closes.
+  // operator (recover via `install-daemon`). Takes effect on the very next
+  // RPC on any connection, not just new ones; any of the revoked account's
+  // open streams (WatchStatus, StreamLogs) are actively cancelled.
   rpc RevokeOperator(RevokeOperatorRequest) returns (OperatorMutation);
   // List the currently-granted operator accounts, read from the home dir's
   // ACL (the authoritative set) and joined with the grant attribution log

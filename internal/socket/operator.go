@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/user"
+	"slices"
 	"strconv"
 	"time"
 
@@ -166,8 +167,20 @@ func (s *Server) mutateOperator(
 	// bounded by aclOpTimeout.
 	actx, cancel := bounded.WithTimeout(context.Background(), aclOpTimeout)
 	defer cancel()
-	if err := apply(actx, s.HomeDir.String(), s.socketPath, u.Username); err != nil {
-		return nil, status.Errorf(codes.Internal, "%s failed for %s: %v", recordAction, u.Username, err)
+	applyErr := apply(actx, s.HomeDir.String(), s.socketPath, u.Username)
+	if recordAction == "revoke" {
+		// Ground truth, not applyErr: chmodBoth's two chmod calls (home dir,
+		// then the live socket) aren't atomic, so a failure on the second can
+		// still leave the first — the ACL checkUID actually reads — already
+		// mutated. Re-reading here means that partial failure still kills the
+		// operator's live streams, instead of their next RPC being silently
+		// denied while an already-open WatchStatus/StreamLogs lingers.
+		if uids, err := opacl.ListUIDs(s.HomeDir.String()); err == nil && !slices.Contains(uids, uid) {
+			s.gate.killStreams(uid)
+		}
+	}
+	if applyErr != nil {
+		return nil, status.Errorf(codes.Internal, "%s failed for %s: %v", recordAction, u.Username, applyErr)
 	}
 
 	byUID, byUser := operatorIdentity(ctx)

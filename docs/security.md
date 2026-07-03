@@ -176,13 +176,28 @@ audit trail under the operator-writable home — a good-faith reconstruction
 aid, not a tamper-proof control, exactly like the `injected_keys` trail and
 the guest `authorized_keys` before it. `runnyctl operator revoke` refuses to
 remove the last operator (recoverable only via `sudo runnyctl
-install-daemon`, which resets the ACL to the install-time bootstrap); a
-revoke refuses new connections immediately, though a read-only stream
-already open (the app's `WatchStatus`) may linger until it closes. A root
+install-daemon`, which resets the ACL to the install-time bootstrap). A root
 peer is refused as a grant target (root already bypasses the socket's
 `0600` mode and needs no ACE). Per-user deployments have a single owner and
 no ACL-managed set, so `operator grant`/`revoke` require the system daemon;
 `operator list` still works everywhere, reading whatever ACL is present.
+
+**Revocation takes effect at the next RPC on any connection, not just at
+`connect()`.** A server-wide gRPC interceptor pair rechecks the caller's uid
+against a fresh (uncached) ACL read on every unary call and every stream
+open — uniformly, across all RPCs, so a new RPC is gated by default and no
+per-handler allowlist can drift. A revoked operator holding an
+already-open connection is denied on its very next call. The daemon also
+actively kills that operator's in-flight streams (`WatchStatus`,
+`StreamLogs`) the moment `runnyctl operator revoke` lands the ACL mutation,
+via an event-driven per-uid cancel registry — no polling, no lingering
+read stream. The killed stream ends with a `PermissionDenied` the client
+can show, not a silent clean close. Root always passes (uid 0 bypasses the
+socket's `0600` mode by design and holds no ACE); a peer whose uid could
+not be read is denied (fail closed). Out-of-band ACL edits (a manual
+`chmod`, or `install-daemon` resetting the ACL) are not swept for
+in-flight streams — only the in-process revoke path triggers the kill —
+but every new RPC still observes the edit immediately.
 
 ## Ephemeral guests
 

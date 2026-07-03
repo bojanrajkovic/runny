@@ -148,13 +148,15 @@ histograms; the instrument inventory, each instrument's meaning, and its
 exact label set live as doc comments on the instruments in
 `internal/telemetry/metrics.go`. Two properties define the fold:
 
-- **Durations are event-time arithmetic, never clock reads.** A step's
-  duration is its `StepLeft` timestamp minus its `StepEntered` timestamp; a
-  cycle's is `CycleFinished` minus the cycle's recorded start. The fold is a
-  pure function of the stream, so a replayed stream produces the live
-  stream's numbers, and an event whose start was never observed produces no
-  duration point rather than a fabricated one. The cycle's `result` and
-  `ending` labels are the persisted record classification, passed through
+- **Durations ride the event, the consumer holds no state.** `StepEvent` and
+  `JobEvent` each carry their own `Duration` — stamped by the FSM at
+  `StepLeft`/`JobEnded` from the `cycle.StateRecord`/`JobInfo` it already
+  holds — so the metrics consumer is a pure event→instrument fold with no
+  per-cycle tracking to accrete or clean up. A cycle's duration is
+  `CycleFinished` minus the cycle's recorded start. A zero `Duration` (a
+  stray or legacy event) records the count where applicable but skips the
+  histogram, never a fabricated point. The cycle's `result` and `ending`
+  labels are the persisted record classification, passed through
   `FinishEvent` — metrics can never disagree with `cycle.json` about how a
   cycle ended.
 - **Every label is a closed set.** States, outcomes, endings, and action

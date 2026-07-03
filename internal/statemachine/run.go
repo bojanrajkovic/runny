@@ -104,6 +104,7 @@ func (c *run) beginStep(ctx context.Context, state State, mut func(*Status)) (co
 		c.rec.States = append(c.rec.States, sr)
 		obs.Emit(ctx, obs.Event{Kind: obs.KindStepLeft, StepInfo: &obs.StepEvent{
 			State: string(state), Outcome: obs.Outcome(outcome), Error: errStr,
+			Duration: sr.Left.Sub(sr.Entered),
 		}})
 	}
 	return ctx, finish
@@ -690,6 +691,7 @@ func (c *run) runJob(ctx context.Context, markerLine string) (bool, State, error
 	// this function captured never sees them.
 	obs.Emit(ctx, obs.Event{Kind: obs.KindJobEnded, Job: &obs.JobEvent{
 		Name: jobName, Outcome: obs.Outcome(jobOutcome), OperatorKeys: c.rec.Job.OperatorKeys,
+		Duration: time.Since(job.Started),
 	}})
 	finish(jobOutcome, jobErrStr)
 

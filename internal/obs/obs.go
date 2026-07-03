@@ -111,11 +111,14 @@ type CycleRef struct {
 // StepEvent is the payload for StepEntered/StepLeft. A state is entered at
 // most once per cycle — the FSM never revisits a state within a cycle (a
 // broken guest means a new cycle, not an in-place retry) — so State alone
-// correlates a StepLeft with its StepEntered.
+// correlates a StepLeft with its StepEntered. Duration is populated on
+// StepLeft only (the FSM knows the step's Entered/Left from its own
+// StateRecord); zero on StepEntered.
 type StepEvent struct {
-	State   string
-	Outcome Outcome
-	Error   string
+	State    string
+	Outcome  Outcome
+	Error    string
+	Duration time.Duration
 }
 
 // Attr is one action attribute. Keys are fully-qualified constants declared
@@ -170,11 +173,14 @@ type RunnerEvent struct {
 // only) are the operator debug-key fingerprints present in — or ambiguously
 // attempted against — the guest while the job ran, mirroring
 // cycle.JobInfo.OperatorKeys: "did this job run with a credential
-// installed" answerable from the event stream alone.
+// installed" answerable from the event stream alone. Duration is populated
+// on JobEnded only (the FSM knows the job's Started and its own end time);
+// zero on JobStarted.
 type JobEvent struct {
 	Name         string
 	Outcome      Outcome
 	OperatorKeys []string
+	Duration     time.Duration
 }
 
 // AuditEvent mirrors an operator debug-key audit append/update
@@ -230,6 +236,10 @@ type Event struct {
 // wires an Emitter to real consumers is responsible for fan-out and for a
 // drop-with-logged-counter response to backpressure — the FSM goroutine
 // that calls Emit or Action can never be made to wait on a slow consumer.
+// The payload types only grow additively over time (e.g. StepEvent.Duration
+// and JobEvent.Duration, populated on the *Left/*Ended half of their pair):
+// an existing field's meaning or an existing Kind's semantics never change,
+// so a consumer written against an older payload shape keeps working.
 // All events for one cycle scope are emitted from a single goroutine (the
 // slot's FSM goroutine) with two exceptions an emitter must tolerate: the
 // shared image puller's KindDetail progress (see internal/statemachine),

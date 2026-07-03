@@ -670,9 +670,10 @@ func TestMain(m *testing.M) {
 }
 
 // eventsForCycle returns the obs events emitted for one cycle, in emission
-// (Seq) order. A harness accumulates events across every cycle the slot
-// runs (including a gated cycle that starts before a test's cancel lands),
-// so assertions on one cycle's shape must filter to it first.
+// order (the order the harness's emitter callback was invoked in). A harness
+// accumulates events across every cycle the slot runs (including a gated
+// cycle that starts before a test's cancel lands), so assertions on one
+// cycle's shape must filter to it first.
 func (h *harness) eventsForCycle(cycleID string) []obs.Event {
 	h.eventsMu.Lock()
 	defer h.eventsMu.Unlock()

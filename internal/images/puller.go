@@ -153,8 +153,9 @@ func acquirePuller(dir string, report func(string), proto *imagePuller) (*subscr
 	// while holding the one global pullerRegistryMu would let a slow emitter
 	// serialize every pool/slot's pull acquisition daemon-wide) but MUST still
 	// happen before go p.run() starts: run() is what can emit KindHTTP,
-	// KindDetail, or even KindPullFinished, so starting it first would race
-	// KindPullStarted for the lowest Seq on this pull scope.
+	// KindDetail, or even KindPullFinished, so starting it first would let
+	// this pull scope's first-ever event be something other than
+	// KindPullStarted — the bracket a consumer opens something at.
 	if created {
 		obs.Emit(p.ctx, obs.Event{Kind: obs.KindPullStarted})
 		go p.run()

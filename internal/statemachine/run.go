@@ -220,12 +220,14 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 		// The report callback fires on the shared image puller's own goroutine
 		// (internal/images: every pull, shared or not, runs its own `go
 		// p.run()`), not this cycle's FSM goroutine — an exception to "events
-		// for one cycle are emitted from a single goroutine" (ADR-0024). Safe
-		// regardless: obs's scope is immutable after WithStep/WithCycle and Seq
-		// is atomic, so Detail events still land with a valid, unique Seq — just
-		// not necessarily Time-ordered relative to this goroutine's other
-		// events. The ensurer's own wait-for-pull action (correlated across
-		// cycles by pull id) carries the proper shared-pull attribution.
+		// for one cycle are emitted from a single goroutine" (ADR-0024, and
+		// obs.Emitter's own doc comment). Safe regardless: obs's scope is
+		// immutable after WithStep/WithCycle, so the puller's goroutine and
+		// this one need no synchronization to read it, and every installed
+		// consumer is documented to tolerate this exact exception — just not
+		// necessarily Time-ordered relative to this goroutine's other events.
+		// The ensurer's own wait-for-pull action (correlated across cycles by
+		// pull id) carries the proper shared-pull attribution.
 		// The returned digest is deliberately dropped: the resolve callback
 		// below already recorded it, at the moment it was learned.
 		_, runnerVersion, bundle, err := c.deps.Images.Ensure(esctx, func(d string) { c.setDetail(esctx, d) }, func(d string) {

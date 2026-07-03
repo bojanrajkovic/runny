@@ -41,6 +41,24 @@ from conventional commits) + goreleaser (build, package, publish, brew tap).
   `RELEASER_APP_ID` var, `RELEASER_APP_PRIVATE_KEY` secret), kept distinct from
   the runtime runner-registration App so CI and prod-host credentials don't share
   a blast radius. Skipped gracefully when those secrets are absent.
+- **Beta channel via a second formula/cask pair**: a manually-tagged
+  pre-release (see "Consequences" below) publishes as a GitHub pre-release,
+  which the `homebrew` job detects via `github.event.release.prerelease` and
+  renders into `runny-beta.rb`/`runny-app-beta.rb` (from
+  `tools/deploy/runny-beta.rb.tmpl`/`runny-app-beta.rb.tmpl`) instead of the
+  stable pair — so a beta publish never overwrites what `brew install runny`
+  resolves to. The four packages (`runny`, `runny-beta`, `runny-app`,
+  `runny-app-beta`) are mutually exclusive with each other: same binaries
+  (`runnyd`/`runnyctl`) and, for the casks, the same `Runny.app` bundle
+  identity (fixed by the Xcode product name, not something a cask
+  controls) — one channel, one manager, at a time, same rule the stable
+  formula/cask pair already followed. The beta formula declares the
+  formula-formula and formula-cask conflicts (`conflicts_with`), same as
+  the stable formula; neither cask declares `conflicts_with` (the
+  `formula:` variant is deprecated with no replacement, per the existing
+  comment in `runny-app.rb.tmpl`) — cask-vs-formula relies on each cask's
+  `preflight` check, and cask-vs-cask relies on brew's own refusal to
+  overwrite an app bundle it doesn't already own.
 - Artifact-producing jobs stay **cold** (no Bazel or tool caches) per the CI
   security posture.
 

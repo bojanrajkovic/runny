@@ -195,17 +195,35 @@ jobs:
           VERSION: ${{ needs.artifacts.outputs.version }}
           SHA: ${{ needs.artifacts.outputs.sha256 }}
           DMG_SHA: ${{ needs.artifacts.outputs.dmg_sha256 }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
           export URL="https://github.com/${REPO}/releases/download/${TAG}/runny_${VERSION}_darwin_arm64.tar.gz"
           export DMG_URL="https://github.com/${REPO}/releases/download/${TAG}/Runny_${VERSION}.dmg"
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/bojanrajkovic/homebrew-tap.git" tap
           mkdir -p tap/Formula tap/Casks
+
+          # A GitHub pre-release (manual beta tag, ADR-0010) renders the
+          # opt-in beta formula/cask instead of the default pair, so
+          # publishing a beta never clobbers what `brew install runny`
+          # resolves to.
+          if [ "$PRERELEASE" = "true" ]; then
+            FORMULA_TMPL=tools/deploy/runny-beta.rb.tmpl
+            FORMULA_REL=Formula/runny-beta.rb
+            CASK_TMPL=tools/deploy/runny-app-beta.rb.tmpl
+            CASK_REL=Casks/runny-app-beta.rb
+          else
+            FORMULA_TMPL=tools/deploy/runny.rb.tmpl
+            FORMULA_REL=Formula/runny.rb
+            CASK_TMPL=tools/deploy/runny-app.rb.tmpl
+            CASK_REL=Casks/runny-app.rb
+          fi
+
           # Render the reviewed templates; only the listed vars are substituted per template
           # so Ruby's own #{...} interpolations pass through untouched.
-          envsubst '${VERSION} ${URL} ${SHA}' < tools/deploy/runny.rb.tmpl > tap/Formula/runny.rb
-          envsubst '${VERSION} ${DMG_URL} ${DMG_SHA}' < tools/deploy/runny-app.rb.tmpl > tap/Casks/runny-app.rb
+          envsubst '${VERSION} ${URL} ${SHA}' < "$FORMULA_TMPL" > "tap/$FORMULA_REL"
+          envsubst '${VERSION} ${DMG_URL} ${DMG_SHA}' < "$CASK_TMPL" > "tap/$CASK_REL"
           cd tap
-          git add Formula/runny.rb Casks/runny-app.rb
+          git add "$FORMULA_REL" "$CASK_REL"
           git -c user.name="runny-release[bot]" -c user.email="noreply@coderinserepeat.com" \
             commit -m "runny ${VERSION}"
           # Explicit target: cloning an empty tap can leave the local branch

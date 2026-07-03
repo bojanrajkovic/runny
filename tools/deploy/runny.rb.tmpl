@@ -16,9 +16,11 @@ class Runny < Formula
   depends_on :macos
   depends_on arch: :arm64
 
-  # Mutual exclusion lives here only — brew deprecated conflicts_with formula: in casks
-  # (brew PR #20499, no replacement). Don't delete this thinking the cask handles it: it can't.
+  conflicts_with "runny-beta", because: "both install the runnyd and runnyctl binaries"
+  # Mutual exclusion vs. casks lives here only — brew deprecated conflicts_with formula: in
+  # casks (brew PR #20499, no replacement). Don't delete this thinking the cask handles it: it can't.
   conflicts_with cask: "runny-app"
+  conflicts_with cask: "runny-app-beta"
 
   def install
     bin.install "runnyd"

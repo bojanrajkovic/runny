@@ -221,10 +221,26 @@ func (p *imagePuller) finish(res ensureResult) {
 // headroom) hold and retry within a bounded window, otherwise broadcast and
 // stop. A panic is converted into a terminal error so subscribers can never
 // hang waiting on a dead puller (the silent-failure shape this project kills).
+//
+// Not every return path calls finish() (see the two ctx.Err() checks below,
+// and holdForDisk's own ctx-cancellation return): the last subscriber
+// leaving before an attempt resolves is a deliberate no-fabricated-outcome
+// no-op, not a bug. But something still has to close the pull's trace
+// span (KindPullStarted opened one), so this defer checks p.terminal —
+// already the one flag finish() sets, from any call site, guarded by p.mu
+// — and emits KindPullAbandoned exactly when finish() never ran. No new
+// state to track: this reuses the guard finish() already has.
 func (p *imagePuller) run() {
 	defer func() {
 		if r := recover(); r != nil {
 			p.finish(ensureResult{err: fmt.Errorf("image puller for %s panicked: %v", p.ref, r)})
+			return
+		}
+		p.mu.Lock()
+		abandoned := p.terminal == nil
+		p.mu.Unlock()
+		if abandoned {
+			obs.Emit(p.ctx, obs.Event{Kind: obs.KindPullAbandoned})
 		}
 	}()
 	// holdDeadline bounds the TOTAL time spent in disk holds across this puller's

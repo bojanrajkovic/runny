@@ -682,6 +682,40 @@ func TestTraceConsumerPullFailureStatus(t *testing.T) {
 	}
 }
 
+// A pull abandoned before a terminal outcome (KindPullAbandoned, not
+// KindPullFinished) still closes its root span — error status, no
+// outcome/bytes attributes since there was never a result — and evicts the
+// map entry, so a stray later event for the same pull id is a no-op instead
+// of reopening or double-processing it.
+func TestTraceConsumerPullAbandonedClosesRootAndEvicts(t *testing.T) {
+	emit, exp := newTestAssembler(t)
+
+	pull := &obs.PullRef{ID: "pull-abandoned", Ref: "ghcr.io/x", Digest: "sha256:x", Started: at(0)}
+	emit(obs.Event{Time: at(0), Pull: pull, Kind: obs.KindPullStarted})
+	emit(obs.Event{Time: at(1), Pull: pull, Kind: obs.KindDetail, Detail: &obs.DetailEvent{Text: "pulled 500 MiB"}})
+	emit(obs.Event{Time: at(2), Pull: pull, Kind: obs.KindPullAbandoned})
+	// A stray event after abandonment must not reopen or re-end the span.
+	emit(obs.Event{Time: at(3), Pull: pull, Kind: obs.KindPullFinished, PullInfo: &obs.PullEvent{Outcome: obs.OutcomeOK}})
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 || spans[0].Name != "runny.pull" {
+		t.Fatalf("got %d spans, want exactly 1 runny.pull root", len(spans))
+	}
+	root := spans[0]
+	if root.Status.Code != codes.Error {
+		t.Errorf("abandoned pull root status = %v, want Error", root.Status.Code)
+	}
+	if got := attrString(root.Attributes, "runny.outcome"); got != "" {
+		t.Errorf("abandoned pull root carries runny.outcome = %q, want none (no result to report)", got)
+	}
+	if got := attrString(root.Attributes, "runny.progress.last"); got != "pulled 500 MiB" {
+		t.Errorf("abandoned pull root progress.last = %q, want the last detail before abandonment", got)
+	}
+	if root.EndTime.UTC() != at(2).UTC() {
+		t.Errorf("abandoned pull root end time = %v, want %v (the abandonment time, not the stray KindPullFinished)", root.EndTime, at(2))
+	}
+}
+
 // KindHTTP/KindDetail for a pull whose KindPullStarted was never seen (a
 // stray event, or a pull that already finished) is a no-op — the same
 // stray-event tolerance withCycle/withStep give cycle-scoped events.

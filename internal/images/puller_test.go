@@ -351,6 +351,46 @@ func TestPullerEmitsStartedAndFinishedWithPullIdentity(t *testing.T) {
 	}
 }
 
+// Two concurrent subscribers to one shared pull produce exactly one
+// KindPullStarted/KindPullFinished pair — issue #125's core guarantee.
+// TestPullerSharesOutcomeAcrossSubscribers asserts the same sharing for the
+// digest/subscriber-facing result; this is the event-level equivalent.
+func TestPullerTwoSubscribersEmitExactlyOnePullFinished(t *testing.T) {
+	dir := t.TempDir()
+	cap := &eventCapture{}
+	var calls atomic.Int32
+	release := make(chan struct{})
+	attempt := func(ctx context.Context) (string, error) {
+		calls.Add(1)
+		<-release // hold the pull open so the second subscriber joins mid-flight
+		return "sha256:shared", nil
+	}
+	subA, relA := testAcquireWithEvents(t, dir, cap.emit, attempt, okFree(0))
+	defer relA()
+	subB, relB := testAcquire(t, dir, nil, attempt, okFree(0))
+	defer relB()
+
+	close(release)
+	recvWithin(t, subA, time.Second)
+	recvWithin(t, subB, time.Second)
+
+	var started, finished int
+	for _, e := range cap.all() {
+		switch e.Kind {
+		case obs.KindPullStarted:
+			started++
+		case obs.KindPullFinished:
+			finished++
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("attempt ran %d times, want exactly 1 (shared)", calls.Load())
+	}
+	if started != 1 || finished != 1 {
+		t.Fatalf("started=%d finished=%d across 2 subscribers, want exactly 1 each", started, finished)
+	}
+}
+
 // The pull's HTTP traffic — a classed round trip through obs.HTTPTransport,
 // the same transport oci.Client wires — carries the pull scope: the
 // KindHTTP event lands with Pull set, proving realAttempt's traffic is no
@@ -521,7 +561,9 @@ func TestPullerEmitsFinishedWithErrorOutcome(t *testing.T) {
 
 // A puller cancelled before any terminal outcome (last subscriber left,
 // attempt itself returns the cancellation) emits no KindPullFinished at all —
-// no fabricated outcome for a pull that never finished.
+// no fabricated outcome for a pull that never finished — but it does emit
+// exactly one KindPullAbandoned, so a trace consumer's open root span still
+// closes instead of leaking.
 func TestPullerCancelledEmitsNoFinishedEvent(t *testing.T) {
 	dir := t.TempDir()
 	cap := &eventCapture{}
@@ -536,9 +578,86 @@ func TestPullerCancelledEmitsNoFinishedEvent(t *testing.T) {
 	rel()
 
 	time.Sleep(50 * time.Millisecond) // let the puller goroutine wind down
+	var abandoned int
 	for _, e := range cap.all() {
 		if e.Kind == obs.KindPullFinished {
 			t.Fatalf("cancelled puller emitted %+v, want nothing", e)
 		}
+		if e.Kind == obs.KindPullAbandoned {
+			abandoned++
+		}
 	}
+	if abandoned != 1 {
+		t.Fatalf("KindPullAbandoned count = %d, want exactly 1", abandoned)
+	}
+}
+
+// A pull that gives up after the bounded disk-hold window emits
+// KindPullFinished (finish() is called from inside holdForDisk itself), not
+// KindPullAbandoned — the deadline-exceeded give-up is a real terminal
+// outcome, not an abandonment.
+func TestPullerDiskGiveUpEmitsFinishedNotAbandoned(t *testing.T) {
+	dir := t.TempDir()
+	cap := &eventCapture{}
+	attempt := func(ctx context.Context) (string, error) {
+		return "", &oci.DiskHeadroomError{Ref: "r", ImageBytes: 100, FreeBytes: 1}
+	}
+	diskFree := func(string) (uint64, error) { return 1, nil } // never enough
+	sub, rel := testAcquireWithEvents(t, dir, cap.emit, attempt, diskFree)
+	defer rel()
+	recvWithin(t, sub, 2*time.Second)
+
+	var finished, abandoned int
+	for _, e := range cap.all() {
+		switch e.Kind {
+		case obs.KindPullFinished:
+			finished++
+		case obs.KindPullAbandoned:
+			abandoned++
+		}
+	}
+	if finished != 1 || abandoned != 0 {
+		t.Fatalf("finished=%d abandoned=%d, want exactly 1 finished, 0 abandoned", finished, abandoned)
+	}
+}
+
+// A pull cancelled WHILE holding for disk headroom (the last subscriber
+// leaves mid-hold, before the deadline) is abandoned, not finished — the
+// same no-fabricated-outcome rule as a cancellation mid-attempt.
+func TestPullerCancelledDuringDiskHoldEmitsAbandoned(t *testing.T) {
+	dir := t.TempDir()
+	cap := &eventCapture{}
+	holding := make(chan struct{})
+	var holdOnce sync.Once
+	attempt := func(ctx context.Context) (string, error) {
+		return "", &oci.DiskHeadroomError{Ref: "r", ImageBytes: 100, FreeBytes: 1}
+	}
+	diskFree := func(string) (uint64, error) {
+		holdOnce.Do(func() { close(holding) })
+		return 1, nil // never enough — stays in the hold until cancelled
+	}
+	_, rel := testAcquireWithEvents(t, dir, cap.emit, attempt, diskFree)
+	<-holding
+	rel()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		var finished, abandoned int
+		for _, e := range cap.all() {
+			switch e.Kind {
+			case obs.KindPullFinished:
+				finished++
+			case obs.KindPullAbandoned:
+				abandoned++
+			}
+		}
+		if finished != 0 {
+			t.Fatalf("cancelled-during-hold pull emitted KindPullFinished, want KindPullAbandoned only")
+		}
+		if abandoned == 1 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("cancellation during a disk hold did not emit exactly one KindPullAbandoned")
 }

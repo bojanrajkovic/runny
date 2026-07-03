@@ -287,6 +287,20 @@ func TestMetricsConsumerIgnoresPullStarted(t *testing.T) {
 	}
 }
 
+// KindPullAbandoned closes the trace side's root span for a pull that never
+// reached a terminal outcome, but must record nothing here — no fabricated
+// outcome for a pull that never finished.
+func TestMetricsConsumerIgnoresPullAbandoned(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	m.emit(obs.Event{Kind: obs.KindPullAbandoned, Pull: &obs.PullRef{ID: "p1"}})
+	ms := collect(t, reader)
+	if got, ok := ms["runny.image.pull.duration"]; ok {
+		if h, ok := got.Data.(metricdata.Histogram[float64]); ok && len(h.DataPoints) > 0 {
+			t.Errorf("pull.duration has %d datapoints for KindPullAbandoned, want 0", len(h.DataPoints))
+		}
+	}
+}
+
 // The pull/tarball instruments, folded straight out of the event stream:
 // KindPullFinished feeds runny.image.pull.duration/bytes, KindTarballDone
 // feeds runny.runner_tarball.download.duration. Names, units, and

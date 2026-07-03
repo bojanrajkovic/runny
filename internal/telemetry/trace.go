@@ -155,6 +155,8 @@ func (a *traceAssembler) emit(e obs.Event) {
 		a.pullStarted(e)
 	case obs.KindPullFinished:
 		a.pullFinished(e)
+	case obs.KindPullAbandoned:
+		a.pullAbandoned(e)
 	}
 }
 
@@ -496,24 +498,10 @@ func (a *traceAssembler) pullStarted(e obs.Event) {
 	a.pulls[e.Pull.ID] = &pullSpans{ctx: ctx, root: span}
 }
 
-// pullFinished ends the pull's root span and drops its map entry.
-//
-// A puller that is cancelled before a terminal outcome (its last subscriber
-// left mid-attempt) never calls finish() and so never emits KindPullFinished
-// — internal/images/puller.go's run() just returns, the same no-fabricated-
-// outcome rule the pull-scoped metrics fold (metrics.go) also honors. That
-// path leaves this map's entry un-evicted and its root span un-ended. This
-// is deliberately not chased with eviction machinery: PullRef.ID is
-// pullID(dir), a deterministic hash
-// of the content-addressed bundle directory, so the NEXT pull of the same
-// image (the common case — the same slot or a sibling retries) reuses the
-// same key and overwrites the stale entry outright. The residue is bounded
-// by the number of distinct images ever abandoned mid-pull and never
-// revisited, not by how many times a cycle recycles — a small, slow-growing
-// number in practice, not the unbounded-per-request shape this project
-// exists to kill. An abandoned root span is otherwise inert: unexported
-// (never .End()'d), so it costs memory only, never a leaked goroutine or a
-// stuck exporter.
+// pullFinished ends the pull's root span with its outcome and drops its map
+// entry. A puller cancelled before a terminal outcome never calls finish()
+// and so never emits this — see pullAbandoned, the counterpart that closes
+// the span for that path instead, so no entry is ever left un-evicted.
 func (a *traceAssembler) pullFinished(e obs.Event) {
 	if e.Pull == nil {
 		return
@@ -540,5 +528,33 @@ func (a *traceAssembler) pullFinished(e obs.Event) {
 			ps.root.SetStatus(codes.Error, e.PullInfo.Error)
 		}
 	}
+	ps.root.End(trace.WithTimestamp(e.Time))
+}
+
+// pullAbandoned ends the pull's root span for the one path pullFinished
+// never sees: the last subscriber left before an attempt resolved, so
+// internal/images/puller.go's run() returned without a terminal outcome to
+// report. There is no outcome or bytes to attach — the pull's own work may
+// still be salvageable by a successor puller for the same dir, this cycle's
+// wait just stopped watching it — so the span closes as an error with a
+// fixed reason instead of a fabricated result.
+func (a *traceAssembler) pullAbandoned(e obs.Event) {
+	if e.Pull == nil {
+		return
+	}
+	a.mu.Lock()
+	ps := a.pulls[e.Pull.ID]
+	delete(a.pulls, e.Pull.ID)
+	a.mu.Unlock()
+	if ps == nil {
+		return
+	}
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.lastDetail != "" {
+		ps.root.SetAttributes(attribute.String("runny.progress.last", ps.lastDetail))
+	}
+	ps.root.SetStatus(codes.Error, "abandoned: last subscriber left before a terminal outcome")
 	ps.root.End(trace.WithTimestamp(e.Time))
 }

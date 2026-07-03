@@ -24,6 +24,14 @@ const (
 	// worth knowing at start is already on PullRef.
 	KindPullStarted  Kind = "pull_started"
 	KindPullFinished Kind = "pull_finished"
+	// KindPullAbandoned closes a pull that never reached a terminal
+	// outcome (its last subscriber left before an attempt resolved) —
+	// distinct from KindPullFinished so a metrics consumer that only
+	// switches on the latter still records nothing for it, matching the
+	// no-fabricated-outcome rule. It exists purely so a consumer that
+	// opened something at KindPullStarted has a signal to close it with;
+	// carries no payload.
+	KindPullAbandoned Kind = "pull_abandoned"
 )
 
 // PullEvent is the payload for KindPullFinished.

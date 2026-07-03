@@ -130,10 +130,10 @@ root and every subscribing cycle's `wait-for-pull` action both carry the same
 `runny.pull.id`, so a query joins them without the pull's trace needing to be
 a child of any one cycle's (it structurally can't be). A puller cancelled
 before a terminal outcome (its last subscriber left) never emits
-`KindPullFinished`, so its root span is never closed — a small, self-bounding
-artifact, not unbounded growth: `PullRef.ID` is a deterministic hash of the
-pull's content-addressed directory, so the next pull of the same image
-reuses the same ID and overwrites the assembler's stale entry.
+`KindPullFinished` — no fabricated outcome for a pull that never finished —
+but it does emit `KindPullAbandoned`, carrying no payload, purely so the root
+span still closes (`Status=Error`, a fixed reason) instead of leaking a map
+entry and an un-ended span for however long the daemon runs.
 
 Beyond the step tree, the trace carries the cycle's identity and audit
 detail: the root's attributes include the pool, the assembled runner name,

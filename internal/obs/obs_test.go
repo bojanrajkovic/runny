@@ -13,31 +13,12 @@ func testCycle() CycleRef {
 	return CycleRef{InstancePrefix: "host-ab12cd34", Slot: "slot-0", CycleID: "deadbeef", Started: time.Now()}
 }
 
-// Seq is per-cycle monotonic: every event emitted through one cycle scope
-// hands out a strictly increasing sequence.
-func TestSeqMonotonicPerCycle(t *testing.T) {
-	var got []uint64
-	emit := func(e Event) { got = append(got, e.Seq) }
-
-	ctx := WithStep(WithCycle(context.Background(), emit, testCycle()), "BOOT")
-	for range 3 {
-		_ = Action(ctx, "step", func(context.Context) error { return nil })
-	}
-
-	if len(got) != 6 { // ActionStarted + ActionEnded per call
-		t.Fatalf("got %d events, want 6", len(got))
-	}
-	for i := 1; i < len(got); i++ {
-		if got[i] <= got[i-1] {
-			t.Fatalf("Seq not monotonic: %v", got)
-		}
-	}
-}
-
-// The counter belongs to the cycle scope: step scopes derived from it share
-// it, so Seq stays strictly monotonic across the whole cycle no matter how
-// many step scopes the FSM layers on, interleaving Emit and Action.
-func TestSeqSharedAcrossStepScopes(t *testing.T) {
+// Every event emitted through a cycle's step scopes — however many the FSM
+// derives, interleaving Emit and Action across them — must still carry the
+// cycle's identity and a stamped Time, and each must carry the step it was
+// actually emitted under (empty for cycle-level events, the owning step's
+// name otherwise).
+func TestEmitAcrossStepScopesPreservesCycleIdentity(t *testing.T) {
 	var got []Event
 	emit := func(e Event) { got = append(got, e) }
 
@@ -58,9 +39,6 @@ func TestSeqSharedAcrossStepScopes(t *testing.T) {
 		t.Fatalf("got %d events, want 10", len(got))
 	}
 	for i, e := range got {
-		if e.Seq != uint64(i+1) {
-			t.Fatalf("event %d has Seq %d, want %d (per-cycle order broken): %+v", i, e.Seq, i+1, got)
-		}
 		if e.Cycle.CycleID != "deadbeef" {
 			t.Fatalf("event %d lost cycle identity: %+v", i, e)
 		}
@@ -230,32 +208,6 @@ func TestEventCarriesCycleIdentity(t *testing.T) {
 
 	if got.Cycle != cycle {
 		t.Fatalf("event cycle = %+v, want %+v", got.Cycle, cycle)
-	}
-}
-
-// Two independent cycle scopes (two cycles/slots) must not share a Seq
-// counter.
-func TestSeqIsPerCycleNotGlobal(t *testing.T) {
-	var seqsA, seqsB []uint64
-	emitA := func(e Event) { seqsA = append(seqsA, e.Seq) }
-	emitB := func(e Event) { seqsB = append(seqsB, e.Seq) }
-
-	ctxA := WithCycle(context.Background(), emitA, testCycle())
-	ctxB := WithCycle(context.Background(), emitB, testCycle())
-
-	_ = Action(ctxA, "a1", func(context.Context) error { return nil })
-	_ = Action(ctxB, "b1", func(context.Context) error { return nil })
-	_ = Action(ctxA, "a2", func(context.Context) error { return nil })
-
-	if len(seqsA) != 4 || len(seqsB) != 2 {
-		t.Fatalf("seqsA=%v seqsB=%v", seqsA, seqsB)
-	}
-	// A's second action pair must still be monotonic within A, unaffected by B.
-	if seqsA[2] <= seqsA[1] || seqsA[3] <= seqsA[2] {
-		t.Fatalf("seqsA not monotonic: %v", seqsA)
-	}
-	if seqsB[0] != 1 || seqsB[1] != 2 {
-		t.Fatalf("seqsB should start at 1 independently: %v", seqsB)
 	}
 }
 

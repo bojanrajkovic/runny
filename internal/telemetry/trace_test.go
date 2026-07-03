@@ -41,82 +41,75 @@ func at(seconds int) time.Time { return testCycle.Started.Add(time.Duration(seco
 func TestTraceConsumerGolden(t *testing.T) {
 	emit, exp := newTestAssembler(t)
 
-	var seq uint64
-	next := func() uint64 { seq++; return seq }
+	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
 
-	cycleStartSeq := next()
-	emit(obs.Event{Seq: cycleStartSeq, Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
-
-	bootSeq := next()
 	emit(obs.Event{
-		Seq: bootSeq, Time: at(1), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepEntered,
+		Time: at(1), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepEntered,
 		StepInfo: &obs.StepEvent{State: "BOOT"},
 	})
 
-	dialSeq := next()
 	emit(obs.Event{
-		Seq: dialSeq, Time: at(2), Cycle: testCycle, Step: "BOOT", Kind: obs.KindActionStarted,
+		Time: at(2), Cycle: testCycle, Step: "BOOT", Kind: obs.KindActionStarted,
 		Action: &obs.ActionEvent{Name: "dial", Attrs: []obs.Attr{{Key: "runny.hardening", Value: "scramble"}}},
 	})
 
 	emit(obs.Event{
-		Seq: next(), Time: at(3), Cycle: testCycle, Step: "BOOT", Kind: obs.KindDetail,
+		Time: at(3), Cycle: testCycle, Step: "BOOT", Kind: obs.KindDetail,
 		Detail: &obs.DetailEvent{Text: "dialing 10.0.0.5:22"},
 	})
 
 	emit(obs.Event{
-		Seq: next(), Time: at(4), Cycle: testCycle, Step: "BOOT", Kind: obs.KindActionEnded,
+		Time: at(4), Cycle: testCycle, Step: "BOOT", Kind: obs.KindActionEnded,
 		Action: &obs.ActionEvent{Name: "dial", Outcome: obs.OutcomeOK, Duration: 2 * time.Second},
 	})
 
 	// A step-level Detail (no action open) — must land on the step span, not
 	// the just-closed action span.
 	emit(obs.Event{
-		Seq: next(), Time: at(5), Cycle: testCycle, Step: "BOOT", Kind: obs.KindDetail,
+		Time: at(5), Cycle: testCycle, Step: "BOOT", Kind: obs.KindDetail,
 		Detail: &obs.DetailEvent{Text: "booted"},
 	})
 
 	emit(obs.Event{
-		Seq: next(), Time: at(6), Cycle: testCycle, Step: "BOOT", Kind: obs.KindVMInfo,
+		Time: at(6), Cycle: testCycle, Step: "BOOT", Kind: obs.KindVMInfo,
 		VM: &obs.VMEvent{MAC: "aa:bb:cc:dd:ee:ff"},
 	})
 	emit(obs.Event{
-		Seq: next(), Time: at(7), Cycle: testCycle, Step: "BOOT", Kind: obs.KindVMInfo,
+		Time: at(7), Cycle: testCycle, Step: "BOOT", Kind: obs.KindVMInfo,
 		VM: &obs.VMEvent{IP: "10.0.0.5"},
 	})
 	emit(obs.Event{
-		Seq: next(), Time: at(7), Cycle: testCycle, Step: "BOOT", Kind: obs.KindRunnerInfo,
+		Time: at(7), Cycle: testCycle, Step: "BOOT", Kind: obs.KindRunnerInfo,
 		Runner: &obs.RunnerEvent{ID: 424242},
 	})
 
 	emit(obs.Event{
-		Seq: next(), Time: at(8), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepLeft,
+		Time: at(8), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepLeft,
 		StepInfo: &obs.StepEvent{State: "BOOT", Outcome: obs.OutcomeOK},
 	})
 
-	jobSeq := next()
 	emit(obs.Event{
-		Seq: jobSeq, Time: at(9), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepEntered,
+		Time: at(9), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepEntered,
 		StepInfo: &obs.StepEvent{State: "JOB"},
 	})
 	emit(obs.Event{
-		Seq: next(), Time: at(10), Cycle: testCycle, Step: "JOB", Kind: obs.KindJobStarted,
+		Time: at(10), Cycle: testCycle, Step: "JOB", Kind: obs.KindJobStarted,
 		Job: &obs.JobEvent{Name: "build"},
 	})
 	// JobEnded fires before StepLeft (the FSM brackets job events inside the
 	// step) and carries the job's operator-key audit.
 	emit(obs.Event{
-		Seq: next(), Time: at(11), Cycle: testCycle, Step: "JOB", Kind: obs.KindJobEnded,
+		Time: at(11), Cycle: testCycle, Step: "JOB", Kind: obs.KindJobEnded,
 		Job: &obs.JobEvent{Name: "build", Outcome: obs.OutcomeOK, OperatorKeys: []string{"SHA256:testfp"}},
 	})
 	emit(obs.Event{
-		Seq: next(), Time: at(12), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepLeft,
+		Time: at(12), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepLeft,
 		StepInfo: &obs.StepEvent{State: "JOB", Outcome: obs.OutcomeOK},
 	})
 
 	opUID := uint32(501)
 	emit(obs.Event{
-		Seq: next(), Time: at(13), Cycle: testCycle, Kind: obs.KindAuditAppend,
+		Time: at(13), Cycle: testCycle, Kind: obs.KindAuditAppend,
 		Audit: &obs.AuditEvent{
 			Fingerprint: "SHA256:testfp", Comment: "oncall laptop", Reason: "flaky dns",
 			Outcome: "pending", State: "JOB", OperatorUID: &opUID, OperatorUser: "brajkovic",
@@ -124,7 +117,7 @@ func TestTraceConsumerGolden(t *testing.T) {
 	})
 
 	emit(obs.Event{
-		Seq: next(), Time: at(14), Cycle: testCycle, Kind: obs.KindCycleFinished,
+		Time: at(14), Cycle: testCycle, Kind: obs.KindCycleFinished,
 		Finish: &obs.FinishEvent{Result: "success", Ending: "success"},
 	})
 
@@ -253,9 +246,9 @@ func attrInt64(attrs []attribute.KeyValue, key string) int64   { return attr(att
 func TestTraceConsumerConcurrentDetail(t *testing.T) {
 	emit, _ := newTestAssembler(t)
 
-	emit(obs.Event{Seq: 1, Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
+	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
 	emit(obs.Event{
-		Seq: 2, Time: at(1), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepEntered,
+		Time: at(1), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepEntered,
 		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE"},
 	})
 
@@ -265,7 +258,7 @@ func TestTraceConsumerConcurrentDetail(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			emit(obs.Event{
-				Seq: uint64(100 + i), Time: at(1), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindDetail,
+				Time: at(1), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindDetail,
 				Detail: &obs.DetailEvent{Text: "pulling"},
 			})
 		}(i)
@@ -273,11 +266,11 @@ func TestTraceConsumerConcurrentDetail(t *testing.T) {
 	wg.Wait()
 
 	emit(obs.Event{
-		Seq: 3, Time: at(2), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepLeft,
+		Time: at(2), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepLeft,
 		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE", Outcome: obs.OutcomeOK},
 	})
 	emit(obs.Event{
-		Seq: 4, Time: at(3), Cycle: testCycle, Kind: obs.KindCycleFinished,
+		Time: at(3), Cycle: testCycle, Kind: obs.KindCycleFinished,
 		Finish: &obs.FinishEvent{Result: "success", Ending: "success"},
 	})
 }
@@ -290,17 +283,17 @@ func TestTraceConsumerConcurrentDetail(t *testing.T) {
 func TestTraceConsumerDeadlineIsFailure(t *testing.T) {
 	emit, exp := newTestAssembler(t)
 
-	emit(obs.Event{Seq: 1, Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
+	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
 	emit(obs.Event{
-		Seq: 2, Time: at(1), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepEntered,
+		Time: at(1), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepEntered,
 		StepInfo: &obs.StepEvent{State: "BOOT"},
 	})
 	emit(obs.Event{
-		Seq: 3, Time: at(2), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepLeft,
+		Time: at(2), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepLeft,
 		StepInfo: &obs.StepEvent{State: "BOOT", Outcome: "deadline", Error: "context deadline exceeded"},
 	})
 	emit(obs.Event{
-		Seq: 4, Time: at(3), Cycle: testCycle, Kind: obs.KindCycleFinished,
+		Time: at(3), Cycle: testCycle, Kind: obs.KindCycleFinished,
 		Finish: &obs.FinishEvent{Result: "failure", Ending: "failure", FailureState: "BOOT", Error: "context deadline exceeded"},
 	})
 
@@ -324,22 +317,22 @@ func TestTraceConsumerDeadlineIsFailure(t *testing.T) {
 func TestTraceConsumerLateJobEndedStillLandsOnRoot(t *testing.T) {
 	emit, exp := newTestAssembler(t)
 
-	emit(obs.Event{Seq: 1, Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
+	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
 	emit(obs.Event{
-		Seq: 2, Time: at(1), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepEntered,
+		Time: at(1), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepEntered,
 		StepInfo: &obs.StepEvent{State: "JOB"},
 	})
 	emit(obs.Event{
-		Seq: 3, Time: at(2), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepLeft,
+		Time: at(2), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepLeft,
 		StepInfo: &obs.StepEvent{State: "JOB", Outcome: obs.OutcomeOK},
 	})
 	// The old order: JobEnded after its step closed.
 	emit(obs.Event{
-		Seq: 4, Time: at(3), Cycle: testCycle, Step: "JOB", Kind: obs.KindJobEnded,
+		Time: at(3), Cycle: testCycle, Step: "JOB", Kind: obs.KindJobEnded,
 		Job: &obs.JobEvent{Name: "build", Outcome: obs.OutcomeOK, OperatorKeys: []string{"SHA256:latefp"}},
 	})
 	emit(obs.Event{
-		Seq: 5, Time: at(4), Cycle: testCycle, Kind: obs.KindCycleFinished,
+		Time: at(4), Cycle: testCycle, Kind: obs.KindCycleFinished,
 		Finish: &obs.FinishEvent{Result: "success", Ending: "success"},
 	})
 
@@ -369,25 +362,25 @@ func TestTraceConsumerImageIdentity(t *testing.T) {
 	ref := testCycle
 	ref.Image = "ghcr.io/test/image:1"
 
-	emit(obs.Event{Seq: 1, Time: at(0), Cycle: ref, Kind: obs.KindCycleStarted})
+	emit(obs.Event{Time: at(0), Cycle: ref, Kind: obs.KindCycleStarted})
 	emit(obs.Event{
-		Seq: 2, Time: at(1), Cycle: ref, Step: "ENSURE_IMAGE", Kind: obs.KindStepEntered,
+		Time: at(1), Cycle: ref, Step: "ENSURE_IMAGE", Kind: obs.KindStepEntered,
 		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE"},
 	})
 	emit(obs.Event{
-		Seq: 3, Time: at(2), Cycle: ref, Step: "ENSURE_IMAGE", Kind: obs.KindImageInfo,
+		Time: at(2), Cycle: ref, Step: "ENSURE_IMAGE", Kind: obs.KindImageInfo,
 		Image: &obs.ImageEvent{Digest: "sha256:abc"},
 	})
 	emit(obs.Event{
-		Seq: 4, Time: at(3), Cycle: ref, Step: "ENSURE_IMAGE", Kind: obs.KindImageInfo,
+		Time: at(3), Cycle: ref, Step: "ENSURE_IMAGE", Kind: obs.KindImageInfo,
 		Image: &obs.ImageEvent{RunnerVersion: "actions-runner-osx-arm64-2.320.0.tar.gz"},
 	})
 	emit(obs.Event{
-		Seq: 5, Time: at(4), Cycle: ref, Step: "ENSURE_IMAGE", Kind: obs.KindStepLeft,
+		Time: at(4), Cycle: ref, Step: "ENSURE_IMAGE", Kind: obs.KindStepLeft,
 		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE", Outcome: obs.OutcomeOK},
 	})
 	emit(obs.Event{
-		Seq: 6, Time: at(5), Cycle: ref, Kind: obs.KindCycleFinished,
+		Time: at(5), Cycle: ref, Kind: obs.KindCycleFinished,
 		Finish: &obs.FinishEvent{Result: "success", Ending: "success"},
 	})
 
@@ -429,52 +422,52 @@ func TestTraceConsumerImageIdentity(t *testing.T) {
 func TestTraceConsumerHTTPSpans(t *testing.T) {
 	emit, exp := newTestAssembler(t)
 
-	emit(obs.Event{Seq: 1, Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
+	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
 	emit(obs.Event{
-		Seq: 2, Time: at(1), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepEntered,
+		Time: at(1), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepEntered,
 		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE"},
 	})
 	emit(obs.Event{
-		Seq: 3, Time: at(2), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindActionStarted,
+		Time: at(2), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindActionStarted,
 		Action: &obs.ActionEvent{Name: "resolve"},
 	})
 	// Two manifest round trips inside the resolve action: a 401 challenge
 	// answered by the token dance, then the authenticated retry.
 	emit(obs.Event{
-		Seq: 4, Time: at(3), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindHTTP,
+		Time: at(3), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindHTTP,
 		HTTP: &obs.HTTPEvent{Class: obs.HTTPRegistryManifest, Method: "GET", Host: "ghcr.io", Status: 401, Duration: time.Second},
 	})
 	emit(obs.Event{
-		Seq: 5, Time: at(5), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindHTTP,
+		Time: at(5), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindHTTP,
 		HTTP: &obs.HTTPEvent{
 			Class: obs.HTTPRegistryManifest, Method: "GET", Host: "ghcr.io", Status: 200,
 			Duration: time.Second, HeaderDuration: 200 * time.Millisecond, BytesRead: 2048,
 		},
 	})
 	emit(obs.Event{
-		Seq: 6, Time: at(6), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindActionEnded,
+		Time: at(6), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindActionEnded,
 		Action: &obs.ActionEvent{Name: "resolve", Outcome: obs.OutcomeOK, Duration: 4 * time.Second},
 	})
 	emit(obs.Event{
-		Seq: 7, Time: at(7), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepLeft,
+		Time: at(7), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepLeft,
 		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE", Outcome: obs.OutcomeOK},
 	})
 	// MINT_JIT has no actions: its round trips parent under the step span,
 	// and a transport-level failure carries error status.
 	emit(obs.Event{
-		Seq: 8, Time: at(8), Cycle: testCycle, Step: "MINT_JIT", Kind: obs.KindStepEntered,
+		Time: at(8), Cycle: testCycle, Step: "MINT_JIT", Kind: obs.KindStepEntered,
 		StepInfo: &obs.StepEvent{State: "MINT_JIT"},
 	})
 	emit(obs.Event{
-		Seq: 9, Time: at(10), Cycle: testCycle, Step: "MINT_JIT", Kind: obs.KindHTTP,
+		Time: at(10), Cycle: testCycle, Step: "MINT_JIT", Kind: obs.KindHTTP,
 		HTTP: &obs.HTTPEvent{Class: obs.HTTPGitHubJIT, Method: "POST", Host: "api.github.com", Error: "context deadline exceeded", Duration: 2 * time.Second},
 	})
 	emit(obs.Event{
-		Seq: 10, Time: at(11), Cycle: testCycle, Step: "MINT_JIT", Kind: obs.KindStepLeft,
+		Time: at(11), Cycle: testCycle, Step: "MINT_JIT", Kind: obs.KindStepLeft,
 		StepInfo: &obs.StepEvent{State: "MINT_JIT", Outcome: obs.OutcomeError, Error: "mint failed"},
 	})
 	emit(obs.Event{
-		Seq: 11, Time: at(12), Cycle: testCycle, Kind: obs.KindCycleFinished,
+		Time: at(12), Cycle: testCycle, Kind: obs.KindCycleFinished,
 		Finish: &obs.FinishEvent{Result: "failure", Ending: "failure"},
 	})
 

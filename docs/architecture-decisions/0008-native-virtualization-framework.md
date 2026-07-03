@@ -51,7 +51,7 @@ parsing (octets are zero-stripped — normalize); OCI pull = own client
 
 - Deletes the child-supervision problem entirely; every VM operation is an
   in-process call the FSM deadline-bounds directly.
-- In-process VM lifetime (daemon dies → VMs die) aligns with crash-only
+- In-process VM lifetime (daemon dies → VMs die) aligns with single-use
   ephemeral runners; restart is a cold start (ADR-0004).
 - cgo + Virtualization.framework: runnyd must be codesigned with the
   `com.apple.security.virtualization` entitlement (ad-hoc OK locally); daemon

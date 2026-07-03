@@ -14,7 +14,7 @@ shared pull's spans).
 ## Context
 
 runny is built around a truthful record. Every cycle writes a cycle.json
-timeline ([ADR-0004](0004-crash-only-state-machine.md)); the live status
+timeline ([ADR-0004](0004-destroy-and-recycle-state-machine.md)); the live status
 snapshot is fed by the same FSM helpers that build that record; `runnyctl why`
 renders it. Adding OTEL traces and metrics (so fleet health is visible in
 standard tooling, not only through `runnyctl` and log scraping) raises a
@@ -26,7 +26,7 @@ from the one output the FSM already produces.
 
 Constraints that shape the answer:
 
-- **Crash-only** ([ADR-0004](0004-crash-only-state-machine.md)): telemetry
+- **No silent failure** ([ADR-0004](0004-destroy-and-recycle-state-machine.md)): telemetry
   must never block or alter the cycle, and telemetry loss must be visible
   (logged), never silent.
 - **No unbounded operations** ([ADR-0011](0011-bounded-contexts.md)): export

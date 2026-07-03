@@ -87,7 +87,7 @@ func parseableByRespawnTarget(ctx context.Context, plistPath, configPath string,
 // disk-headroom). That is deliberate and not a gap to close here: gating a
 // forward-only migration on live GitHub/registry/disk health would let a
 // transient blip refuse the very upgrade meant to fix things, and those failures
-// are not silent — the crash-only FSM meets them loudly at MINT_JIT / ENSURE_IMAGE
+// are not silent — the slot FSM meets them loudly at MINT_JIT / ENSURE_IMAGE
 // (backoff, why-visibility, cycle records), so a daemon with dead creds is no more
 // "alive" refused than respawned. The network checks are point-in-time anyway
 // (valid at gate-time, dead at runtime), so the FSM, not the gate, is the real net.

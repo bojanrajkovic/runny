@@ -22,7 +22,7 @@ keys" section for the current behavior.
 When a runner VM misbehaves — a wedged provision, a hung job, a guest that
 fails in a way the post-mortem diag does not explain — an operator needs a
 shell into the live guest *now*, not an autopsy of its corpse. Runny's guests
-are crash-only and ephemeral (ADR-0004, ADR-0008): the FSM's only response to
+are ephemeral (ADR-0004, ADR-0008): the FSM's only response to
 trouble is destroy-and-recycle, so by the time an operator notices, the
 evidence is usually already gone. Two distinct incident shapes need a live
 shell:
@@ -70,7 +70,7 @@ semantics*:
   — a pure exec-free re-arm when the fingerprint is already installed this
   cycle (survives a guest reboot), or a fresh audited install for a new key.
 
-Release is always destruction (crash-only: "resume listening" would be
+Release is always destruction ("resume listening" would be
 repair-in-place): explicit via `runnyctl recycle` (client-side `-force` guard),
 automatic via hold expiry (`limits.max_debug_hold`, default 2h), or daemon
 shutdown. All exits go through the unchanged TEARDOWN sink, so the injected key

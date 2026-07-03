@@ -66,7 +66,7 @@ The living shape — the fingerprint, the two-phase bounding, the verdict — is
 - **An on-disk clean-exit breadcrumb** (the dying process writes a file the
   successor consumes) to distinguish a graceful drain-exit from a
   crash-during-drain. It is load-bearing on-disk handoff state that the
-  crash-only invariant ([ADR-0004](0004-crash-only-state-machine.md)) works to
+  cold-start rule ([ADR-0004](0004-destroy-and-recycle-state-machine.md)) works to
   avoid, and it tied the success signal to the clean-exit path — making a crash
   that lands the *right* config report a false failure. The actionable
   distinction (a job was interrupted) is instead **observed client-side**: a

@@ -9,7 +9,7 @@ import "io"
 // or sshd inherits that exemption; but a process that self-daemonizes — forks
 // and lets its parent exit, reparenting to launchd — is neither, and macOS
 // silently denies it vmnet access (guest dials fail "no route to host"). runnyd
-// must never background itself; crash-only KeepAlive keeps it a launchd child.
+// must never background itself; KeepAlive restarts keep it a launchd child.
 // This type makes the invariant observable at startup, not only at the first
 // failed guest dial.
 type launchContext int

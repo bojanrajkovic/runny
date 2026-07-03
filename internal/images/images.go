@@ -372,7 +372,7 @@ func (e *Ensurer) ensureRunnerTarball(ctx context.Context, report func(string)) 
 		// A real download starts here — the metric brackets exactly this, so a
 		// cache hit or a slot that waited out a peer's download records nothing.
 		start := time.Now()
-		derr := e.downloadTarball(ctx, dest, assetName, assetURL, wantSHA, report)
+		derr := e.downloadTarball(ctx, dest, assetURL, wantSHA, report)
 		// A download truncated by the caller's own cancellation (operator
 		// recycle, daemon shutdown) is not a download outcome — record nothing,
 		// the same rule the pull side follows. A stall kill still records: its
@@ -393,7 +393,8 @@ func (e *Ensurer) ensureRunnerTarball(ctx context.Context, report func(string)) 
 // downloadTarball fetches assetURL to dest via a .partial temp file, with
 // stall watching, progress reporting, and the service-declared checksum
 // verification.
-func (e *Ensurer) downloadTarball(ctx context.Context, dest, assetName, assetURL, wantSHA string, report func(string)) error {
+func (e *Ensurer) downloadTarball(ctx context.Context, dest, assetURL, wantSHA string, report func(string)) error {
+	assetName := filepath.Base(dest) // dest is cacheDir joined with assetName
 	log := e.log()
 	log.Info("downloading runner tarball", "asset", assetName)
 	if report != nil {

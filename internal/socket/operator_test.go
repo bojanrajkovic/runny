@@ -3,7 +3,6 @@
 package socket
 
 import (
-	"context"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -12,7 +11,6 @@ import (
 	"time"
 
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
@@ -58,12 +56,6 @@ func newOperatorTestServer(t *testing.T) *Server {
 	s := &Server{HomeDir: home.Dir(homeDir)}
 	s.socketPath = sock
 	return s
-}
-
-// asOperator returns a context carrying a peerAuth identity, as if the
-// caller authenticated over the real socket with this uid.
-func asOperator(ctx context.Context, uid uint32) context.Context {
-	return peer.NewContext(ctx, &peer.Peer{AuthInfo: peerAuth{UID: &uid}})
 }
 
 func TestGrantOperatorRequiresSystemDaemon(t *testing.T) {

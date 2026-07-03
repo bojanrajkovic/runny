@@ -964,11 +964,11 @@ func captureDaemonLog(t *testing.T) *logring.Ring {
 	return ring
 }
 
-// operatorPeerCtx builds a ctx carrying a kernel-authenticated peer uid, the
-// shape peerCreds installs during ServerHandshake.
-func operatorPeerCtx(t *testing.T, uid uint32) context.Context {
-	t.Helper()
-	return peer.NewContext(t.Context(), &peer.Peer{AuthInfo: peerAuth{UID: &uid}})
+// asOperator returns a context carrying a peerAuth identity, as if the
+// caller authenticated over the real socket with this uid. Lives here (not
+// the darwin-gated operator_test.go) so portable tests can use it too.
+func asOperator(ctx context.Context, uid uint32) context.Context {
+	return peer.NewContext(ctx, &peer.Peer{AuthInfo: peerAuth{UID: &uid}})
 }
 
 // stubUsername makes lookupUsername resolve every uid to name for the test.
@@ -991,8 +991,8 @@ func operatorLines(ring *logring.Ring) []logring.Entry {
 }
 
 // wantOperatorLine asserts the ring holds exactly one operator line with the
-// given message and attrs.
-func wantOperatorLine(t *testing.T, ring *logring.Ring, msg string, attrs map[string]string) {
+// given message and attrs, returning it for further absence checks.
+func wantOperatorLine(t *testing.T, ring *logring.Ring, msg string, attrs map[string]string) logring.Entry {
 	t.Helper()
 	lines := operatorLines(ring)
 	if len(lines) != 1 {
@@ -1007,6 +1007,7 @@ func wantOperatorLine(t *testing.T, ring *logring.Ring, msg string, attrs map[st
 			t.Errorf("attr %s = %q, want %q", k, got, v)
 		}
 	}
+	return e
 }
 
 // Recycle logs the authenticated operator and the command's own attrs, naming
@@ -1015,7 +1016,7 @@ func TestRecycleLogsOperator(t *testing.T) {
 	ring := captureDaemonLog(t)
 	stubUsername(t, "bob")
 	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
-	if _, err := srv.Recycle(operatorPeerCtx(t, 503), &runnyv1.RecycleRequest{
+	if _, err := srv.Recycle(asOperator(t.Context(), 503), &runnyv1.RecycleRequest{
 		Slot: "host-a1b2c3d4-mac-1-e48657d0", Reason: "wedged", CancelRunningJob: true,
 	}); err != nil {
 		t.Fatal(err)
@@ -1031,7 +1032,7 @@ func TestPauseLogsOperatorWithCommandID(t *testing.T) {
 	ring := captureDaemonLog(t)
 	stubUsername(t, "bob")
 	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
-	if _, err := srv.Pause(operatorPeerCtx(t, 503), &runnyv1.PauseRequest{
+	if _, err := srv.Pause(asOperator(t.Context(), 503), &runnyv1.PauseRequest{
 		Slot: "mac-1", CommandId: "cmd-abc",
 	}); err != nil {
 		t.Fatal(err)
@@ -1047,13 +1048,13 @@ func TestResumeLogsOperatorWithoutCommandID(t *testing.T) {
 	ring := captureDaemonLog(t)
 	stubUsername(t, "bob")
 	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
-	if _, err := srv.Resume(operatorPeerCtx(t, 503), &runnyv1.ResumeRequest{Slot: "mac-1"}); err != nil {
+	if _, err := srv.Resume(asOperator(t.Context(), 503), &runnyv1.ResumeRequest{Slot: "mac-1"}); err != nil {
 		t.Fatal(err)
 	}
-	wantOperatorLine(t, ring, "operator resume", map[string]string{
+	e := wantOperatorLine(t, ring, "operator resume", map[string]string{
 		"slot": "mac-1", "operator_uid": "503", "operator_user": "bob",
 	})
-	if _, present := operatorLines(ring)[0].Attrs["command_id"]; present {
+	if _, present := e.Attrs["command_id"]; present {
 		t.Error("empty command_id must stay off the log line")
 	}
 }
@@ -1066,10 +1067,10 @@ func TestLifecycleLogUnknownPeerCred(t *testing.T) {
 	if _, err := srv.Recycle(t.Context(), &runnyv1.RecycleRequest{Slot: "mac-1", Reason: "x"}); err != nil {
 		t.Fatal(err)
 	}
-	wantOperatorLine(t, ring, "operator recycle", map[string]string{
+	e := wantOperatorLine(t, ring, "operator recycle", map[string]string{
 		"slot": "mac-1", "operator_uid": "unknown",
 	})
-	if _, present := operatorLines(ring)[0].Attrs["operator_user"]; present {
+	if _, present := e.Attrs["operator_user"]; present {
 		t.Error("unknown peer cred must not carry an operator_user")
 	}
 }
@@ -1082,7 +1083,7 @@ func TestRejectedSlotCommandLogsNothing(t *testing.T) {
 	for slots[0].Command(statemachine.Command{Kind: statemachine.CmdPause}) {
 	}
 	srv := newTestServer(slots, nil, nil, nil)
-	if _, err := srv.Recycle(operatorPeerCtx(t, 503), &runnyv1.RecycleRequest{Slot: "mac-1"}); err == nil {
+	if _, err := srv.Recycle(asOperator(t.Context(), 503), &runnyv1.RecycleRequest{Slot: "mac-1"}); err == nil {
 		t.Fatal("expected the full-buffer rejection")
 	}
 	if lines := operatorLines(ring); len(lines) != 0 {
@@ -1099,7 +1100,7 @@ func TestReloadLogsAttemptAndVerdict(t *testing.T) {
 	srv.ReloadFn = func(ctx context.Context, reason string) ReloadResult {
 		return ReloadResult{Accepted: false}
 	}
-	if _, err := srv.Reload(operatorPeerCtx(t, 503), &runnyv1.ReloadRequest{Reason: "new image"}); err != nil {
+	if _, err := srv.Reload(asOperator(t.Context(), 503), &runnyv1.ReloadRequest{Reason: "new image"}); err != nil {
 		t.Fatal(err)
 	}
 	wantOperatorLine(t, ring, "operator reload", map[string]string{
@@ -1115,7 +1116,7 @@ func TestUpgradeReloadLogsVerdict(t *testing.T) {
 	srv.UpgradeReloadFn = func(ctx context.Context, reason string) ReloadResult {
 		return ReloadResult{Accepted: true, StartedDrain: true}
 	}
-	if _, err := srv.UpgradeReload(operatorPeerCtx(t, 503), &runnyv1.ReloadRequest{Reason: "upgrade"}); err != nil {
+	if _, err := srv.UpgradeReload(asOperator(t.Context(), 503), &runnyv1.ReloadRequest{Reason: "upgrade"}); err != nil {
 		t.Fatal(err)
 	}
 	wantOperatorLine(t, ring, "operator upgrade-reload", map[string]string{
@@ -1137,13 +1138,13 @@ func TestPruneApplyLogsOperatorDryRunDoesNot(t *testing.T) {
 			Items:          []PruneItem{{Path: "/fake", Bytes: 2048, Kind: "runner-tarball", Reason: "superseded"}},
 		}
 	}
-	if _, err := srv.Prune(operatorPeerCtx(t, 503), &runnyv1.PruneRequest{Apply: false}); err != nil {
+	if _, err := srv.Prune(asOperator(t.Context(), 503), &runnyv1.PruneRequest{Apply: false}); err != nil {
 		t.Fatal(err)
 	}
 	if lines := operatorLines(ring); len(lines) != 0 {
 		t.Errorf("dry-run prune logged %v, want nothing", lines)
 	}
-	if _, err := srv.Prune(operatorPeerCtx(t, 503), &runnyv1.PruneRequest{Apply: true}); err != nil {
+	if _, err := srv.Prune(asOperator(t.Context(), 503), &runnyv1.PruneRequest{Apply: true}); err != nil {
 		t.Fatal(err)
 	}
 	wantOperatorLine(t, ring, "operator prune", map[string]string{

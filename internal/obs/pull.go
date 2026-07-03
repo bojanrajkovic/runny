@@ -2,7 +2,6 @@ package obs
 
 import (
 	"context"
-	"sync/atomic"
 	"time"
 )
 
@@ -25,9 +24,6 @@ const (
 	// worth knowing at start is already on PullRef.
 	KindPullStarted  Kind = "pull_started"
 	KindPullFinished Kind = "pull_finished"
-	// KindTarballDone is cycle-scoped: a runner-tarball download belongs to
-	// whichever cycle triggered it, unlike a shared image pull.
-	KindTarballDone Kind = "tarball_done"
 )
 
 // PullEvent is the payload for KindPullFinished.
@@ -38,22 +34,11 @@ type PullEvent struct {
 	Bytes    int64
 }
 
-// TarballEvent is the payload for KindTarballDone.
-type TarballEvent struct {
-	Outcome  Outcome
-	Error    string
-	Duration time.Duration
-}
-
 // WithPull establishes the observability scope for one shared image pull:
 // every Emit on the returned context (or a derived context) emits through
 // emit with Event.Pull set to pull instead of Event.Cycle, stamped from this
 // call's own per-pull Seq counter. emit may be nil, degrading every Emit on
 // this scope to a no-op — the same contract WithCycle gives cycle scopes.
 func WithPull(ctx context.Context, emit Emitter, pull PullRef) context.Context {
-	return context.WithValue(ctx, scopeKey{}, &scope{
-		emit: emit,
-		pull: &pull,
-		seq:  new(atomic.Uint64),
-	})
+	return context.WithValue(ctx, scopeKey{}, newScope(emit, CycleRef{}, &pull))
 }

@@ -36,6 +36,10 @@ const (
 	KindAuditAppend   Kind = "audit_append"
 	KindAuditUpdate   Kind = "audit_update"
 	KindCycleFinished Kind = "cycle_finished"
+	// KindTarballDone is cycle-scoped: a runner-tarball download belongs to
+	// whichever cycle triggered it, unlike a shared image pull (see pull.go
+	// for the pull-scoped kinds).
+	KindTarballDone Kind = "tarball_done"
 )
 
 // Action names are a closed set: each becomes a span name on the trace side
@@ -216,6 +220,13 @@ type FinishEvent struct {
 	Error        string
 }
 
+// TarballEvent is the payload for KindTarballDone.
+type TarballEvent struct {
+	Outcome  Outcome
+	Error    string
+	Duration time.Duration
+}
+
 // Event is one entry in a cycle's — or a shared image pull's —
 // observability stream. Exactly one kind-specific payload is populated,
 // selected by Kind, and exactly one of Cycle/Pull identifies which scope the
@@ -258,12 +269,15 @@ type Event struct {
 // All events for one cycle scope are emitted from a single goroutine (the
 // slot's FSM goroutine) with two exceptions an emitter must tolerate:
 // KindHTTP from a scoped context handed to concurrent requests, and every
-// pull-scoped event, which comes from the shared image puller's own
-// goroutine — never a cycle's FSM goroutine, and never interleaved with a
-// cycle scope's events (the two scope kinds never share a Seq counter). The
-// scope's Seq counter is atomic, so order stays coherent within each scope.
-// Seq is the durable per-scope order consumers sort and correlate by, not a
-// concurrency serializer.
+// pull-scoped event after the first — KindPullStarted runs on whichever
+// cycle's goroutine happens to create the puller (the same goroutine that
+// calls WithPull), but everything after it (KindDetail, KindHTTP,
+// KindPullFinished) comes from the shared image puller's own goroutine, its
+// progress watcher, or its blob-fetch workers — never a cycle's FSM
+// goroutine, and never interleaved with a cycle scope's events (the two
+// scope kinds never share a Seq counter). The scope's Seq counter is atomic,
+// so order stays coherent within each scope. Seq is the durable per-scope
+// order consumers sort and correlate by, not a concurrency serializer.
 type Emitter func(Event)
 
 // scope is the context-carried identity: which cycle/step (or pull) is
@@ -292,11 +306,14 @@ type scopeKey struct{}
 // Action on this scope a no-op — the shape used when telemetry is
 // unconfigured.
 func WithCycle(ctx context.Context, emit Emitter, cycle CycleRef) context.Context {
-	return context.WithValue(ctx, scopeKey{}, &scope{
-		emit:  emit,
-		cycle: cycle,
-		seq:   new(atomic.Uint64),
-	})
+	return context.WithValue(ctx, scopeKey{}, newScope(emit, cycle, nil))
+}
+
+// newScope builds the scope both WithCycle and WithPull install: same
+// emitter/Seq machinery, differing only in which identity — cycle or pull —
+// is set. pull nil means a cycle scope.
+func newScope(emit Emitter, cycle CycleRef, pull *PullRef) *scope {
+	return &scope{emit: emit, cycle: cycle, pull: pull, seq: new(atomic.Uint64)}
 }
 
 // WithStep derives a scope for one FSM step: same cycle, same emitter, and
@@ -323,6 +340,15 @@ func liveScope(ctx context.Context) *scope {
 		return nil
 	}
 	return s
+}
+
+// Live reports whether ctx carries a scope that can actually emit — the
+// same predicate Action and HTTPTransport check internally before doing any
+// work. A caller outside this package that builds a payload before calling
+// Emit on a hot path should check this first, so a scope-less or
+// nil-emitter context never pays for an allocation nobody will read.
+func Live(ctx context.Context) bool {
+	return liveScope(ctx) != nil
 }
 
 // emitEvent stamps e with the scope's next Seq, the current time, and the

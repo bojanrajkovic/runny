@@ -124,7 +124,8 @@ func (e *Ensurer) acquireImagePull(dir string, ref oci.Ref, report func(string))
 func acquirePuller(dir string, report func(string), proto *imagePuller) (*subscription, func()) {
 	pullerRegistryMu.Lock()
 	p := pullerRegistry[dir]
-	if p == nil {
+	created := p == nil
+	if created {
 		now := time.Now()
 		pctx, cancel := context.WithCancel(context.Background())
 		pctx = obs.WithPull(pctx, proto.events, obs.PullRef{
@@ -136,7 +137,6 @@ func acquirePuller(dir string, report func(string), proto *imagePuller) (*subscr
 		proto.startedAt = now
 		p = proto
 		pullerRegistry[dir] = p
-		obs.Emit(pctx, obs.Event{Kind: obs.KindPullStarted})
 		go p.run()
 	}
 	sub := &subscription{done: make(chan ensureResult, 1)}
@@ -150,6 +150,14 @@ func acquirePuller(dir string, report func(string), proto *imagePuller) (*subscr
 	last := p.lastDetail
 	p.mu.Unlock()
 	pullerRegistryMu.Unlock()
+	// KindPullStarted waits until both locks are released: an installed
+	// emitter is a caller-supplied callback (obs.Emitter's contract puts the
+	// must-not-block burden on whoever installs it, not on us), and calling
+	// it while holding the one global pullerRegistryMu would let a slow
+	// emitter serialize every pool/slot's pull acquisition daemon-wide.
+	if created {
+		obs.Emit(p.ctx, obs.Event{Kind: obs.KindPullStarted})
+	}
 	if last != "" && report != nil {
 		report(last) // a late joiner sees the current wait immediately
 	}
@@ -350,7 +358,12 @@ func (p *imagePuller) holdDetail(dir string, dh *oci.DiskHeadroomError, deadline
 // it: each reporter is a slot's setDetail, which takes the slot mutex, so
 // calling it under p.mu would invert the lock order into slot.mu -> p.mu.
 func (p *imagePuller) report(detail string) {
-	obs.Emit(p.ctx, obs.Event{Kind: obs.KindDetail, Detail: &obs.DetailEvent{Text: detail}})
+	// Gate on obs.Live before building the payload: this fires up to once a
+	// second for the life of a multi-GiB pull, and with telemetry off (the
+	// documented default) there is no emitter to read a DetailEvent anyway.
+	if obs.Live(p.ctx) {
+		obs.Emit(p.ctx, obs.Event{Kind: obs.KindDetail, Detail: &obs.DetailEvent{Text: detail}})
+	}
 	p.mu.Lock()
 	p.lastDetail = detail
 	reporters := make([]func(string), 0, len(p.subs))

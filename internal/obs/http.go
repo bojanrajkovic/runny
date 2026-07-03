@@ -122,7 +122,7 @@ func (t *HTTPTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		Host:   req.URL.Hostname(),
 	}
 	if err != nil {
-		h.Error = err.Error()
+		h.Error = ErrText(err)
 		h.Duration = time.Since(start)
 		s.emitEvent(Event{Kind: KindHTTP, HTTP: &h})
 		return resp, err
@@ -139,9 +139,7 @@ func (t *HTTPTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp.Body = &observedBody{rc: resp.Body, emit: func(n int64, readErr error) {
 		h.Duration = time.Since(start)
 		h.BytesRead = n
-		if readErr != nil {
-			h.Error = readErr.Error()
-		}
+		h.Error = ErrText(readErr)
 		s.emitEvent(Event{Kind: KindHTTP, HTTP: &h})
 	}}
 	return resp, nil

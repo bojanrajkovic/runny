@@ -28,6 +28,20 @@ func testProto(dir string) *imagePuller {
 	}
 }
 
+// testPullerWithSeams is a testProto with its attempt/diskFree seams
+// stubbed — the shared build step testAcquire and testAcquireWithEvents
+// both start from, so the one extra field the latter sets (events) is the
+// only difference between the two call sites.
+func testPullerWithSeams(dir string,
+	attempt func(context.Context) (string, error),
+	diskFree func(string) (uint64, error),
+) *imagePuller {
+	proto := testProto(dir)
+	proto.attempt = attempt
+	proto.diskFree = diskFree
+	return proto
+}
+
 // testAcquire subscribes to a puller for dir with stubbed seams (attempt /
 // diskFree), exercising the registry + run-loop without a live registry or a
 // real filesystem.
@@ -36,23 +50,17 @@ func testAcquire(t *testing.T, dir string, report func(string),
 	diskFree func(string) (uint64, error),
 ) (*subscription, func()) {
 	t.Helper()
-	proto := testProto(dir)
-	proto.attempt = attempt
-	proto.diskFree = diskFree
-	return acquirePuller(dir, report, proto)
+	return acquirePuller(dir, report, testPullerWithSeams(dir, attempt, diskFree))
 }
 
 // testAcquireWithEvents is testAcquire plus a fake obs.Emitter wired onto
-// the puller's own pull scope — the two suites (default seams, plus an
-// emitter) share the same testProto configuration.
+// the puller's own pull scope.
 func testAcquireWithEvents(t *testing.T, dir string, emit obs.Emitter,
 	attempt func(context.Context) (string, error),
 	diskFree func(string) (uint64, error),
 ) (*subscription, func()) {
 	t.Helper()
-	proto := testProto(dir)
-	proto.attempt = attempt
-	proto.diskFree = diskFree
+	proto := testPullerWithSeams(dir, attempt, diskFree)
 	proto.events = emit
 	return acquirePuller(dir, nil, proto)
 }
@@ -310,29 +318,21 @@ func TestPullerSubscribeAtTerminalNeverHangs(t *testing.T) {
 	}
 }
 
-// collectEvents is a goroutine-safe obs.Emitter that appends to a slice —
-// the puller's own goroutine and the progress watcher's can both call in.
-func collectEvents() (obs.Emitter, func() []obs.Event) {
-	var mu sync.Mutex
-	var events []obs.Event
-	emit := func(e obs.Event) { mu.Lock(); events = append(events, e); mu.Unlock() }
-	all := func() []obs.Event { mu.Lock(); defer mu.Unlock(); return append([]obs.Event(nil), events...) }
-	return emit, all
-}
-
 // A successful pull emits exactly one KindPullStarted and one
 // KindPullFinished, both carrying the puller's own Pull identity (never a
-// Cycle), with the finished payload reporting outcome=ok.
+// Cycle), with the finished payload reporting outcome=ok. eventCapture (see
+// images_test.go) is the shared goroutine-safe obs.Emitter test double — the
+// puller's own goroutine and the progress watcher's can both call in.
 func TestPullerEmitsStartedAndFinishedWithPullIdentity(t *testing.T) {
 	dir := t.TempDir()
-	emit, all := collectEvents()
+	cap := &eventCapture{}
 	attempt := func(ctx context.Context) (string, error) { return "sha256:x", nil }
-	sub, rel := testAcquireWithEvents(t, dir, emit, attempt, okFree(0))
+	sub, rel := testAcquireWithEvents(t, dir, cap.emit, attempt, okFree(0))
 	defer rel()
 	recvWithin(t, sub, time.Second)
 
 	var started, finished int
-	for _, e := range all() {
+	for _, e := range cap.all() {
 		if e.Pull == nil {
 			t.Fatalf("event %s missing Pull identity: %+v", e.Kind, e)
 		}
@@ -363,7 +363,7 @@ func TestPullerHTTPTrafficCarriesPullScope(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	dir := t.TempDir()
-	emit, all := collectEvents()
+	cap := &eventCapture{}
 	client := &http.Client{Transport: &obs.HTTPTransport{}}
 	attempt := func(ctx context.Context) (string, error) {
 		req, err := http.NewRequestWithContext(obs.WithHTTPClass(ctx, obs.HTTPRegistryBlob), http.MethodGet, srv.URL, nil)
@@ -378,12 +378,12 @@ func TestPullerHTTPTrafficCarriesPullScope(t *testing.T) {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return "sha256:x", nil
 	}
-	sub, rel := testAcquireWithEvents(t, dir, emit, attempt, okFree(0))
+	sub, rel := testAcquireWithEvents(t, dir, cap.emit, attempt, okFree(0))
 	defer rel()
 	recvWithin(t, sub, time.Second)
 
 	var httpEvents int
-	for _, e := range all() {
+	for _, e := range cap.all() {
 		if e.Kind != obs.KindHTTP {
 			continue
 		}
@@ -405,7 +405,7 @@ func TestPullerHTTPTrafficCarriesPullScope(t *testing.T) {
 // subscribing cycle.
 func TestPullerDiskHoldEmitsDetailUnderPullScope(t *testing.T) {
 	dir := t.TempDir()
-	emit, all := collectEvents()
+	cap := &eventCapture{}
 	var attempts atomic.Int32
 	attempt := func(ctx context.Context) (string, error) {
 		if attempts.Add(1) == 1 {
@@ -420,12 +420,12 @@ func TestPullerDiskHoldEmitsDetailUnderPullScope(t *testing.T) {
 		}
 		return 1 << 62, nil
 	}
-	sub, rel := testAcquireWithEvents(t, dir, emit, attempt, diskFree)
+	sub, rel := testAcquireWithEvents(t, dir, cap.emit, attempt, diskFree)
 	defer rel()
 	recvWithin(t, sub, 2*time.Second)
 
 	var sawDetail bool
-	for _, e := range all() {
+	for _, e := range cap.all() {
 		if e.Kind == obs.KindDetail {
 			sawDetail = true
 			if e.Pull == nil {
@@ -443,14 +443,14 @@ func TestPullerDiskHoldEmitsDetailUnderPullScope(t *testing.T) {
 // subscriber-facing result.
 func TestPullerEmitsFinishedOnPanic(t *testing.T) {
 	dir := t.TempDir()
-	emit, all := collectEvents()
+	cap := &eventCapture{}
 	attempt := func(ctx context.Context) (string, error) { panic("boom in the pull") }
-	sub, rel := testAcquireWithEvents(t, dir, emit, attempt, okFree(0))
+	sub, rel := testAcquireWithEvents(t, dir, cap.emit, attempt, okFree(0))
 	defer rel()
 	recvWithin(t, sub, time.Second)
 
 	var finished int
-	for _, e := range all() {
+	for _, e := range cap.all() {
 		if e.Kind == obs.KindPullFinished {
 			finished++
 		}
@@ -465,7 +465,7 @@ func TestPullerEmitsFinishedOnPanic(t *testing.T) {
 // exercises for the registry, here asserted for the KindPullFinished event.
 func TestPullerEmitsFinishedEvenAfterLastSubscriberLeaves(t *testing.T) {
 	dir := t.TempDir()
-	emit, all := collectEvents()
+	cap := &eventCapture{}
 	started := make(chan struct{})
 	proceed := make(chan struct{})
 	attempt := func(ctx context.Context) (string, error) {
@@ -473,7 +473,7 @@ func TestPullerEmitsFinishedEvenAfterLastSubscriberLeaves(t *testing.T) {
 		<-proceed // the pull already committed to disk; ignore cancellation
 		return "sha256:landed", nil
 	}
-	_, rel := testAcquireWithEvents(t, dir, emit, attempt, okFree(0))
+	_, rel := testAcquireWithEvents(t, dir, cap.emit, attempt, okFree(0))
 	<-started
 	rel()          // the only subscriber leaves mid-attempt
 	close(proceed) // let the attempt land anyway
@@ -481,7 +481,7 @@ func TestPullerEmitsFinishedEvenAfterLastSubscriberLeaves(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		var finished int
-		for _, e := range all() {
+		for _, e := range cap.all() {
 			if e.Kind == obs.KindPullFinished {
 				finished++
 			}

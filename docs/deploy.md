@@ -249,6 +249,21 @@ short-lived installation token scoped to `homebrew-tap`; it no-ops until those
 secrets exist. That App is deliberately *not* the runtime runner-registration
 App — release/CI and prod-host/runner-admin are separate blast radii.
 
+**Beta channel:** a manually-tagged pre-release (ADR-0010) publishes a
+separate `runny-beta` formula and `runny-app-beta` cask instead of
+overwriting the stable pair:
+
+```sh
+brew install bojanrajkovic/tap/runny-beta                # CLI, beta channel
+brew install --cask bojanrajkovic/tap/runny-app-beta      # app, beta channel
+```
+
+All four packages (`runny`, `runny-beta`, `runny-app`, `runny-app-beta`) are
+mutually exclusive with each other — same binaries, and for the casks the
+same `Runny.app` bundle identity — so switching channels means
+uninstalling the old one first (e.g. `brew uninstall runny-beta && brew
+install runny`).
+
 ## Headless system daemon
 
 For a headless fleet host — no desktop login — runnyd runs as a **non-root

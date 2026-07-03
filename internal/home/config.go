@@ -279,10 +279,9 @@ func parseConfig(raw []byte, path string) (*Config, error) {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
 	c.applyDefaults()
-	if err := c.expandOTLPHeaders(); err != nil {
-		return nil, fmt.Errorf("invalid config %s: %w", path, err)
-	}
-	if err := c.validate(); err != nil {
+	// validate() reads no header values, so it can run (and join errors)
+	// even when expansion failed.
+	if err := errors.Join(c.expandOTLPHeaders(), c.validate()); err != nil {
 		return nil, fmt.Errorf("invalid config %s: %w", path, err)
 	}
 	return &c, nil

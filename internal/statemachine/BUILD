@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "fsm.go",
         "io.go",
+        "run.go",
         "statuscell.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/statemachine",

@@ -768,14 +768,15 @@ func assertCycleFramed(t *testing.T, events []obs.Event, rec *cycle.Record) {
 func TestRecordOperatorKeyNotifiesWatchers(t *testing.T) {
 	job := &cycle.JobInfo{Name: "build"}
 	rec := &cycle.Record{Job: job}
-	s := &Slot{cell: &statusCell{}}
-	s.cell.status.Job = job
+	cell := &statusCell{}
+	cell.status.Job = job
+	c := &run{cell: cell, rec: rec}
 
 	got := make(chan Status, 4)
-	s.OnChange(func(st Status) { got <- st })
+	cell.onChangeAppend(func(st Status) { got <- st })
 
 	const fp = "SHA256:operator-key"
-	s.recordOperatorKey(rec, fp)
+	c.recordOperatorKey(fp)
 
 	select {
 	case st := <-got:
@@ -2863,12 +2864,12 @@ func TestDrainForCompletionClassifiesCompletedNotBudget(t *testing.T) {
 	// in proc.Lines(), drainForCompletion must classify the job as COMPLETED,
 	// never a budget blowout. A blind budget interval would coin-flip this; the
 	// drain-check makes the accounting exact.
-	s := NewSlot("t", Deps{})
+	newRun := func(p Proc) *run { return &run{deps: Deps{}, rec: &cycle.Record{CycleID: "cyc"}, proc: p} }
 
 	t.Run("buffered completion marker → completed/ok", func(t *testing.T) {
 		p := newFakeProc()
 		p.say("Job build completed with result: Succeeded")
-		done, ok := s.drainForCompletion(p, "cyc")
+		done, ok := newRun(p).drainForCompletion()
 		if !done || !ok {
 			t.Errorf("drainForCompletion = (%v, %v), want (true, true) — a buffered marker is a completion", done, ok)
 		}
@@ -2877,7 +2878,7 @@ func TestDrainForCompletionClassifiesCompletedNotBudget(t *testing.T) {
 	t.Run("channel closed with code 0 → completed/ok", func(t *testing.T) {
 		p := newFakeProc()
 		p.exit(0)
-		done, ok := s.drainForCompletion(p, "cyc")
+		done, ok := newRun(p).drainForCompletion()
 		if !done || !ok {
 			t.Errorf("drainForCompletion = (%v, %v), want (true, true)", done, ok)
 		}
@@ -2886,7 +2887,7 @@ func TestDrainForCompletionClassifiesCompletedNotBudget(t *testing.T) {
 	t.Run("channel closed with nonzero code → completed/not-ok", func(t *testing.T) {
 		p := newFakeProc()
 		p.exit(7)
-		done, ok := s.drainForCompletion(p, "cyc")
+		done, ok := newRun(p).drainForCompletion()
 		if !done || ok {
 			t.Errorf("drainForCompletion = (%v, %v), want (true, false)", done, ok)
 		}
@@ -2895,7 +2896,7 @@ func TestDrainForCompletionClassifiesCompletedNotBudget(t *testing.T) {
 	t.Run("nothing buffered → genuine blowout", func(t *testing.T) {
 		p := newFakeProc()
 		p.say("still working, no completion in sight")
-		done, ok := s.drainForCompletion(p, "cyc")
+		done, ok := newRun(p).drainForCompletion()
 		if done || ok {
 			t.Errorf("drainForCompletion = (%v, %v), want (false, false) — a real budget blowout", done, ok)
 		}

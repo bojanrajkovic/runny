@@ -199,6 +199,19 @@ not be read is denied (fail closed). Out-of-band ACL edits (a manual
 in-flight streams — only the in-process revoke path triggers the kill —
 but every new RPC still observes the edit immediately.
 
+The kill is cooperative, not preemptive: it cancels a context both stream
+handlers already select on between sends, so a handler currently blocked
+**inside** a send (a slow or non-reading client has exhausted HTTP/2 flow
+control) is not interrupted mid-send — gRPC's `SendMsg` never consults the
+cancelled context, only the handler's own `Context().Done()` case does.
+That stream stays open until the client's connection actually ends, most
+plausibly on `StreamLogs -follow`'s higher-volume path. Forcing an
+in-flight send to abort would mean tearing down the client's whole
+underlying connection, killing every other RPC that client has open too —
+a broader blast radius than the narrow case it would close. Accepted as a
+residual: the common case (a handler idling between sends) is closed; a
+stalled reader mid-send is not.
+
 ## Ephemeral guests
 
 Each cycle runs a **fresh APFS clone, destroyed on teardown** by the destroy-and-recycle

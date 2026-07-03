@@ -13,7 +13,6 @@ package obs
 
 import (
 	"context"
-	"sync/atomic"
 	"time"
 )
 
@@ -236,7 +235,6 @@ type TarballEvent struct {
 // for pull-scoped events — so every kind carries its step attribution
 // without consumers folding StepEntered/StepLeft brackets to recover it.
 type Event struct {
-	Seq   uint64
 	Time  time.Time
 	Cycle CycleRef
 	Pull  *PullRef
@@ -274,17 +272,13 @@ type Event struct {
 // calls WithPull), but everything after it (KindDetail, KindHTTP,
 // KindPullFinished) comes from the shared image puller's own goroutine, its
 // progress watcher, or its blob-fetch workers — never a cycle's FSM
-// goroutine, and never interleaved with a cycle scope's events (the two
-// scope kinds never share a Seq counter). The scope's Seq counter is atomic,
-// so order stays coherent within each scope. Seq is the durable per-scope
-// order consumers sort and correlate by, not a concurrency serializer.
+// goroutine. Consumers correlate and order by each event's own Time and by
+// Kind-specific pairing (ActionStarted/ActionEnded matched by name within a
+// step, StepEntered/StepLeft by State) — nothing needs a sequence counter.
 type Emitter func(Event)
 
 // scope is the context-carried identity: which cycle/step (or pull) is
-// active, where events go, and the per-scope Seq counter. The counter
-// belongs to the scope established by WithCycle or WithPull; step scopes
-// derived by WithStep share it — that sharing is what keeps Seq totally
-// ordered across a whole cycle. pull is nil for a cycle scope; when set, it
+// active and where events go. pull is nil for a cycle scope; when set, it
 // identifies a pull scope and emitEvent stamps Event.Pull instead of
 // Event.Cycle. Unexported so it can only be built through
 // WithCycle/WithPull/WithStep.
@@ -293,7 +287,6 @@ type scope struct {
 	cycle CycleRef
 	pull  *PullRef
 	step  string
-	seq   *atomic.Uint64
 }
 
 type scopeKey struct{}
@@ -301,25 +294,22 @@ type scopeKey struct{}
 // WithCycle establishes the observability scope for one cycle: every Emit
 // and Action on the returned context (or a context derived from it,
 // including through bounded.Context, whose Value delegates to its parent)
-// emits through emit against cycle, stamped from the single per-cycle Seq
-// counter this call creates. emit may be nil, which makes every Emit and
-// Action on this scope a no-op — the shape used when telemetry is
+// emits through emit against cycle. emit may be nil, which makes every Emit
+// and Action on this scope a no-op — the shape used when telemetry is
 // unconfigured.
 func WithCycle(ctx context.Context, emit Emitter, cycle CycleRef) context.Context {
 	return context.WithValue(ctx, scopeKey{}, newScope(emit, cycle, nil))
 }
 
-// newScope builds the scope both WithCycle and WithPull install: same
-// emitter/Seq machinery, differing only in which identity — cycle or pull —
-// is set. pull nil means a cycle scope.
+// newScope builds the scope both WithCycle and WithPull install, differing
+// only in which identity — cycle or pull — is set. pull nil means a cycle
+// scope.
 func newScope(emit Emitter, cycle CycleRef, pull *PullRef) *scope {
-	return &scope{emit: emit, cycle: cycle, pull: pull, seq: new(atomic.Uint64)}
+	return &scope{emit: emit, cycle: cycle, pull: pull}
 }
 
-// WithStep derives a scope for one FSM step: same cycle, same emitter, and
-// crucially the same per-cycle Seq counter — entering a new step never
-// resets the cycle's event order. On a context with no scope it returns
-// ctx unchanged.
+// WithStep derives a scope for one FSM step: same cycle, same emitter. On a
+// context with no scope it returns ctx unchanged.
 func WithStep(ctx context.Context, step string) context.Context {
 	s, _ := ctx.Value(scopeKey{}).(*scope)
 	if s == nil {
@@ -351,12 +341,10 @@ func Live(ctx context.Context) bool {
 	return liveScope(ctx) != nil
 }
 
-// emitEvent stamps e with the scope's next Seq, the current time, and the
-// scope's identity — CycleRef for a cycle scope, PullRef for a pull scope,
-// exactly one of the two — and the scope's step, then hands it to the
-// emitter.
+// emitEvent stamps e with the current time and the scope's identity —
+// CycleRef for a cycle scope, PullRef for a pull scope, exactly one of the
+// two — and the scope's step, then hands it to the emitter.
 func (s *scope) emitEvent(e Event) {
-	e.Seq = s.seq.Add(1)
 	e.Time = time.Now()
 	if s.pull != nil {
 		e.Pull = s.pull
@@ -367,11 +355,11 @@ func (s *scope) emitEvent(e Event) {
 	s.emit(e)
 }
 
-// Emit stamps e with the scope's next Seq, the current time, the scope's
-// CycleRef, and the scope's step, then hands it to the emitter. The caller
-// supplies Kind and the kind-specific payload; Seq, Time, Cycle, and Step
-// are overwritten. On a context with no scope, or a scope with a nil
-// emitter, Emit is a safe no-op.
+// Emit stamps e with the current time, the scope's CycleRef, and the
+// scope's step, then hands it to the emitter. The caller supplies Kind and
+// the kind-specific payload; Time, Cycle, and Step are overwritten. On a
+// context with no scope, or a scope with a nil emitter, Emit is a safe
+// no-op.
 func Emit(ctx context.Context, e Event) {
 	if s := liveScope(ctx); s != nil {
 		s.emitEvent(e)

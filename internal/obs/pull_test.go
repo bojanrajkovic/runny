@@ -27,25 +27,6 @@ func TestPullScopeStampsPullNotCycle(t *testing.T) {
 	}
 }
 
-// A pull scope's Seq counter is its own — independent of any cycle scope's,
-// the same isolation TestSeqIsPerCycleNotGlobal checks between two cycles.
-func TestPullSeqIndependentOfCycleScope(t *testing.T) {
-	var pullSeqs, cycleSeqs []uint64
-	pctx := WithPull(context.Background(), func(e Event) { pullSeqs = append(pullSeqs, e.Seq) }, testPull())
-	cctx := WithCycle(context.Background(), func(e Event) { cycleSeqs = append(cycleSeqs, e.Seq) }, testCycle())
-
-	Emit(pctx, Event{Kind: KindPullStarted})
-	Emit(cctx, Event{Kind: KindCycleStarted})
-	Emit(pctx, Event{Kind: KindPullFinished, PullInfo: &PullEvent{Outcome: OutcomeOK}})
-
-	if len(pullSeqs) != 2 || pullSeqs[0] != 1 || pullSeqs[1] != 2 {
-		t.Fatalf("pull seqs = %v, want [1 2]", pullSeqs)
-	}
-	if len(cycleSeqs) != 1 || cycleSeqs[0] != 1 {
-		t.Fatalf("cycle seqs = %v, want [1]", cycleSeqs)
-	}
-}
-
 // A pull scope with a nil emitter must degrade to a safe no-op, the same
 // contract WithCycle gives.
 func TestWithPullNilEmitterIsNoop(t *testing.T) {

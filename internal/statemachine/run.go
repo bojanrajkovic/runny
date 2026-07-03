@@ -121,6 +121,16 @@ func (c *run) publish(ctx context.Context, ev obs.Event, mut func(*cycle.Record,
 	obs.Emit(ctx, ev)
 }
 
+// publishQuiet is publish without the notify: VM MAC and VM IP are each
+// followed immediately by the next state's own setState broadcast, so an
+// earlier notify here would be a redundant, benign extra one — unlike the
+// RunnerVersion site (also silent today, on purpose), these have no such
+// accepted-delta exception to spend.
+func (c *run) publishQuiet(ctx context.Context, ev obs.Event, mut func(*cycle.Record, *Status)) {
+	c.cell.update(func(st *Status) { mut(c.rec, st) })
+	obs.Emit(ctx, ev)
+}
+
 // setDetail publishes a live annotation for the current state.
 func (c *run) setDetail(ctx context.Context, detail string) {
 	snap, fns, changed := c.cell.setDetailIfChanged(detail)
@@ -238,7 +248,12 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 		if err != nil {
 			return err
 		}
-		if runnerVersion != "" { // no resolver configured → no tarball, no event
+		if runnerVersion != "" {
+			// no resolver configured → no tarball, no event, and rec/status
+			// already hold "" from cycle start (a fresh *cycle.Record, and
+			// backoffWait resets Status.RunnerVersion before every cycle) —
+			// nothing to publish when it's empty.
+			//
 			// Known accepted delta: this site used to skip notify (the next
 			// setState, ENSURE_IMAGE → CLONE, broadcasts it milliseconds
 			// later) — publish always notifies, so this now gains one extra,
@@ -247,12 +262,6 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 				rec.RunnerVersion = runnerVersion
 				st.RunnerVersion = runnerVersion
 			})
-		} else {
-			snap, fns := c.cell.update(func(st *Status) {
-				c.rec.RunnerVersion = runnerVersion
-				st.RunnerVersion = runnerVersion
-			})
-			c.cell.notify(fns, snap)
 		}
 		c.srcBundle = bundle
 		return nil
@@ -303,7 +312,7 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 			}
 			c.machine = m
 			mac := m.MAC()
-			c.publish(bc, obs.Event{Kind: obs.KindVMInfo, VM: &obs.VMEvent{MAC: mac}}, func(rec *cycle.Record, st *Status) {
+			c.publishQuiet(bc, obs.Event{Kind: obs.KindVMInfo, VM: &obs.VMEvent{MAC: mac}}, func(rec *cycle.Record, st *Status) {
 				rec.VM.MAC = mac
 				st.VM.MAC = mac
 			})
@@ -318,7 +327,7 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 				return err
 			}
 			ip = got
-			c.publish(bc, obs.Event{Kind: obs.KindVMInfo, VM: &obs.VMEvent{IP: ip}}, func(rec *cycle.Record, st *Status) {
+			c.publishQuiet(bc, obs.Event{Kind: obs.KindVMInfo, VM: &obs.VMEvent{IP: ip}}, func(rec *cycle.Record, st *Status) {
 				rec.VM.IP = ip
 				st.VM.IP = ip
 			})

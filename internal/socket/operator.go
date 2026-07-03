@@ -68,13 +68,16 @@ func resolveOperatorAccountOrStatus(input string) (*user.User, error) {
 	return u, nil
 }
 
-// operatorIdentity resolves the calling peer's uid/username for grant
-// attribution, the same identity InjectDebugKey stamps onto injected_keys.
-func operatorIdentity(ctx context.Context) (uid uint32, username string) {
-	if u, ok := peerUID(ctx); ok {
-		return u, lookupUsername(u)
+// operatorIdentity resolves the calling peer's kernel-authenticated uid and
+// best-effort username — the one resolver behind grant attribution,
+// injected-key audit rows, and lifecycle-command log lines. A nil uid means
+// the peer cred could not be read, never conflated with root's real uid 0.
+func operatorIdentity(ctx context.Context) (uid *uint32, username string) {
+	u, ok := peerUID(ctx)
+	if !ok {
+		return nil, ""
 	}
-	return 0, ""
+	return &u, lookupUsername(u)
 }
 
 func (s *Server) GrantOperator(ctx context.Context, req *runnyv1.GrantOperatorRequest) (*runnyv1.OperatorMutation, error) {

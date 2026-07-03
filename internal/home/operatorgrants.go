@@ -19,9 +19,12 @@ func (d Dir) OperatorGrantsPath() string { return filepath.Join(string(d), "oper
 // OperatorGrant is one append-only entry: an operator granting or revoking
 // another. ByUID/ByUser identify the authenticated peer that ran the RPC
 // (SO_PEERCRED); TargetUID/TargetUser identify the account granted/revoked.
+// ByUID is nil when the peer cred could not be read — never a fabricated 0,
+// which would attribute the mutation to root (the same has-bit distinction
+// cycle.InjectedKey.OperatorUID draws).
 type OperatorGrant struct {
 	Action     string    `json:"action"` // "grant" | "revoke"
-	ByUID      uint32    `json:"by_uid"`
+	ByUID      *uint32   `json:"by_uid,omitempty"`
 	ByUser     string    `json:"by_user"`
 	TargetUID  uint32    `json:"target_uid"`
 	TargetUser string    `json:"target_user"`

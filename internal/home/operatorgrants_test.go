@@ -2,16 +2,56 @@ package home
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
 
+// TestOperatorGrantByUIDHasBit pins the unknown-vs-root distinction on disk:
+// a nil ByUID (unreadable peer cred) writes no by_uid key at all and reads
+// back nil — never a fabricated 0, which would attribute the grant to root —
+// while a real uid-0 grantor survives the round-trip as 0.
+func TestOperatorGrantByUIDHasBit(t *testing.T) {
+	d := Dir(t.TempDir())
+	rootUID := uint32(0)
+	for _, g := range []OperatorGrant{
+		{Action: "grant", TargetUser: "alice"},
+		{Action: "grant", ByUID: &rootUID, ByUser: "root", TargetUser: "bob"},
+	} {
+		if err := d.AppendOperatorGrant(g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := os.ReadFile(d.OperatorGrantsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if strings.Contains(lines[0], "by_uid") {
+		t.Errorf("unknown grantor wrote a by_uid key: %s", lines[0])
+	}
+	got, err := d.ReadOperatorGrants()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 records, got %+v", got)
+	}
+	if got[0].ByUID != nil {
+		t.Errorf("unknown grantor read back by_uid=%d, want nil", *got[0].ByUID)
+	}
+	if got[1].ByUID == nil || *got[1].ByUID != 0 {
+		t.Errorf("root grantor's uid 0 lost its has-bit: %+v", got[1])
+	}
+}
+
 func TestOperatorGrantsRoundTrip(t *testing.T) {
 	d := Dir(t.TempDir())
 	base := time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC)
+	uid1, uid2 := uint32(501), uint32(502)
 	want := []OperatorGrant{
-		{Action: "grant", ByUID: 501, ByUser: "brajkovic", TargetUID: 502, TargetUser: "alice", At: base},
-		{Action: "grant", ByUID: 502, ByUser: "alice", TargetUID: 503, TargetUser: "bob", At: base.Add(time.Hour)},
+		{Action: "grant", ByUID: &uid1, ByUser: "brajkovic", TargetUID: 502, TargetUser: "alice", At: base},
+		{Action: "grant", ByUID: &uid2, ByUser: "alice", TargetUID: 503, TargetUser: "bob", At: base.Add(time.Hour)},
 	}
 	for _, g := range want {
 		if err := d.AppendOperatorGrant(g); err != nil {

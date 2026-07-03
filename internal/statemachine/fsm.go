@@ -967,7 +967,9 @@ func (s *Slot) listenAndRunJob(ctx context.Context, rec *cycle.Record, proc Proc
 		// pull) is resolved. Clear the stale NOTE now rather than waiting for
 		// finishCycle, so the status reflects "healthy" while the slot is healthy.
 		// Both the published fields and the internal counter are reset under the
-		// same lock acquisition so observers never see an inconsistent pair.
+		// same lock acquisition so observers never see an inconsistent pair: this
+		// closure runs inside setState's cell.update, so s.cell.mu is already held
+		// here — a deliberate direct field touch, not an unlocked write.
 		st.LastFailure = ""
 		st.ConsecutiveFailures = 0
 		s.cell.failures = 0

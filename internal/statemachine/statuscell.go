@@ -10,9 +10,11 @@ import (
 // statusCell is the slot's mutex-guarded live-status core: the Status
 // snapshot, the watcher list, the pause flag, and the failure streak. It is
 // the one home for everything the slot's status lock guards, for the slot's
-// entire lifetime. Slot holds a *statusCell but never reaches c.mu directly —
-// every locked mutation goes through a cell method, kept separate so fsm.go
-// stays pure control flow (mirrors io.go's split for the same reason).
+// entire lifetime, kept separate so fsm.go stays pure control flow (mirrors
+// io.go's split for the same reason). As a rule Slot reaches c.mu only
+// through a cell method; finishCycle's joint failures+Status write is the one
+// carried-over exception (a raw lock, documented at its call site) — a later
+// refactor (the publish seam, issue #252) is the planned home for it.
 type statusCell struct {
 	mu       sync.Mutex
 	status   Status

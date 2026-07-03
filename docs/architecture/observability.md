@@ -7,7 +7,8 @@ this is the current shape.
 
 ```mermaid
 flowchart LR
-    FSM["FSM choke points\n(state + cycle helpers,\nobs.Action sites)"] -->|emit| EV["obs.Event stream\n(ordered per cycle)"]
+    FSM["FSM choke points\n(state + cycle helpers,\nobs.Action sites)"] -->|emit| EV["obs.Event stream\n(ordered per cycle or pull)"]
+    PULL["shared image puller\n(internal/images)"] -->|emit| EV
     FSM -->|same helpers| REC["cycle.Record → cycle.json"]
     EV --> TRC["trace emitter → OTLP spans"]
     EV --> MET["metrics emitter → OTLP metrics"]
@@ -20,7 +21,9 @@ flowchart LR
 ### The seam
 
 `internal/obs` is the structured event stream: `Event`/`Kind`, a
-context-carried scope (`WithCycle`, `WithStep`), and `Action(ctx, name, fn)`
+context-carried scope (`WithCycle`/`WithStep` for a cycle, `WithPull` for a
+shared image pull — a pull belongs to no single cycle, so it gets its own
+scope kind rather than borrowing cycle identity), and `Action(ctx, name, fn)`
 for fine-grained work. It imports nothing beyond the standard library —
 domain packages (`images`, `guest`, `sshx`) call `obs.Action` without ever
 importing an OTEL type, and a context without a scope degrades `Action` to a
@@ -107,11 +110,37 @@ completion (EOF or close), so the span carries the transfer's true
 duration and byte count (`runny.http.bytes`), a `headers` span event marks
 where waiting ended and transfer began, and a body that dies mid-stream —
 the stall-kill shape — reports the status the headers claimed plus the
-read error as span error status. One caveat is load-bearing: the shared
-pull actor's blob traffic carries a *pull* scope (`obs.WithPull`), not a
-cycle scope — a pull belongs to no single cycle — so this trace consumer,
-which attributes every span through `runny.cycle_id`, renders none of it;
-folding pull-scoped events into their own trace is a separate consumer.
+read error as span error status. The shared image pull's own traffic is the
+one exception to "every `KindHTTP` is a cycle-scoped child": it carries a
+*pull* scope (`obs.WithPull`), not a cycle scope, so it renders under a
+separate root — described next.
+
+A shared image pull gets its own trace, independent of any cycle's, because
+it belongs to no single one (many slots can share the underlying pull).
+`KindPullStarted` opens a flat root span `runny.pull` (attributes:
+`runny.pull.id`, `runny.image.ref`, `runny.image.digest` — no steps or
+actions, since a pull has none of its own); its `KindHTTP` traffic (the
+manifest resolve, blob GETs) renders as `http <class>` children exactly like
+a cycle's, just parented under the pull root instead of a step or action;
+`KindDetail` progress ticks land as `runny.progress.last` on the root, the
+same summarizing-attribute rule steps use; `KindPullFinished` closes it with
+`runny.outcome` and `runny.pull.bytes`, `Status=Error` on failure. Correlation
+to the cycles that waited on it is attribute-based, not structural: the pull
+root and every subscribing cycle's `wait-for-pull` action both carry the same
+`runny.pull.id`, so a query joins them without the pull's trace needing to be
+a child of any one cycle's (it structurally can't be). A puller cancelled
+before a terminal outcome (its last subscriber left) never emits
+`KindPullFinished` — no fabricated outcome for a pull that never finished —
+but it does emit `KindPullAbandoned`, carrying no payload, purely so the root
+span still closes (`Status=Error`, a fixed reason) instead of leaking a map
+entry and an un-ended span for however long the daemon runs. `runny.pull.id`
+is a deterministic hash of the pull's directory, so a successor puller for
+the same image can share a predecessor's still-open map entry if it starts
+before the predecessor's own terminal event lands; the assembler tells them
+apart by the `*obs.PullRef` pointer identity every event from one puller
+instance carries (stamped once, never copied), closing the predecessor's
+span as "superseded" the moment a successor starts rather than ever letting
+a stale event touch the wrong span.
 
 Beyond the step tree, the trace carries the cycle's identity and audit
 detail: the root's attributes include the pool, the assembled runner name,
@@ -165,18 +194,21 @@ exact label set live as doc comments on the instruments in
   and any other guest-controlled string never become labels — they exist
   only as span attributes on the trace side.
 
-A third family records **outside the fold**: the image ensurer's pull and
-tarball-download instruments (`telemetry.NewEnsurerMetrics`, injected into
-`internal/images` behind a plain-func seam the way progress reporting is).
-A shared image pull serves many subscribing slots and belongs to no single
-cycle, so its duration and bytes are per-underlying-work truths recorded
-once at the pull's terminal outcome — never once per subscriber, and never
-fabricated for a pull cancelled before it finished. Each subscribing
-cycle's *experience* of that pull is its `wait-for-pull` action, which the
-event fold exports like any other action (a per-cycle duration, one point
-per waiting slot) — the two views measure different things and must not be
-summed. Instrument meanings and label sets live as doc comments on the
-instruments, alongside the event-derived ones.
+A third family folds from the same stream despite not being cycle-scoped:
+`KindPullFinished` feeds `runny.image.pull.duration`/`runny.image.pull.bytes`,
+and `KindTarballDone` feeds `runny.runner_tarball.download.duration` — no
+second injected seam, just two more kinds in the one switch. A shared image
+pull serves many subscribing slots and belongs to no single cycle, so its
+duration and bytes are per-underlying-work truths recorded once at the pull's terminal
+outcome — never once per subscriber, and never fabricated for a pull
+cancelled before it finished (no `KindPullFinished`, no metric point — the
+same no-fabricated-duration rule steps and jobs follow). Neither instrument
+carries a pool/slot label, since neither event carries a `Cycle`. Each
+subscribing cycle's *experience* of that pull is its `wait-for-pull` action,
+which the event fold exports like any other action (a per-cycle duration,
+one point per waiting slot) — the two views measure different things and
+must not be summed. Instrument meanings and label sets live as doc comments
+on the instruments, alongside the event-derived ones.
 
 Alongside the event-derived instruments, `telemetry.RegisterGauges`
 installs the status-polled side: observable gauges the SDK's periodic

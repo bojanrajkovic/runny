@@ -12,7 +12,6 @@ go_library(
     deps = [
         "//internal/diskfree",
         "//internal/home",
-        "//internal/images",
         "//internal/obs",
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel//attribute",

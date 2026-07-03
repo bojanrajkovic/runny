@@ -273,50 +273,94 @@ func TestMetricsConsumerOrphanEvents(t *testing.T) {
 	}
 }
 
-// datapointCount sums every datapoint across every collected instrument,
-// regardless of shape — a shape-agnostic way to assert "nothing new landed"
-// without a timestamp-sensitive deep comparison across two Collect calls.
-func datapointCount(ms map[string]metricdata.Metrics) int {
-	total := 0
-	for _, m := range ms {
-		switch d := m.Data.(type) {
-		case metricdata.Histogram[float64]:
-			total += len(d.DataPoints)
-		case metricdata.Sum[int64]:
-			total += len(d.DataPoints)
-		case metricdata.Gauge[int64]:
-			total += len(d.DataPoints)
+// KindPullStarted carries no payload consumers record from — it exists so
+// the trace side has a root to open — so this consumer's switch has no case
+// for it at all; feeding one through must be a true no-op.
+func TestMetricsConsumerIgnoresPullStarted(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	m.emit(obs.Event{Kind: obs.KindPullStarted, Pull: &obs.PullRef{ID: "p1"}})
+	ms := collect(t, reader)
+	if got, ok := ms["runny.image.pull.duration"]; ok {
+		if h, ok := got.Data.(metricdata.Histogram[float64]); ok && len(h.DataPoints) > 0 {
+			t.Errorf("pull.duration has %d datapoints for KindPullStarted, want 0", len(h.DataPoints))
 		}
 	}
-	return total
 }
 
-// Pull-scoped events (KindPullStarted, KindPullFinished) and the cycle-scoped
-// KindTarballDone match no case in this consumer's switch — feeding them
-// through must be a true no-op, not just quietly filtered. Folding these
-// into their own instruments is a separate consumer (a later change), not
-// this one.
-func TestMetricsConsumerIgnoresPullEvents(t *testing.T) {
+// KindPullAbandoned closes the trace side's root span for a pull that never
+// reached a terminal outcome, but must record nothing here — no fabricated
+// outcome for a pull that never finished.
+func TestMetricsConsumerIgnoresPullAbandoned(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	m.emit(obs.Event{Kind: obs.KindPullAbandoned, Pull: &obs.PullRef{ID: "p1"}})
+	ms := collect(t, reader)
+	if got, ok := ms["runny.image.pull.duration"]; ok {
+		if h, ok := got.Data.(metricdata.Histogram[float64]); ok && len(h.DataPoints) > 0 {
+			t.Errorf("pull.duration has %d datapoints for KindPullAbandoned, want 0", len(h.DataPoints))
+		}
+	}
+}
+
+// The pull/tarball instruments, folded straight out of the event stream:
+// KindPullFinished feeds runny.image.pull.duration/bytes, KindTarballDone
+// feeds runny.runner_tarball.download.duration. Names, units, and
+// descriptions are pinned exactly — Grafana/Tempo dashboards query these
+// names. Neither carries a Cycle, so neither carries a pool/slot label; the
+// exact attribute-set match in histPoint's onePoint already proves that (a
+// stray pool/slot label would make the lookup fail to find a match).
+func TestMetricsConsumerPullAndTarballFold(t *testing.T) {
 	m, reader := newTestMetrics(t)
 
-	m.emit(obs.Event{
-		Time: at(1), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "BOOT", Outcome: obs.OutcomeOK, Duration: 5 * time.Second},
-	})
-	before := datapointCount(collect(t, reader))
-
-	pull := &obs.PullRef{ID: "p1", Ref: "ghcr.io/x", Digest: "sha256:x", Started: time.Now()}
-	m.emit(obs.Event{Kind: obs.KindPullStarted, Pull: pull})
-	m.emit(obs.Event{Kind: obs.KindPullFinished, Pull: pull, PullInfo: &obs.PullEvent{
-		Outcome: obs.OutcomeOK, Duration: time.Second, Bytes: 100,
+	m.emit(obs.Event{Kind: obs.KindPullFinished, Pull: &obs.PullRef{ID: "p1"}, PullInfo: &obs.PullEvent{
+		Outcome: obs.OutcomeOK, Duration: 90 * time.Second, Bytes: 5 << 30,
 	}})
 	m.emit(obs.Event{Kind: obs.KindTarballDone, Cycle: testCycle, Tarball: &obs.TarballEvent{
-		Outcome: obs.OutcomeOK, Duration: time.Second,
+		Outcome: obs.OutcomeError, Duration: 3 * time.Second,
 	}})
 
-	if after := datapointCount(collect(t, reader)); before != after {
-		t.Fatalf("pull/tarball events changed the datapoint count: before=%d after=%d", before, after)
+	ms := collect(t, reader)
+	okSet := attribute.NewSet(attribute.String("outcome", "ok"))
+	errSet := attribute.NewSet(attribute.String("outcome", "error"))
+
+	dur := ms["runny.image.pull.duration"]
+	if dur.Unit != "s" {
+		t.Errorf("pull.duration unit = %q, want s", dur.Unit)
 	}
+	if want := "Wall-clock lifetime of one underlying image pull, including disk holds and re-attempts, recorded once at its terminal outcome regardless of how many slots shared it."; dur.Description != want {
+		t.Errorf("pull.duration description = %q, want %q", dur.Description, want)
+	}
+	if p := histPoint(t, dur, okSet); p.Sum != 90 {
+		t.Errorf("pull.duration sum = %v, want 90", p.Sum)
+	}
+
+	bytes := ms["runny.image.pull.bytes"]
+	if bytes.Unit != "By" {
+		t.Errorf("pull.bytes unit = %q, want By", bytes.Unit)
+	}
+	if want := "Bytes transferred by one underlying image pull, cumulative across its attempts (can exceed the image size on retry)."; bytes.Description != want {
+		t.Errorf("pull.bytes description = %q, want %q", bytes.Description, want)
+	}
+	if p := histPoint(t, bytes, okSet); p.Sum != float64(int64(5<<30)) {
+		t.Errorf("pull.bytes sum = %v, want 5 GiB", p.Sum)
+	}
+
+	tb := ms["runny.runner_tarball.download.duration"]
+	if tb.Unit != "s" {
+		t.Errorf("tarball duration unit = %q, want s", tb.Unit)
+	}
+	if want := "Duration of one actual runner-tarball download — cache hits and slots that waited out a peer's download record nothing."; tb.Description != want {
+		t.Errorf("tarball duration description = %q, want %q", tb.Description, want)
+	}
+	if p := histPoint(t, tb, errSet); p.Sum != 3 {
+		t.Errorf("tarball duration sum = %v, want 3", p.Sum)
+	}
+}
+
+// A nil payload (a stray or malformed event) must not panic either fold.
+func TestMetricsConsumerNilPullTarballPayloadsAreNoop(t *testing.T) {
+	m, _ := newTestMetrics(t)
+	m.emit(obs.Event{Kind: obs.KindPullFinished, Pull: &obs.PullRef{ID: "p1"}})
+	m.emit(obs.Event{Kind: obs.KindTarballDone, Cycle: testCycle})
 }
 
 // TestRegisterGauges polls a faked three-slot fleet and asserts the full 0/1
@@ -445,46 +489,5 @@ func TestRegisterGaugesDiskErrorBlastRadius(t *testing.T) {
 	}
 	if len(handled) == 0 {
 		t.Error("statfs error was not reported to the OTEL error handler; loss must never be silent")
-	}
-}
-
-// TestNewEnsurerMetrics pins the ensurer-scope seam: the three instruments,
-// their units, the outcome label, and second/byte denominations.
-func TestNewEnsurerMetrics(t *testing.T) {
-	meter, reader := newTestMeter(t)
-	m, err := NewEnsurerMetrics(meter)
-	if err != nil {
-		t.Fatalf("NewEnsurerMetrics: %v", err)
-	}
-
-	m.PullDone("ok", 90*time.Second, 5<<30)
-	m.TarballDownloadDone("error", 3*time.Second)
-
-	got := collect(t, reader)
-	okSet := attribute.NewSet(attribute.String("outcome", "ok"))
-	errSet := attribute.NewSet(attribute.String("outcome", "error"))
-
-	dur := got["runny.image.pull.duration"]
-	if dur.Unit != "s" {
-		t.Errorf("pull.duration unit = %q, want s", dur.Unit)
-	}
-	if p := histPoint(t, dur, okSet); p.Sum != 90 {
-		t.Errorf("pull.duration sum = %v, want 90", p.Sum)
-	}
-
-	bytes := got["runny.image.pull.bytes"]
-	if bytes.Unit != "By" {
-		t.Errorf("pull.bytes unit = %q, want By", bytes.Unit)
-	}
-	if p := histPoint(t, bytes, okSet); p.Sum != float64(int64(5<<30)) {
-		t.Errorf("pull.bytes sum = %v, want 5 GiB", p.Sum)
-	}
-
-	tb := got["runny.runner_tarball.download.duration"]
-	if tb.Unit != "s" {
-		t.Errorf("tarball duration unit = %q, want s", tb.Unit)
-	}
-	if p := histPoint(t, tb, errSet); p.Sum != 3 {
-		t.Errorf("tarball duration sum = %v, want 3", p.Sum)
 	}
 }

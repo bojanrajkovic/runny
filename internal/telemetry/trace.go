@@ -12,21 +12,24 @@ import (
 	"github.com/bojanrajkovic/runny/internal/obs"
 )
 
-// NewTraceConsumer returns an obs.Emitter that folds one cycle's event
-// stream into an OTLP span tree: root "runny.cycle", one child
-// "cycle.step <STATE>" per FSM step, one grandchild "cycle.step.action
-// <name>" per action within a step. Safe to install as the shared
-// obs.Emitter across every slot: assembler state is keyed per (slot, cycle
-// ID) behind a package-level mutex on lookup/insert/delete, and each
-// cycle's own span handles are additionally guarded by a per-cycle mutex:
-// ENSURE_IMAGE's progress callback can fire from the shared image puller's
-// own goroutine, not the cycle's FSM goroutine (internal/images/puller.go
-// runs each pull on `go p.run()`; internal/statemachine/fsm.go documents
-// the resulting KindDetail events as the one case obs's events for a cycle
-// aren't all emitted from a single goroutine), so this consumer can't
-// assume single-writer either.
+// NewTraceConsumer returns an obs.Emitter that folds two independent event
+// streams into OTLP span trees. A cycle's stream renders as root
+// "runny.cycle", one child "cycle.step <STATE>" per FSM step, one
+// grandchild "cycle.step.action <name>" per action within a step. A shared
+// image pull's stream — scoped separately (obs.WithPull), since a pull
+// belongs to no single cycle — renders as its own flat root "runny.pull"
+// with "http <class>" client children; the two subtrees correlate by the
+// `runny.pull.id` attribute they share (the pull root carries it, and so
+// does the cycle-scoped `wait-for-pull` action that waited on it), not by
+// span parentage. Safe to install as the shared obs.Emitter across every
+// slot: assembler state is keyed per (slot, cycle ID) or per pull ID behind
+// a package-level mutex on lookup/insert/delete, and each cycle's or pull's
+// own span handles are additionally guarded by a per-entry mutex — a pull's
+// events (and ENSURE_IMAGE's KindDetail progress relay) can fire from the
+// shared image puller's own goroutine, never a cycle's FSM goroutine, so
+// this consumer can't assume single-writer either.
 func NewTraceConsumer(tracer trace.Tracer) obs.Emitter {
-	a := &traceAssembler{tracer: tracer, cycles: map[cycleKey]*cycleSpans{}}
+	a := &traceAssembler{tracer: tracer, cycles: map[cycleKey]*cycleSpans{}, pulls: map[string]*pullSpans{}}
 	return a.emit
 }
 
@@ -51,11 +54,32 @@ type cycleSpans struct {
 	steps map[string]*stepSpans
 }
 
+// pullSpans is a shared image pull's span state — the pull-scope sibling of
+// cycleSpans. A pull has no steps or actions of its own (KindHTTP is its
+// only child), so it needs none of cycleSpans' step-tracking machinery.
+// ref identifies which puller instance this entry belongs to: PullRef.ID is
+// a deterministic hash of the pull's directory, so a successor puller for
+// the same image (started the instant the last subscriber leaves, before
+// the predecessor's own goroutine notices cancellation) reuses the exact
+// same map key. Every event from one puller instance carries the identical
+// *obs.PullRef pointer (stamped once at obs.WithPull, never copied), so
+// comparing ref by pointer identity — not just the map key — is what tells
+// a stale predecessor's terminal event from the live successor sharing its
+// key: see getPull/resolveOwnPull.
+type pullSpans struct {
+	mu         sync.Mutex
+	ctx        context.Context
+	root       trace.Span
+	lastDetail string
+	ref        *obs.PullRef
+}
+
 type traceAssembler struct {
 	tracer trace.Tracer
 
 	mu     sync.Mutex
 	cycles map[cycleKey]*cycleSpans
+	pulls  map[string]*pullSpans
 }
 
 func (a *traceAssembler) get(e obs.Event) *cycleSpans {
@@ -75,6 +99,48 @@ func (a *traceAssembler) withCycle(e obs.Event, fn func(cs *cycleSpans)) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	fn(cs)
+}
+
+// getPull looks up e.Pull.ID's entry, but only returns it when the entry
+// still belongs to the puller instance that emitted e (ps.ref == e.Pull, a
+// pointer comparison) — a stale predecessor's event arriving after a
+// successor has already overwritten the map entry (see pullSpans' doc
+// comment) must not resolve to the successor's live span.
+func (a *traceAssembler) getPull(e obs.Event) *pullSpans {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ps := a.pulls[e.Pull.ID]
+	if ps == nil || ps.ref != e.Pull {
+		return nil
+	}
+	return ps
+}
+
+// resolveOwnPull is getPull plus eviction: it deletes the map entry too, but
+// ONLY when the looked-up entry is confirmed to belong to e's puller
+// instance — the same ref check as getPull. A stale predecessor's terminal
+// event must never evict a live successor's entry.
+func (a *traceAssembler) resolveOwnPull(e obs.Event) *pullSpans {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ps := a.pulls[e.Pull.ID]
+	if ps == nil || ps.ref != e.Pull {
+		return nil
+	}
+	delete(a.pulls, e.Pull.ID)
+	return ps
+}
+
+// withPull looks up e's pull and runs fn with it locked; a no-op if the pull
+// isn't tracked (already finished, or a stray event before KindPullStarted).
+func (a *traceAssembler) withPull(e obs.Event, fn func(ps *pullSpans)) {
+	ps := a.getPull(e)
+	if ps == nil {
+		return
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	fn(ps)
 }
 
 // withStep is withCycle plus an e.Step lookup; a no-op if the step isn't
@@ -119,6 +185,12 @@ func (a *traceAssembler) emit(e obs.Event) {
 		a.audit(e)
 	case obs.KindCycleFinished:
 		a.cycleFinished(e)
+	case obs.KindPullStarted:
+		a.pullStarted(e)
+	case obs.KindPullFinished:
+		a.pullFinished(e)
+	case obs.KindPullAbandoned:
+		a.pullAbandoned(e)
 	}
 }
 
@@ -201,17 +273,24 @@ func (a *traceAssembler) actionEnded(e obs.Event) {
 }
 
 // httpRoundTrip renders one KindHTTP event as an already-completed child
-// span of whatever was innermost when the round trip finished: the open
-// action if one is running, else the step, else the root. The event is
-// emitted at completion carrying its own duration, so the span starts at
-// Time − Duration and ends at Time — no pairing state to hold. Span IDs are
-// SDK-random (round trips of one class legitimately repeat within a step —
-// retries, the registry's 401 token dance — so nothing about the event
-// itself need be a unique identity); correlation across a trace or across
-// traces is attribute-based (runny.cycle_id on the root, runny.pull.id on a
-// shared pull's actions).
+// span of whatever was innermost when the round trip finished: for a
+// cycle-scoped event, the open action if one is running, else the step,
+// else the root; for a pull-scoped event (the shared image puller's own
+// OCI traffic), always the pull's root — a pull has no steps or actions of
+// its own. The event is emitted at completion carrying its own duration, so
+// the span starts at Time − Duration and ends at Time — no pairing state to
+// hold. Span IDs are SDK-random (round trips of one class legitimately
+// repeat within a scope — retries, the registry's 401 token dance — so
+// nothing about the event itself need be a unique identity); correlation
+// across a trace or across traces is attribute-based (runny.cycle_id on the
+// cycle root, runny.pull.id on both the pull root and the cycle-scoped
+// wait-for-pull action that waited on it).
 func (a *traceAssembler) httpRoundTrip(e obs.Event) {
 	if e.HTTP == nil {
+		return
+	}
+	if e.Pull != nil {
+		a.withPull(e, func(ps *pullSpans) { a.renderHTTPSpan(ps.ctx, e) })
 		return
 	}
 	a.withCycle(e, func(cs *cycleSpans) {
@@ -222,48 +301,60 @@ func (a *traceAssembler) httpRoundTrip(e obs.Event) {
 				parent = ss.current.ctx
 			}
 		}
-		h := e.HTTP
-		attrs := []attribute.KeyValue{
-			attribute.String("http.request.method", h.Method),
-			attribute.String("server.address", h.Host),
-		}
-		if h.Status != 0 {
-			attrs = append(attrs, attribute.Int("http.response.status_code", h.Status))
-			attrs = append(attrs, attribute.Int64("runny.http.bytes", h.BytesRead))
-		}
-		start := e.Time.Add(-h.Duration)
-		_, span := a.tracer.Start(parent, "http "+string(h.Class),
-			trace.WithTimestamp(start),
-			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithAttributes(attrs...))
-		// The span covers the whole exchange through body completion; the
-		// headers marker shows where waiting ended and transfer began.
-		if h.HeaderDuration > 0 {
-			span.AddEvent("headers", trace.WithTimestamp(start.Add(h.HeaderDuration)))
-		}
-		// Client-span status follows the HTTP semconv rule: any 4xx/5xx is an
-		// error, not just transport failures — a 503 retry storm or a 403
-		// mint must not render as a row of healthy spans under a red action.
-		// (The registry's routine 401 token challenge renders as an errored
-		// hop too; its resolve action staying green is what says the dance
-		// succeeded.)
-		switch {
-		case h.Error != "":
-			span.SetStatus(codes.Error, h.Error)
-		case h.Status >= 400:
-			span.SetStatus(codes.Error, "HTTP "+strconv.Itoa(h.Status))
-		}
-		span.End(trace.WithTimestamp(e.Time))
+		a.renderHTTPSpan(parent, e)
 	})
 }
 
+// renderHTTPSpan builds the completed client span for one KindHTTP event
+// under parent — the part httpRoundTrip's cycle- and pull-scoped routing
+// share; only parent selection differs between them.
+func (a *traceAssembler) renderHTTPSpan(parent context.Context, e obs.Event) {
+	h := e.HTTP
+	attrs := []attribute.KeyValue{
+		attribute.String("http.request.method", h.Method),
+		attribute.String("server.address", h.Host),
+	}
+	if h.Status != 0 {
+		attrs = append(attrs, attribute.Int("http.response.status_code", h.Status))
+		attrs = append(attrs, attribute.Int64("runny.http.bytes", h.BytesRead))
+	}
+	start := e.Time.Add(-h.Duration)
+	_, span := a.tracer.Start(parent, "http "+string(h.Class),
+		trace.WithTimestamp(start),
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attrs...))
+	// The span covers the whole exchange through body completion; the
+	// headers marker shows where waiting ended and transfer began.
+	if h.HeaderDuration > 0 {
+		span.AddEvent("headers", trace.WithTimestamp(start.Add(h.HeaderDuration)))
+	}
+	// Client-span status follows the HTTP semconv rule: any 4xx/5xx is an
+	// error, not just transport failures — a 503 retry storm or a 403
+	// mint must not render as a row of healthy spans under a red action.
+	// (The registry's routine 401 token challenge renders as an errored
+	// hop too; its resolve action staying green is what says the dance
+	// succeeded.)
+	switch {
+	case h.Error != "":
+		span.SetStatus(codes.Error, h.Error)
+	case h.Status >= 400:
+		span.SetStatus(codes.Error, "HTTP "+strconv.Itoa(h.Status))
+	}
+	span.End(trace.WithTimestamp(e.Time))
+}
+
 // detail attaches the latest progress annotation to whichever span is
-// innermost when it fires — the open action if one is running, else the
-// step, else (no step scope at all) the root — so ENSURE_IMAGE's "2.1 GiB
-// at 41 MiB/s" style updates land as one summarizing attribute on the span
-// that closes next, instead of one span event per tick.
+// innermost when it fires. For a cycle-scoped event: the open action if one
+// is running, else the step, else (no step scope at all) the root — so
+// ENSURE_IMAGE's "2.1 GiB at 41 MiB/s" style updates land as one summarizing
+// attribute on the span that closes next, instead of one span event per
+// tick. For a pull-scoped event: the pull's root, the only span it has.
 func (a *traceAssembler) detail(e obs.Event) {
 	if e.Detail == nil {
+		return
+	}
+	if e.Pull != nil {
+		a.withPull(e, func(ps *pullSpans) { ps.lastDetail = e.Detail.Text })
 		return
 	}
 	a.withCycle(e, func(cs *cycleSpans) {
@@ -425,4 +516,90 @@ func (a *traceAssembler) cycleFinished(e obs.Event) {
 		}
 	}
 	cs.root.End(trace.WithTimestamp(e.Time))
+}
+
+// pullStarted opens the pull's root span. If e.Pull.ID is already tracked,
+// the entry there belongs to a predecessor puller for the same directory:
+// internal/images/puller.go's registry only ever runs one live puller per
+// dir, so a second KindPullStarted for the same ID means the predecessor
+// has already been superseded — its own terminal event, whenever it
+// arrives, will find ps.ref no longer matches (see getPull/resolveOwnPull)
+// and safely no-op instead of touching this new entry. Close the stale
+// entry's span right here instead of leaving it open forever waiting for a
+// terminal event that can no longer reach it.
+func (a *traceAssembler) pullStarted(e obs.Event) {
+	if e.Pull == nil {
+		return
+	}
+	ctx, span := a.tracer.Start(context.Background(), "runny.pull", trace.WithTimestamp(e.Time), trace.WithAttributes(
+		attribute.String("runny.pull.id", e.Pull.ID),
+		attribute.String("runny.image.ref", e.Pull.Ref),
+		attribute.String("runny.image.digest", e.Pull.Digest),
+	))
+	a.mu.Lock()
+	stale := a.pulls[e.Pull.ID]
+	a.pulls[e.Pull.ID] = &pullSpans{ctx: ctx, root: span, ref: e.Pull}
+	a.mu.Unlock()
+	if stale == nil {
+		return
+	}
+	stale.mu.Lock()
+	defer stale.mu.Unlock()
+	stale.root.SetStatus(codes.Error, "superseded by a new pull for the same image")
+	stale.root.End(trace.WithTimestamp(e.Time))
+}
+
+// pullFinished ends the pull's root span with its outcome and drops its map
+// entry. A puller cancelled before a terminal outcome never calls finish()
+// and so never emits this — see pullAbandoned, the counterpart that closes
+// the span for that path instead, so no entry is ever left un-evicted.
+func (a *traceAssembler) pullFinished(e obs.Event) {
+	if e.Pull == nil {
+		return
+	}
+	ps := a.resolveOwnPull(e)
+	if ps == nil {
+		return
+	}
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.lastDetail != "" {
+		ps.root.SetAttributes(attribute.String("runny.progress.last", ps.lastDetail))
+	}
+	if e.PullInfo != nil {
+		ps.root.SetAttributes(
+			attribute.String("runny.outcome", string(e.PullInfo.Outcome)),
+			attribute.Int64("runny.pull.bytes", e.PullInfo.Bytes),
+		)
+		if outcomeIsFailure(e.PullInfo.Outcome) {
+			ps.root.SetStatus(codes.Error, e.PullInfo.Error)
+		}
+	}
+	ps.root.End(trace.WithTimestamp(e.Time))
+}
+
+// pullAbandoned ends the pull's root span for the one path pullFinished
+// never sees: the last subscriber left before an attempt resolved, so
+// internal/images/puller.go's run() returned without a terminal outcome to
+// report. There is no outcome or bytes to attach — the pull's own work may
+// still be salvageable by a successor puller for the same dir, this cycle's
+// wait just stopped watching it — so the span closes as an error with a
+// fixed reason instead of a fabricated result.
+func (a *traceAssembler) pullAbandoned(e obs.Event) {
+	if e.Pull == nil {
+		return
+	}
+	ps := a.resolveOwnPull(e)
+	if ps == nil {
+		return
+	}
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.lastDetail != "" {
+		ps.root.SetAttributes(attribute.String("runny.progress.last", ps.lastDetail))
+	}
+	ps.root.SetStatus(codes.Error, "abandoned: last subscriber left before a terminal outcome")
+	ps.root.End(trace.WithTimestamp(e.Time))
 }

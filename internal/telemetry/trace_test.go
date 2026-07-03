@@ -569,26 +569,243 @@ func TestTraceConsumerHTTPSpans(t *testing.T) {
 	}
 }
 
-// Pull-scoped events (KindPullStarted, KindPullFinished) and the
-// cycle-scoped KindTarballDone carry no case in this consumer's switch, and
-// a pull event's zero Cycle can never resolve through withCycle — feeding
-// them through must produce zero spans, not just fail to attach to one.
-// Folding pull-scoped traces is a separate consumer (a later change), not
-// this one.
-func TestTraceConsumerIgnoresPullEvents(t *testing.T) {
+// A scripted pull with two HTTP round trips renders as one runny.pull root
+// with two client children — outcome, bytes, and the progress detail landing
+// on the root at KindPullFinished — and the pull id it carries matches the
+// cycle-scoped wait-for-pull action that waited on it: the correlation the
+// two subtrees share instead of span parentage.
+func TestTraceConsumerPullSpans(t *testing.T) {
 	emit, exp := newTestAssembler(t)
 
-	pull := &obs.PullRef{ID: "p1", Ref: "ghcr.io/x", Digest: "sha256:x", Started: at(0)}
-	emit(obs.Event{Kind: obs.KindPullStarted, Pull: pull})
-	emit(obs.Event{Kind: obs.KindPullFinished, Pull: pull, PullInfo: &obs.PullEvent{
-		Outcome: obs.OutcomeOK, Duration: time.Second, Bytes: 100,
+	pull := &obs.PullRef{ID: "pull-abc123", Ref: "ghcr.io/x@sha256:d34d", Digest: "sha256:d34d", Started: at(0)}
+
+	// The cycle side: ENSURE_IMAGE's wait-for-pull action, carrying the same
+	// pull id the pull side will carry on its root.
+	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
+	emit(obs.Event{
+		Time: at(0), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepEntered,
+		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE"},
+	})
+	emit(obs.Event{
+		Time: at(0), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindActionStarted,
+		Action: &obs.ActionEvent{Name: obs.ActionWaitForPull, Attrs: []obs.Attr{{Key: obs.AttrPullID, Value: pull.ID}}},
+	})
+
+	// The pull side: started, a token exchange, a progress tick, the blob
+	// GET, finished.
+	emit(obs.Event{Time: at(1), Pull: pull, Kind: obs.KindPullStarted})
+	emit(obs.Event{Time: at(2), Pull: pull, Kind: obs.KindHTTP, HTTP: &obs.HTTPEvent{
+		Class: obs.HTTPRegistryToken, Method: "GET", Host: "registry.example", Status: 200, Duration: time.Second,
 	}})
-	emit(obs.Event{Kind: obs.KindDetail, Pull: pull, Detail: &obs.DetailEvent{Text: "pulled 1 GiB at 40 MiB/s"}})
-	emit(obs.Event{Kind: obs.KindTarballDone, Cycle: testCycle, Tarball: &obs.TarballEvent{
-		Outcome: obs.OutcomeOK, Duration: time.Second,
+	emit(obs.Event{Time: at(4), Pull: pull, Kind: obs.KindDetail, Detail: &obs.DetailEvent{Text: "pulled 1 GiB at 500 MiB/s"}})
+	emit(obs.Event{Time: at(5), Pull: pull, Kind: obs.KindHTTP, HTTP: &obs.HTTPEvent{
+		Class: obs.HTTPRegistryBlob, Method: "GET", Host: "registry.example", Status: 200,
+		Duration: 3 * time.Second, BytesRead: 1 << 30,
+	}})
+	emit(obs.Event{Time: at(6), Pull: pull, Kind: obs.KindPullFinished, PullInfo: &obs.PullEvent{
+		Outcome: obs.OutcomeOK, Duration: 5 * time.Second, Bytes: 1 << 30,
 	}})
 
+	emit(obs.Event{
+		Time: at(6), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindActionEnded,
+		Action: &obs.ActionEvent{
+			Name: obs.ActionWaitForPull, Outcome: obs.OutcomeOK,
+			Attrs: []obs.Attr{{Key: obs.AttrPullID, Value: pull.ID}},
+		},
+	})
+
+	var root, waitForPull tracetest.SpanStub
+	var children []tracetest.SpanStub
+	for _, s := range exp.GetSpans() {
+		switch s.Name {
+		case "runny.pull":
+			root = s
+		case "http registry.token", "http registry.blob":
+			children = append(children, s)
+		case "cycle.step.action wait-for-pull":
+			waitForPull = s
+		}
+	}
+	if root.Name == "" {
+		t.Fatal("no runny.pull root span found")
+	}
+	if len(children) != 2 {
+		t.Fatalf("got %d client children under the pull, want 2", len(children))
+	}
+	for _, c := range children {
+		if c.Parent.SpanID() != root.SpanContext.SpanID() {
+			t.Errorf("%s parent = %x, want the pull root %x", c.Name, c.Parent.SpanID(), root.SpanContext.SpanID())
+		}
+	}
+
+	if got := attrString(root.Attributes, "runny.outcome"); got != string(obs.OutcomeOK) {
+		t.Errorf("pull root outcome = %q, want ok", got)
+	}
+	if got := attrInt64(root.Attributes, "runny.pull.bytes"); got != 1<<30 {
+		t.Errorf("pull root bytes = %d, want %d", got, int64(1<<30))
+	}
+	if got := attrString(root.Attributes, "runny.progress.last"); got != "pulled 1 GiB at 500 MiB/s" {
+		t.Errorf("pull root progress.last = %q", got)
+	}
+	if root.Status.Code == codes.Error {
+		t.Error("a successful pull's root must not carry error status")
+	}
+
+	if waitForPull.Name == "" {
+		t.Fatal("no cycle.step.action wait-for-pull span found")
+	}
+	rootID := attrString(root.Attributes, "runny.pull.id")
+	waitID := attrString(waitForPull.Attributes, obs.AttrPullID)
+	if rootID == "" || rootID != waitID {
+		t.Errorf("pull ids: root=%q wait-for-pull=%q, want equal and non-empty", rootID, waitID)
+	}
+}
+
+// A failed pull's root carries error status and the failure text — the same
+// rule a failed step or action span follows.
+func TestTraceConsumerPullFailureStatus(t *testing.T) {
+	emit, exp := newTestAssembler(t)
+
+	pull := &obs.PullRef{ID: "pull-fail", Ref: "ghcr.io/x", Digest: "sha256:x", Started: at(0)}
+	emit(obs.Event{Time: at(0), Pull: pull, Kind: obs.KindPullStarted})
+	emit(obs.Event{Time: at(1), Pull: pull, Kind: obs.KindPullFinished, PullInfo: &obs.PullEvent{
+		Outcome: obs.OutcomeError, Error: "registry 503", Duration: time.Second,
+	}})
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 || spans[0].Name != "runny.pull" {
+		t.Fatalf("got %d spans, want exactly 1 runny.pull root", len(spans))
+	}
+	root := spans[0]
+	if root.Status.Code != codes.Error || root.Status.Description != "registry 503" {
+		t.Errorf("pull root status = %+v, want Error \"registry 503\"", root.Status)
+	}
+}
+
+// A pull abandoned before a terminal outcome (KindPullAbandoned, not
+// KindPullFinished) still closes its root span — error status, no
+// outcome/bytes attributes since there was never a result — and evicts the
+// map entry, so a stray later event for the same pull id is a no-op instead
+// of reopening or double-processing it.
+func TestTraceConsumerPullAbandonedClosesRootAndEvicts(t *testing.T) {
+	emit, exp := newTestAssembler(t)
+
+	pull := &obs.PullRef{ID: "pull-abandoned", Ref: "ghcr.io/x", Digest: "sha256:x", Started: at(0)}
+	emit(obs.Event{Time: at(0), Pull: pull, Kind: obs.KindPullStarted})
+	emit(obs.Event{Time: at(1), Pull: pull, Kind: obs.KindDetail, Detail: &obs.DetailEvent{Text: "pulled 500 MiB"}})
+	emit(obs.Event{Time: at(2), Pull: pull, Kind: obs.KindPullAbandoned})
+	// A stray event after abandonment must not reopen or re-end the span.
+	emit(obs.Event{Time: at(3), Pull: pull, Kind: obs.KindPullFinished, PullInfo: &obs.PullEvent{Outcome: obs.OutcomeOK}})
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 || spans[0].Name != "runny.pull" {
+		t.Fatalf("got %d spans, want exactly 1 runny.pull root", len(spans))
+	}
+	root := spans[0]
+	if root.Status.Code != codes.Error {
+		t.Errorf("abandoned pull root status = %v, want Error", root.Status.Code)
+	}
+	if got := attrString(root.Attributes, "runny.outcome"); got != "" {
+		t.Errorf("abandoned pull root carries runny.outcome = %q, want none (no result to report)", got)
+	}
+	if got := attrString(root.Attributes, "runny.progress.last"); got != "pulled 500 MiB" {
+		t.Errorf("abandoned pull root progress.last = %q, want the last detail before abandonment", got)
+	}
+	if root.EndTime.UTC() != at(2).UTC() {
+		t.Errorf("abandoned pull root end time = %v, want %v (the abandonment time, not the stray KindPullFinished)", root.EndTime, at(2))
+	}
+}
+
+// Two puller instances for the same image directory share the exact same
+// deterministic PullRef.ID (a successor can start the instant the last
+// subscriber leaves, before the predecessor's own goroutine notices
+// cancellation and emits its terminal event). pullStarted closes the
+// predecessor's span out as "superseded" the moment the successor starts;
+// the predecessor's own stale terminal event, arriving later, must not
+// touch or re-end the successor's live span — only the successor's own
+// events (carrying its own *PullRef) can.
+func TestTraceConsumerPullSuccessorSurvivesStalePredecessorEvent(t *testing.T) {
+	emit, exp := newTestAssembler(t)
+
+	predecessor := &obs.PullRef{ID: "pull-shared", Ref: "ghcr.io/x", Digest: "sha256:x", Started: at(0)}
+	successor := &obs.PullRef{ID: "pull-shared", Ref: "ghcr.io/x", Digest: "sha256:x", Started: at(1)}
+
+	emit(obs.Event{Time: at(0), Pull: predecessor, Kind: obs.KindPullStarted})
+	emit(obs.Event{Time: at(1), Pull: successor, Kind: obs.KindPullStarted}) // supersedes predecessor's entry
+
+	// The predecessor's own stale terminal event must not touch the
+	// successor's now-installed entry.
+	emit(obs.Event{Time: at(2), Pull: predecessor, Kind: obs.KindPullAbandoned})
+
+	// The successor's own traffic and finish must land normally.
+	emit(obs.Event{Time: at(3), Pull: successor, Kind: obs.KindHTTP, HTTP: &obs.HTTPEvent{
+		Class: obs.HTTPRegistryBlob, Method: "GET", Host: "registry.example", Status: 200, Duration: time.Second,
+	}})
+	emit(obs.Event{Time: at(5), Pull: successor, Kind: obs.KindPullFinished, PullInfo: &obs.PullEvent{
+		Outcome: obs.OutcomeOK, Duration: 4 * time.Second, Bytes: 100,
+	}})
+
+	var roots []tracetest.SpanStub
+	var children int
+	for _, s := range exp.GetSpans() {
+		switch s.Name {
+		case "runny.pull":
+			roots = append(roots, s)
+		case "http registry.blob":
+			children++
+		}
+	}
+	if len(roots) != 2 {
+		t.Fatalf("got %d runny.pull spans, want exactly 2 (predecessor + successor, both closed)", len(roots))
+	}
+	if children != 1 {
+		t.Fatalf("got %d client children, want 1 (the successor's HTTP traffic, not dropped as stray)", children)
+	}
+
+	var predecessorSpan, successorSpan tracetest.SpanStub
+	for _, s := range roots {
+		if s.EndTime.UTC() == at(1).UTC() {
+			predecessorSpan = s
+		} else {
+			successorSpan = s
+		}
+	}
+	if predecessorSpan.Status.Code != codes.Error || predecessorSpan.Status.Description != "superseded by a new pull for the same image" {
+		t.Errorf("predecessor span status = %+v, want Error \"superseded...\"", predecessorSpan.Status)
+	}
+	if got := attrString(successorSpan.Attributes, "runny.outcome"); got != string(obs.OutcomeOK) {
+		t.Errorf("successor span outcome = %q, want ok (its own real finish, not the predecessor's stale abandon)", got)
+	}
+	if successorSpan.EndTime.UTC() != at(5).UTC() {
+		t.Errorf("successor span end time = %v, want %v (its own finish, not the predecessor's stale abandon at t=2)", successorSpan.EndTime, at(5))
+	}
+}
+
+// KindHTTP/KindDetail for a pull whose KindPullStarted was never seen (a
+// stray event, or a pull that already finished) is a no-op — the same
+// stray-event tolerance withCycle/withStep give cycle-scoped events.
+func TestTraceConsumerStrayPullEventsAreNoop(t *testing.T) {
+	emit, exp := newTestAssembler(t)
+
+	pull := &obs.PullRef{ID: "pull-stray"}
+	emit(obs.Event{Time: at(0), Pull: pull, Kind: obs.KindHTTP, HTTP: &obs.HTTPEvent{Class: obs.HTTPRegistryBlob}})
+	emit(obs.Event{Time: at(0), Pull: pull, Kind: obs.KindDetail, Detail: &obs.DetailEvent{Text: "x"}})
+	emit(obs.Event{Time: at(0), Pull: pull, Kind: obs.KindPullFinished, PullInfo: &obs.PullEvent{Outcome: obs.OutcomeOK}})
+
 	if spans := exp.GetSpans(); len(spans) != 0 {
-		t.Fatalf("pull/tarball events produced %d spans, want 0", len(spans))
+		t.Fatalf("stray pull events (no KindPullStarted seen) produced %d spans, want 0", len(spans))
+	}
+}
+
+// KindTarballDone is cycle-scoped and carries no trace rendering of its own
+// (metrics-only, per internal/telemetry/metrics.go) — feeding one through
+// must not produce a span.
+func TestTraceConsumerIgnoresTarballDone(t *testing.T) {
+	emit, exp := newTestAssembler(t)
+	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindTarballDone, Tarball: &obs.TarballEvent{
+		Outcome: obs.OutcomeOK, Duration: time.Second,
+	}})
+	if spans := exp.GetSpans(); len(spans) != 0 {
+		t.Fatalf("KindTarballDone produced %d spans, want 0", len(spans))
 	}
 }

@@ -273,9 +273,33 @@ func TestEnsureRunnerTarballEmitsTarballDoneEvent(t *testing.T) {
 	}
 }
 
+// A download that fails on its own terms (not caller cancellation) still
+// fires KindTarballDone, with outcome=error and the failure text.
+func TestEnsureRunnerTarballFailureEmitsErrorOutcome(t *testing.T) {
+	cap := &eventCapture{}
+	e := newTarballEnsurer(t, tarballServer(t, http.StatusServiceUnavailable))
+
+	if _, _, err := e.ensureRunnerTarball(scopedCtx(cap), nil); err == nil {
+		t.Fatal("ensureRunnerTarball succeeded against a 503 download")
+	}
+
+	var got []obs.Event
+	for _, ev := range cap.all() {
+		if ev.Kind == obs.KindTarballDone {
+			got = append(got, ev)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d KindTarballDone events, want exactly 1", len(got))
+	}
+	if got[0].Tarball.Outcome != obs.OutcomeError || got[0].Tarball.Error == "" {
+		t.Errorf("KindTarballDone = %+v, want outcome=error with a non-empty error text", got[0].Tarball)
+	}
+}
+
 // A download truncated by the caller's own cancellation is not a download
-// outcome — record nothing, the same rule TestEnsureRunnerTarballCancelledRecordsNothing
-// checks for the metric.
+// outcome — record nothing, the same rule a failed-on-its-own-terms download
+// (above) is exempt from.
 func TestEnsureRunnerTarballCancelledEmitsNoTarballDoneEvent(t *testing.T) {
 	cap := &eventCapture{}
 	ctx, cancel := context.WithCancel(context.Background())

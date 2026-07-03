@@ -77,6 +77,55 @@ func (c *run) setState(state State, mut func(*Status)) {
 	setStatus(c.cell, c.deps.Log, c.name, c.deps.Pool, state, mut)
 }
 
+// beginStep opens one FSM step: publishes the state transition (with the
+// completed-states snapshot) under mut, emits StepEntered, and opens the
+// StateRecord. The returned ctx carries the step's obs scope; the returned
+// finish stamps outcome/error, appends to rec.States, and emits StepLeft.
+// finish is idempotent — a second call is a no-op, so a select-loop that
+// calls it on every exit path never double-appends a StateRecord.
+func (c *run) beginStep(ctx context.Context, state State, mut func(*Status)) (context.Context, func(cycle.Outcome, string)) {
+	ctx = obs.WithStep(ctx, string(state))
+	completed := slices.Clone(c.rec.States)
+	c.setState(state, func(st *Status) {
+		st.ActiveCycleStates = completed
+		if mut != nil {
+			mut(st)
+		}
+	})
+	obs.Emit(ctx, obs.Event{Kind: obs.KindStepEntered, StepInfo: &obs.StepEvent{State: string(state)}})
+	sr := cycle.StateRecord{State: string(state), Entered: time.Now()}
+	var done bool
+	finish := func(outcome cycle.Outcome, errStr string) {
+		if done {
+			return
+		}
+		done = true
+		sr.Left, sr.Outcome, sr.Error = time.Now(), outcome, errStr
+		c.rec.States = append(c.rec.States, sr)
+		obs.Emit(ctx, obs.Event{Kind: obs.KindStepLeft, StepInfo: &obs.StepEvent{
+			State: string(state), Outcome: obs.Outcome(outcome), Error: errStr,
+		}})
+	}
+	return ctx, finish
+}
+
+// publish applies one learned fact to the cycle record and the live status
+// under one lock acquisition, then emits its obs event and notifies watchers
+// — one seam, three surfaces, so they can never disagree. Digest, RunnerVersion,
+// VM MAC, and VM IP all used to skip notify here on purpose (the next state's
+// own setState broadcasts moments later) except Digest, which already
+// notified; publish always notifies, so the other three each gain one benign
+// extra broadcast — no consumer or test distinguishes it from the one that
+// follows. recordOperatorKey shares this same lock-mutate-notify body
+// directly (it has no obs event of its own — its callers already emit the
+// audit trail events around it) so it isn't routed through publish, to avoid
+// emitting a synthetic event.
+func (c *run) publish(ctx context.Context, ev obs.Event, mut func(*cycle.Record, *Status)) {
+	snap, fns := c.cell.update(func(st *Status) { mut(c.rec, st) })
+	c.cell.notify(fns, snap)
+	obs.Emit(ctx, ev)
+}
+
 // setDetail publishes a live annotation for the current state.
 func (c *run) setDetail(ctx context.Context, detail string) {
 	snap, fns, changed := c.cell.setDetailIfChanged(detail)
@@ -186,21 +235,24 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 			// image_info event sit together here so they can never disagree —
 			// a cycle whose pull fails after resolve still records (and
 			// emits) the digest it tried to pull.
-			c.rec.ImageDigest = d
-			snap, fns := c.cell.update(func(st *Status) { st.ImageDigest = d })
-			c.cell.notify(fns, snap)
-			obs.Emit(esctx, obs.Event{Kind: obs.KindImageInfo, Image: &obs.ImageEvent{Digest: d}})
+			c.publish(esctx, obs.Event{Kind: obs.KindImageInfo, Image: &obs.ImageEvent{Digest: d}}, func(rec *cycle.Record, st *Status) {
+				rec.ImageDigest = d
+				st.ImageDigest = d
+			})
 		})
 		if err != nil {
 			return err
 		}
-		c.rec.RunnerVersion = runnerVersion
-		if runnerVersion != "" { // no resolver configured → no tarball, no event
-			obs.Emit(esctx, obs.Event{Kind: obs.KindImageInfo, Image: &obs.ImageEvent{RunnerVersion: runnerVersion}})
+		if runnerVersion != "" {
+			// no resolver configured → no tarball, no event, and rec/status
+			// already hold "" from cycle start (a fresh *cycle.Record, and
+			// backoffWait resets Status.RunnerVersion before every cycle) —
+			// nothing to publish when it's empty.
+			c.publish(esctx, obs.Event{Kind: obs.KindImageInfo, Image: &obs.ImageEvent{RunnerVersion: runnerVersion}}, func(rec *cycle.Record, st *Status) {
+				rec.RunnerVersion = runnerVersion
+				st.RunnerVersion = runnerVersion
+			})
 		}
-		// RunnerVersion: no explicit notify needed — the next setState
-		// (ENSURE_IMAGE → CLONE) broadcasts it milliseconds later.
-		c.cell.update(func(st *Status) { st.RunnerVersion = runnerVersion })
 		c.srcBundle = bundle
 		return nil
 	})
@@ -249,9 +301,11 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 				return err
 			}
 			c.machine = m
-			c.cell.update(func(st *Status) { st.VM.MAC = m.MAC() })
-			c.rec.VM.MAC = m.MAC()
-			obs.Emit(bc, obs.Event{Kind: obs.KindVMInfo, VM: &obs.VMEvent{MAC: m.MAC()}})
+			mac := m.MAC()
+			c.publish(bc, obs.Event{Kind: obs.KindVMInfo, VM: &obs.VMEvent{MAC: mac}}, func(rec *cycle.Record, st *Status) {
+				rec.VM.MAC = mac
+				st.VM.MAC = mac
+			})
 			return nil
 		})
 	}
@@ -263,9 +317,10 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 				return err
 			}
 			ip = got
-			c.cell.update(func(st *Status) { st.VM.IP = ip })
-			c.rec.VM.IP = ip
-			obs.Emit(bc, obs.Event{Kind: obs.KindVMInfo, VM: &obs.VMEvent{IP: ip}})
+			c.publish(bc, obs.Event{Kind: obs.KindVMInfo, VM: &obs.VMEvent{IP: ip}}, func(rec *cycle.Record, st *Status) {
+				rec.VM.IP = ip
+				st.VM.IP = ip
+			})
 			return nil
 		})
 	}
@@ -436,28 +491,19 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 // runState records one state's execution; sctx is consulted only to
 // classify deadline outcomes. false = cycle failed.
 func (c *run) runState(state State, sctx context.Context, f func() error) bool {
-	completed := slices.Clone(c.rec.States)
-	c.setState(state, func(st *Status) {
+	_, finish := c.beginStep(sctx, state, func(st *Status) {
 		st.CycleID = c.rec.CycleID
 		st.RunnerName = c.runnerName
-		st.ActiveCycleStates = completed
 	})
-	obs.Emit(sctx, obs.Event{Kind: obs.KindStepEntered, StepInfo: &obs.StepEvent{State: string(state)}})
-	sr := cycle.StateRecord{State: string(state), Entered: time.Now()}
 	err := f()
-	sr.Left = time.Now()
 	switch {
 	case err == nil:
-		sr.Outcome = cycle.OutcomeOK
+		finish(cycle.OutcomeOK, "")
 	case errors.Is(err, context.DeadlineExceeded) || sctx.Err() != nil && errors.Is(context.Cause(sctx), context.DeadlineExceeded):
-		sr.Outcome, sr.Error = cycle.OutcomeDeadline, err.Error()
+		finish(cycle.OutcomeDeadline, err.Error())
 	default:
-		sr.Outcome, sr.Error = cycle.OutcomeError, err.Error()
+		finish(cycle.OutcomeError, err.Error())
 	}
-	c.rec.States = append(c.rec.States, sr)
-	obs.Emit(sctx, obs.Event{Kind: obs.KindStepLeft, StepInfo: &obs.StepEvent{
-		State: string(state), Outcome: obs.Outcome(sr.Outcome), Error: sr.Error,
-	}})
 	if err != nil {
 		c.failState, c.failErr = state, err
 		return false
@@ -483,10 +529,7 @@ func (c *run) enter(cctx context.Context, state State, d time.Duration, f func(b
 // (issue #39) is reported as a benign failure carrying StateDebug.
 func (c *run) listenAndRunJob(ctx context.Context) (bool, State, error) {
 	cfg := c.deps.Config
-	ctx = obs.WithStep(ctx, string(StateListening))
-	completed := slices.Clone(c.rec.States)
-	c.setState(StateListening, func(st *Status) {
-		st.ActiveCycleStates = completed
+	ctx, finishListening := c.beginStep(ctx, StateListening, func(st *Status) {
 		// Reaching LISTENING proves the pre-boot failure (e.g. a doomed image
 		// pull) is resolved. Clear the stale NOTE now rather than waiting for
 		// finishCycle, so the status reflects "healthy" while the slot is healthy.
@@ -498,21 +541,11 @@ func (c *run) listenAndRunJob(ctx context.Context) (bool, State, error) {
 		st.ConsecutiveFailures = 0
 		c.cell.failures = 0
 	})
-	obs.Emit(ctx, obs.Event{Kind: obs.KindStepEntered, StepInfo: &obs.StepEvent{State: string(StateListening)}})
-	lrec := cycle.StateRecord{State: string(StateListening), Entered: time.Now()}
 
 	reconcile := time.NewTicker(cfg.Limits.ReconcileInterval.D())
 	defer reconcile.Stop()
 	maxIdle := time.NewTimer(cfg.Limits.MaxIdle.D())
 	defer maxIdle.Stop()
-
-	finishListening := func(outcome cycle.Outcome, err string) {
-		lrec.Left, lrec.Outcome, lrec.Error = time.Now(), outcome, err
-		c.rec.States = append(c.rec.States, lrec)
-		obs.Emit(ctx, obs.Event{Kind: obs.KindStepLeft, StepInfo: &obs.StepEvent{
-			State: string(StateListening), Outcome: obs.Outcome(outcome), Error: err,
-		}})
-	}
 
 	for {
 		select {
@@ -626,41 +659,39 @@ func jobNameFromMarker(markerLine string) string {
 // operator's mid-job work (§3).
 func (c *run) runJob(ctx context.Context, markerLine string) (bool, State, error) {
 	cfg := c.deps.Config
-	ctx = obs.WithStep(ctx, string(StateJob))
 	jobName := jobNameFromMarker(markerLine)
 	job := &cycle.JobInfo{Name: jobName, Started: time.Now()}
-	c.rec.Job = job
-	completedBeforeJob := slices.Clone(c.rec.States)
-	c.setState(StateJob, func(st *Status) {
+	// rec.Job and status.Job are set together, inside beginStep's own locked
+	// setState — not a separate publish call, so the JOB transition's single
+	// notify already carries Job populated (a second, later publish call
+	// here would fire an extra broadcast beyond the one documented delta).
+	ctx, finish := c.beginStep(ctx, StateJob, func(st *Status) {
+		c.rec.Job = job
 		st.Job = job
-		st.ActiveCycleStates = completedBeforeJob
 	})
-	obs.Emit(ctx, obs.Event{Kind: obs.KindStepEntered, StepInfo: &obs.StepEvent{State: string(StateJob)}})
 	obs.Emit(ctx, obs.Event{Kind: obs.KindJobStarted, Job: &obs.JobEvent{Name: jobName}})
-	jrec := cycle.StateRecord{State: string(StateJob), Entered: time.Now()}
 
 	jctx, jcancel := context.WithTimeout(ctx, cfg.Limits.MaxJobDuration.D())
 	jobOK, jobErr := c.watchJob(jctx, ctx)
 	jcancel()
-	jrec.Left = time.Now()
+
+	var jobOutcome cycle.Outcome
+	var jobErrStr string
 	if jobOK {
-		jrec.Outcome = cycle.OutcomeOK
+		jobOutcome = cycle.OutcomeOK
 	} else {
-		jrec.Outcome, jrec.Error = cycle.OutcomeError, jobErr.Error()
+		jobOutcome, jobErrStr = cycle.OutcomeError, jobErr.Error()
 	}
-	c.rec.States = append(c.rec.States, jrec)
-	// JobEnded before StepLeft, mirroring JobStarted's position after
-	// StepEntered: both bracket the JOB step from inside its span, so a
+	// JobEnded before StepLeft (finish), mirroring JobStarted's position
+	// after StepEntered: both bracket the JOB step from inside its span, so a
 	// consumer never sees a job event for a step that's already closed.
 	// c.rec.Job, not the local job pointer: recordOperatorKey is copy-on-write
 	// and rebinds c.rec.Job to a fresh JobInfo per appended key — the original
 	// this function captured never sees them.
 	obs.Emit(ctx, obs.Event{Kind: obs.KindJobEnded, Job: &obs.JobEvent{
-		Name: jobName, Outcome: obs.Outcome(jrec.Outcome), OperatorKeys: c.rec.Job.OperatorKeys,
+		Name: jobName, Outcome: obs.Outcome(jobOutcome), OperatorKeys: c.rec.Job.OperatorKeys,
 	}})
-	obs.Emit(ctx, obs.Event{Kind: obs.KindStepLeft, StepInfo: &obs.StepEvent{
-		State: string(StateJob), Outcome: obs.Outcome(jrec.Outcome), Error: jrec.Error,
-	}})
+	finish(jobOutcome, jobErrStr)
 
 	switch {
 	case !c.arm.armed:
@@ -994,7 +1025,9 @@ func (c *run) freezeForDebug(ctx context.Context, cmd Command,
 	}
 
 	// 5. Install.
-	if err := c.boundedGuestArg(ctx, secureSSH, cmd.PubKey, c.guest.InstallAuthorizedKey); err != nil {
+	if err := c.boundedGuest(ctx, secureSSH, func(bc bounded.Context) error {
+		return c.guest.InstallAuthorizedKey(bc, cmd.PubKey)
+	}); err != nil {
 		c.updateAudit(ctx, idx, "error", err.Error())
 		cmd.reply(DebugKeyReply{Err: fmt.Errorf("installing the key failed: %w", err)})
 		finishListening(cycle.OutcomeError, "debug freeze: key install failed")
@@ -1069,7 +1102,9 @@ func (c *run) midJobInject(ctx context.Context, cmd Command) {
 
 	// 3. Install over the cycle's live session (a fresh channel; the runner
 	// proc and the job are untouched). cctx, NOT jctx (§3).
-	err := c.boundedGuestArg(ctx, secureSSH, cmd.PubKey, c.guest.InstallAuthorizedKey)
+	err := c.boundedGuest(ctx, secureSSH, func(bc bounded.Context) error {
+		return c.guest.InstallAuthorizedKey(bc, cmd.PubKey)
+	})
 	switch {
 	case err == nil:
 		// 4. Success: arm.
@@ -1147,22 +1182,10 @@ func (c *run) enterPostJobDebug(ctx context.Context) (State, error) {
 // max-idle is gone by construction; release is destruction.
 func (c *run) holdForDebug(ctx context.Context, holdUntil time.Time) (State, error) {
 	secureSSH := c.deps.Config.Deadlines.SecureSSH.D()
-	ctx = obs.WithStep(ctx, string(StateDebug))
-	completedBeforeDebug := slices.Clone(c.rec.States)
-	c.setState(StateDebug, func(st *Status) {
+	ctx, finish := c.beginStep(ctx, StateDebug, func(st *Status) {
 		st.DebugHoldExpires = holdUntil
 		st.Detail = fmt.Sprintf("held for debug; release: runnyctl recycle %s", c.name)
-		st.ActiveCycleStates = completedBeforeDebug
 	})
-	obs.Emit(ctx, obs.Event{Kind: obs.KindStepEntered, StepInfo: &obs.StepEvent{State: string(StateDebug)}})
-	dr := cycle.StateRecord{State: string(StateDebug), Entered: time.Now()}
-	finish := func(outcome cycle.Outcome, errStr string) {
-		dr.Left, dr.Outcome, dr.Error = time.Now(), outcome, errStr
-		c.rec.States = append(c.rec.States, dr)
-		obs.Emit(ctx, obs.Event{Kind: obs.KindStepLeft, StepInfo: &obs.StepEvent{
-			State: string(StateDebug), Outcome: obs.Outcome(outcome), Error: errStr,
-		}})
-	}
 
 	hold := time.NewTimer(time.Until(holdUntil))
 	defer hold.Stop()
@@ -1184,11 +1207,10 @@ func (c *run) holdForDebug(ctx context.Context, holdUntil time.Time) (State, err
 			case CmdResume:
 				c.cell.setPaused(false, cmd.ID)
 			case CmdDebugKey:
-				c.debugReArm(ctx, cmd, hold, secureSSH, finish)
-				if dr.Left.IsZero() {
-					continue // still holding
+				if ended := c.debugReArm(ctx, cmd, hold, secureSSH, finish); ended {
+					return StateDebug, fmt.Errorf("debug hold install: %w", errDebugInjectFailed)
 				}
-				return StateDebug, fmt.Errorf("debug hold install: %w", errDebugInjectFailed)
+				// still holding
 			}
 		}
 	}
@@ -1196,17 +1218,17 @@ func (c *run) holdForDebug(ctx context.Context, holdUntil time.Time) (State, err
 
 // debugReArm handles a CmdDebugKey dequeued in DEBUG (§5.5): re-arm an
 // already-installed key exec-free, or install a new key. On a fatal install
-// error it calls finish() (setting dr.Left) so the caller ends the hold.
+// error it calls finish() and returns ended=true so the caller ends the hold.
 func (c *run) debugReArm(ctx context.Context, cmd Command,
 	hold *time.Timer, secureSSH time.Duration, finish func(cycle.Outcome, string),
-) {
+) (ended bool) {
 	if !cmd.Expires.IsZero() && time.Now().After(cmd.Expires) {
 		cmd.reply(DebugKeyReply{Err: errors.New("command expired; nothing was injected")})
-		return
+		return false
 	}
 	if cmd.CycleID != "" && cmd.CycleID != c.rec.CycleID {
 		cmd.reply(DebugKeyReply{Err: fmt.Errorf("cycle %s already ended; nothing was injected", cmd.CycleID)})
-		return
+		return false
 	}
 	// reset moves the auto-release deadline to now+cmd.Hold and publishes it,
 	// returning the new deadline for the reply.
@@ -1230,19 +1252,20 @@ func (c *run) debugReArm(ctx context.Context, cmd Command,
 		_ = c.writeAuditSidecar()
 		c.emitAuditAppend(ctx)
 		cmd.reply(DebugKeyReply{User: c.deps.Pool.SSHUser, HostKeys: c.guest.HostKeys(), HoldUntil: newUntil})
-		return
+		return false
 	}
 
 	// NEW KEY: write-ahead, then install with a one-shot Redial retry.
 	idx, ok := c.appendPending(ctx, cmd, StateDebug)
 	if !ok {
 		cmd.reply(DebugKeyReply{Err: errors.New("audit write failed; injection refused")})
-		return
+		return false
 	}
-	err := c.boundedGuestArg(ctx, secureSSH, cmd.PubKey, c.guest.InstallAuthorizedKey)
+	install := func(bc bounded.Context) error { return c.guest.InstallAuthorizedKey(bc, cmd.PubKey) }
+	err := c.boundedGuest(ctx, secureSSH, install)
 	if errors.Is(err, ErrGuestUnreachable) {
 		if rerr := c.boundedGuest(ctx, secureSSH, c.guest.Redial); rerr == nil {
-			err = c.boundedGuestArg(ctx, secureSSH, cmd.PubKey, c.guest.InstallAuthorizedKey)
+			err = c.boundedGuest(ctx, secureSSH, install)
 		}
 	}
 	switch {
@@ -1250,15 +1273,18 @@ func (c *run) debugReArm(ctx context.Context, cmd Command,
 		newUntil := reset()
 		c.updateAudit(ctx, idx, "ok", "")
 		cmd.reply(DebugKeyReply{User: c.deps.Pool.SSHUser, HostKeys: c.guest.HostKeys(), HoldUntil: newUntil})
+		return false
 	case errors.Is(err, ErrGuestUnreachable):
 		c.updateAudit(ctx, idx, "unreachable", err.Error())
 		cmd.reply(DebugKeyReply{Err: errors.New(
 			"guest session is down (rebooted?); hold unchanged — extend with the already-installed key, or release with recycle",
 		)})
+		return false
 	default:
 		c.updateAudit(ctx, idx, "error", err.Error())
 		cmd.reply(DebugKeyReply{Err: fmt.Errorf("installing the key failed: %w", err)})
 		finish(cycle.OutcomeError, "debug hold: key install failed")
+		return true
 	}
 }
 
@@ -1365,14 +1391,6 @@ func (c *run) boundedGuest(ctx context.Context, d time.Duration, f func(bounded.
 	return f(bctx)
 }
 
-// boundedGuestArg calls a guest method that takes a bounded.Context and a
-// string argument.
-func (c *run) boundedGuestArg(ctx context.Context, d time.Duration, arg string, f func(bounded.Context, string) error) error {
-	bctx, cancel := bounded.WithTimeout(ctx, d)
-	defer cancel()
-	return f(bctx, arg)
-}
-
 // teardown is the universal sink. Post-mortem first (failure cycles), then
 // stop → delete → deregister → record. Every step is best-effort with its own
 // bound; nothing here can wedge the slot. Returns true when force-stop
@@ -1380,11 +1398,7 @@ func (c *run) boundedGuestArg(ctx context.Context, d time.Duration, arg string, 
 // absorb, because releasing an in-process VM takes a process exit.
 func (c *run) teardown(ctx context.Context) bool {
 	cfg := c.deps.Config
-	ctx = obs.WithStep(ctx, string(StateTeardown))
-	completedBeforeTeardown := slices.Clone(c.rec.States)
-	c.setState(StateTeardown, func(st *Status) { st.ActiveCycleStates = completedBeforeTeardown })
-	obs.Emit(ctx, obs.Event{Kind: obs.KindStepEntered, StepInfo: &obs.StepEvent{State: string(StateTeardown)}})
-	tr := cycle.StateRecord{State: string(StateTeardown), Entered: time.Now()}
+	ctx, finish := c.beginStep(ctx, StateTeardown, nil)
 	// Teardown must run even when ctx (daemon shutdown) is done: detach.
 	// context.WithoutCancel still forwards Value lookups to ctx, so the obs
 	// scope survives detachment.
@@ -1469,13 +1483,14 @@ func (c *run) teardown(ctx context.Context) bool {
 
 	// 3. Stop the VM (graceful 10s → force; force is the floor).
 	wedged := false
+	var stopErr string
 	if c.machine != nil {
 		_ = obs.Action(ctx, obs.ActionStop, func(context.Context) error {
 			err := c.machine.Stop(tctx, 10*time.Second)
 			if err != nil {
 				c.deps.Log.Error("vm stop escalation failed; guest still running", "err", err)
 				wedged = true
-				tr.Error = fmt.Sprintf("vm stop escalation failed: %v", err)
+				stopErr = fmt.Sprintf("vm stop escalation failed: %v", err)
 			}
 			return err
 		})
@@ -1514,27 +1529,25 @@ func (c *run) teardown(ctx context.Context) bool {
 		})
 	}
 
-	tr.Left = time.Now()
+	var outcome cycle.Outcome
+	errStr := stopErr
 	switch {
 	case wedged:
 		// Recording OK here once hid the exact outage this project exists
 		// to kill: cycle.json swore teardown succeeded while a ghost guest
 		// ate the macOS guest cap and every later boot failed. A dereg can
 		// still fail on this path (step 5 runs regardless); note it, but the
-		// wedge dominates the outcome. tr.Error already holds the stop failure.
-		tr.Outcome = cycle.OutcomeError
+		// wedge dominates the outcome. errStr already holds the stop failure.
+		outcome = cycle.OutcomeError
 		if len(cleanupWarns) > 0 {
-			tr.Error += "; " + strings.Join(cleanupWarns, "; ")
+			errStr += "; " + strings.Join(cleanupWarns, "; ")
 		}
 	case len(cleanupWarns) > 0:
-		tr.Outcome = cycle.OutcomeWarn
-		tr.Error = strings.Join(cleanupWarns, "; ")
+		outcome = cycle.OutcomeWarn
+		errStr = strings.Join(cleanupWarns, "; ")
 	default:
-		tr.Outcome = cycle.OutcomeOK
+		outcome = cycle.OutcomeOK
 	}
-	c.rec.States = append(c.rec.States, tr)
-	obs.Emit(ctx, obs.Event{Kind: obs.KindStepLeft, StepInfo: &obs.StepEvent{
-		State: string(StateTeardown), Outcome: obs.Outcome(tr.Outcome), Error: tr.Error,
-	}})
+	finish(outcome, errStr)
 	return wedged
 }

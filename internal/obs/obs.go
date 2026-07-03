@@ -36,6 +36,10 @@ const (
 	KindAuditAppend   Kind = "audit_append"
 	KindAuditUpdate   Kind = "audit_update"
 	KindCycleFinished Kind = "cycle_finished"
+	// KindTarballDone is cycle-scoped: a runner-tarball download belongs to
+	// whichever cycle triggered it, unlike a shared image pull (see pull.go
+	// for the pull-scoped kinds).
+	KindTarballDone Kind = "tarball_done"
 )
 
 // Action names are a closed set: each becomes a span name on the trace side
@@ -90,6 +94,16 @@ func OutcomeOf(err error) Outcome {
 		return OutcomeError
 	}
 	return OutcomeOK
+}
+
+// ErrText is the one definition of "an event's Error field": empty for a
+// nil error, err.Error() otherwise. Shared by Action and by every payload
+// that pairs an Outcome with an Error string, so the two can't drift apart.
+func ErrText(err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	return ""
 }
 
 // CycleRef identifies the cycle an event belongs to, plus the cycle-static
@@ -206,16 +220,26 @@ type FinishEvent struct {
 	Error        string
 }
 
-// Event is one entry in a cycle's observability stream. Exactly one
-// kind-specific payload is populated, selected by Kind. Step is the FSM
-// step active when the event was emitted — stamped by Emit from the scope,
-// empty for cycle-level events emitted outside any step scope — so every
-// kind carries its step attribution without consumers folding
-// StepEntered/StepLeft brackets to recover it.
+// TarballEvent is the payload for KindTarballDone.
+type TarballEvent struct {
+	Outcome  Outcome
+	Error    string
+	Duration time.Duration
+}
+
+// Event is one entry in a cycle's — or a shared image pull's —
+// observability stream. Exactly one kind-specific payload is populated,
+// selected by Kind, and exactly one of Cycle/Pull identifies which scope the
+// event belongs to (a zero CycleRef when Pull is set). Step is the FSM step
+// active when the event was emitted — stamped by Emit from the scope, empty
+// for cycle-level events emitted outside any step scope, and always empty
+// for pull-scoped events — so every kind carries its step attribution
+// without consumers folding StepEntered/StepLeft brackets to recover it.
 type Event struct {
 	Seq   uint64
 	Time  time.Time
 	Cycle CycleRef
+	Pull  *PullRef
 	Step  string
 	Kind  Kind
 
@@ -229,6 +253,8 @@ type Event struct {
 	Job      *JobEvent
 	Audit    *AuditEvent
 	Finish   *FinishEvent
+	PullInfo *PullEvent
+	Tarball  *TarballEvent
 }
 
 // Emitter receives every event a scope produces. Installed by the daemon;
@@ -241,22 +267,31 @@ type Event struct {
 // an existing field's meaning or an existing Kind's semantics never change,
 // so a consumer written against an older payload shape keeps working.
 // All events for one cycle scope are emitted from a single goroutine (the
-// slot's FSM goroutine) with two exceptions an emitter must tolerate: the
-// shared image puller's KindDetail progress (see internal/statemachine),
-// and KindHTTP from a scoped context handed to concurrent requests (the
-// scope's Seq counter is atomic, so order stays coherent). Seq is the
-// durable per-cycle order consumers sort and correlate by, not a
-// concurrency serializer.
+// slot's FSM goroutine) with two exceptions an emitter must tolerate:
+// KindHTTP from a scoped context handed to concurrent requests, and every
+// pull-scoped event after the first — KindPullStarted runs on whichever
+// cycle's goroutine happens to create the puller (the same goroutine that
+// calls WithPull), but everything after it (KindDetail, KindHTTP,
+// KindPullFinished) comes from the shared image puller's own goroutine, its
+// progress watcher, or its blob-fetch workers — never a cycle's FSM
+// goroutine, and never interleaved with a cycle scope's events (the two
+// scope kinds never share a Seq counter). The scope's Seq counter is atomic,
+// so order stays coherent within each scope. Seq is the durable per-scope
+// order consumers sort and correlate by, not a concurrency serializer.
 type Emitter func(Event)
 
-// scope is the context-carried identity: which cycle/step is active, where
-// events go, and the per-cycle Seq counter. The counter belongs to the
-// cycle scope established by WithCycle; step scopes derived by WithStep
-// share it — that sharing is what keeps Seq totally ordered across a whole
-// cycle. Unexported so it can only be built through WithCycle/WithStep.
+// scope is the context-carried identity: which cycle/step (or pull) is
+// active, where events go, and the per-scope Seq counter. The counter
+// belongs to the scope established by WithCycle or WithPull; step scopes
+// derived by WithStep share it — that sharing is what keeps Seq totally
+// ordered across a whole cycle. pull is nil for a cycle scope; when set, it
+// identifies a pull scope and emitEvent stamps Event.Pull instead of
+// Event.Cycle. Unexported so it can only be built through
+// WithCycle/WithPull/WithStep.
 type scope struct {
 	emit  Emitter
 	cycle CycleRef
+	pull  *PullRef
 	step  string
 	seq   *atomic.Uint64
 }
@@ -271,11 +306,14 @@ type scopeKey struct{}
 // Action on this scope a no-op — the shape used when telemetry is
 // unconfigured.
 func WithCycle(ctx context.Context, emit Emitter, cycle CycleRef) context.Context {
-	return context.WithValue(ctx, scopeKey{}, &scope{
-		emit:  emit,
-		cycle: cycle,
-		seq:   new(atomic.Uint64),
-	})
+	return context.WithValue(ctx, scopeKey{}, newScope(emit, cycle, nil))
+}
+
+// newScope builds the scope both WithCycle and WithPull install: same
+// emitter/Seq machinery, differing only in which identity — cycle or pull —
+// is set. pull nil means a cycle scope.
+func newScope(emit Emitter, cycle CycleRef, pull *PullRef) *scope {
+	return &scope{emit: emit, cycle: cycle, pull: pull, seq: new(atomic.Uint64)}
 }
 
 // WithStep derives a scope for one FSM step: same cycle, same emitter, and
@@ -304,12 +342,27 @@ func liveScope(ctx context.Context) *scope {
 	return s
 }
 
-// emitEvent stamps e with the scope's next Seq, the current time, the
-// scope's CycleRef, and the scope's step, then hands it to the emitter.
+// Live reports whether ctx carries a scope that can actually emit — the
+// same predicate Action and HTTPTransport check internally before doing any
+// work. A caller outside this package that builds a payload before calling
+// Emit on a hot path should check this first, so a scope-less or
+// nil-emitter context never pays for an allocation nobody will read.
+func Live(ctx context.Context) bool {
+	return liveScope(ctx) != nil
+}
+
+// emitEvent stamps e with the scope's next Seq, the current time, and the
+// scope's identity — CycleRef for a cycle scope, PullRef for a pull scope,
+// exactly one of the two — and the scope's step, then hands it to the
+// emitter.
 func (s *scope) emitEvent(e Event) {
 	e.Seq = s.seq.Add(1)
 	e.Time = time.Now()
-	e.Cycle = s.cycle
+	if s.pull != nil {
+		e.Pull = s.pull
+	} else {
+		e.Cycle = s.cycle
+	}
 	e.Step = s.step
 	s.emit(e)
 }
@@ -345,15 +398,11 @@ func Action(ctx context.Context, name string, fn func(context.Context) error, at
 	err := fn(ctx)
 	dur := time.Since(start)
 
-	outcome, errText := OutcomeOf(err), ""
-	if err != nil {
-		errText = err.Error()
-	}
 	Emit(ctx, Event{Kind: KindActionEnded, Action: &ActionEvent{
 		Name:     name,
 		Attrs:    attrs,
-		Outcome:  outcome,
-		Error:    errText,
+		Outcome:  OutcomeOf(err),
+		Error:    ErrText(err),
 		Duration: dur,
 	}})
 

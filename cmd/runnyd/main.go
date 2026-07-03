@@ -289,6 +289,7 @@ func run() error {
 				StallBudget:   cfg.Deadlines.PullStall.D(),
 				ResolveBudget: cfg.Deadlines.Resolve.D(),
 				Metrics:       ensurerMetrics,
+				Events:        events,
 				Log:           logger,
 			},
 			Clone: func(src tart.Bundle, dst string) error {

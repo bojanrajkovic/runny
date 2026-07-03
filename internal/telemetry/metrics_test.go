@@ -273,6 +273,52 @@ func TestMetricsConsumerOrphanEvents(t *testing.T) {
 	}
 }
 
+// datapointCount sums every datapoint across every collected instrument,
+// regardless of shape — a shape-agnostic way to assert "nothing new landed"
+// without a timestamp-sensitive deep comparison across two Collect calls.
+func datapointCount(ms map[string]metricdata.Metrics) int {
+	total := 0
+	for _, m := range ms {
+		switch d := m.Data.(type) {
+		case metricdata.Histogram[float64]:
+			total += len(d.DataPoints)
+		case metricdata.Sum[int64]:
+			total += len(d.DataPoints)
+		case metricdata.Gauge[int64]:
+			total += len(d.DataPoints)
+		}
+	}
+	return total
+}
+
+// Pull-scoped events (KindPullStarted, KindPullFinished) and the cycle-scoped
+// KindTarballDone match no case in this consumer's switch — feeding them
+// through must be a true no-op, not just quietly filtered. Folding these
+// into their own instruments is a separate consumer (a later change), not
+// this one.
+func TestMetricsConsumerIgnoresPullEvents(t *testing.T) {
+	m, reader := newTestMetrics(t)
+
+	m.emit(obs.Event{
+		Time: at(1), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepLeft,
+		StepInfo: &obs.StepEvent{State: "BOOT", Outcome: obs.OutcomeOK, Duration: 5 * time.Second},
+	})
+	before := datapointCount(collect(t, reader))
+
+	pull := &obs.PullRef{ID: "p1", Ref: "ghcr.io/x", Digest: "sha256:x", Started: time.Now()}
+	m.emit(obs.Event{Kind: obs.KindPullStarted, Pull: pull})
+	m.emit(obs.Event{Kind: obs.KindPullFinished, Pull: pull, PullInfo: &obs.PullEvent{
+		Outcome: obs.OutcomeOK, Duration: time.Second, Bytes: 100,
+	}})
+	m.emit(obs.Event{Kind: obs.KindTarballDone, Cycle: testCycle, Tarball: &obs.TarballEvent{
+		Outcome: obs.OutcomeOK, Duration: time.Second,
+	}})
+
+	if after := datapointCount(collect(t, reader)); before != after {
+		t.Fatalf("pull/tarball events changed the datapoint count: before=%d after=%d", before, after)
+	}
+}
+
 // TestRegisterGauges polls a faked three-slot fleet and asserts the full 0/1
 // state matrix, per-slot scalars, and the home-dir disk gauge.
 func TestRegisterGauges(t *testing.T) {

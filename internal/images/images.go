@@ -48,7 +48,11 @@ type Ensurer struct {
 	// Metrics receives the ensurer-scope pull/download outcomes (see the
 	// Metrics doc); nil records nothing.
 	Metrics *Metrics
-	Log     *slog.Logger
+	// Events is the obs emitter the shared image puller uses to establish
+	// its own pull scope (obs.WithPull); nil-safe, like everything else that
+	// takes an obs.Emitter.
+	Events obs.Emitter
+	Log    *slog.Logger
 
 	// Test seams, nil → the real implementations (the imagePuller
 	// attempt/diskFree pattern): resolve is the registry manifest
@@ -369,8 +373,9 @@ func (e *Ensurer) ensureRunnerTarball(ctx context.Context, report func(string)) 
 			return nil // already cached
 		}
 
-		// A real download starts here — the metric brackets exactly this, so a
-		// cache hit or a slot that waited out a peer's download records nothing.
+		// A real download starts here — the metric and the obs event both
+		// bracket exactly this, so a cache hit or a slot that waited out a
+		// peer's download records nothing on either.
 		start := time.Now()
 		derr := e.downloadTarball(ctx, dest, assetURL, wantSHA, report)
 		// A download truncated by the caller's own cancellation (operator
@@ -378,7 +383,11 @@ func (e *Ensurer) ensureRunnerTarball(ctx context.Context, report func(string)) 
 		// the same rule the pull side follows. A stall kill still records: its
 		// watcher cancels only the inner watch context, not ctx.
 		if derr == nil || ctx.Err() == nil {
-			e.Metrics.tarballDownloadDone(outcomeOf(derr), time.Since(start))
+			dur := time.Since(start)
+			obs.Emit(ctx, obs.Event{Kind: obs.KindTarballDone, Tarball: &obs.TarballEvent{
+				Outcome: obs.OutcomeOf(derr), Error: obs.ErrText(derr), Duration: dur,
+			}})
+			e.Metrics.tarballDownloadDone(outcomeOf(derr), dur)
 		}
 		if derr != nil {
 			return derr

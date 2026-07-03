@@ -108,9 +108,10 @@ duration and byte count (`runny.http.bytes`), a `headers` span event marks
 where waiting ended and transfer began, and a body that dies mid-stream —
 the stall-kill shape — reports the status the headers claimed plus the
 read error as span error status. One caveat is load-bearing: the shared
-pull actor's blob traffic emits nothing because its context carries no
-scope (the same attribution rule that keeps its pull out of any single
-cycle).
+pull actor's blob traffic carries a *pull* scope (`obs.WithPull`), not a
+cycle scope — a pull belongs to no single cycle — so this trace consumer,
+which attributes every span through `runny.cycle_id`, renders none of it;
+folding pull-scoped events into their own trace is a separate consumer.
 
 Beyond the step tree, the trace carries the cycle's identity and audit
 detail: the root's attributes include the pool, the assembled runner name,

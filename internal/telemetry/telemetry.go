@@ -72,6 +72,12 @@ func Setup(ctx context.Context, cfg home.OTLPConfig, version, instanceID string,
 
 	traceOpts := []otlptracegrpc.Option{otlptracegrpc.WithEndpointURL(cfg.Endpoint)}
 	metricOpts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpointURL(cfg.Endpoint)}
+	if len(cfg.Headers) > 0 {
+		// Headers arrive already env-expanded by home.LoadConfig; both
+		// signals share the one map, matching the single shared endpoint.
+		traceOpts = append(traceOpts, otlptracegrpc.WithHeaders(cfg.Headers))
+		metricOpts = append(metricOpts, otlpmetricgrpc.WithHeaders(cfg.Headers))
+	}
 	if insecure {
 		traceOpts = append(traceOpts, otlptracegrpc.WithInsecure())
 		metricOpts = append(metricOpts, otlpmetricgrpc.WithInsecure())

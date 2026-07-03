@@ -189,15 +189,24 @@ type ObservabilityConfig struct {
 }
 
 // OTLPConfig is the single OTLP export target for both traces and metrics.
-// There are deliberately no per-signal endpoints or headers — nothing here
-// yet needs them, and they're easy to add later without a breaking change. A
-// non-empty Endpoint enables export; its scheme selects transport security.
+// Endpoint and Headers deliberately apply to both signals — nothing here
+// yet needs per-signal values, and they're easy to add later without a
+// breaking change. A non-empty Endpoint enables export; its scheme selects
+// transport security.
 type OTLPConfig struct {
 	// Endpoint is the collector URL. https selects TLS, http selects an
 	// insecure connection (for a local collector); any other scheme, an
 	// empty host, or a malformed URL, is rejected. Empty (the default) means
 	// telemetry is off.
 	Endpoint string `yaml:"endpoint"`
+	// Headers are extra key/value pairs sent with every OTLP export request,
+	// for both signals. This is how OTLP backends authenticate — e.g.
+	// x-honeycomb-team, api-key, or authorization: Bearer <token>. Values may
+	// reference environment variables with the Collector's ${env:VAR} syntax,
+	// resolved once at load; an unset variable is a load error, never a
+	// silently empty header. Every other byte, including bare $, passes
+	// through untouched — secrets legitimately contain dollar signs.
+	Headers map[string]string `yaml:"headers"`
 	// MetricsInterval is the metrics export period. Zero takes the default;
 	// validate() enforces a floor so a typo can't hot-loop the exporter.
 	MetricsInterval Duration `yaml:"metrics_interval"`
@@ -270,10 +279,39 @@ func parseConfig(raw []byte, path string) (*Config, error) {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
 	c.applyDefaults()
+	if err := c.expandOTLPHeaders(); err != nil {
+		return nil, fmt.Errorf("invalid config %s: %w", path, err)
+	}
 	if err := c.validate(); err != nil {
 		return nil, fmt.Errorf("invalid config %s: %w", path, err)
 	}
 	return &c, nil
+}
+
+// envPlaceholderRE is the Collector's ${env:VAR} placeholder syntax. Only
+// this exact shape expands; shell-style $VAR or ${VAR} deliberately does
+// not, so a literal $ inside a secret value survives.
+var envPlaceholderRE = regexp.MustCompile(`\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// expandOTLPHeaders resolves ${env:VAR} placeholders in OTLP header values.
+// A disabled block (empty endpoint) is left alone: its headers are dead
+// config, and expanding them could fail a boot that sends no telemetry.
+func (c *Config) expandOTLPHeaders() error {
+	if !c.Observability.OTLP.Enabled() {
+		return nil
+	}
+	var errs []error
+	for k, v := range c.Observability.OTLP.Headers {
+		c.Observability.OTLP.Headers[k] = envPlaceholderRE.ReplaceAllStringFunc(v, func(m string) string {
+			name := m[len("${env:") : len(m)-1]
+			val, ok := os.LookupEnv(name)
+			if !ok {
+				errs = append(errs, fmt.Errorf("observability.otlp.headers[%q]: environment variable %s is not set", k, name))
+			}
+			return val
+		})
+	}
+	return errors.Join(errs...)
 }
 
 func (c *Config) applyDefaults() {
@@ -451,6 +489,11 @@ func (c *Config) validate() error {
 			errs = append(errs, fmt.Errorf("observability.otlp.endpoint %q: missing host (use https://host:port or http://host:port)", ep))
 		case u.Scheme != "https" && u.Scheme != "http":
 			errs = append(errs, fmt.Errorf("observability.otlp.endpoint %q: scheme must be https or http, got %q", ep, u.Scheme))
+		}
+		for name := range c.Observability.OTLP.Headers {
+			if name == "" {
+				errs = append(errs, errors.New("observability.otlp.headers: header name must not be empty"))
+			}
 		}
 		if c.Observability.OTLP.MetricsInterval.D() < otlpMetricsIntervalFloor {
 			errs = append(errs, fmt.Errorf("observability.otlp.metrics_interval must be >= %v, got %v",

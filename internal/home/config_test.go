@@ -169,6 +169,8 @@ func TestLoadConfigValidation(t *testing.T) {
 		{"otlp endpoint port only", minimalConfig + "observability:\n  otlp:\n    endpoint: \"https://:4317\"\n", "observability.otlp.endpoint"},
 		{"otlp endpoint missing scheme", minimalConfig + "observability:\n  otlp:\n    endpoint: collector.example:4317\n", "observability.otlp.endpoint"},
 		{"otlp metrics interval below floor", minimalConfig + "observability:\n  otlp:\n    endpoint: https://collector.example:4317\n    metrics_interval: 500ms\n", "observability.otlp.metrics_interval"},
+		{"otlp header unset env var", minimalConfig + "observability:\n  otlp:\n    endpoint: https://collector.example:4317\n    headers:\n      authorization: ${env:RUNNY_TEST_UNSET_VAR}\n", `observability.otlp.headers["authorization"]: environment variable RUNNY_TEST_UNSET_VAR is not set`},
+		{"otlp empty header name", minimalConfig + "observability:\n  otlp:\n    endpoint: https://collector.example:4317\n    headers:\n      \"\": v\n", "header name must not be empty"},
 	}
 	for _, tc := range cases {
 		_, err := LoadConfig(writeConfig(t, tc.yaml))
@@ -199,6 +201,37 @@ func TestLoadConfigObservabilityValid(t *testing.T) {
 	}
 	if got := c.Observability.OTLP.MetricsInterval.D(); got != 30*time.Second {
 		t.Errorf("Observability.OTLP.MetricsInterval = %v, want 30s", got)
+	}
+}
+
+func TestLoadConfigOTLPHeaders(t *testing.T) {
+	t.Setenv("RUNNY_TEST_OTLP_TOKEN", "s3cret")
+	c, err := LoadConfig(writeConfig(t, minimalConfig+
+		"observability:\n  otlp:\n    endpoint: https://collector.example:4317\n    headers:\n"+
+		"      x-honeycomb-team: ${env:RUNNY_TEST_OTLP_TOKEN}\n"+
+		"      x-plain: literal-$value\n"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	h := c.Observability.OTLP.Headers
+	if got := h["x-honeycomb-team"]; got != "s3cret" {
+		t.Errorf(`Headers["x-honeycomb-team"] = %q, want expanded "s3cret"`, got)
+	}
+	// A bare $ that isn't the ${env:...} placeholder passes through
+	// untouched — secret values legitimately contain dollar signs.
+	if got := h["x-plain"]; got != "literal-$value" {
+		t.Errorf(`Headers["x-plain"] = %q, want "literal-$value" untouched`, got)
+	}
+}
+
+// Headers on a disabled block (no endpoint) are dead config: they must not
+// be expanded — the daemon boots with telemetry off even if the referenced
+// variable is unset, matching how metrics_interval is only validated when
+// telemetry is on.
+func TestLoadConfigOTLPHeadersIgnoredWhenDisabled(t *testing.T) {
+	if _, err := LoadConfig(writeConfig(t, minimalConfig+
+		"observability:\n  otlp:\n    headers:\n      authorization: ${env:RUNNY_TEST_UNSET_VAR}\n")); err != nil {
+		t.Fatalf("LoadConfig: %v, want headers ignored when telemetry is off", err)
 	}
 }
 

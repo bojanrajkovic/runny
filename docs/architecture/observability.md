@@ -43,7 +43,11 @@ nothing:
 - **Configured endpoint:** OTLP gRPC exporters for traces and metrics
   against the endpoint (`https` selects TLS, `http` selects an insecure
   local connection — the same rule `internal/home` already validates at
-  config-load time). A batch span processor with the SDK's default
+  config-load time). `observability.otlp.headers` rides on every export
+  request from both exporters — backend auth is a request header in OTLP,
+  so one shared map is the whole auth surface; `internal/home` resolves any
+  `${env:VAR}` placeholders at load, so `telemetry` only ever sees final
+  values. A batch span processor with the SDK's default
   drop-on-queue-full semantics — telemetry loss must be possible, telemetry
   backpressure into a slot must not be. A periodic metric reader at the
   configured interval. Every histogram instrument uses exponential (base-2)

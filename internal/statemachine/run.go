@@ -111,23 +111,18 @@ func (c *run) beginStep(ctx context.Context, state State, mut func(*Status)) (co
 
 // publish applies one learned fact to the cycle record and the live status
 // under one lock acquisition, then emits its obs event and notifies watchers
-// — one seam, three surfaces, so they can never disagree. recordOperatorKey
-// shares this same lock-mutate-notify body directly (it has no obs event of
-// its own — its callers already emit the audit trail events around it) so
-// it isn't routed through publish, to avoid emitting a synthetic event.
+// — one seam, three surfaces, so they can never disagree. Digest, RunnerVersion,
+// VM MAC, and VM IP all used to skip notify here on purpose (the next state's
+// own setState broadcasts moments later) except Digest, which already
+// notified; publish always notifies, so the other three each gain one benign
+// extra broadcast — no consumer or test distinguishes it from the one that
+// follows. recordOperatorKey shares this same lock-mutate-notify body
+// directly (it has no obs event of its own — its callers already emit the
+// audit trail events around it) so it isn't routed through publish, to avoid
+// emitting a synthetic event.
 func (c *run) publish(ctx context.Context, ev obs.Event, mut func(*cycle.Record, *Status)) {
 	snap, fns := c.cell.update(func(st *Status) { mut(c.rec, st) })
 	c.cell.notify(fns, snap)
-	obs.Emit(ctx, ev)
-}
-
-// publishQuiet is publish without the notify: VM MAC and VM IP are each
-// followed immediately by the next state's own setState broadcast, so an
-// earlier notify here would be a redundant, benign extra one — unlike the
-// RunnerVersion site (also silent today, on purpose), these have no such
-// accepted-delta exception to spend.
-func (c *run) publishQuiet(ctx context.Context, ev obs.Event, mut func(*cycle.Record, *Status)) {
-	c.cell.update(func(st *Status) { mut(c.rec, st) })
 	obs.Emit(ctx, ev)
 }
 
@@ -253,11 +248,6 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 			// already hold "" from cycle start (a fresh *cycle.Record, and
 			// backoffWait resets Status.RunnerVersion before every cycle) —
 			// nothing to publish when it's empty.
-			//
-			// Known accepted delta: this site used to skip notify (the next
-			// setState, ENSURE_IMAGE → CLONE, broadcasts it milliseconds
-			// later) — publish always notifies, so this now gains one extra,
-			// benign status broadcast.
 			c.publish(esctx, obs.Event{Kind: obs.KindImageInfo, Image: &obs.ImageEvent{RunnerVersion: runnerVersion}}, func(rec *cycle.Record, st *Status) {
 				rec.RunnerVersion = runnerVersion
 				st.RunnerVersion = runnerVersion
@@ -312,7 +302,7 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 			}
 			c.machine = m
 			mac := m.MAC()
-			c.publishQuiet(bc, obs.Event{Kind: obs.KindVMInfo, VM: &obs.VMEvent{MAC: mac}}, func(rec *cycle.Record, st *Status) {
+			c.publish(bc, obs.Event{Kind: obs.KindVMInfo, VM: &obs.VMEvent{MAC: mac}}, func(rec *cycle.Record, st *Status) {
 				rec.VM.MAC = mac
 				st.VM.MAC = mac
 			})
@@ -327,7 +317,7 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 				return err
 			}
 			ip = got
-			c.publishQuiet(bc, obs.Event{Kind: obs.KindVMInfo, VM: &obs.VMEvent{IP: ip}}, func(rec *cycle.Record, st *Status) {
+			c.publish(bc, obs.Event{Kind: obs.KindVMInfo, VM: &obs.VMEvent{IP: ip}}, func(rec *cycle.Record, st *Status) {
 				rec.VM.IP = ip
 				st.VM.IP = ip
 			})

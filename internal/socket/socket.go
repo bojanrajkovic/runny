@@ -189,18 +189,20 @@ type Server struct {
 	// reaches a socket created AFTER the grant).
 	socketPath string
 
+	// gate is the per-RPC operator-revocation check, built by Serve from
+	// IsSystemDaemon/HomeDir. nil (pass-through) on a per-user daemon, which
+	// has no ACL-managed operator set to enforce against.
+	gate *operatorGate
+
 	// operatorMu serializes mutateOperator's List-then-mutate sequence:
 	// without it, two concurrent grant/revoke RPCs (gRPC dispatches unary
 	// calls on separate goroutines) can both read the same pre-mutation
 	// operator set and both pass a precondition (e.g. "not the last
-	// operator") that the other's mutation has already invalidated. A
-	// separate lock from mu, which guards the unrelated watch fan-out below.
+	// operator") that the other's mutation has already invalidated.
 	operatorMu sync.Mutex
 
-	// watch fan-out
-	mu      sync.Mutex
-	watchID int
-	watches map[int]chan struct{}
+	// watches fans a status change out to every open WatchStatus call.
+	watches *fanoutRegistry[chan struct{}]
 }
 
 // NewServer wires the slots' OnChange into the watch fan-out.
@@ -222,7 +224,7 @@ func NewServer(slots []*statemachine.Slot, ring, runnerRing *logring.Ring,
 		// old process. Distinct from the persisted, respawn-stable instance-id.
 		BootID:  rand.Text(),
 		Config:  cfg,
-		watches: map[int]chan struct{}{},
+		watches: newFanoutRegistry[chan struct{}](),
 	}
 	for _, slot := range slots {
 		slot.OnChange(func(statemachine.Status) { s.notify() })
@@ -231,14 +233,12 @@ func NewServer(slots []*statemachine.Slot, ring, runnerRing *logring.Ring,
 }
 
 func (s *Server) notify() {
-	s.mu.Lock()
-	for _, ch := range s.watches {
+	s.watches.forEach(func(ch chan struct{}) {
 		select {
 		case ch <- struct{}{}:
 		default:
 		}
-	}
-	s.mu.Unlock()
+	})
 }
 
 // NotifyProgress is the exported seam the drainer wires as its progress hook: a
@@ -281,10 +281,17 @@ func (s *Server) Serve(ctx context.Context, socketPath string) error {
 		return fmt.Errorf("restricting socket perms: %w", err)
 	}
 	s.socketPath = socketPath
+	s.gate = newOperatorGate(s.IsSystemDaemon, s.HomeDir.String())
+	unaryChain := []grpc.UnaryServerInterceptor{recoveryUnary}
+	streamChain := []grpc.StreamServerInterceptor{recoveryStream}
+	if s.gate != nil {
+		unaryChain = append(unaryChain, s.gate.unary)
+		streamChain = append(streamChain, s.gate.stream)
+	}
 	g := grpc.NewServer(
 		grpc.Creds(newPeerCreds()),
-		grpc.ChainUnaryInterceptor(recoveryUnary),
-		grpc.ChainStreamInterceptor(recoveryStream),
+		grpc.ChainUnaryInterceptor(unaryChain...),
+		grpc.ChainStreamInterceptor(streamChain...),
 	)
 	runnyv1.RegisterRunnyServiceServer(g, s)
 	go func() {
@@ -364,16 +371,7 @@ func (s *Server) GetStatus(ctx context.Context, _ *runnyv1.GetStatusRequest) (*r
 
 func (s *Server) WatchStatus(_ *runnyv1.WatchStatusRequest, stream grpc.ServerStreamingServer[runnyv1.GetStatusResponse]) error {
 	ch := make(chan struct{}, 1)
-	s.mu.Lock()
-	id := s.watchID
-	s.watchID++
-	s.watches[id] = ch
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		delete(s.watches, id)
-		s.mu.Unlock()
-	}()
+	defer s.watches.register(ch)()
 
 	tick := time.NewTicker(30 * time.Second)
 	defer tick.Stop()

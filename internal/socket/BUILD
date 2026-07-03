@@ -7,6 +7,8 @@ go_library(
         "peercred.go",
         "peercred_darwin.go",
         "peercred_other.go",
+        "registry.go",
+        "revocation.go",
         "socket.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/socket",
@@ -44,6 +46,7 @@ go_test(
     srcs = [
         "operator_test.go",
         "peercred_test.go",
+        "revocation_test.go",
         "socket_test.go",
     ],
     embed = [":socket"],
@@ -66,10 +69,12 @@ go_test(
         "@rules_go//go/platform:darwin": [
             "//internal/bounded",
             "//internal/opacl",
+            "@org_golang_google_grpc//metadata",
         ],
         "@rules_go//go/platform:ios": [
             "//internal/bounded",
             "//internal/opacl",
+            "@org_golang_google_grpc//metadata",
         ],
         "//conditions:default": [],
     }),

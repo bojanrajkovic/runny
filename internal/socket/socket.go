@@ -509,30 +509,66 @@ func (s *Server) findSlot(name string) (*statemachine.Slot, error) {
 	return nil, status.Errorf(codes.NotFound, "no slot matches %q (use the slot name, or a runner name as shown by status)", name)
 }
 
-// command resolves a slot handle and injects cmd. The rejection is
-// Unavailable (matching InjectDebugKey): a full command buffer drains itself
-// within a cycle step, so retry-policy conventions treat it as retryable,
-// unlike FailedPrecondition. The message names the RESOLVED slot — req may
-// carry a runner name, and an error naming a nonexistent slot sends the
-// operator grepping for the wrong thing.
-func (s *Server) command(handle string, cmd statemachine.Command) error {
+// command resolves a slot handle and injects cmd, returning the RESOLVED
+// slot name — req may carry a runner name, and both the rejection message
+// and the operator-attribution log line must name the slot the operator
+// would grep for. The rejection is Unavailable (matching InjectDebugKey): a
+// full command buffer drains itself within a cycle step, so retry-policy
+// conventions treat it as retryable, unlike FailedPrecondition.
+func (s *Server) command(handle string, cmd statemachine.Command) (string, error) {
 	slot, err := s.findSlot(handle)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !slot.Command(cmd) {
-		return status.Errorf(codes.Unavailable, "slot %s is not accepting commands", slot.Name())
+		return "", status.Errorf(codes.Unavailable, "slot %s is not accepting commands", slot.Name())
 	}
-	return nil
+	return slot.Name(), nil
+}
+
+// logOperatorCommand records who issued a lifecycle command, joining the
+// daemon log to the FSM's own transition records. slot is the
+// resolved slot name, or "" for fleet-wide verbs (reload, prune), which carry
+// no slot attr. Identity is best-effort: an unreadable peer cred logs
+// operator_uid="unknown" — never fabricated, never conflated with root's
+// real uid 0. Call it only after the command is accepted (slot verbs) or the
+// verdict is known (reload verbs), so lookupUsername's worst-case bound
+// delays only the RPC's return, never the action.
+func logOperatorCommand(ctx context.Context, verb, slot string, attrs ...any) {
+	var args []any
+	if slot != "" {
+		args = append(args, "slot", slot)
+	}
+	if uid, ok := peerUID(ctx); ok {
+		args = append(args, "operator_uid", uid)
+		if u := lookupUsername(uid); u != "" {
+			args = append(args, "operator_user", u)
+		}
+	} else {
+		args = append(args, "operator_uid", "unknown")
+	}
+	slog.Info("operator "+verb, append(args, attrs...)...)
+}
+
+// commandIDAttr renders the optional echoed command id as log attrs: present
+// only when the client sent one, so the line joins to
+// recent_applied_command_ids without empty-string noise.
+func commandIDAttr(id string) []any {
+	if id == "" {
+		return nil
+	}
+	return []any{"command_id", id}
 }
 
 func (s *Server) Recycle(ctx context.Context, req *runnyv1.RecycleRequest) (*runnyv1.RecycleResponse, error) {
-	if err := s.command(req.GetSlot(), statemachine.Command{
+	slot, err := s.command(req.GetSlot(), statemachine.Command{
 		Kind: statemachine.CmdRecycle, Reason: req.GetReason(),
 		CancelJob: req.GetCancelRunningJob(),
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
+	logOperatorCommand(ctx, "recycle", slot, "reason", req.GetReason(), "cancel_job", req.GetCancelRunningJob())
 	return &runnyv1.RecycleResponse{}, nil
 }
 
@@ -543,9 +579,11 @@ func (s *Server) Pause(ctx context.Context, req *runnyv1.PauseRequest) (*runnyv1
 	// A full command buffer (the drainer saturates non-converged slots with
 	// re-issued pause+recycle pairs) must surface as an error, never a silent
 	// drop reported as success — the silent-failure-proofness invariant.
-	if err := s.command(req.GetSlot(), statemachine.Command{Kind: statemachine.CmdPause, ID: req.GetCommandId()}); err != nil {
+	slot, err := s.command(req.GetSlot(), statemachine.Command{Kind: statemachine.CmdPause, ID: req.GetCommandId()})
+	if err != nil {
 		return nil, err
 	}
+	logOperatorCommand(ctx, "pause", slot, commandIDAttr(req.GetCommandId())...)
 	resp := &runnyv1.PauseResponse{}
 	// Pause during a drain is allowed (idempotent; the drain wants slots
 	// paused anyway) but the operator must learn it is in-memory: the
@@ -568,7 +606,8 @@ func (s *Server) Resume(ctx context.Context, req *runnyv1.ResumeRequest) (*runny
 	if d := s.drainState().Reason; d != "" {
 		return nil, status.Errorf(codes.FailedPrecondition, "daemon is draining: %s; resume after the respawn", d)
 	}
-	if err := s.command(req.GetSlot(), statemachine.Command{Kind: statemachine.CmdResume, ID: req.GetCommandId()}); err != nil {
+	slot, err := s.command(req.GetSlot(), statemachine.Command{Kind: statemachine.CmdResume, ID: req.GetCommandId()})
+	if err != nil {
 		return nil, err
 	}
 	if d := s.drainState().Reason; d != "" {
@@ -576,9 +615,11 @@ func (s *Server) Resume(ctx context.Context, req *runnyv1.ResumeRequest) (*runny
 		// Best-effort undo: if the buffer is full the drainer's re-issue loop
 		// (observe→recheck→CmdPause) covers the gap on the next FSM transition,
 		// so a dropped undo does not permanently stall the drain.
-		_ = s.command(req.GetSlot(), statemachine.Command{Kind: statemachine.CmdPause})
+		_, _ = s.command(req.GetSlot(), statemachine.Command{Kind: statemachine.CmdPause})
 		return nil, status.Errorf(codes.FailedPrecondition, "daemon is draining: %s; resume after the respawn", d)
 	}
+	// After the undo re-check: a raced-and-undone resume never claims applied.
+	logOperatorCommand(ctx, "resume", slot, commandIDAttr(req.GetCommandId())...)
 	return &runnyv1.ResumeResponse{}, nil
 }
 
@@ -616,7 +657,11 @@ func (s *Server) Reload(ctx context.Context, req *runnyv1.ReloadRequest) (*runny
 	// or not it was validated, so "refused because already draining" would
 	// invert the operator's reading. The handler never blocks on
 	// convergence; that is observed via status/watch.
-	return s.reloadResponse(s.ReloadFn(ctx, req.GetReason())), nil
+	r := s.ReloadFn(ctx, req.GetReason())
+	// Attempt AND verdict: unlike slot commands, a preflight rejection is
+	// itself the interesting fact for a fleet-wide drain.
+	logOperatorCommand(ctx, "reload", "", "reason", req.GetReason(), "accepted", r.Accepted, "started_drain", r.StartedDrain)
+	return s.reloadResponse(r), nil
 }
 
 // UpgradeReload is the upgrade-daemon verb: it may defer a config-parse failure
@@ -628,7 +673,9 @@ func (s *Server) UpgradeReload(ctx context.Context, req *runnyv1.ReloadRequest) 
 	if s.UpgradeReloadFn == nil {
 		return nil, status.Error(codes.Unimplemented, "upgrade-reload is not wired on this server")
 	}
-	return s.reloadResponse(s.UpgradeReloadFn(ctx, req.GetReason())), nil
+	r := s.UpgradeReloadFn(ctx, req.GetReason())
+	logOperatorCommand(ctx, "upgrade-reload", "", "reason", req.GetReason(), "accepted", r.Accepted, "started_drain", r.StartedDrain)
+	return s.reloadResponse(r), nil
 }
 
 func (s *Server) Why(ctx context.Context, req *runnyv1.WhyRequest) (*runnyv1.WhyResponse, error) {
@@ -831,6 +878,11 @@ func (s *Server) Prune(ctx context.Context, req *runnyv1.PruneRequest) (*runnyv1
 	resp.Errors = append(resp.Errors, plan.Errors...)
 	if plan.ApplyErr != nil {
 		resp.Errors = append(resp.Errors, plan.ApplyErr.Error())
+	}
+	// Dry-runs are reads; only an apply request is an operator action worth
+	// attributing. applied reflects what actually happened, not the request.
+	if req.GetApply() {
+		logOperatorCommand(ctx, "prune", "", "applied", resp.GetApplied(), "reclaimed_bytes", resp.GetReclaimedBytes(), "items", len(resp.GetItems()))
 	}
 	return resp, nil
 }

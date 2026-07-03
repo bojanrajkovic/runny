@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -947,6 +948,208 @@ func TestPruneUnimplementedWhenUnwired(t *testing.T) {
 	if status.Code(err) != codes.Unimplemented {
 		t.Errorf("Prune without PruneFn: got %v, want Unimplemented", err)
 	}
+}
+
+// ---- operator attribution on lifecycle commands -------------------------------
+
+// captureDaemonLog swaps the default slog logger for one recording into a
+// fresh ring — the same handler shape runnyd wires for the daemon log —
+// restored on cleanup.
+func captureDaemonLog(t *testing.T) *logring.Ring {
+	t.Helper()
+	ring := logring.NewRing(64)
+	orig := slog.Default()
+	slog.SetDefault(slog.New(logring.NewHandler(io.Discard, slog.LevelDebug, ring)))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+	return ring
+}
+
+// operatorPeerCtx builds a ctx carrying a kernel-authenticated peer uid, the
+// shape peerCreds installs during ServerHandshake.
+func operatorPeerCtx(t *testing.T, uid uint32) context.Context {
+	t.Helper()
+	return peer.NewContext(t.Context(), &peer.Peer{AuthInfo: peerAuth{UID: &uid}})
+}
+
+// stubUsername makes lookupUsername resolve every uid to name for the test.
+func stubUsername(t *testing.T, name string) {
+	t.Helper()
+	orig := lookupID
+	lookupID = func(string) (*user.User, error) { return &user.User{Username: name}, nil }
+	t.Cleanup(func() { lookupID = orig })
+}
+
+// operatorLines returns the ring's "operator <verb>" entries.
+func operatorLines(ring *logring.Ring) []logring.Entry {
+	var out []logring.Entry
+	for _, e := range ring.Snapshot(64) {
+		if strings.HasPrefix(e.Message, "operator ") {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// wantOperatorLine asserts the ring holds exactly one operator line with the
+// given message and attrs.
+func wantOperatorLine(t *testing.T, ring *logring.Ring, msg string, attrs map[string]string) {
+	t.Helper()
+	lines := operatorLines(ring)
+	if len(lines) != 1 {
+		t.Fatalf("got %d operator log lines, want 1: %v", len(lines), lines)
+	}
+	e := lines[0]
+	if e.Message != msg {
+		t.Errorf("message = %q, want %q", e.Message, msg)
+	}
+	for k, v := range attrs {
+		if got := e.Attrs[k]; got != v {
+			t.Errorf("attr %s = %q, want %q", k, got, v)
+		}
+	}
+}
+
+// Recycle logs the authenticated operator and the command's own attrs, naming
+// the RESOLVED slot even when the request carries a runner name.
+func TestRecycleLogsOperator(t *testing.T) {
+	ring := captureDaemonLog(t)
+	stubUsername(t, "bob")
+	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	if _, err := srv.Recycle(operatorPeerCtx(t, 503), &runnyv1.RecycleRequest{
+		Slot: "host-a1b2c3d4-mac-1-e48657d0", Reason: "wedged", CancelRunningJob: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wantOperatorLine(t, ring, "operator recycle", map[string]string{
+		"slot": "mac-1", "operator_uid": "503", "operator_user": "bob",
+		"reason": "wedged", "cancel_job": "true",
+	})
+}
+
+// Pause logs on acceptance, carrying command_id only when the client sent one.
+func TestPauseLogsOperatorWithCommandID(t *testing.T) {
+	ring := captureDaemonLog(t)
+	stubUsername(t, "bob")
+	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	if _, err := srv.Pause(operatorPeerCtx(t, 503), &runnyv1.PauseRequest{
+		Slot: "mac-1", CommandId: "cmd-abc",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wantOperatorLine(t, ring, "operator pause", map[string]string{
+		"slot": "mac-1", "operator_uid": "503", "operator_user": "bob", "command_id": "cmd-abc",
+	})
+}
+
+// Resume logs after the post-enqueue drain re-check passes; an empty
+// command_id stays off the line entirely.
+func TestResumeLogsOperatorWithoutCommandID(t *testing.T) {
+	ring := captureDaemonLog(t)
+	stubUsername(t, "bob")
+	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	if _, err := srv.Resume(operatorPeerCtx(t, 503), &runnyv1.ResumeRequest{Slot: "mac-1"}); err != nil {
+		t.Fatal(err)
+	}
+	wantOperatorLine(t, ring, "operator resume", map[string]string{
+		"slot": "mac-1", "operator_uid": "503", "operator_user": "bob",
+	})
+	if _, present := operatorLines(ring)[0].Attrs["command_id"]; present {
+		t.Error("empty command_id must stay off the log line")
+	}
+}
+
+// An unreadable peer cred logs operator_uid="unknown" — never fabricated,
+// never conflated with root's real uid 0 — and no operator_user at all.
+func TestLifecycleLogUnknownPeerCred(t *testing.T) {
+	ring := captureDaemonLog(t)
+	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	if _, err := srv.Recycle(t.Context(), &runnyv1.RecycleRequest{Slot: "mac-1", Reason: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	wantOperatorLine(t, ring, "operator recycle", map[string]string{
+		"slot": "mac-1", "operator_uid": "unknown",
+	})
+	if _, present := operatorLines(ring)[0].Attrs["operator_user"]; present {
+		t.Error("unknown peer cred must not carry an operator_user")
+	}
+}
+
+// A rejected slot command (full buffer here) changes nothing daemon-side and
+// must log nothing — the loud typed error is the record.
+func TestRejectedSlotCommandLogsNothing(t *testing.T) {
+	ring := captureDaemonLog(t)
+	slots := testSlots("mac-1")
+	for slots[0].Command(statemachine.Command{Kind: statemachine.CmdPause}) {
+	}
+	srv := newTestServer(slots, nil, nil, nil)
+	if _, err := srv.Recycle(operatorPeerCtx(t, 503), &runnyv1.RecycleRequest{Slot: "mac-1"}); err == nil {
+		t.Fatal("expected the full-buffer rejection")
+	}
+	if lines := operatorLines(ring); len(lines) != 0 {
+		t.Errorf("rejected command logged %v, want nothing", lines)
+	}
+}
+
+// Reload logs attempt AND verdict — a preflight rejection is the interesting
+// fact, so accepted=false still gets a line.
+func TestReloadLogsAttemptAndVerdict(t *testing.T) {
+	ring := captureDaemonLog(t)
+	stubUsername(t, "bob")
+	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	srv.ReloadFn = func(ctx context.Context, reason string) ReloadResult {
+		return ReloadResult{Accepted: false}
+	}
+	if _, err := srv.Reload(operatorPeerCtx(t, 503), &runnyv1.ReloadRequest{Reason: "new image"}); err != nil {
+		t.Fatal(err)
+	}
+	wantOperatorLine(t, ring, "operator reload", map[string]string{
+		"operator_uid": "503", "operator_user": "bob",
+		"reason": "new image", "accepted": "false", "started_drain": "false",
+	})
+}
+
+func TestUpgradeReloadLogsVerdict(t *testing.T) {
+	ring := captureDaemonLog(t)
+	stubUsername(t, "bob")
+	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
+	srv.UpgradeReloadFn = func(ctx context.Context, reason string) ReloadResult {
+		return ReloadResult{Accepted: true, StartedDrain: true}
+	}
+	if _, err := srv.UpgradeReload(operatorPeerCtx(t, 503), &runnyv1.ReloadRequest{Reason: "upgrade"}); err != nil {
+		t.Fatal(err)
+	}
+	wantOperatorLine(t, ring, "operator upgrade-reload", map[string]string{
+		"operator_uid": "503", "operator_user": "bob",
+		"reason": "upgrade", "accepted": "true", "started_drain": "true",
+	})
+}
+
+// Prune apply logs the operator and the reclaim outcome; a dry-run is a read
+// and logs nothing.
+func TestPruneApplyLogsOperatorDryRunDoesNot(t *testing.T) {
+	ring := captureDaemonLog(t)
+	stubUsername(t, "bob")
+	srv := newTestServer(nil, nil, nil, nil)
+	srv.PruneFn = func(_ context.Context, apply bool) PrunePlan {
+		return PrunePlan{
+			Applied:        apply,
+			ReclaimedBytes: 2048,
+			Items:          []PruneItem{{Path: "/fake", Bytes: 2048, Kind: "runner-tarball", Reason: "superseded"}},
+		}
+	}
+	if _, err := srv.Prune(operatorPeerCtx(t, 503), &runnyv1.PruneRequest{Apply: false}); err != nil {
+		t.Fatal(err)
+	}
+	if lines := operatorLines(ring); len(lines) != 0 {
+		t.Errorf("dry-run prune logged %v, want nothing", lines)
+	}
+	if _, err := srv.Prune(operatorPeerCtx(t, 503), &runnyv1.PruneRequest{Apply: true}); err != nil {
+		t.Fatal(err)
+	}
+	wantOperatorLine(t, ring, "operator prune", map[string]string{
+		"operator_uid": "503", "operator_user": "bob",
+		"applied": "true", "reclaimed_bytes": "2048", "items": "1",
+	})
 }
 
 func TestPruneDryRunDeletesNothing(t *testing.T) {

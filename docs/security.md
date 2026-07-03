@@ -162,7 +162,10 @@ cred-read failure) is recorded as unknown rather than failing the request —
 an audit enhancement, never a second gate. This closes the "an operator did
 X" → "operator A did X" gap once more than one operator identity can exist;
 see [ADR-0014](architecture-decisions/0014-debug-key-injection.md) for the
-authorization model this extends.
+authorization model this extends. Lifecycle commands (recycle, pause, resume,
+reload, upgrade-reload, prune with apply) log the same kernel-authenticated
+uid and best-effort username to the daemon log (`runnyctl logs -daemon`) —
+attribution only, no new persisted audit trail.
 
 **The control socket may grant several operator accounts, on the system
 daemon.** An existing operator grants another via `runnyctl operator grant`:

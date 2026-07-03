@@ -768,8 +768,8 @@ func assertCycleFramed(t *testing.T, events []obs.Event, rec *cycle.Record) {
 func TestRecordOperatorKeyNotifiesWatchers(t *testing.T) {
 	job := &cycle.JobInfo{Name: "build"}
 	rec := &cycle.Record{Job: job}
-	s := &Slot{}
-	s.status.Job = job
+	s := &Slot{cell: &statusCell{}}
+	s.cell.status.Job = job
 
 	got := make(chan Status, 4)
 	s.OnChange(func(st Status) { got <- st })
@@ -1705,9 +1705,9 @@ func TestBackoffProgression(t *testing.T) {
 		c.Limits.BackoffCap = home.Duration(30 * time.Second)
 	})
 	set := func(n uint32) {
-		h.slot.mu.Lock()
-		h.slot.failures = n
-		h.slot.mu.Unlock()
+		h.slot.cell.mu.Lock()
+		h.slot.cell.failures = n
+		h.slot.cell.mu.Unlock()
 	}
 	cases := []struct {
 		failures uint32
@@ -2957,9 +2957,9 @@ func TestDebugHeldAfterJobOKResetsStreak(t *testing.T) {
 	})
 	h.images.maxCalls = 1
 	// Seed a failing streak so a reset is observable.
-	h.slot.mu.Lock()
-	h.slot.failures = 3
-	h.slot.mu.Unlock()
+	h.slot.cell.mu.Lock()
+	h.slot.cell.failures = 3
+	h.slot.cell.mu.Unlock()
 	cancel := h.reachJobArmed(t)
 	defer cancel()
 
@@ -3167,9 +3167,9 @@ func TestMidJobInstallFailureDoesNotCountStreak(t *testing.T) {
 	})
 	h.images.maxCalls = 1
 	h.guest.installErr = errors.New("ambiguous failure")
-	h.slot.mu.Lock()
-	h.slot.failures = 2
-	h.slot.mu.Unlock()
+	h.slot.cell.mu.Lock()
+	h.slot.cell.failures = 2
+	h.slot.cell.mu.Unlock()
 	cancel := h.start(t)
 	defer cancel()
 	h.waitState(t, StateProvision)

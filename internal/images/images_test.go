@@ -182,18 +182,29 @@ func tarballServer(t *testing.T, status int) RunnerResolver {
 	}
 }
 
-// EnsureRunnerTarball brackets its whole body — resolve + download, or the
+// newTarballEnsurer builds an *Ensurer whose RunnerCacheDir already exists
+// (ensureRunnerTarball, unlike the old free function, resolves its
+// destination through e.Home rather than taking a bare cacheDir param).
+func newTarballEnsurer(t *testing.T, resolve RunnerResolver) *Ensurer {
+	t.Helper()
+	home := home.Dir(t.TempDir())
+	if err := home.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	return &Ensurer{Home: home, Runner: resolve, ResolveBudget: time.Second, StallBudget: time.Minute}
+}
+
+// ensureRunnerTarball brackets its whole body — resolve + download, or the
 // cache hit — in a tarball-ensure action, so cache-hit cycles show an honest
 // near-zero duration rather than nothing.
 func TestEnsureRunnerTarballEmitsAction(t *testing.T) {
 	cap := &eventCapture{}
-	dir := t.TempDir()
-	resolve := tarballServer(t, http.StatusOK)
+	e := newTarballEnsurer(t, tarballServer(t, http.StatusOK))
 
 	for i := 0; i < 2; i++ { // download, then cache hit — both emit the action
-		_, asset, err := EnsureRunnerTarball(scopedCtx(cap), dir, resolve, time.Second, time.Minute, nil, nil, nil)
+		_, asset, err := e.ensureRunnerTarball(scopedCtx(cap), nil)
 		if err != nil || asset == "" {
-			t.Fatalf("EnsureRunnerTarball #%d: (%q, %v)", i, asset, err)
+			t.Fatalf("ensureRunnerTarball #%d: (%q, %v)", i, asset, err)
 		}
 	}
 	got := cap.actionEvents(obs.ActionTarballEnsure)
@@ -213,12 +224,11 @@ func TestEnsureRunnerTarballEmitsAction(t *testing.T) {
 // hit (no request happens at all).
 func TestEnsureRunnerTarballEmitsHTTPEvent(t *testing.T) {
 	cap := &eventCapture{}
-	dir := t.TempDir()
-	resolve := tarballServer(t, http.StatusOK)
+	e := newTarballEnsurer(t, tarballServer(t, http.StatusOK))
 
 	for i := 0; i < 2; i++ { // download, then cache hit
-		if _, _, err := EnsureRunnerTarball(scopedCtx(cap), dir, resolve, time.Second, time.Minute, nil, nil, nil); err != nil {
-			t.Fatalf("EnsureRunnerTarball #%d: %v", i, err)
+		if _, _, err := e.ensureRunnerTarball(scopedCtx(cap), nil); err != nil {
+			t.Fatalf("ensureRunnerTarball #%d: %v", i, err)
 		}
 	}
 

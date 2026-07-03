@@ -68,11 +68,11 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string), onDigestResol
 	// Runner tarball first: small, fails fast, and shared across slots
 	// (per-file locking inside).
 	if e.Runner != nil {
-		_, runnerVersion, err = EnsureRunnerTarball(ctx, e.Home.RunnerCacheDir(), e.Runner, e.resolveBudget(), e.StallBudget, report, e.Metrics, e.log())
+		_, runnerVersion, err = e.ensureRunnerTarball(ctx, report)
 		if err != nil {
 			return "", "", "", fmt.Errorf("ensuring runner tarball: %w", err)
 		}
-		// Reserve the tarball until Ensure returns: after EnsureRunnerTarball
+		// Reserve the tarball until Ensure returns: after ensureRunnerTarball
 		// the semaphore is released but the FSM hasn't published RunnerVersion
 		// yet. Without this, on-demand prune can delete the tarball during the
 		// image pull that follows, causing CLONE to fail.
@@ -113,7 +113,7 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string), onDigestResol
 	pinned.Digest = digest // pull exactly what we resolved
 	acquire := e.acquire
 	if acquire == nil {
-		acquire = e.defaultAcquire
+		acquire = e.acquireImagePull
 	}
 	// wait-for-pull is this cycle's experience of the shared pull — the time
 	// spent subscribed, whether or not this slot triggered it. The pull's own
@@ -161,12 +161,6 @@ func (e *Ensurer) defaultResolve(ctx context.Context) (string, error) {
 	rctx, rcancel := bounded.WithTimeout(ctx, e.resolveBudget())
 	defer rcancel()
 	return client.Resolve(rctx, e.Ref)
-}
-
-// defaultAcquire subscribes to the shared pull of dir (the e.acquire test
-// seam's production value).
-func (e *Ensurer) defaultAcquire(dir string, ref oci.Ref, report func(string)) (*subscription, func()) {
-	return acquireImagePull(dir, ref, e.StallBudget, e.log(), e.Metrics, report)
 }
 
 // pullID is the shared pull's identity: a short hash of the
@@ -309,7 +303,7 @@ var tarballLocks sync.Map // filename -> chan struct{} (capacity-1 semaphore)
 // tarballReserved tracks tarballs that Ensure() has resolved and downloaded
 // but whose RunnerVersion has not yet been published to slot status (the FSM
 // sets it only after Ensure returns). Ensure() stores the filename right after
-// EnsureRunnerTarball returns and defers a delete so the reservation covers
+// ensureRunnerTarball returns and defers a delete so the reservation covers
 // the full image-resolve/pull window that follows the download.
 var tarballReserved sync.Map // filename -> struct{}
 
@@ -331,91 +325,82 @@ func ProtectActiveTarballs(protect map[string]bool) {
 	})
 }
 
-// EnsureRunnerTarball makes sure the service-current actions-runner tarball
-// sits in cacheDir (the virtiofs share). Returns the tarball path and the
-// asset filename (the version identifier, e.g. "actions-runner-osx-arm64-2.320.0.tar.gz").
-// The download is stall-watched and progress-reported — no unbounded silent
-// network reads anywhere (a startup-time version of this dead-stalled on a
-// hung GitHub download with no timeout). Old versions accumulate in the shared
-// store and are reaped at cold start by PruneRunnerCache, not here: each cycle
-// clones its own tarball before boot, so this store has no live readers to race.
+// ensureRunnerTarball makes sure the service-current actions-runner tarball
+// sits in e.Home.RunnerCacheDir() (the virtiofs share). Returns the tarball
+// path and the asset filename (the version identifier, e.g.
+// "actions-runner-osx-arm64-2.320.0.tar.gz"). The download is stall-watched
+// and progress-reported — no unbounded silent network reads anywhere (a
+// startup-time version of this dead-stalled on a hung GitHub download with no
+// timeout). Old versions accumulate in the shared store and are reaped at
+// cold start by PruneRunnerCache, not here: each cycle clones its own tarball
+// before boot, so this store has no live readers to race.
 //
 // The whole body — resolve + download, or the cache hit — runs under a
 // tarball-ensure action, so a cache-hit cycle's trace shows an honest
 // near-zero duration for this sub-step.
-func EnsureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerResolver, resolveBudget, stallBudget time.Duration, report func(string), metrics *Metrics, log *slog.Logger) (path, asset string, err error) {
+func (e *Ensurer) ensureRunnerTarball(ctx context.Context, report func(string)) (path, asset string, err error) {
 	err = obs.Action(ctx, obs.ActionTarballEnsure, func(ctx context.Context) error {
-		var ierr error
-		path, asset, ierr = ensureRunnerTarball(ctx, cacheDir, resolve, resolveBudget, stallBudget, report, metrics, log)
-		return ierr
-	})
-	return path, asset, err
-}
-
-func ensureRunnerTarball(ctx context.Context, cacheDir string, resolve RunnerResolver, resolveBudget, stallBudget time.Duration, report func(string), metrics *Metrics, log *slog.Logger) (string, string, error) {
-	if resolveBudget <= 0 {
-		resolveBudget = defaultResolveTimeout
-	}
-	rctx, rcancel := bounded.WithTimeout(ctx, resolveBudget)
-	assetName, assetURL, wantSHA, err := resolve(rctx)
-	rcancel()
-	if err != nil {
-		return "", "", err
-	}
-
-	semAny, _ := tarballLocks.LoadOrStore(assetName, make(chan struct{}, 1))
-	sem := semAny.(chan struct{})
-	select {
-	case sem <- struct{}{}:
-	default:
-		if report != nil {
-			report("waiting for a concurrent download of " + assetName)
+		rctx, rcancel := bounded.WithTimeout(ctx, e.resolveBudget())
+		assetName, assetURL, wantSHA, rerr := e.Runner(rctx)
+		rcancel()
+		if rerr != nil {
+			return rerr
 		}
+
+		semAny, _ := tarballLocks.LoadOrStore(assetName, make(chan struct{}, 1))
+		sem := semAny.(chan struct{})
 		select {
 		case sem <- struct{}{}:
-		case <-ctx.Done():
-			return "", "", fmt.Errorf("waiting for a concurrent download of %s: %w", assetName, context.Cause(ctx))
+		default:
+			if report != nil {
+				report("waiting for a concurrent download of " + assetName)
+			}
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return fmt.Errorf("waiting for a concurrent download of %s: %w", assetName, context.Cause(ctx))
+			}
 		}
-	}
-	defer func() { <-sem }()
+		defer func() { <-sem }()
 
-	dest := filepath.Join(cacheDir, assetName)
-	if _, err := os.Stat(dest); err == nil {
-		return dest, assetName, nil // already cached
-	}
+		dest := filepath.Join(e.Home.RunnerCacheDir(), assetName)
+		if _, statErr := os.Stat(dest); statErr == nil {
+			path, asset = dest, assetName
+			return nil // already cached
+		}
 
-	// A real download starts here — the metric brackets exactly this, so a
-	// cache hit or a slot that waited out a peer's download records nothing.
-	start := time.Now()
-	err = downloadTarball(ctx, dest, assetName, assetURL, wantSHA, stallBudget, report, log)
-	// A download truncated by the caller's own cancellation (operator
-	// recycle, daemon shutdown) is not a download outcome — record nothing,
-	// the same rule the pull side follows. A stall kill still records: its
-	// watcher cancels only the inner watch context, not ctx.
-	if err == nil || ctx.Err() == nil {
-		metrics.tarballDownloadDone(outcomeOf(err), time.Since(start))
-	}
-	if err != nil {
-		return "", "", err
-	}
-	if log != nil {
-		log.Info("runner tarball cached", "asset", assetName)
-	}
-	return dest, assetName, nil
+		// A real download starts here — the metric brackets exactly this, so a
+		// cache hit or a slot that waited out a peer's download records nothing.
+		start := time.Now()
+		derr := e.downloadTarball(ctx, dest, assetName, assetURL, wantSHA, report)
+		// A download truncated by the caller's own cancellation (operator
+		// recycle, daemon shutdown) is not a download outcome — record nothing,
+		// the same rule the pull side follows. A stall kill still records: its
+		// watcher cancels only the inner watch context, not ctx.
+		if derr == nil || ctx.Err() == nil {
+			e.Metrics.tarballDownloadDone(outcomeOf(derr), time.Since(start))
+		}
+		if derr != nil {
+			return derr
+		}
+		e.log().Info("runner tarball cached", "asset", assetName)
+		path, asset = dest, assetName
+		return nil
+	})
+	return path, asset, err
 }
 
 // downloadTarball fetches assetURL to dest via a .partial temp file, with
 // stall watching, progress reporting, and the service-declared checksum
 // verification.
-func downloadTarball(ctx context.Context, dest, assetName, assetURL, wantSHA string, stallBudget time.Duration, report func(string), log *slog.Logger) error {
-	if log != nil {
-		log.Info("downloading runner tarball", "asset", assetName)
-	}
+func (e *Ensurer) downloadTarball(ctx context.Context, dest, assetName, assetURL, wantSHA string, report func(string)) error {
+	log := e.log()
+	log.Info("downloading runner tarball", "asset", assetName)
 	if report != nil {
 		report("downloading " + assetName)
 	}
 	stall := bounded.NewStall()
-	wctx, cancel := stall.Watch(ctx, stallBudget)
+	wctx, cancel := stall.Watch(ctx, e.StallBudget)
 	defer cancel()
 
 	dreq, err := http.NewRequestWithContext(obs.WithHTTPClass(wctx, obs.HTTPTarballDownload), http.MethodGet, assetURL, nil)
@@ -435,7 +420,7 @@ func downloadTarball(ctx context.Context, dest, assetName, assetURL, wantSHA str
 	if err != nil {
 		return err
 	}
-	prog := newProgress(report, log, stallBudget)
+	prog := newProgress(report, log, e.StallBudget)
 	body := io.TeeReader(dresp.Body, progressWriter(func(n int64) {
 		stall.Feed(n)
 		prog.feed(n)

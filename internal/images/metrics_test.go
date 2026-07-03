@@ -127,21 +127,22 @@ func TestEnsureRunnerTarballDownloadMetric(t *testing.T) {
 	m := &Metrics{TarballDownloadDone: func(outcome string, d time.Duration) {
 		calls = append(calls, outcome)
 	}}
-	dir := t.TempDir()
-	resolve := tarballServer(t, http.StatusOK)
+	e := newTarballEnsurer(t, tarballServer(t, http.StatusOK))
+	e.Metrics = m
 
 	for i := 0; i < 2; i++ { // download, then cache hit
-		if _, _, err := EnsureRunnerTarball(context.Background(), dir, resolve, time.Second, time.Minute, nil, m, nil); err != nil {
-			t.Fatalf("EnsureRunnerTarball #%d: %v", i, err)
+		if _, _, err := e.ensureRunnerTarball(context.Background(), nil); err != nil {
+			t.Fatalf("ensureRunnerTarball #%d: %v", i, err)
 		}
 	}
 	if len(calls) != 1 || calls[0] != "ok" {
 		t.Fatalf("download metric calls = %v, want exactly [ok] (cache hit must not record)", calls)
 	}
 
-	failResolve := tarballServer(t, http.StatusServiceUnavailable)
-	if _, _, err := EnsureRunnerTarball(context.Background(), t.TempDir(), failResolve, time.Second, time.Minute, nil, m, nil); err == nil {
-		t.Fatal("EnsureRunnerTarball succeeded against a 503 download")
+	failEnsurer := newTarballEnsurer(t, tarballServer(t, http.StatusServiceUnavailable))
+	failEnsurer.Metrics = m
+	if _, _, err := failEnsurer.ensureRunnerTarball(context.Background(), nil); err == nil {
+		t.Fatal("ensureRunnerTarball succeeded against a 503 download")
 	}
 	if len(calls) != 2 || calls[1] != "error" {
 		t.Fatalf("download metric calls = %v, want [ok error]", calls)
@@ -201,8 +202,10 @@ func TestEnsureRunnerTarballCancelledRecordsNothing(t *testing.T) {
 		cancel()
 	}()
 
-	if _, _, err := EnsureRunnerTarball(ctx, t.TempDir(), resolve, time.Second, time.Minute, nil, m, nil); err == nil {
-		t.Fatal("EnsureRunnerTarball succeeded despite cancellation")
+	e := newTarballEnsurer(t, resolve)
+	e.Metrics = m
+	if _, _, err := e.ensureRunnerTarball(ctx, nil); err == nil {
+		t.Fatal("ensureRunnerTarball succeeded despite cancellation")
 	}
 	if len(calls) != 0 {
 		t.Fatalf("cancelled download recorded %v, want nothing", calls)

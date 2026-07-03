@@ -512,7 +512,7 @@ func run() error {
 			}
 		}
 		// Protect tarballs whose download is in flight but whose RunnerVersion
-		// has not been published to slot status yet (EnsureRunnerTarball
+		// has not been published to slot status yet (the tarball ensure
 		// completes before Ensure returns, so there is a window where the
 		// tarball is cached but the slot still shows RunnerVersion="").
 		images.ProtectActiveTarballs(protectTarballs)

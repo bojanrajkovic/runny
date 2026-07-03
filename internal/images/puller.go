@@ -101,9 +101,9 @@ var (
 // puller. ref must be digest-pinned; all subscribers of one dir necessarily
 // resolved the same digest because dir is content-addressed
 // (home.ImageBundleDir embeds the digest).
-func acquireImagePull(dir string, ref oci.Ref, stall time.Duration, log *slog.Logger, metrics *Metrics, report func(string)) (*subscription, func()) {
+func (e *Ensurer) acquireImagePull(dir string, ref oci.Ref, report func(string)) (*subscription, func()) {
 	proto := &imagePuller{
-		destDir: dir, ref: ref, stall: stall, log: log, metrics: metrics,
+		destDir: dir, ref: ref, stall: e.StallBudget, log: e.log(), metrics: e.Metrics,
 		holdBudget: defaultDiskHoldBudget, pollInterval: defaultDiskPollInterval,
 	}
 	proto.attempt = proto.realAttempt

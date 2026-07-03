@@ -166,6 +166,12 @@
         "endpoint": {
           "type": "string"
         },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
         "metrics_interval": {
           "type": "string",
           "examples": [

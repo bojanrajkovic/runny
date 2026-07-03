@@ -107,13 +107,27 @@ observability:
   otlp:
     endpoint: https://collector.example:4317   # https = TLS, http = insecure
     metrics_interval: 60s                        # optional; default 60s
+    headers:                                     # optional; sent on every export
+      x-honeycomb-team: ${env:HONEYCOMB_API_KEY}
 ```
 
 Enabling it adds **outbound OTLP egress only** — the daemon still opens no
 listening TCP socket; it dials out to `endpoint` the same way it dials GitHub.
 `https` selects TLS, `http` is for a local/insecure collector. `endpoint` is
 the single switch: a non-empty value turns on export for both signals, there
-are no per-signal endpoints. See
+are no per-signal endpoints.
+
+`headers` carries backend auth — every OTLP backend authenticates via a
+request header (`x-honeycomb-team`, `api-key`, `authorization: Bearer …`), so
+a plain map covers them all. Values may reference environment variables with
+the Collector's `${env:VAR}` syntax, resolved once at config load; an unset
+variable refuses the config with a precise error rather than exporting with a
+silently empty credential. (Under launchd the daemon's environment is
+whatever the plist's `EnvironmentVariables` provides — the expansion is most
+useful for foreground `runnyd` runs and dev shells.) Only that exact placeholder shape expands — every
+other byte, including bare `$`, passes through untouched. A literal key in
+the file works too: the config is already an operator-owned `0600` file, the
+same posture that protects the `github.private_key_path` target. See
 [ADR-0024](architecture-decisions/0024-observability-event-seam.md) for the
 design this enables.
 

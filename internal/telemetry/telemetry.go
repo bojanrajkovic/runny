@@ -70,8 +70,10 @@ func Setup(ctx context.Context, cfg home.OTLPConfig, version, instanceID string,
 		return noop, fmt.Errorf("telemetry: building resource: %w", err)
 	}
 
-	traceOpts := []otlptracegrpc.Option{otlptracegrpc.WithEndpointURL(cfg.Endpoint)}
-	metricOpts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpointURL(cfg.Endpoint)}
+	// Headers arrive already env-expanded by home.LoadConfig; an empty map
+	// is a no-op.
+	traceOpts := []otlptracegrpc.Option{otlptracegrpc.WithEndpointURL(cfg.Endpoint), otlptracegrpc.WithHeaders(cfg.Headers)}
+	metricOpts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpointURL(cfg.Endpoint), otlpmetricgrpc.WithHeaders(cfg.Headers)}
 	if insecure {
 		traceOpts = append(traceOpts, otlptracegrpc.WithInsecure())
 		metricOpts = append(metricOpts, otlpmetricgrpc.WithInsecure())

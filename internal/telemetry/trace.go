@@ -57,11 +57,21 @@ type cycleSpans struct {
 // pullSpans is a shared image pull's span state — the pull-scope sibling of
 // cycleSpans. A pull has no steps or actions of its own (KindHTTP is its
 // only child), so it needs none of cycleSpans' step-tracking machinery.
+// ref identifies which puller instance this entry belongs to: PullRef.ID is
+// a deterministic hash of the pull's directory, so a successor puller for
+// the same image (started the instant the last subscriber leaves, before
+// the predecessor's own goroutine notices cancellation) reuses the exact
+// same map key. Every event from one puller instance carries the identical
+// *obs.PullRef pointer (stamped once at obs.WithPull, never copied), so
+// comparing ref by pointer identity — not just the map key — is what tells
+// a stale predecessor's terminal event from the live successor sharing its
+// key: see getPull/resolveOwnPull.
 type pullSpans struct {
 	mu         sync.Mutex
 	ctx        context.Context
 	root       trace.Span
 	lastDetail string
+	ref        *obs.PullRef
 }
 
 type traceAssembler struct {
@@ -91,10 +101,34 @@ func (a *traceAssembler) withCycle(e obs.Event, fn func(cs *cycleSpans)) {
 	fn(cs)
 }
 
+// getPull looks up e.Pull.ID's entry, but only returns it when the entry
+// still belongs to the puller instance that emitted e (ps.ref == e.Pull, a
+// pointer comparison) — a stale predecessor's event arriving after a
+// successor has already overwritten the map entry (see pullSpans' doc
+// comment) must not resolve to the successor's live span.
 func (a *traceAssembler) getPull(e obs.Event) *pullSpans {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.pulls[e.Pull.ID]
+	ps := a.pulls[e.Pull.ID]
+	if ps == nil || ps.ref != e.Pull {
+		return nil
+	}
+	return ps
+}
+
+// resolveOwnPull is getPull plus eviction: it deletes the map entry too, but
+// ONLY when the looked-up entry is confirmed to belong to e's puller
+// instance — the same ref check as getPull. A stale predecessor's terminal
+// event must never evict a live successor's entry.
+func (a *traceAssembler) resolveOwnPull(e obs.Event) *pullSpans {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ps := a.pulls[e.Pull.ID]
+	if ps == nil || ps.ref != e.Pull {
+		return nil
+	}
+	delete(a.pulls, e.Pull.ID)
+	return ps
 }
 
 // withPull looks up e's pull and runs fn with it locked; a no-op if the pull
@@ -484,6 +518,15 @@ func (a *traceAssembler) cycleFinished(e obs.Event) {
 	cs.root.End(trace.WithTimestamp(e.Time))
 }
 
+// pullStarted opens the pull's root span. If e.Pull.ID is already tracked,
+// the entry there belongs to a predecessor puller for the same directory:
+// internal/images/puller.go's registry only ever runs one live puller per
+// dir, so a second KindPullStarted for the same ID means the predecessor
+// has already been superseded — its own terminal event, whenever it
+// arrives, will find ps.ref no longer matches (see getPull/resolveOwnPull)
+// and safely no-op instead of touching this new entry. Close the stale
+// entry's span right here instead of leaving it open forever waiting for a
+// terminal event that can no longer reach it.
 func (a *traceAssembler) pullStarted(e obs.Event) {
 	if e.Pull == nil {
 		return
@@ -494,8 +537,16 @@ func (a *traceAssembler) pullStarted(e obs.Event) {
 		attribute.String("runny.image.digest", e.Pull.Digest),
 	))
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.pulls[e.Pull.ID] = &pullSpans{ctx: ctx, root: span}
+	stale := a.pulls[e.Pull.ID]
+	a.pulls[e.Pull.ID] = &pullSpans{ctx: ctx, root: span, ref: e.Pull}
+	a.mu.Unlock()
+	if stale == nil {
+		return
+	}
+	stale.mu.Lock()
+	defer stale.mu.Unlock()
+	stale.root.SetStatus(codes.Error, "superseded by a new pull for the same image")
+	stale.root.End(trace.WithTimestamp(e.Time))
 }
 
 // pullFinished ends the pull's root span with its outcome and drops its map
@@ -506,10 +557,7 @@ func (a *traceAssembler) pullFinished(e obs.Event) {
 	if e.Pull == nil {
 		return
 	}
-	a.mu.Lock()
-	ps := a.pulls[e.Pull.ID]
-	delete(a.pulls, e.Pull.ID)
-	a.mu.Unlock()
+	ps := a.resolveOwnPull(e)
 	if ps == nil {
 		return
 	}
@@ -542,10 +590,7 @@ func (a *traceAssembler) pullAbandoned(e obs.Event) {
 	if e.Pull == nil {
 		return
 	}
-	a.mu.Lock()
-	ps := a.pulls[e.Pull.ID]
-	delete(a.pulls, e.Pull.ID)
-	a.mu.Unlock()
+	ps := a.resolveOwnPull(e)
 	if ps == nil {
 		return
 	}

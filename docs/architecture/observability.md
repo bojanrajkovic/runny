@@ -133,7 +133,14 @@ before a terminal outcome (its last subscriber left) never emits
 `KindPullFinished` — no fabricated outcome for a pull that never finished —
 but it does emit `KindPullAbandoned`, carrying no payload, purely so the root
 span still closes (`Status=Error`, a fixed reason) instead of leaking a map
-entry and an un-ended span for however long the daemon runs.
+entry and an un-ended span for however long the daemon runs. `runny.pull.id`
+is a deterministic hash of the pull's directory, so a successor puller for
+the same image can share a predecessor's still-open map entry if it starts
+before the predecessor's own terminal event lands; the assembler tells them
+apart by the `*obs.PullRef` pointer identity every event from one puller
+instance carries (stamped once, never copied), closing the predecessor's
+span as "superseded" the moment a successor starts rather than ever letting
+a stale event touch the wrong span.
 
 Beyond the step tree, the trace carries the cycle's identity and audit
 detail: the root's attributes include the pool, the assembled runner name,

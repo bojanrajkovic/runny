@@ -716,6 +716,71 @@ func TestTraceConsumerPullAbandonedClosesRootAndEvicts(t *testing.T) {
 	}
 }
 
+// Two puller instances for the same image directory share the exact same
+// deterministic PullRef.ID (a successor can start the instant the last
+// subscriber leaves, before the predecessor's own goroutine notices
+// cancellation and emits its terminal event). pullStarted closes the
+// predecessor's span out as "superseded" the moment the successor starts;
+// the predecessor's own stale terminal event, arriving later, must not
+// touch or re-end the successor's live span — only the successor's own
+// events (carrying its own *PullRef) can.
+func TestTraceConsumerPullSuccessorSurvivesStalePredecessorEvent(t *testing.T) {
+	emit, exp := newTestAssembler(t)
+
+	predecessor := &obs.PullRef{ID: "pull-shared", Ref: "ghcr.io/x", Digest: "sha256:x", Started: at(0)}
+	successor := &obs.PullRef{ID: "pull-shared", Ref: "ghcr.io/x", Digest: "sha256:x", Started: at(1)}
+
+	emit(obs.Event{Time: at(0), Pull: predecessor, Kind: obs.KindPullStarted})
+	emit(obs.Event{Time: at(1), Pull: successor, Kind: obs.KindPullStarted}) // supersedes predecessor's entry
+
+	// The predecessor's own stale terminal event must not touch the
+	// successor's now-installed entry.
+	emit(obs.Event{Time: at(2), Pull: predecessor, Kind: obs.KindPullAbandoned})
+
+	// The successor's own traffic and finish must land normally.
+	emit(obs.Event{Time: at(3), Pull: successor, Kind: obs.KindHTTP, HTTP: &obs.HTTPEvent{
+		Class: obs.HTTPRegistryBlob, Method: "GET", Host: "registry.example", Status: 200, Duration: time.Second,
+	}})
+	emit(obs.Event{Time: at(5), Pull: successor, Kind: obs.KindPullFinished, PullInfo: &obs.PullEvent{
+		Outcome: obs.OutcomeOK, Duration: 4 * time.Second, Bytes: 100,
+	}})
+
+	var roots []tracetest.SpanStub
+	var children int
+	for _, s := range exp.GetSpans() {
+		switch s.Name {
+		case "runny.pull":
+			roots = append(roots, s)
+		case "http registry.blob":
+			children++
+		}
+	}
+	if len(roots) != 2 {
+		t.Fatalf("got %d runny.pull spans, want exactly 2 (predecessor + successor, both closed)", len(roots))
+	}
+	if children != 1 {
+		t.Fatalf("got %d client children, want 1 (the successor's HTTP traffic, not dropped as stray)", children)
+	}
+
+	var predecessorSpan, successorSpan tracetest.SpanStub
+	for _, s := range roots {
+		if s.EndTime.UTC() == at(1).UTC() {
+			predecessorSpan = s
+		} else {
+			successorSpan = s
+		}
+	}
+	if predecessorSpan.Status.Code != codes.Error || predecessorSpan.Status.Description != "superseded by a new pull for the same image" {
+		t.Errorf("predecessor span status = %+v, want Error \"superseded...\"", predecessorSpan.Status)
+	}
+	if got := attrString(successorSpan.Attributes, "runny.outcome"); got != string(obs.OutcomeOK) {
+		t.Errorf("successor span outcome = %q, want ok (its own real finish, not the predecessor's stale abandon)", got)
+	}
+	if successorSpan.EndTime.UTC() != at(5).UTC() {
+		t.Errorf("successor span end time = %v, want %v (its own finish, not the predecessor's stale abandon at t=2)", successorSpan.EndTime, at(5))
+	}
+}
+
 // KindHTTP/KindDetail for a pull whose KindPullStarted was never seen (a
 // stray event, or a pull that already finished) is a no-op — the same
 // stray-event tolerance withCycle/withStep give cycle-scoped events.

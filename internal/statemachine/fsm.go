@@ -341,13 +341,10 @@ type Slot struct {
 
 	cmds chan Command
 
-	mu       sync.Mutex
-	status   Status
-	onChange []func(Status)
-
-	// failure streak for backoff; reset on job completion or a held LISTENING.
-	failures uint32
-	paused   bool
+	// cell holds everything the slot's status lock guards (the Status
+	// snapshot, the watcher list, paused, the failure streak) — see
+	// statuscell.go.
+	cell *statusCell
 }
 
 func NewSlot(name string, deps Deps) *Slot {
@@ -359,12 +356,7 @@ func NewSlot(name string, deps Deps) *Slot {
 		name: name,
 		deps: deps,
 		cmds: make(chan Command, 8),
-		// Slot, Pool, and Image are slot-constant identity (the name, the
-		// owning pool, and the configured ref), not cycle state. Seeded here
-		// so a slot that hasn't transitioned yet still renders a complete
-		// row, and re-set on every transition by setState — so none depends
-		// on this seed surviving a future struct-replace refactor.
-		status: Status{Slot: name, Pool: deps.Pool.Name, Image: deps.Pool.Image},
+		cell: newStatusCell(name, deps.Pool),
 	}
 }
 
@@ -384,16 +376,7 @@ func (s *Slot) Command(c Command) bool {
 // the slot's lock, and synchronously on FSM goroutines — they must not
 // block (fan out through a buffered channel like the socket server does).
 func (s *Slot) OnChange(fn func(Status)) {
-	s.mu.Lock()
-	s.onChange = append(s.onChange, fn)
-	s.mu.Unlock()
-}
-
-// notify calls every listener with snap (callers must not hold s.mu).
-func (s *Slot) notify(fns []func(Status), snap Status) {
-	for _, fn := range fns {
-		fn(snap)
-	}
+	s.cell.onChangeAppend(fn)
 }
 
 // Name returns the slot's immutable name (the status snapshot's Slot field
@@ -402,34 +385,30 @@ func (s *Slot) Name() string { return s.name }
 
 // Status returns the current snapshot.
 func (s *Slot) Status() Status {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.status
+	return s.cell.snapshot()
 }
 
 func (s *Slot) setState(state State, mut func(*Status)) {
-	s.mu.Lock()
-	s.status.Slot = s.name
-	s.status.Pool = s.deps.Pool.Name   // slot-constant identity, like Slot
-	s.status.Image = s.deps.Pool.Image // slot-constant identity, like Slot
-	s.status.State = state
-	s.status.StateEntered = time.Now()
-	s.status.Detail = ""
-	// Reset block: a debug hold's status belongs to exactly one state's
-	// lifetime. Clearing both here means DebugHoldExpires/DebugHoldArmed
-	// vanish the instant DEBUG or TEARDOWN (or any other state) is entered;
-	// the mut below re-sets DebugHoldExpires when this transition IS into
-	// DEBUG (issue #39).
-	s.status.DebugHoldExpires = time.Time{}
-	s.status.DebugHoldArmed = false
-	if mut != nil {
-		mut(&s.status)
-	}
-	snap := s.status
-	fns := slices.Clone(s.onChange)
-	s.mu.Unlock()
+	snap, fns := s.cell.update(func(st *Status) {
+		st.Slot = s.name
+		st.Pool = s.deps.Pool.Name   // slot-constant identity, like Slot
+		st.Image = s.deps.Pool.Image // slot-constant identity, like Slot
+		st.State = state
+		st.StateEntered = time.Now()
+		st.Detail = ""
+		// Reset block: a debug hold's status belongs to exactly one state's
+		// lifetime. Clearing both here means DebugHoldExpires/DebugHoldArmed
+		// vanish the instant DEBUG or TEARDOWN (or any other state) is
+		// entered; the mut below re-sets DebugHoldExpires when this
+		// transition IS into DEBUG (issue #39).
+		st.DebugHoldExpires = time.Time{}
+		st.DebugHoldArmed = false
+		if mut != nil {
+			mut(st)
+		}
+	})
 	s.deps.Log.Info("state", "state", state, "cycle", snap.CycleID)
-	s.notify(fns, snap)
+	s.cell.notify(fns, snap)
 }
 
 // Run drives cycles until ctx is cancelled or the slot wedges. This is the
@@ -457,14 +436,12 @@ func (s *Slot) Run(ctx context.Context) {
 
 // markWedged parks the slot and tells the world why.
 func (s *Slot) markWedged() {
-	s.mu.Lock()
-	s.status.Wedged = true
-	s.status.Detail = "guest survived force-stop; slot parked until the daemon restarts"
-	snap := s.status
-	fns := slices.Clone(s.onChange)
-	s.mu.Unlock()
+	snap, fns := s.cell.update(func(st *Status) {
+		st.Wedged = true
+		st.Detail = "guest survived force-stop; slot parked until the daemon restarts"
+	})
 	s.deps.Log.Error("slot wedged: guest survived force-stop and holds a guest-cap slot; parking (the daemon restarts cold once no job is running)")
-	s.notify(fns, snap)
+	s.cell.notify(fns, snap)
 }
 
 // backoffWait sits in BACKOFF until the backoff timer elapses and the slot
@@ -537,71 +514,26 @@ func (s *Slot) handleIdleCommand(cmd Command) {
 
 // setDetail publishes a live annotation for the current state.
 func (s *Slot) setDetail(ctx context.Context, detail string) {
-	s.mu.Lock()
-	if s.status.Detail == detail {
-		s.mu.Unlock()
+	snap, fns, changed := s.cell.setDetailIfChanged(detail)
+	if !changed {
 		return
 	}
-	s.status.Detail = detail
-	snap := s.status
-	fns := slices.Clone(s.onChange)
-	s.mu.Unlock()
 	obs.Emit(ctx, obs.Event{Kind: obs.KindDetail, Detail: &obs.DetailEvent{Text: detail}})
-	s.notify(fns, snap)
+	s.cell.notify(fns, snap)
 }
 
 func (s *Slot) isPaused() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.paused
+	return s.cell.isPaused()
 }
 
-// recentCommandIDCap bounds the per-slot applied-command history. Generous
-// relative to the client's confirm→catch window: an id only needs to survive
-// from the snapshot that carries it until the client polls, so a handful is
-// plenty, and the cap exists only to keep an always-paused slot's history from
-// growing without bound.
-const recentCommandIDCap = 16
-
-// setPaused applies a pause/resume and republishes the slot status. cmdID is
-// the applying command's correlation id (empty for daemon-internal re-issues);
-// a non-empty id is appended to Status.RecentAppliedCommandIDs so the control
-// surface can confirm that specific command by membership. An empty cmdID
-// appends nothing, so a coalesced status stream never drops a client's
-// acknowledgement out of the history.
+// setPaused applies a pause/resume and republishes the slot status; see
+// statusCell.setPaused.
 func (s *Slot) setPaused(p bool, cmdID string) {
-	s.mu.Lock()
-	s.paused = p
-	s.status.Paused = p
-	if cmdID != "" {
-		s.status.RecentAppliedCommandIDs = appendBounded(
-			s.status.RecentAppliedCommandIDs, cmdID, recentCommandIDCap,
-		)
-	}
-	snap := s.status
-	fns := slices.Clone(s.onChange)
-	s.mu.Unlock()
-	s.notify(fns, snap)
-}
-
-// appendBounded returns ids with id appended, retaining at most max entries
-// (oldest evicted). It always allocates a fresh backing array so a status value
-// already snapshotted under the lock keeps its own stable slice — a later
-// append must not mutate an array a prior snapshot still references.
-func appendBounded(ids []string, id string, max int) []string {
-	next := make([]string, 0, max)
-	if len(ids) >= max {
-		next = append(next, ids[len(ids)-max+1:]...)
-	} else {
-		next = append(next, ids...)
-	}
-	return append(next, id)
+	s.cell.setPaused(p, cmdID)
 }
 
 func (s *Slot) currentBackoff() time.Duration {
-	s.mu.Lock()
-	n := s.failures
-	s.mu.Unlock()
+	n := s.cell.failureCount()
 	if n == 0 {
 		return 0
 	}
@@ -766,12 +698,8 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 			// a cycle whose pull fails after resolve still records (and
 			// emits) the digest it tried to pull.
 			rec.ImageDigest = d
-			s.mu.Lock()
-			s.status.ImageDigest = d
-			snap := s.status
-			fns := slices.Clone(s.onChange)
-			s.mu.Unlock()
-			s.notify(fns, snap)
+			snap, fns := s.cell.update(func(st *Status) { st.ImageDigest = d })
+			s.cell.notify(fns, snap)
 			obs.Emit(esctx, obs.Event{Kind: obs.KindImageInfo, Image: &obs.ImageEvent{Digest: d}})
 		})
 		if err != nil {
@@ -783,9 +711,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 		}
 		// RunnerVersion: no explicit notify needed — the next setState
 		// (ENSURE_IMAGE → CLONE) broadcasts it milliseconds later.
-		s.mu.Lock()
-		s.status.RunnerVersion = runnerVersion
-		s.mu.Unlock()
+		s.cell.update(func(st *Status) { st.RunnerVersion = runnerVersion })
 		srcBundle = bundle
 		return nil
 	})
@@ -835,9 +761,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 				return err
 			}
 			machine = m
-			s.mu.Lock()
-			s.status.VM.MAC = m.MAC()
-			s.mu.Unlock()
+			s.cell.update(func(st *Status) { st.VM.MAC = m.MAC() })
 			rec.VM.MAC = m.MAC()
 			obs.Emit(c, obs.Event{Kind: obs.KindVMInfo, VM: &obs.VMEvent{MAC: m.MAC()}})
 			return nil
@@ -851,9 +775,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 				return err
 			}
 			ip = got
-			s.mu.Lock()
-			s.status.VM.IP = ip
-			s.mu.Unlock()
+			s.cell.update(func(st *Status) { st.VM.IP = ip })
 			rec.VM.IP = ip
 			obs.Emit(c, obs.Event{Kind: obs.KindVMInfo, VM: &obs.VMEvent{IP: ip}})
 			return nil
@@ -1048,7 +970,7 @@ func (s *Slot) listenAndRunJob(ctx context.Context, rec *cycle.Record, proc Proc
 		// same lock acquisition so observers never see an inconsistent pair.
 		st.LastFailure = ""
 		st.ConsecutiveFailures = 0
-		s.failures = 0
+		s.cell.failures = 0
 	})
 	obs.Emit(ctx, obs.Event{Kind: obs.KindStepEntered, StepInfo: &obs.StepEvent{State: string(StateListening)}})
 	lrec := cycle.StateRecord{State: string(StateListening), Entered: time.Now()}
@@ -1405,7 +1327,7 @@ func (s *Slot) auditDisarm(ctx context.Context, rec *cycle.Record, cause string,
 // recycle, pause-while-armed). NOT setState (we are in JOB; StateEntered must
 // not move). Mirrors the locked helper that SET the flag at arm time.
 // recordOperatorKey appends fp to the cycle's job audit (JobInfo.OperatorKeys),
-// copy-on-write under the lock. rec.Job and s.status.Job alias one *JobInfo
+// copy-on-write under the lock. rec.Job and the cell's Status.Job alias one *JobInfo
 // (set together at JOB entry), and Status()/the watch feed hand that pointer to
 // gRPC goroutines — so an unlocked `append` to its slice is a live data race
 // (a torn read of the slice header, or a read of a reallocated backing array).
@@ -1417,38 +1339,32 @@ func (s *Slot) auditDisarm(ctx context.Context, rec *cycle.Record, cause string,
 // privileged key may be on the guest stays invisible to StreamStatus until some
 // unrelated status change fires.
 func (s *Slot) recordOperatorKey(rec *cycle.Record, fp string) {
-	s.mu.Lock()
-	j := *rec.Job
-	j.OperatorKeys = append(append([]string(nil), rec.Job.OperatorKeys...), fp)
-	rec.Job = &j
-	s.status.Job = &j
-	snap := s.status
-	fns := slices.Clone(s.onChange)
-	s.mu.Unlock()
-	s.notify(fns, snap)
+	snap, fns := s.cell.update(func(st *Status) {
+		j := *rec.Job
+		j.OperatorKeys = append(append([]string(nil), rec.Job.OperatorKeys...), fp)
+		rec.Job = &j
+		st.Job = &j
+	})
+	s.cell.notify(fns, snap)
 }
 
 func (s *Slot) clearArmedStatus(arm *debugArm, detail string) {
 	arm.armed = false
-	s.mu.Lock()
-	s.status.DebugHoldArmed = false
-	s.status.Detail = detail
-	snap := s.status
-	fns := slices.Clone(s.onChange)
-	s.mu.Unlock()
-	s.notify(fns, snap)
+	snap, fns := s.cell.update(func(st *Status) {
+		st.DebugHoldArmed = false
+		st.Detail = detail
+	})
+	s.cell.notify(fns, snap)
 }
 
 // setArmedStatus sets Status.DebugHoldArmed and Detail at arm time (the locked
 // mutate-and-notify mirror of clearArmedStatus; NOT setState).
 func (s *Slot) setArmedStatus(detail string) {
-	s.mu.Lock()
-	s.status.DebugHoldArmed = true
-	s.status.Detail = detail
-	snap := s.status
-	fns := slices.Clone(s.onChange)
-	s.mu.Unlock()
-	s.notify(fns, snap)
+	snap, fns := s.cell.update(func(st *Status) {
+		st.DebugHoldArmed = true
+		st.Detail = detail
+	})
+	s.cell.notify(fns, snap)
 }
 
 // jobDetail is the plain JOB status line (no armed annotation).
@@ -1745,12 +1661,8 @@ func (s *Slot) debugReArm(ctx context.Context, rec *cycle.Record, guest Guest, c
 	reset := func() time.Time {
 		newUntil := time.Now().Add(cmd.Hold)
 		hold.Reset(time.Until(newUntil))
-		s.mu.Lock()
-		s.status.DebugHoldExpires = newUntil
-		snap := s.status
-		fns := slices.Clone(s.onChange)
-		s.mu.Unlock()
-		s.notify(fns, snap)
+		snap, fns := s.cell.update(func(st *Status) { st.DebugHoldExpires = newUntil })
+		s.cell.notify(fns, snap)
 		return newUntil
 	}
 
@@ -2110,22 +2022,26 @@ func (s *Slot) finishCycle(rec *cycle.Record, benign bool) {
 		s.deps.Log.Warn("pruning cycle records", "err", err)
 	}
 
-	s.mu.Lock()
+	// A raw cell lock, not update(): this joint failures+status write has no
+	// notify (finishCycle's caller starts the next backoffWait, whose own
+	// setState broadcasts the result), and failures isn't a Status field
+	// update() could reach.
+	s.cell.mu.Lock()
 	switch {
 	case rec.Result == cycle.ResultSuccess ||
 		((heldListening(rec) || debugHeldAfterJobOK(rec)) && !injectionFailed(rec)):
-		s.failures = 0
-		s.status.LastFailure = ""
+		s.cell.failures = 0
+		s.cell.status.LastFailure = ""
 	case benign:
 		// streak unchanged
 	default:
-		s.failures++
+		s.cell.failures++
 		if rec.Failure != nil {
-			s.status.LastFailure = rec.Failure.State + ": " + rec.Failure.Error
+			s.cell.status.LastFailure = rec.Failure.State + ": " + rec.Failure.Error
 		}
 	}
-	s.status.ConsecutiveFailures = s.failures
-	s.mu.Unlock()
+	s.cell.status.ConsecutiveFailures = s.cell.failures
+	s.cell.mu.Unlock()
 	s.deps.Log.Info("cycle finished", "cycle", rec.CycleID, "result", rec.Result)
 }
 

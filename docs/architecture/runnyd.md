@@ -5,7 +5,7 @@ The current shape of the daemon. Decisions and their alternatives live in
 
 ## System shape
 
-`runnyd` runs one crash-only state machine per runner slot, boots tart-format
+`runnyd` runs one destroy-and-recycle state machine per runner slot, boots tart-format
 guests in-process via Virtualization.framework (`internal/vm`), provisions
 them over deadline-bounded SSH (`internal/sshx` → `internal/guest`),
 registers them with GitHub via JIT config (`internal/github`), and serves the
@@ -33,11 +33,11 @@ flowchart LR
 
 ## The cycle
 
-The crash-only FSM design (per-state deadlines, the TEARDOWN sink, backoff
+The FSM design (per-state deadlines, the TEARDOWN sink, backoff
 policy) is decided in
-[ADR-0004](../architecture-decisions/0004-crash-only-state-machine.md), and the
-property it implements — destroy-and-recycle, never repair-in-place — is defined
-in [crash-only.md](crash-only.md); the per-cycle SSH hardening state is
+[ADR-0004](../architecture-decisions/0004-destroy-and-recycle-state-machine.md), and the
+property it implements — no silent failure, via destroy-and-recycle — is defined
+in [no-silent-failure.md](no-silent-failure.md); the per-cycle SSH hardening state is
 [ADR-0013](../architecture-decisions/0013-ephemeral-ssh-keys-in-band-rotation.md).
 The code (`internal/statemachine`) is the authority on states and deadline
 defaults; the diagram below is the living transition map and tracks the code.

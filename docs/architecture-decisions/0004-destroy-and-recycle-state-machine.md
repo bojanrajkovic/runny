@@ -1,12 +1,13 @@
-# ADR-0004: Crash-only state machine with per-state deadlines
+# ADR-0004: Destroy-and-recycle state machine with per-state deadlines
 
 **Status:** Accepted (2026-06-07; states finalized 2026-06-09)
 
-**Amended:** 2026-06-24 — the *definition* of crash-only graduated into a
-standalone principle, [`architecture/crash-only.md`](../architecture/crash-only.md).
-This ADR owns the FSM decision and its alternatives; that doc owns what the term
-means — the property (no silent failure), its destroy-and-recycle mechanism, and
-what it explicitly is *not* (notably, distinct from the hermeticity boundary and
+**Amended:** 2026-06-24 — the *definition* of what this FSM guarantees graduated
+into a standalone principle,
+[`architecture/no-silent-failure.md`](../architecture/no-silent-failure.md).
+This ADR owns the FSM decision and its alternatives; that doc owns the
+guarantee — the property (no silent failure), its destroy-and-recycle mechanism,
+and what it explicitly is *not* (notably, distinct from the hermeticity boundary and
 from the no-unbounded-operations invariant) — and is what other docs link to
 instead of restating.
 
@@ -60,7 +61,7 @@ Key properties:
 - **Registration-aware health**: LISTENING reconciles against GitHub's runner
   list every 60 s. "Registration vanished" (zombie → recycle) is distinguished
   from "GitHub unreachable" (transient → hold and log) — sand conflated these.
-- **Crash-only restart = cold start**: in-process VMs (ADR-0008) die with the
+- **Restart = cold start**: in-process VMs (ADR-0008) die with the
   daemon. Startup = validate → sweep (`vms/*`, offline GitHub registrations by
   instance prefix) → fresh cycles. Disk holds artifacts, never authoritative
   state.

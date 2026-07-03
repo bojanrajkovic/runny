@@ -19,7 +19,7 @@ behaves:
 - A runnyd that **self-daemonizes or reparents** away from launchd is neither a
   launchd job nor an sshd child, and is *silently denied* — every guest dial
   fails `connect: no route to host` while the host shell reaches the same
-  address. runnyd never backgrounds itself (crash-only KeepAlive keeps it a
+  address. runnyd never backgrounds itself (KeepAlive restarts keep it a
   launchd child); don't wrap it in something that does.
 
 So runnyd installs **started by launchd**, in one of two shapes: a **non-root

@@ -134,7 +134,7 @@ func (t TargetConfig) String() string {
 	return t.Owner + "/" + t.Repo
 }
 
-// Deadlines are the per-state budgets of the crash-only FSM, calibrated from
+// Deadlines are the per-state budgets of the slot FSM, calibrated from
 // spike measurements. Zero values take defaults.
 type Deadlines struct {
 	Clone     Duration `yaml:"clone"`

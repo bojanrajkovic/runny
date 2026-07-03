@@ -91,7 +91,7 @@ account, privileged once at install, unprivileged at runtime.**
   drops its `service` block (it could only ever make a per-user agent).
 
 - **The launchd-started invariant is load-bearing and asserted.** The
-  auto-allow holds only while runnyd never self-daemonizes; the crash-only
+  auto-allow holds only while runnyd never self-daemonizes; the launchd
   KeepAlive model already guarantees this, and a startup check plus a regression
   test enforce it.
 

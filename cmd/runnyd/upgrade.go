@@ -19,7 +19,7 @@ const upgradeCheckInterval = 30 * time.Minute
 // upgradeNotice logs once when the running daemon falls behind the binary launchd
 // would respawn it as — the headless mirror of runnyctl's skew banner, for an
 // operator who reads logs rather than running runnyctl. Log-only: the daemon
-// never respawns or re-execs itself (a crash-only daemon's restarts come from
+// never respawns or re-execs itself (runnyd's restarts come from
 // launchd, not from itself); it only names the upgrade verb.
 type upgradeNotice struct {
 	log     *slog.Logger

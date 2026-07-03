@@ -100,7 +100,7 @@ residual skew is **made loud**.
   cannot exist for an app user by construction.
 
 - **Install the daemon as a per-user LaunchAgent via `SMAppService`; launchd
-  owns the process, the app never does.** Crash-only `KeepAlive` is the daemon's
+  owns the process, the app never does.** launchd `KeepAlive` is the daemon's
   recovery model ([ADR-0012](0012-wedged-guest-escalation.md),
   [ADR-0014](0014-config-reload-drain-and-respawn.md)): on a wedge or a reload it
   exits non-zero for a launchd cold start. An app that `Process`-spawned `runnyd`
@@ -164,7 +164,7 @@ residual skew is **made loud**.
   first-class skew state — a warning, never a refusal (Tailscale's CLI surfaces
   the same daemon-vs-client mismatch over its IPC socket); after an app upgrade it
   offers to `kickstart` the agent onto the new binary, gated on a drain since
-  crash-only forbids interrupting a job. The verdict is a pure function beside the
+  a restart kills the in-process guest and must not interrupt a job. The verdict is a pure function beside the
   reload/ack verdicts in `DaemonStore`, unit-tested without a live daemon.
 
 - **The system LaunchDaemon is the headless channel; reconcile by detect-and-defer.**
@@ -184,7 +184,7 @@ residual skew is **made loud**.
 ## Rejected alternatives
 
 - **App `Process`-spawns the bundled `runnyd`.** The obvious "bundle and run."
-  It dies with the app and never restarts after a wedge — defeating crash-only
+  It dies with the app and never restarts after a wedge — defeating
   `KeepAlive`, the daemon's whole recovery model. This constraint is *why* the
   app installs an agent rather than running the binary.
 
@@ -220,7 +220,7 @@ residual skew is **made loud**.
   OrbStack hard-refuse a client below a minimum API version; runny does not. Its
   contract is a monotone `protocol_version` with graceful degradation
   (ADR-0017), and a hard refusal would break the legitimate new-client/old-daemon
-  upgrade window that a crash-only recycle resolves on its own. Skew must be
+  upgrade window that the next recycle resolves on its own. Skew must be
   visible, never fatal — the warn-and-continue behavior Tailscale's CLI already
   models (`client version != tailscaled server version`, printed, non-fatal).
 

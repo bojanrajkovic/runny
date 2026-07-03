@@ -24,8 +24,8 @@ succeed. Surfaced live: two slots churning the same disk-guard refusal.
 The fix has to share the deterministic failure without (a) reintroducing an
 unbounded operation ([ADR-0011](0011-bounded-contexts.md) — a doomed pull
 retried forever is the silent-hang shape this project exists to kill) and
-without (b) taking long-run retry ownership away from the crash-only FSM
-([ADR-0004](0004-crash-only-state-machine.md)).
+without (b) taking long-run retry ownership away from the slot FSM
+([ADR-0004](0004-destroy-and-recycle-state-machine.md)).
 
 ## Decision
 
@@ -85,7 +85,7 @@ operator to free disk — not derived from any other budget, per the
   on disk indefinitely is an unbounded operation; an operator who never frees
   space would leave every slot wedged behind an actor with no recycle and no
   failure accounting — the exact silent stall ADR-0011 forbids. The hold is
-  bounded and hands back to FSM backoff, which keeps the crash-only recycle and
+  bounded and hands back to FSM backoff, which keeps the visible recycle and
   streak intact.
 
 - **Re-running a full pull on each deterministic retry.** A pull re-fetches the

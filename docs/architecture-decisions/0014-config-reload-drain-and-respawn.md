@@ -14,7 +14,7 @@ with the fleet already drained.
 
 The daemon already has a supervisor that makes restarts free: launchd
 KeepAlive respawn is load-bearing for the ADR-0012 wedge escalation.
-Restarting through it applies the new config as a crash-only cold start —
+Restarting through it applies the new config as a cold start —
 reload reuses the restart, it is not a new mechanism.
 
 ## Decision

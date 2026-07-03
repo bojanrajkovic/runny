@@ -1,4 +1,4 @@
-// runnyd is the runner daemon: one crash-only state machine per runner slot,
+// runnyd is the runner daemon: one destroy-and-recycle state machine per runner slot,
 // serving the runny.v1 control surface over a unix socket. Restart is a cold
 // start by design: validate, sweep, run.
 package main

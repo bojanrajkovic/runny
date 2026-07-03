@@ -1,4 +1,4 @@
-// Package statemachine is runny's core: one crash-only FSM per runner slot.
+// Package statemachine is runny's core: one destroy-and-recycle FSM per runner slot.
 // Every state is entered with a context deadline; the only
 // response to any failure is TEARDOWN → BACKOFF with capped exponential
 // backoff. Teardown cannot fail — escalating force is the floor.

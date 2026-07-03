@@ -77,7 +77,7 @@ type launchDaemonPlist struct {
 	UserName         string   `plist:"UserName"`
 	ProgramArguments []string `plist:"ProgramArguments"`
 	RunAtLoad        bool     `plist:"RunAtLoad"`
-	// KeepAlive is load-bearing for crash-only teardown and config reload: runnyd
+	// KeepAlive is load-bearing for wedge escalation and config reload: runnyd
 	// exits non-zero expecting a launchd cold start. Stop it with
 	// "launchctl bootout system/", never by killing it.
 	KeepAlive         bool   `plist:"KeepAlive"`
@@ -95,7 +95,7 @@ type launchDaemonPlist struct {
 // ProcessType (a system daemon has no GUI session, so the per-user agent's
 // Interactive — which exists to surface the GUI Local Network prompt — is wrong;
 // a launchd-started daemon of any uid is auto-allowed local network regardless,
-// TN3179). KeepAlive is load-bearing: crash-only teardown and config reload both
+// TN3179). KeepAlive is load-bearing: wedge escalation and config reload both
 // exit non-zero expecting launchd to cold-start the daemon.
 func Plist(cfg Config) string {
 	logsDir := home.Dir(cfg.HomeDir).LogsDir()

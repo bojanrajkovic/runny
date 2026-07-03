@@ -6,7 +6,7 @@ root, or a write to a system path is `runnyctl`'s job, not the app's. This is th
 canonical statement of that boundary; the decision that enacted it is
 [ADR-0023](../architecture-decisions/0023-app-non-privileged-boundary.md).
 
-The boundary is a property, like crash-only and no-unbounded-operations: a surface
+The boundary is a property, like no-silent-failure and no-unbounded-operations: a surface
 either stays inside the per-user domain or it does not, and "inside" is testable —
 no `with administrator privileges` string, no `osascript` admin broker, no
 privileged subprocess anywhere in the app target.
@@ -63,7 +63,7 @@ side of the split, and the boundary deletes them rather than hardening them.
   ownership probe drives an observer banner that points the operator at `runnyctl`
   to remove it. Observation is read-only and needs no privilege; the app simply
   never *manages* what it observes here.
-- **Not crash-only or no-unbounded-operations.** Those govern how a guest fails
+- **Not no-silent-failure or no-unbounded-operations.** Those govern how a guest fails
   and that operations are bounded; this governs which launchd domain the app may
   write. They are independent properties that happen to share the silent-failure-proof
   goal.

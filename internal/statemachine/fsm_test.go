@@ -1732,7 +1732,7 @@ func TestBackoffProgression(t *testing.T) {
 }
 
 // Teardown hang-resistance: a wedged guest whose diag pull never returns on
-// its own must not hold TEARDOWN past its budget — crash-only means teardown
+// its own must not hold TEARDOWN past its budget — teardown
 // converges no matter what the guest does.
 func TestTeardownBoundedDespiteWedgedDiagPull(t *testing.T) {
 	h := newHarness(t, nil)

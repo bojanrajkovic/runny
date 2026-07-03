@@ -31,4 +31,4 @@ Spike-proven end-to-end 2026-06-07 (container start → `Listening for Jobs` in
 
 - **Registration tokens + config.sh**: token material enters the guest,
   requires explicit deregistration on every path, and `config.sh` state
-  persists across runs — all liabilities for crash-only ephemeral VMs.
+  persists across runs — all liabilities for single-use ephemeral VMs.

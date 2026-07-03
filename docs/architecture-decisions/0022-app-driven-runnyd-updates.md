@@ -103,9 +103,9 @@ gated update path.
   `runnyctl upgrade-daemon` runs the on-disk (new) binary's `-test-config` against
   the in-place config and, on OK, issues the drain-gated reload; brew already
   delivered the binary, so there is no re-stage. A daemon that watched its own
-  binary and respawned itself would add a self-triggered restart to a crash-only
+  binary and respawned itself would add a self-triggered restart to a
   daemon whose entire model is that restarts come from launchd, not itself
-  ([ADR-0004](0004-crash-only-state-machine.md)).
+  ([ADR-0004](0004-destroy-and-recycle-state-machine.md)).
 
 - **Skew is surfaced on non-GUI channels.** `runnyctl doctor` and the CLI skew
   warning name "a newer runnyd is available — run `runnyctl upgrade-daemon`" when
@@ -256,7 +256,7 @@ startup also hard-fails on (`runner-perm`, `image-resolve`, `disk-headroom`) are
 deliberately not pre-gated for a forward-only migration. Gating them would couple
 a headless upgrade to live GitHub/registry/disk health — letting a transient blip
 refuse the migration meant to recover from it, the same coupling the no-network
-gate rule above rejects. These failures are not silent: the crash-only state
+gate rule above rejects. These failures are not silent: the slot state
 machine meets them at `MINT_JIT` / `ENSURE_IMAGE` with backoff, why-visibility, and
 cycle records, so the FSM — not a point-in-time startup gate — is the runtime net.
 A daemon whose GitHub credentials are dead is no more functional held on the old

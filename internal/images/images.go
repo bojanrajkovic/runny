@@ -45,12 +45,11 @@ type Ensurer struct {
 	// ResolveBudget bounds the metadata round-trips that precede the pull
 	// (Deadlines.Resolve); zero takes the default.
 	ResolveBudget time.Duration
-	// Metrics receives the ensurer-scope pull/download outcomes (see the
-	// Metrics doc); nil records nothing.
-	Metrics *Metrics
 	// Events is the obs emitter the shared image puller uses to establish
-	// its own pull scope (obs.WithPull); nil-safe, like everything else that
-	// takes an obs.Emitter.
+	// its own pull scope (obs.WithPull) and ensureRunnerTarball uses to emit
+	// KindTarballDone; nil-safe, like everything else that takes an
+	// obs.Emitter. The metrics consumer folds both out of this stream —
+	// there is no second injected metrics seam.
 	Events obs.Emitter
 	Log    *slog.Logger
 
@@ -383,11 +382,9 @@ func (e *Ensurer) ensureRunnerTarball(ctx context.Context, report func(string)) 
 		// the same rule the pull side follows. A stall kill still records: its
 		// watcher cancels only the inner watch context, not ctx.
 		if derr == nil || ctx.Err() == nil {
-			dur := time.Since(start)
 			obs.Emit(ctx, obs.Event{Kind: obs.KindTarballDone, Tarball: &obs.TarballEvent{
-				Outcome: obs.OutcomeOf(derr), Error: obs.ErrText(derr), Duration: dur,
+				Outcome: obs.OutcomeOf(derr), Error: obs.ErrText(derr), Duration: time.Since(start),
 			}})
-			e.Metrics.tarballDownloadDone(outcomeOf(derr), dur)
 		}
 		if derr != nil {
 			return derr

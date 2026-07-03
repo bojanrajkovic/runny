@@ -57,7 +57,6 @@ type imagePuller struct {
 	ref     oci.Ref // pinned to the resolved digest
 	stall   time.Duration
 	log     *slog.Logger
-	metrics *Metrics    // nil-safe; records the terminal pull outcome
 	events  obs.Emitter // nil-safe; establishes this puller's pull scope
 
 	// startedAt anchors the pull-duration metric; pullBytes accumulates
@@ -108,8 +107,7 @@ var (
 // (home.ImageBundleDir embeds the digest).
 func (e *Ensurer) acquireImagePull(dir string, ref oci.Ref, report func(string)) (*subscription, func()) {
 	proto := &imagePuller{
-		destDir: dir, ref: ref, stall: e.StallBudget, log: e.log(), metrics: e.Metrics,
-		events:     e.Events,
+		destDir: dir, ref: ref, stall: e.StallBudget, log: e.log(), events: e.Events,
 		holdBudget: defaultDiskHoldBudget, pollInterval: defaultDiskPollInterval,
 	}
 	proto.attempt = proto.realAttempt
@@ -207,15 +205,13 @@ func (p *imagePuller) finish(res ensureResult) {
 	p.mu.Unlock()
 	pullerRegistryMu.Unlock()
 	p.cancel() // release the lifetime ctx; run() has returned by now
-	// Only the winner of the terminal==nil guard reaches here, so the pull
-	// metric and the KindPullFinished event both record exactly once per
-	// underlying pull — subscriber count and finish/panic double-calls can't
-	// inflate either.
+	// Only the winner of the terminal==nil guard reaches here, so
+	// KindPullFinished records exactly once per underlying pull —
+	// subscriber count and finish/panic double-calls can't inflate it.
 	dur, bytes := time.Since(p.startedAt), p.pullBytes.Load()
 	obs.Emit(p.ctx, obs.Event{Kind: obs.KindPullFinished, PullInfo: &obs.PullEvent{
 		Outcome: obs.OutcomeOf(res.err), Error: obs.ErrText(res.err), Duration: dur, Bytes: bytes,
 	}})
-	p.metrics.pullDone(outcomeOf(res.err), dur, bytes)
 	for sub := range subs {
 		sub.done <- res // buffered size 1, never blocks, delivered once
 	}

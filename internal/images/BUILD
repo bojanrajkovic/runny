@@ -6,7 +6,6 @@ go_library(
         "disk_darwin.go",
         "disk_linux.go",
         "images.go",
-        "metrics.go",
         "prune.go",
         "puller.go",
     ],
@@ -27,7 +26,6 @@ go_test(
     name = "images_test",
     srcs = [
         "images_test.go",
-        "metrics_test.go",
         "prune_test.go",
         "puller_test.go",
         "tarball_test.go",

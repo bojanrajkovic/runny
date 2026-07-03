@@ -11,19 +11,21 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/bojanrajkovic/runny/internal/diskfree"
-	"github.com/bojanrajkovic/runny/internal/images"
 	"github.com/bojanrajkovic/runny/internal/obs"
 )
 
 // NewMetricsConsumer returns an obs.Emitter that folds the event stream into
-// the cycle/step/job/action instruments — a pure fold with no per-cycle
-// state of its own: StepLeft and JobEnded carry their own Duration (the FSM
-// stamps it from the StateRecord/JobInfo it already holds), so there is
-// nothing to track between events. Same sharing contract as
-// NewTraceConsumer: one instance serves every slot; instrument Add/Record
-// are already goroutine-safe, so no locking is needed here either. Every
-// label value comes from a closed set — states, outcomes, action names,
-// config'd pools and slots — never a guest-controlled string.
+// the cycle/step/job/action instruments, plus the pull/tarball ones —
+// folded out of this same stream rather than a second injected seam — a
+// pure fold with no per-cycle state of its own:
+// StepLeft, JobEnded, PullFinished, and TarballDone all carry their own
+// Duration, so there is nothing to track between events. Same sharing
+// contract as NewTraceConsumer: one instance serves every slot; instrument
+// Add/Record are already goroutine-safe, so no locking is needed here
+// either. Every label value comes from a closed set — states, outcomes,
+// action names, config'd pools and slots — never a guest-controlled string;
+// pull/tarball events carry no pool/slot at all, since a pull belongs to no
+// single cycle.
 func NewMetricsConsumer(meter metric.Meter) (obs.Emitter, error) {
 	m := &metricsConsumer{}
 	if err := m.instruments(meter); err != nil {
@@ -51,6 +53,18 @@ type metricsConsumer struct {
 	// obs.Action wrapper measured; `action` names come from the closed const
 	// set in internal/obs.
 	actionDuration metric.Float64Histogram
+	// pullDuration/pullBytes fire once per underlying image pull, at
+	// KindPullFinished — never once per subscribing cycle, since a pull
+	// belongs to no single one. A puller cancelled before a terminal outcome
+	// (its last subscriber left) never emits KindPullFinished, so this
+	// records nothing either — no fabricated outcome for a pull that never
+	// finished.
+	pullDuration metric.Float64Histogram
+	pullBytes    metric.Float64Histogram
+	// tarballDuration fires once per actual runner-tarball download, at
+	// KindTarballDone — never for a cache hit or a slot that waited out a
+	// peer's download.
+	tarballDuration metric.Float64Histogram
 }
 
 func (m *metricsConsumer) instruments(meter metric.Meter) error {
@@ -79,6 +93,18 @@ func (m *metricsConsumer) instruments(meter metric.Meter) error {
 	m.actionDuration, err = meter.Float64Histogram("runny.action.duration",
 		metric.WithUnit("s"),
 		metric.WithDescription("Duration of one obs.Action sub-step within an FSM step."))
+	errs = append(errs, err)
+	m.pullDuration, err = meter.Float64Histogram("runny.image.pull.duration",
+		metric.WithUnit("s"),
+		metric.WithDescription("Wall-clock lifetime of one underlying image pull, including disk holds and re-attempts, recorded once at its terminal outcome regardless of how many slots shared it."))
+	errs = append(errs, err)
+	m.pullBytes, err = meter.Float64Histogram("runny.image.pull.bytes",
+		metric.WithUnit("By"),
+		metric.WithDescription("Bytes transferred by one underlying image pull, cumulative across its attempts (can exceed the image size on retry)."))
+	errs = append(errs, err)
+	m.tarballDuration, err = meter.Float64Histogram("runny.runner_tarball.download.duration",
+		metric.WithUnit("s"),
+		metric.WithDescription("Duration of one actual runner-tarball download — cache hits and slots that waited out a peer's download record nothing."))
 	errs = append(errs, err)
 	return errors.Join(errs...)
 }
@@ -139,46 +165,26 @@ func (m *metricsConsumer) emit(e obs.Event) {
 			m.cycleDuration.Record(ctx, e.Time.Sub(e.Cycle.Started).Seconds(),
 				metric.WithAttributes(pool, result, ending))
 		}
-	}
-}
 
-// NewEnsurerMetrics builds the ensurer-scope instruments and returns them
-// behind the images.Metrics seam — the image ensurer records pull and
-// tarball-download outcomes through it without importing any OTEL type.
-// These are per-underlying-work truths, not per-cycle ones (a shared pull
-// serves many subscribing slots and belongs to none of them), which is why
-// they record here instead of folding out of the cycle event stream.
-// `outcome` is the closed ok/error vocabulary; durations are seconds, bytes
-// are bytes, and the exponential-histogram view Setup installs applies to
-// all three.
-func NewEnsurerMetrics(meter metric.Meter) (*images.Metrics, error) {
-	var errs []error
-	pullDur, err := meter.Float64Histogram("runny.image.pull.duration",
-		metric.WithUnit("s"),
-		metric.WithDescription("Wall-clock lifetime of one underlying image pull, including disk holds and re-attempts, recorded once at its terminal outcome regardless of how many slots shared it."))
-	errs = append(errs, err)
-	pullBytes, err := meter.Float64Histogram("runny.image.pull.bytes",
-		metric.WithUnit("By"),
-		metric.WithDescription("Bytes transferred by one underlying image pull, cumulative across its attempts (can exceed the image size on retry)."))
-	errs = append(errs, err)
-	tarballDur, err := meter.Float64Histogram("runny.runner_tarball.download.duration",
-		metric.WithUnit("s"),
-		metric.WithDescription("Duration of one actual runner-tarball download — cache hits and slots that waited out a peer's download record nothing."))
-	errs = append(errs, err)
-	if err := errors.Join(errs...); err != nil {
-		return nil, err
+	case obs.KindPullFinished:
+		// Pull-scoped events carry no Cycle — pool/slot never apply to a
+		// pull, which belongs to no single one — so this case deliberately
+		// never touches the pool/slot locals above.
+		if e.PullInfo == nil {
+			return
+		}
+		attrs := metric.WithAttributes(attribute.String("outcome", string(e.PullInfo.Outcome)))
+		m.pullDuration.Record(ctx, e.PullInfo.Duration.Seconds(), attrs)
+		m.pullBytes.Record(ctx, float64(e.PullInfo.Bytes), attrs)
+
+	case obs.KindTarballDone:
+		if e.Tarball == nil {
+			return
+		}
+		m.tarballDuration.Record(ctx, e.Tarball.Duration.Seconds(), metric.WithAttributes(
+			attribute.String("outcome", string(e.Tarball.Outcome)),
+		))
 	}
-	return &images.Metrics{
-		PullDone: func(outcome string, d time.Duration, bytes int64) {
-			attrs := metric.WithAttributes(attribute.String("outcome", outcome))
-			pullDur.Record(context.Background(), d.Seconds(), attrs)
-			pullBytes.Record(context.Background(), float64(bytes), attrs)
-		},
-		TarballDownloadDone: func(outcome string, d time.Duration) {
-			tarballDur.Record(context.Background(), d.Seconds(),
-				metric.WithAttributes(attribute.String("outcome", outcome)))
-		},
-	}, nil
 }
 
 // SlotSnapshot is the neutral per-slot view the gauge callback polls —

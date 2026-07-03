@@ -493,3 +493,52 @@ func TestPullerEmitsFinishedEvenAfterLastSubscriberLeaves(t *testing.T) {
 	}
 	t.Fatal("KindPullFinished did not fire after the last subscriber left mid-attempt")
 }
+
+// A terminal failure (transient error handed back to the FSMs) emits exactly
+// one KindPullFinished with outcome=error and the error text.
+func TestPullerEmitsFinishedWithErrorOutcome(t *testing.T) {
+	dir := t.TempDir()
+	cap := &eventCapture{}
+	boom := errors.New("registry 503")
+	attempt := func(ctx context.Context) (string, error) { return "", boom }
+	sub, rel := testAcquireWithEvents(t, dir, cap.emit, attempt, okFree(0))
+	defer rel()
+	recvWithin(t, sub, time.Second)
+
+	var finished []obs.Event
+	for _, e := range cap.all() {
+		if e.Kind == obs.KindPullFinished {
+			finished = append(finished, e)
+		}
+	}
+	if len(finished) != 1 {
+		t.Fatalf("KindPullFinished count = %d, want exactly 1", len(finished))
+	}
+	if finished[0].PullInfo == nil || finished[0].PullInfo.Outcome != obs.OutcomeError || finished[0].PullInfo.Error != boom.Error() {
+		t.Fatalf("KindPullFinished payload = %+v, want outcome=error with the transient error text", finished[0].PullInfo)
+	}
+}
+
+// A puller cancelled before any terminal outcome (last subscriber left,
+// attempt itself returns the cancellation) emits no KindPullFinished at all —
+// no fabricated outcome for a pull that never finished.
+func TestPullerCancelledEmitsNoFinishedEvent(t *testing.T) {
+	dir := t.TempDir()
+	cap := &eventCapture{}
+	started := make(chan struct{})
+	attempt := func(ctx context.Context) (string, error) {
+		close(started)
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	_, rel := testAcquireWithEvents(t, dir, cap.emit, attempt, okFree(0))
+	<-started
+	rel()
+
+	time.Sleep(50 * time.Millisecond) // let the puller goroutine wind down
+	for _, e := range cap.all() {
+		if e.Kind == obs.KindPullFinished {
+			t.Fatalf("cancelled puller emitted %+v, want nothing", e)
+		}
+	}
+}

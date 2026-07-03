@@ -3,12 +3,16 @@ package images
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/bojanrajkovic/runny/internal/obs"
 	"github.com/bojanrajkovic/runny/internal/oci"
 )
 
@@ -36,6 +40,21 @@ func testAcquire(t *testing.T, dir string, report func(string),
 	proto.attempt = attempt
 	proto.diskFree = diskFree
 	return acquirePuller(dir, report, proto)
+}
+
+// testAcquireWithEvents is testAcquire plus a fake obs.Emitter wired onto
+// the puller's own pull scope — the two suites (default seams, plus an
+// emitter) share the same testProto configuration.
+func testAcquireWithEvents(t *testing.T, dir string, emit obs.Emitter,
+	attempt func(context.Context) (string, error),
+	diskFree func(string) (uint64, error),
+) (*subscription, func()) {
+	t.Helper()
+	proto := testProto(dir)
+	proto.attempt = attempt
+	proto.diskFree = diskFree
+	proto.events = emit
+	return acquirePuller(dir, nil, proto)
 }
 
 func recvWithin(t *testing.T, sub *subscription, within time.Duration) ensureResult {
@@ -289,4 +308,188 @@ func TestPullerSubscribeAtTerminalNeverHangs(t *testing.T) {
 		relA()
 		relB()
 	}
+}
+
+// collectEvents is a goroutine-safe obs.Emitter that appends to a slice —
+// the puller's own goroutine and the progress watcher's can both call in.
+func collectEvents() (obs.Emitter, func() []obs.Event) {
+	var mu sync.Mutex
+	var events []obs.Event
+	emit := func(e obs.Event) { mu.Lock(); events = append(events, e); mu.Unlock() }
+	all := func() []obs.Event { mu.Lock(); defer mu.Unlock(); return append([]obs.Event(nil), events...) }
+	return emit, all
+}
+
+// A successful pull emits exactly one KindPullStarted and one
+// KindPullFinished, both carrying the puller's own Pull identity (never a
+// Cycle), with the finished payload reporting outcome=ok.
+func TestPullerEmitsStartedAndFinishedWithPullIdentity(t *testing.T) {
+	dir := t.TempDir()
+	emit, all := collectEvents()
+	attempt := func(ctx context.Context) (string, error) { return "sha256:x", nil }
+	sub, rel := testAcquireWithEvents(t, dir, emit, attempt, okFree(0))
+	defer rel()
+	recvWithin(t, sub, time.Second)
+
+	var started, finished int
+	for _, e := range all() {
+		if e.Pull == nil {
+			t.Fatalf("event %s missing Pull identity: %+v", e.Kind, e)
+		}
+		switch e.Kind {
+		case obs.KindPullStarted:
+			started++
+		case obs.KindPullFinished:
+			finished++
+			if e.PullInfo == nil || e.PullInfo.Outcome != obs.OutcomeOK {
+				t.Errorf("KindPullFinished payload = %+v, want outcome=ok", e.PullInfo)
+			}
+		}
+	}
+	if started != 1 || finished != 1 {
+		t.Fatalf("started=%d finished=%d, want exactly 1 each", started, finished)
+	}
+}
+
+// The pull's HTTP traffic — a classed round trip through obs.HTTPTransport,
+// the same transport oci.Client wires — carries the pull scope: the
+// KindHTTP event lands with Pull set, proving realAttempt's traffic is no
+// longer scope-less.
+func TestPullerHTTPTrafficCarriesPullScope(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("blob"))
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	emit, all := collectEvents()
+	client := &http.Client{Transport: &obs.HTTPTransport{}}
+	attempt := func(ctx context.Context) (string, error) {
+		req, err := http.NewRequestWithContext(obs.WithHTTPClass(ctx, obs.HTTPRegistryBlob), http.MethodGet, srv.URL, nil)
+		if err != nil {
+			return "", err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return "sha256:x", nil
+	}
+	sub, rel := testAcquireWithEvents(t, dir, emit, attempt, okFree(0))
+	defer rel()
+	recvWithin(t, sub, time.Second)
+
+	var httpEvents int
+	for _, e := range all() {
+		if e.Kind != obs.KindHTTP {
+			continue
+		}
+		httpEvents++
+		if e.Pull == nil {
+			t.Errorf("KindHTTP event missing Pull identity: %+v", e)
+		}
+		if e.HTTP.Class != obs.HTTPRegistryBlob {
+			t.Errorf("HTTP class = %q, want %q", e.HTTP.Class, obs.HTTPRegistryBlob)
+		}
+	}
+	if httpEvents != 1 {
+		t.Fatalf("got %d KindHTTP events, want exactly 1", httpEvents)
+	}
+}
+
+// The disk-hold retry status (p.report) lands as a KindDetail on the pull
+// scope — runny.progress.last is visible against the pull, not just each
+// subscribing cycle.
+func TestPullerDiskHoldEmitsDetailUnderPullScope(t *testing.T) {
+	dir := t.TempDir()
+	emit, all := collectEvents()
+	var attempts atomic.Int32
+	attempt := func(ctx context.Context) (string, error) {
+		if attempts.Add(1) == 1 {
+			return "", &oci.DiskHeadroomError{Ref: "r", ImageBytes: 100, FreeBytes: 1}
+		}
+		return "sha256:recovered", nil
+	}
+	var polls atomic.Int32
+	diskFree := func(string) (uint64, error) {
+		if polls.Add(1) <= 1 {
+			return 1, nil
+		}
+		return 1 << 62, nil
+	}
+	sub, rel := testAcquireWithEvents(t, dir, emit, attempt, diskFree)
+	defer rel()
+	recvWithin(t, sub, 2*time.Second)
+
+	var sawDetail bool
+	for _, e := range all() {
+		if e.Kind == obs.KindDetail {
+			sawDetail = true
+			if e.Pull == nil {
+				t.Errorf("KindDetail missing Pull identity: %+v", e)
+			}
+		}
+	}
+	if !sawDetail {
+		t.Fatal("expected at least one KindDetail from the disk-hold retry status")
+	}
+}
+
+// A panic inside the attempt still yields exactly one KindPullFinished — the
+// same silent-failure-proofness TestPullerPanicBroadcasts checks for the
+// subscriber-facing result.
+func TestPullerEmitsFinishedOnPanic(t *testing.T) {
+	dir := t.TempDir()
+	emit, all := collectEvents()
+	attempt := func(ctx context.Context) (string, error) { panic("boom in the pull") }
+	sub, rel := testAcquireWithEvents(t, dir, emit, attempt, okFree(0))
+	defer rel()
+	recvWithin(t, sub, time.Second)
+
+	var finished int
+	for _, e := range all() {
+		if e.Kind == obs.KindPullFinished {
+			finished++
+		}
+	}
+	if finished != 1 {
+		t.Fatalf("KindPullFinished count = %d, want exactly 1", finished)
+	}
+}
+
+// A pull that succeeds after its last subscriber has already left still
+// finishes exactly once — the same race TestPullerLastOutStopsAndDeregisters
+// exercises for the registry, here asserted for the KindPullFinished event.
+func TestPullerEmitsFinishedEvenAfterLastSubscriberLeaves(t *testing.T) {
+	dir := t.TempDir()
+	emit, all := collectEvents()
+	started := make(chan struct{})
+	proceed := make(chan struct{})
+	attempt := func(ctx context.Context) (string, error) {
+		close(started)
+		<-proceed // the pull already committed to disk; ignore cancellation
+		return "sha256:landed", nil
+	}
+	_, rel := testAcquireWithEvents(t, dir, emit, attempt, okFree(0))
+	<-started
+	rel()          // the only subscriber leaves mid-attempt
+	close(proceed) // let the attempt land anyway
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		var finished int
+		for _, e := range all() {
+			if e.Kind == obs.KindPullFinished {
+				finished++
+			}
+		}
+		if finished == 1 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("KindPullFinished did not fire after the last subscriber left mid-attempt")
 }

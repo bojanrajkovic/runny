@@ -12,6 +12,7 @@ import (
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
 	"github.com/bojanrajkovic/runny/internal/diskfree"
+	"github.com/bojanrajkovic/runny/internal/obs"
 	"github.com/bojanrajkovic/runny/internal/oci"
 	"github.com/bojanrajkovic/runny/internal/tart"
 )
@@ -56,7 +57,8 @@ type imagePuller struct {
 	ref     oci.Ref // pinned to the resolved digest
 	stall   time.Duration
 	log     *slog.Logger
-	metrics *Metrics // nil-safe; records the terminal pull outcome
+	metrics *Metrics    // nil-safe; records the terminal pull outcome
+	events  obs.Emitter // nil-safe; establishes this puller's pull scope
 
 	// startedAt anchors the pull-duration metric; pullBytes accumulates
 	// transferred bytes across attempts (fed by realAttempt's progress
@@ -68,7 +70,10 @@ type imagePuller struct {
 	// ctx is the puller's lifetime context, cancelled when the last subscriber
 	// leaves (or on terminal). Not a bounded.Context: the actual network ops get
 	// their bounds from a per-attempt stall watch and the disk hold from
-	// holdBudget; this is a deliberate lifetime context, not a bounded one.
+	// holdBudget; this is a deliberate lifetime context, not a bounded one. It
+	// carries this puller's own pull scope (obs.WithPull), so every emit
+	// through it — realAttempt's OCI traffic included — attributes to this
+	// pull, never to any subscriber's cycle.
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -104,6 +109,7 @@ var (
 func (e *Ensurer) acquireImagePull(dir string, ref oci.Ref, report func(string)) (*subscription, func()) {
 	proto := &imagePuller{
 		destDir: dir, ref: ref, stall: e.StallBudget, log: e.log(), metrics: e.Metrics,
+		events:     e.Events,
 		holdBudget: defaultDiskHoldBudget, pollInterval: defaultDiskPollInterval,
 	}
 	proto.attempt = proto.realAttempt
@@ -119,13 +125,18 @@ func acquirePuller(dir string, report func(string), proto *imagePuller) (*subscr
 	pullerRegistryMu.Lock()
 	p := pullerRegistry[dir]
 	if p == nil {
+		now := time.Now()
 		pctx, cancel := context.WithCancel(context.Background())
+		pctx = obs.WithPull(pctx, proto.events, obs.PullRef{
+			ID: pullID(dir), Ref: proto.ref.String(), Digest: proto.ref.Digest, Started: now,
+		})
 		proto.ctx = pctx
 		proto.cancel = cancel
 		proto.subs = map[*subscription]func(string){}
-		proto.startedAt = time.Now()
+		proto.startedAt = now
 		p = proto
 		pullerRegistry[dir] = p
+		obs.Emit(pctx, obs.Event{Kind: obs.KindPullStarted})
 		go p.run()
 	}
 	sub := &subscription{done: make(chan ensureResult, 1)}
@@ -186,9 +197,14 @@ func (p *imagePuller) finish(res ensureResult) {
 	pullerRegistryMu.Unlock()
 	p.cancel() // release the lifetime ctx; run() has returned by now
 	// Only the winner of the terminal==nil guard reaches here, so the pull
-	// metric records exactly once per underlying pull — subscriber count and
-	// finish/panic double-calls can't inflate it.
-	p.metrics.pullDone(outcomeOf(res.err), time.Since(p.startedAt), p.pullBytes.Load())
+	// metric and the KindPullFinished event both record exactly once per
+	// underlying pull — subscriber count and finish/panic double-calls can't
+	// inflate either.
+	dur, bytes := time.Since(p.startedAt), p.pullBytes.Load()
+	obs.Emit(p.ctx, obs.Event{Kind: obs.KindPullFinished, PullInfo: &obs.PullEvent{
+		Outcome: obs.OutcomeOf(res.err), Error: obs.ErrText(res.err), Duration: dur, Bytes: bytes,
+	}})
+	p.metrics.pullDone(outcomeOf(res.err), dur, bytes)
 	for sub := range subs {
 		sub.done <- res // buffered size 1, never blocks, delivered once
 	}
@@ -327,11 +343,14 @@ func (p *imagePuller) holdDetail(dir string, dh *oci.DiskHeadroomError, deadline
 	)
 }
 
-// report fans a live status line out to every current subscriber. Subscribers
-// are snapshotted under p.mu and the closures invoked OUTSIDE it: each reporter
-// is a slot's setDetail, which takes the slot mutex, so calling it under p.mu
-// would invert the lock order into slot.mu -> p.mu.
+// report fans a live status line out to every current subscriber and emits
+// it as a KindDetail on the puller's own pull scope, so runny.progress.last
+// is visible against the pull, not just against each subscribing cycle.
+// Subscribers are snapshotted under p.mu and the closures invoked OUTSIDE
+// it: each reporter is a slot's setDetail, which takes the slot mutex, so
+// calling it under p.mu would invert the lock order into slot.mu -> p.mu.
 func (p *imagePuller) report(detail string) {
+	obs.Emit(p.ctx, obs.Event{Kind: obs.KindDetail, Detail: &obs.DetailEvent{Text: detail}})
 	p.mu.Lock()
 	p.lastDetail = detail
 	reporters := make([]func(string), 0, len(p.subs))

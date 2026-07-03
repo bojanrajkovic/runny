@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "http.go",
         "obs.go",
+        "pull.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/obs",
     visibility = ["//:__subpackages__"],
@@ -15,6 +16,7 @@ go_test(
     srcs = [
         "http_test.go",
         "obs_test.go",
+        "pull_test.go",
     ],
     embed = [":obs"],
     deps = ["//internal/bounded"],

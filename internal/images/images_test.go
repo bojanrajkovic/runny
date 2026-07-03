@@ -245,3 +245,63 @@ func TestEnsureRunnerTarballEmitsHTTPEvent(t *testing.T) {
 		t.Errorf("HTTP event = %+v, want GET %s 200", got[0], obs.HTTPTarballDownload)
 	}
 }
+
+// KindTarballDone fires once per actual download — never on a cache hit —
+// the same event/metric-in-lockstep rule TestEnsureRunnerTarballDownloadMetric
+// checks for the metric side.
+func TestEnsureRunnerTarballEmitsTarballDoneEvent(t *testing.T) {
+	cap := &eventCapture{}
+	e := newTarballEnsurer(t, tarballServer(t, http.StatusOK))
+
+	for i := 0; i < 2; i++ { // download, then cache hit
+		if _, _, err := e.ensureRunnerTarball(scopedCtx(cap), nil); err != nil {
+			t.Fatalf("ensureRunnerTarball #%d: %v", i, err)
+		}
+	}
+
+	var got []obs.Event
+	for _, ev := range cap.all() {
+		if ev.Kind == obs.KindTarballDone {
+			got = append(got, ev)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d KindTarballDone events, want exactly 1 (cache hit must not record)", len(got))
+	}
+	if got[0].Tarball.Outcome != obs.OutcomeOK {
+		t.Errorf("KindTarballDone outcome = %q, want ok", got[0].Tarball.Outcome)
+	}
+}
+
+// A download truncated by the caller's own cancellation is not a download
+// outcome — record nothing, the same rule TestEnsureRunnerTarballCancelledRecordsNothing
+// checks for the metric.
+func TestEnsureRunnerTarballCancelledEmitsNoTarballDoneEvent(t *testing.T) {
+	cap := &eventCapture{}
+	ctx, cancel := context.WithCancel(context.Background())
+	blocked := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		close(blocked)
+		<-r.Context().Done() // hold the body open until the client goes away
+	}))
+	t.Cleanup(srv.Close)
+	resolve := func(bounded.Context) (string, string, string, error) {
+		return "actions-runner-osx-arm64-9.9.9.tar.gz", srv.URL + "/runner.tar.gz", "", nil
+	}
+	go func() {
+		<-blocked
+		cancel()
+	}()
+
+	e := newTarballEnsurer(t, resolve)
+	if _, _, err := e.ensureRunnerTarball(obs.WithStep(obs.WithCycle(ctx, cap.emit, obs.CycleRef{Slot: "s-1", CycleID: "c1"}), "ENSURE_IMAGE"), nil); err == nil {
+		t.Fatal("ensureRunnerTarball succeeded despite cancellation")
+	}
+	for _, ev := range cap.all() {
+		if ev.Kind == obs.KindTarballDone {
+			t.Fatalf("cancelled download emitted %+v, want nothing", ev)
+		}
+	}
+}

@@ -36,7 +36,7 @@ const (
 	HTTPGitHubRunnerDownload HTTPClass = "github.runner-downloads" // runner-tarball asset resolve
 	HTTPRegistryToken        HTTPClass = "registry.token"          // registry bearer-token challenge
 	HTTPRegistryManifest     HTTPClass = "registry.manifest"       // manifest GET (resolve)
-	HTTPRegistryBlob         HTTPClass = "registry.blob"           // layer blob GET (scope-less from the pull actor)
+	HTTPRegistryBlob         HTTPClass = "registry.blob"           // layer blob GET (pull-scoped, not cycle-scoped)
 	HTTPTarballDownload      HTTPClass = "tarball.download"        // the runner-tarball GET itself
 	// HTTPOther is what an unannotated request through an HTTPTransport
 	// reports as: still visible, never a raw URL. A round trip landing here
@@ -86,9 +86,9 @@ func WithHTTPClass(ctx context.Context, class HTTPClass) context.Context {
 }
 
 // HTTPTransport is an http.RoundTripper that emits one KindHTTP event per
-// round trip on requests whose context carries an obs scope. A scope-less
-// request (the shared pull actor's blob traffic, startup doctor checks, any
-// test) passes straight through to Base with no emitter work — the same
+// round trip on requests whose context carries an obs scope — a cycle scope
+// or a pull scope. A scope-less request (startup doctor checks, any test)
+// passes straight through to Base with no emitter work — the same
 // degradation contract as Action. It adds visibility only: no retries, no
 // header changes, no new network behavior.
 type HTTPTransport struct {

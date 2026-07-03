@@ -568,3 +568,27 @@ func TestTraceConsumerHTTPSpans(t *testing.T) {
 		t.Errorf("jit carries status_code %d, want absent on transport error", got)
 	}
 }
+
+// Pull-scoped events (KindPullStarted, KindPullFinished) and the
+// cycle-scoped KindTarballDone carry no case in this consumer's switch, and
+// a pull event's zero Cycle can never resolve through withCycle — feeding
+// them through must produce zero spans, not just fail to attach to one.
+// Folding pull-scoped traces is a separate consumer (a later change), not
+// this one.
+func TestTraceConsumerIgnoresPullEvents(t *testing.T) {
+	emit, exp := newTestAssembler(t)
+
+	pull := &obs.PullRef{ID: "p1", Ref: "ghcr.io/x", Digest: "sha256:x", Started: at(0)}
+	emit(obs.Event{Kind: obs.KindPullStarted, Pull: pull})
+	emit(obs.Event{Kind: obs.KindPullFinished, Pull: pull, PullInfo: &obs.PullEvent{
+		Outcome: obs.OutcomeOK, Duration: time.Second, Bytes: 100,
+	}})
+	emit(obs.Event{Kind: obs.KindDetail, Pull: pull, Detail: &obs.DetailEvent{Text: "pulled 1 GiB at 40 MiB/s"}})
+	emit(obs.Event{Kind: obs.KindTarballDone, Cycle: testCycle, Tarball: &obs.TarballEvent{
+		Outcome: obs.OutcomeOK, Duration: time.Second,
+	}})
+
+	if spans := exp.GetSpans(); len(spans) != 0 {
+		t.Fatalf("pull/tarball events produced %d spans, want 0", len(spans))
+	}
+}

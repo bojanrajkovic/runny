@@ -137,7 +137,6 @@ func acquirePuller(dir string, report func(string), proto *imagePuller) (*subscr
 		proto.startedAt = now
 		p = proto
 		pullerRegistry[dir] = p
-		go p.run()
 	}
 	sub := &subscription{done: make(chan ensureResult, 1)}
 	p.mu.Lock()
@@ -150,13 +149,17 @@ func acquirePuller(dir string, report func(string), proto *imagePuller) (*subscr
 	last := p.lastDetail
 	p.mu.Unlock()
 	pullerRegistryMu.Unlock()
-	// KindPullStarted waits until both locks are released: an installed
-	// emitter is a caller-supplied callback (obs.Emitter's contract puts the
-	// must-not-block burden on whoever installs it, not on us), and calling
-	// it while holding the one global pullerRegistryMu would let a slow
-	// emitter serialize every pool/slot's pull acquisition daemon-wide.
+	// KindPullStarted waits until both locks are released (an installed
+	// emitter is a caller-supplied callback — obs.Emitter's contract puts the
+	// must-not-block burden on whoever installs it, not on us, and calling it
+	// while holding the one global pullerRegistryMu would let a slow emitter
+	// serialize every pool/slot's pull acquisition daemon-wide) but MUST still
+	// happen before go p.run() starts: run() is what can emit KindHTTP,
+	// KindDetail, or even KindPullFinished, so starting it first would race
+	// KindPullStarted for the lowest Seq on this pull scope.
 	if created {
 		obs.Emit(p.ctx, obs.Event{Kind: obs.KindPullStarted})
+		go p.run()
 	}
 	if last != "" && report != nil {
 		report(last) // a late joiner sees the current wait immediately

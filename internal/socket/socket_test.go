@@ -1010,6 +1010,21 @@ func wantOperatorLine(t *testing.T, ring *logring.Ring, msg string, attrs map[st
 	return e
 }
 
+// TestOperatorIdentityDistinguishesUnknownFromRoot pins the has-bit at the
+// shared resolver: an unreadable peer cred yields a nil uid — never a
+// fabricated 0 that grant attribution would record as root — while a real
+// uid-0 peer resolves to a non-nil 0 with its username.
+func TestOperatorIdentityDistinguishesUnknownFromRoot(t *testing.T) {
+	stubUsername(t, "root")
+	if uid, user := operatorIdentity(t.Context()); uid != nil || user != "" {
+		t.Errorf("no peer cred: got uid=%v user=%q, want nil/empty", uid, user)
+	}
+	uid, user := operatorIdentity(asOperator(t.Context(), 0))
+	if uid == nil || *uid != 0 || user != "root" {
+		t.Errorf("root peer: got uid=%v user=%q, want &0/root", uid, user)
+	}
+}
+
 // Recycle logs the authenticated operator and the command's own attrs, naming
 // the RESOLVED slot even when the request carries a runner name.
 func TestRecycleLogsOperator(t *testing.T) {

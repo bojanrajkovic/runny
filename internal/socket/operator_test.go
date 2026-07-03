@@ -126,8 +126,33 @@ func TestGrantOperatorGrantsAndRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadOperatorGrants: %v", err)
 	}
-	if len(grants) != 1 || grants[0].Action != "grant" || grants[0].TargetUser != testGrantee1 || grants[0].ByUID != 501 {
+	if len(grants) != 1 || grants[0].Action != "grant" || grants[0].TargetUser != testGrantee1 ||
+		grants[0].ByUID == nil || *grants[0].ByUID != 501 {
 		t.Errorf("grant record wrong: %+v", grants)
+	}
+}
+
+// TestGrantRecordUnknownPeerCredIsNotRoot pins that a grant whose peer cred
+// could not be read appends a record with by_uid absent — never uid 0, which
+// would read as root granted it in the audit trail.
+func TestGrantRecordUnknownPeerCredIsNotRoot(t *testing.T) {
+	requireGrantees(t)
+	s := newOperatorTestServer(t)
+	if _, err := s.grantOperator(t.Context(), testGrantee1); err != nil {
+		t.Fatalf("grantOperator: %v", err)
+	}
+	grants, err := s.HomeDir.ReadOperatorGrants()
+	if err != nil {
+		t.Fatalf("ReadOperatorGrants: %v", err)
+	}
+	if len(grants) != 1 {
+		t.Fatalf("expected 1 record, got %+v", grants)
+	}
+	if grants[0].ByUID != nil {
+		t.Errorf("unknown peer cred recorded by_uid=%d, want absent", *grants[0].ByUID)
+	}
+	if grants[0].ByUser != "" {
+		t.Errorf("unknown peer cred recorded by_user=%q, want empty", grants[0].ByUser)
 	}
 }
 

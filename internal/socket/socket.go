@@ -539,9 +539,9 @@ func logOperatorCommand(ctx context.Context, verb, slot string, attrs ...any) {
 	if slot != "" {
 		args = append(args, "slot", slot)
 	}
-	if uid, ok := peerUID(ctx); ok {
-		args = append(args, "operator_uid", uid)
-		if u := lookupUsername(uid); u != "" {
+	if uid, u := operatorIdentity(ctx); uid != nil {
+		args = append(args, "operator_uid", *uid)
+		if u != "" {
 			args = append(args, "operator_user", u)
 		}
 	} else {
@@ -808,12 +808,7 @@ func (s *Server) InjectDebugKey(ctx context.Context, req *runnyv1.InjectDebugKey
 	// The operator identity for the audit trail: the kernel-authenticated
 	// peer uid (never client-supplied), and its username resolved
 	// best-effort here so the FSM stays free of os/user.
-	var operatorUID *uint32
-	var operatorUser string
-	if uid, ok := peerUID(ctx); ok {
-		operatorUID = &uid
-		operatorUser = lookupUsername(uid)
-	}
+	operatorUID, operatorUser := operatorIdentity(ctx)
 
 	// The lookup above can take up to usernameLookupBound; a client that
 	// canceled or hit its own deadline during that stall must not have a key

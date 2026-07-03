@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -17,26 +16,20 @@ import (
 )
 
 // NewMetricsConsumer returns an obs.Emitter that folds the event stream into
-// the cycle/step/job/action instruments. Same sharing contract as
-// NewTraceConsumer: one instance serves every slot, with internal locking on
-// the open-cycle tracking (instrument Add/Record are already
-// goroutine-safe). Durations are computed from event timestamps, never a
-// fresh clock read, so a replayed stream produces the same numbers the live
-// one did. Every label value comes from a closed set — states, outcomes,
-// action names, config'd pools and slots — never a guest-controlled string.
+// the cycle/step/job/action instruments — a pure fold with no per-cycle
+// state of its own: StepLeft and JobEnded carry their own Duration (the FSM
+// stamps it from the StateRecord/JobInfo it already holds), so there is
+// nothing to track between events. Same sharing contract as
+// NewTraceConsumer: one instance serves every slot; instrument Add/Record
+// are already goroutine-safe, so no locking is needed here either. Every
+// label value comes from a closed set — states, outcomes, action names,
+// config'd pools and slots — never a guest-controlled string.
 func NewMetricsConsumer(meter metric.Meter) (obs.Emitter, error) {
-	m := &metricsConsumer{open: map[cycleKey]*openCycle{}}
+	m := &metricsConsumer{}
 	if err := m.instruments(meter); err != nil {
 		return nil, err
 	}
 	return m.emit, nil
-}
-
-// openCycle remembers the start timestamps StepLeft/JobEnded need but don't
-// carry. It exists per in-flight cycle and is dropped at CycleFinished.
-type openCycle struct {
-	stepEntered map[string]time.Time
-	jobStarted  time.Time
 }
 
 type metricsConsumer struct {
@@ -47,8 +40,8 @@ type metricsConsumer struct {
 	cycleCount metric.Int64Counter
 	// cycleDuration is CycleFinished minus the cycle's recorded start.
 	cycleDuration metric.Float64Histogram
-	// stepDuration is one point per StepLeft with a matching StepEntered;
-	// `outcome` passes through the FSM's vocabulary (ok/error/warn/deadline).
+	// stepDuration is one point per StepLeft; `outcome` passes through the
+	// FSM's vocabulary (ok/error/warn/deadline).
 	stepDuration metric.Float64Histogram
 	// jobCount/jobDuration fire at JobEnded — a cycle hosts at most one job,
 	// so job throughput is countable without deduplication.
@@ -58,20 +51,6 @@ type metricsConsumer struct {
 	// obs.Action wrapper measured; `action` names come from the closed const
 	// set in internal/obs.
 	actionDuration metric.Float64Histogram
-
-	mu   sync.Mutex
-	open map[cycleKey]*openCycle
-}
-
-// openFor returns key's tracking entry, creating it on first use. Callers
-// must hold m.mu.
-func (m *metricsConsumer) openFor(key cycleKey) *openCycle {
-	oc := m.open[key]
-	if oc == nil {
-		oc = &openCycle{stepEntered: map[string]time.Time{}}
-		m.open[key] = oc
-	}
-	return oc
 }
 
 func (m *metricsConsumer) instruments(meter metric.Meter) error {
@@ -105,55 +84,32 @@ func (m *metricsConsumer) instruments(meter metric.Meter) error {
 }
 
 func (m *metricsConsumer) emit(e obs.Event) {
-	key := cycleKey{e.Cycle.Slot, e.Cycle.CycleID}
 	pool := attribute.String("pool", e.Cycle.Pool)
 	slot := attribute.String("slot", e.Cycle.Slot)
 	ctx := context.Background()
 
 	switch e.Kind {
-	case obs.KindStepEntered:
-		m.mu.Lock()
-		m.openFor(key).stepEntered[e.Step] = e.Time
-		m.mu.Unlock()
-
 	case obs.KindStepLeft:
-		m.mu.Lock()
-		var entered time.Time
-		var ok bool
-		if oc := m.open[key]; oc != nil {
-			entered, ok = oc.stepEntered[e.Step]
-			delete(oc.stepEntered, e.Step)
-		}
-		m.mu.Unlock()
-		// No matching StepEntered (a stray event) → no fabricated duration.
-		if ok && e.StepInfo != nil {
-			m.stepDuration.Record(ctx, e.Time.Sub(entered).Seconds(), metric.WithAttributes(
+		// A zero Duration (a stray or legacy event) skips the histogram —
+		// the same no-fabricated-duration rule the entered-lookup miss used
+		// to produce.
+		if e.StepInfo != nil && e.StepInfo.Duration > 0 {
+			m.stepDuration.Record(ctx, e.StepInfo.Duration.Seconds(), metric.WithAttributes(
 				pool, attribute.String("step", e.Step),
 				attribute.String("outcome", string(e.StepInfo.Outcome)),
 			))
 		}
 
-	case obs.KindJobStarted:
-		m.mu.Lock()
-		m.openFor(key).jobStarted = e.Time
-		m.mu.Unlock()
-
 	case obs.KindJobEnded:
 		if e.Job == nil {
 			return
 		}
-		m.mu.Lock()
-		var started time.Time
-		if oc := m.open[key]; oc != nil {
-			started = oc.jobStarted
-		}
-		m.mu.Unlock()
 		outcome := attribute.String("outcome", string(e.Job.Outcome))
 		// The job demonstrably ran even when its start was never seen: count
-		// unconditionally, record a duration only against a real start.
+		// unconditionally, record a duration only when one was stamped.
 		m.jobCount.Add(ctx, 1, metric.WithAttributes(pool, slot, outcome))
-		if !started.IsZero() {
-			m.jobDuration.Record(ctx, e.Time.Sub(started).Seconds(), metric.WithAttributes(pool, outcome))
+		if e.Job.Duration > 0 {
+			m.jobDuration.Record(ctx, e.Job.Duration.Seconds(), metric.WithAttributes(pool, outcome))
 		}
 
 	case obs.KindActionEnded:
@@ -167,9 +123,6 @@ func (m *metricsConsumer) emit(e obs.Event) {
 		))
 
 	case obs.KindCycleFinished:
-		m.mu.Lock()
-		delete(m.open, key)
-		m.mu.Unlock()
 		if e.Finish == nil {
 			return
 		}

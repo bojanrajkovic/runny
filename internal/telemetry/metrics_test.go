@@ -25,7 +25,7 @@ func newTestMeter(t *testing.T) (metric.Meter, *sdkmetric.ManualReader) {
 func newTestMetrics(t *testing.T) (*metricsConsumer, *sdkmetric.ManualReader) {
 	t.Helper()
 	meter, reader := newTestMeter(t)
-	m := &metricsConsumer{open: map[cycleKey]*openCycle{}}
+	m := &metricsConsumer{}
 	if err := m.instruments(meter); err != nil {
 		t.Fatalf("instruments: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestMetricsConsumerCleanCycle(t *testing.T) {
 	})
 	m.emit(obs.Event{
 		Time: at(6), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "BOOT", Outcome: obs.OutcomeOK},
+		StepInfo: &obs.StepEvent{State: "BOOT", Outcome: obs.OutcomeOK, Duration: 5 * time.Second},
 	})
 
 	m.emit(obs.Event{
@@ -130,11 +130,11 @@ func TestMetricsConsumerCleanCycle(t *testing.T) {
 	})
 	m.emit(obs.Event{
 		Time: at(20), Cycle: testCycle, Step: "JOB", Kind: obs.KindJobEnded,
-		Job: &obs.JobEvent{Name: "build", Outcome: obs.OutcomeOK},
+		Job: &obs.JobEvent{Name: "build", Outcome: obs.OutcomeOK, Duration: 12 * time.Second},
 	})
 	m.emit(obs.Event{
 		Time: at(21), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "JOB", Outcome: obs.OutcomeOK},
+		StepInfo: &obs.StepEvent{State: "JOB", Outcome: obs.OutcomeOK, Duration: 14 * time.Second},
 	})
 
 	m.emit(obs.Event{
@@ -203,7 +203,7 @@ func TestMetricsConsumerFailureCycle(t *testing.T) {
 	})
 	m.emit(obs.Event{
 		Time: at(4), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "BOOT", Outcome: "deadline", Error: "boot deadline exceeded"},
+		StepInfo: &obs.StepEvent{State: "BOOT", Outcome: "deadline", Error: "boot deadline exceeded", Duration: 3 * time.Second},
 	})
 	m.emit(obs.Event{
 		Time: at(5), Cycle: testCycle, Kind: obs.KindCycleFinished,
@@ -236,9 +236,10 @@ func TestMetricsConsumerFailureCycle(t *testing.T) {
 	}
 }
 
-// TestMetricsConsumerOrphanEvents: a StepLeft with no matching StepEntered
-// and a JobEnded with no JobStarted must not fabricate a duration; JobEnded
-// still counts (the job demonstrably ran).
+// TestMetricsConsumerOrphanEvents: a StepLeft or JobEnded carrying no
+// Duration (a stray event, or one from an older daemon build that predates
+// this field) must not fabricate one; JobEnded still counts (the job
+// demonstrably ran).
 func TestMetricsConsumerOrphanEvents(t *testing.T) {
 	m, reader := newTestMetrics(t)
 
@@ -255,12 +256,12 @@ func TestMetricsConsumerOrphanEvents(t *testing.T) {
 
 	if m, ok := ms["runny.step.duration"]; ok {
 		if h, ok := m.Data.(metricdata.Histogram[float64]); ok && len(h.DataPoints) > 0 {
-			t.Errorf("step.duration has %d datapoints for an orphan StepLeft, want 0", len(h.DataPoints))
+			t.Errorf("step.duration has %d datapoints for a zero-Duration StepLeft, want 0", len(h.DataPoints))
 		}
 	}
 	if m, ok := ms["runny.job.duration"]; ok {
 		if h, ok := m.Data.(metricdata.Histogram[float64]); ok && len(h.DataPoints) > 0 {
-			t.Errorf("job.duration has %d datapoints for an orphan JobEnded, want 0", len(h.DataPoints))
+			t.Errorf("job.duration has %d datapoints for a zero-Duration JobEnded, want 0", len(h.DataPoints))
 		}
 	}
 	jc := sumPoint(t, ms["runny.job.count"], attribute.NewSet(
@@ -268,28 +269,7 @@ func TestMetricsConsumerOrphanEvents(t *testing.T) {
 		attribute.String("outcome", "ok"),
 	))
 	if jc.Value != 1 {
-		t.Errorf("job.count = %d, want 1 (orphan JobEnded still counts)", jc.Value)
-	}
-}
-
-// TestMetricsConsumerTrackingCleanup: CycleFinished must drop the cycle's
-// open-step tracking so a long-lived consumer doesn't accrete state.
-func TestMetricsConsumerTrackingCleanup(t *testing.T) {
-	m, _ := newTestMetrics(t)
-
-	m.emit(obs.Event{
-		Time: at(1), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "BOOT"},
-	})
-	if len(m.open) != 1 {
-		t.Fatalf("open cycles = %d after StepEntered, want 1", len(m.open))
-	}
-	m.emit(obs.Event{
-		Time: at(2), Cycle: testCycle, Kind: obs.KindCycleFinished,
-		Finish: &obs.FinishEvent{Result: "failure", Ending: "shutdown"},
-	})
-	if len(m.open) != 0 {
-		t.Errorf("open cycles = %d after CycleFinished, want 0", len(m.open))
+		t.Errorf("job.count = %d, want 1 (a zero-Duration JobEnded still counts)", jc.Value)
 	}
 }
 

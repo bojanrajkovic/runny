@@ -98,7 +98,6 @@ func Setup(ctx context.Context, cfg home.OTLPConfig, version, instanceID string,
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithResource(res),
 		sdktrace.WithBatcher(traceExp), // default batcher drops on a full queue; never blocks the caller
-		sdktrace.WithIDGenerator(idGenerator{}),
 	)
 	mp := metric.NewMeterProvider(
 		metric.WithResource(res),

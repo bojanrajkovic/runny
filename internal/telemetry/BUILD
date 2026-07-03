@@ -14,7 +14,6 @@ go_library(
         "//internal/home",
         "//internal/images",
         "//internal/obs",
-        "//internal/traceid",
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel//attribute",
         "@io_opentelemetry_go_otel//codes",
@@ -40,7 +39,6 @@ go_test(
     deps = [
         "//internal/home",
         "//internal/obs",
-        "//internal/traceid",
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel//attribute",
         "@io_opentelemetry_go_otel//codes",
@@ -49,6 +47,5 @@ go_test(
         "@io_opentelemetry_go_otel_sdk//trace/tracetest",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
-        "@io_opentelemetry_go_otel_trace//:trace",
     ],
 )

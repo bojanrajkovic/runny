@@ -10,31 +10,23 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/bojanrajkovic/runny/internal/obs"
-	"github.com/bojanrajkovic/runny/internal/traceid"
 )
 
-var (
-	testCycle = obs.CycleRef{
-		InstancePrefix: "host-abcd1234",
-		Slot:           "pool-0",
-		Pool:           "macos-arm",
-		CycleID:        "a1b2c3d4",
-		RunnerName:     "host-abcd1234-pool-0-a1b2c3d4",
-		Started:        time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC),
-	}
-	testTraceID = traceid.Trace(testCycle.InstancePrefix, testCycle.Slot, testCycle.CycleID, testCycle.Started)
-)
+var testCycle = obs.CycleRef{
+	InstancePrefix: "host-abcd1234",
+	Slot:           "pool-0",
+	Pool:           "macos-arm",
+	CycleID:        "a1b2c3d4",
+	RunnerName:     "host-abcd1234-pool-0-a1b2c3d4",
+	Started:        time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC),
+}
 
 func newTestAssembler(t *testing.T) (obs.Emitter, *tracetest.InMemoryExporter) {
 	t.Helper()
 	exp := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithSyncer(exp),
-		sdktrace.WithIDGenerator(idGenerator{}),
-	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 	return NewTraceConsumer(tp.Tracer("test")), exp
 }
@@ -43,9 +35,9 @@ func at(seconds int) time.Time { return testCycle.Started.Add(time.Duration(seco
 
 // TestTraceConsumerGolden walks a representative successful-cycle event
 // stream through the consumer and checks the resulting span tree: names,
-// parentage, deterministic IDs, attributes, and status — covering a
-// step-level Detail, an in-action Detail, action attrs, VM and runner info,
-// the job's operator-key audit, and a fully-populated audit event.
+// parentage, attributes, and status — covering a step-level Detail, an
+// in-action Detail, action attrs, VM and runner info, the job's operator-key
+// audit, and a fully-populated audit event.
 func TestTraceConsumerGolden(t *testing.T) {
 	emit, exp := newTestAssembler(t)
 
@@ -150,13 +142,8 @@ func TestTraceConsumerGolden(t *testing.T) {
 	if !ok {
 		t.Fatal("missing root span runny.cycle")
 	}
-	wantRootTrace := trace.TraceID(testTraceID)
-	if root.SpanContext.TraceID() != wantRootTrace {
-		t.Errorf("root trace ID = %x, want %x", root.SpanContext.TraceID(), wantRootTrace)
-	}
-	wantRootSpan := trace.SpanID(traceid.Span(testTraceID, "cycle", "", ""))
-	if root.SpanContext.SpanID() != wantRootSpan {
-		t.Errorf("root span ID = %x, want %x", root.SpanContext.SpanID(), wantRootSpan)
+	if !root.SpanContext.TraceID().IsValid() || !root.SpanContext.SpanID().IsValid() {
+		t.Errorf("root span carries an invalid (SDK-random) trace/span ID: %+v", root.SpanContext)
 	}
 	if root.StartTime.UTC() != at(0).UTC() || root.EndTime.UTC() != at(14).UTC() {
 		t.Errorf("root span time = [%v, %v], want [%v, %v]", root.StartTime, root.EndTime, at(0), at(14))
@@ -172,9 +159,8 @@ func TestTraceConsumerGolden(t *testing.T) {
 	if boot.Parent.SpanID() != root.SpanContext.SpanID() {
 		t.Errorf("BOOT step's parent span ID = %x, want root's %x", boot.Parent.SpanID(), root.SpanContext.SpanID())
 	}
-	wantBootSpan := trace.SpanID(traceid.Span(testTraceID, "step", "BOOT", ""))
-	if boot.SpanContext.SpanID() != wantBootSpan {
-		t.Errorf("BOOT span ID = %x, want %x", boot.SpanContext.SpanID(), wantBootSpan)
+	if boot.SpanContext.TraceID() != root.SpanContext.TraceID() {
+		t.Errorf("BOOT trace ID = %x, want root's trace %x", boot.SpanContext.TraceID(), root.SpanContext.TraceID())
 	}
 	if got := attrString(boot.Attributes, "runny.progress.last"); got != "booted" {
 		t.Errorf("BOOT progress.last = %q, want %q (the step-level Detail, not the in-action one)", got, "booted")
@@ -190,9 +176,8 @@ func TestTraceConsumerGolden(t *testing.T) {
 	if dial.Parent.SpanID() != boot.SpanContext.SpanID() {
 		t.Errorf("dial action's parent span ID = %x, want BOOT's %x", dial.Parent.SpanID(), boot.SpanContext.SpanID())
 	}
-	wantDialSpan := trace.SpanID(traceid.Span(testTraceID, "action", "BOOT", "dial"))
-	if dial.SpanContext.SpanID() != wantDialSpan {
-		t.Errorf("dial span ID = %x, want %x", dial.SpanContext.SpanID(), wantDialSpan)
+	if dial.SpanContext.TraceID() != root.SpanContext.TraceID() {
+		t.Errorf("dial trace ID = %x, want root's trace %x", dial.SpanContext.TraceID(), root.SpanContext.TraceID())
 	}
 	if got := attrString(dial.Attributes, "runny.progress.last"); got != "dialing 10.0.0.5:22" {
 		t.Errorf("dial progress.last = %q, want the in-action Detail text", got)
@@ -439,7 +424,7 @@ func TestTraceConsumerImageIdentity(t *testing.T) {
 // TestTraceConsumerHTTPSpans covers the KindHTTP fold: an event during an
 // open action parents under that action's span; one with no action open
 // parents under the step; repeats of the same class get distinct
-// seq-derived span IDs; timing reconstructs start as Time − Duration; and a
+// (SDK-random) span IDs; timing reconstructs start as Time − Duration; and a
 // transport-level failure (Status 0 + Error) sets span error status.
 func TestTraceConsumerHTTPSpans(t *testing.T) {
 	emit, exp := newTestAssembler(t)
@@ -495,12 +480,17 @@ func TestTraceConsumerHTTPSpans(t *testing.T) {
 
 	var manifests []tracetest.SpanStub
 	var jit *tracetest.SpanStub
+	var resolveAction, mintJitStep *tracetest.SpanStub
 	for _, s := range exp.GetSpans() {
 		switch s.Name {
 		case "http registry.manifest":
 			manifests = append(manifests, s)
 		case "http github.jit":
 			jit = &s
+		case "cycle.step.action resolve":
+			resolveAction = &s
+		case "cycle.step MINT_JIT":
+			mintJitStep = &s
 		}
 	}
 	if len(manifests) != 2 {
@@ -509,11 +499,15 @@ func TestTraceConsumerHTTPSpans(t *testing.T) {
 	if jit == nil {
 		t.Fatal("missing http github.jit span")
 	}
+	if resolveAction == nil {
+		t.Fatal("missing action span cycle.step.action resolve")
+	}
+	if mintJitStep == nil {
+		t.Fatal("missing step span cycle.step MINT_JIT")
+	}
 
-	actionSID := traceid.Span(testTraceID, "action", "ENSURE_IMAGE", "resolve")
-	stepSID := traceid.Span(testTraceID, "step", "MINT_JIT", "")
 	for i, m := range manifests {
-		if got := m.Parent.SpanID(); got != trace.SpanID(actionSID) {
+		if got := m.Parent.SpanID(); got != resolveAction.SpanContext.SpanID() {
 			t.Errorf("manifest[%d] parent = %s, want the resolve action span", i, got)
 		}
 		if got := attrString(m.Attributes, "server.address"); got != "ghcr.io" {
@@ -527,7 +521,7 @@ func TestTraceConsumerHTTPSpans(t *testing.T) {
 		}
 	}
 	if manifests[0].SpanContext.SpanID() == manifests[1].SpanContext.SpanID() {
-		t.Error("repeated round trips share a span ID; seq must uniquify")
+		t.Error("repeated round trips share a span ID; the SDK's random generator must not collide within one test run")
 	}
 	if got, want := manifests[1].StartTime, at(4); !got.Equal(want) {
 		t.Errorf("manifest[1] start = %v, want Time − Duration = %v", got, want)
@@ -564,7 +558,7 @@ func TestTraceConsumerHTTPSpans(t *testing.T) {
 		t.Error("the authenticated 200 retry must not carry error status")
 	}
 
-	if got := jit.Parent.SpanID(); got != trace.SpanID(stepSID) {
+	if got := jit.Parent.SpanID(); got != mintJitStep.SpanContext.SpanID() {
 		t.Errorf("jit parent = %s, want the MINT_JIT step span", got)
 	}
 	if jit.Status.Code != codes.Error || jit.Status.Description != "context deadline exceeded" {

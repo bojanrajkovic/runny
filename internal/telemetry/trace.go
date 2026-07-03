@@ -7,11 +7,9 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/bojanrajkovic/runny/internal/obs"
-	"github.com/bojanrajkovic/runny/internal/traceid"
 )
 
 // NewTraceConsumer returns an obs.Emitter that folds one cycle's event
@@ -47,11 +45,10 @@ type stepSpans struct {
 }
 
 type cycleSpans struct {
-	mu      sync.Mutex
-	ctx     context.Context
-	root    trace.Span
-	traceID [16]byte
-	steps   map[string]*stepSpans
+	mu    sync.Mutex
+	ctx   context.Context
+	root  trace.Span
+	steps map[string]*stepSpans
 }
 
 type traceAssembler struct {
@@ -126,10 +123,7 @@ func (a *traceAssembler) emit(e obs.Event) {
 }
 
 func (a *traceAssembler) cycleStarted(e obs.Event) {
-	tid := traceid.Trace(e.Cycle.InstancePrefix, e.Cycle.Slot, e.Cycle.CycleID, e.Cycle.Started)
-	sid := traceid.Span(tid, "cycle", "", "")
-	ctx := withIDs(context.Background(), trace.TraceID(tid), trace.SpanID(sid))
-	ctx, span := a.tracer.Start(ctx, "runny.cycle", trace.WithTimestamp(e.Time), trace.WithAttributes(
+	ctx, span := a.tracer.Start(context.Background(), "runny.cycle", trace.WithTimestamp(e.Time), trace.WithAttributes(
 		attribute.String("runny.slot", e.Cycle.Slot),
 		attribute.String("runny.pool", e.Cycle.Pool),
 		attribute.String("runny.image.ref", e.Cycle.Image),
@@ -140,15 +134,13 @@ func (a *traceAssembler) cycleStarted(e obs.Event) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.cycles[cycleKey{e.Cycle.Slot, e.Cycle.CycleID}] = &cycleSpans{
-		ctx: ctx, root: span, traceID: tid, steps: map[string]*stepSpans{},
+		ctx: ctx, root: span, steps: map[string]*stepSpans{},
 	}
 }
 
 func (a *traceAssembler) stepEntered(e obs.Event) {
 	a.withCycle(e, func(cs *cycleSpans) {
-		sid := traceid.Span(cs.traceID, "step", e.Step, "")
-		ctx := withIDs(cs.ctx, trace.TraceID(cs.traceID), trace.SpanID(sid))
-		ctx, span := a.tracer.Start(ctx, "cycle.step "+e.Step, trace.WithTimestamp(e.Time))
+		ctx, span := a.tracer.Start(cs.ctx, "cycle.step "+e.Step, trace.WithTimestamp(e.Time))
 		cs.steps[e.Step] = &stepSpans{
 			spanHandle: &spanHandle{ctx: ctx, span: span},
 			actions:    map[string]*spanHandle{},
@@ -174,15 +166,13 @@ func (a *traceAssembler) stepLeft(e obs.Event) {
 
 func (a *traceAssembler) actionStarted(e obs.Event) {
 	a.withStep(e, func(cs *cycleSpans, ss *stepSpans) {
-		sid := traceid.Span(cs.traceID, "action", e.Step, e.Action.Name)
-		ctx := withIDs(ss.ctx, trace.TraceID(cs.traceID), trace.SpanID(sid))
 		attrs := make([]attribute.KeyValue, 0, len(e.Action.Attrs))
 		for _, kv := range e.Action.Attrs {
 			attrs = append(attrs, attribute.String(kv.Key, kv.Value))
 		}
 		// The action's context is kept so KindHTTP round trips that fire
 		// while it's open can parent under it.
-		ctx, span := a.tracer.Start(ctx, "cycle.step.action "+e.Action.Name,
+		ctx, span := a.tracer.Start(ss.ctx, "cycle.step.action "+e.Action.Name,
 			trace.WithTimestamp(e.Time), trace.WithAttributes(attrs...))
 		h := &spanHandle{ctx: ctx, span: span}
 		ss.actions[e.Action.Name] = h
@@ -214,12 +204,12 @@ func (a *traceAssembler) actionEnded(e obs.Event) {
 // span of whatever was innermost when the round trip finished: the open
 // action if one is running, else the step, else the root. The event is
 // emitted at completion carrying its own duration, so the span starts at
-// Time − Duration and ends at Time — no pairing state to hold. Span IDs
-// fold the event's per-cycle Seq into the derivation because round trips of
-// one class legitimately repeat within a step (retries, the registry's 401
-// token dance); Seq is exactly what internal/traceid excludes from the
-// record-determined spans, so HTTP spans are live-only — a replayed
-// cycle.json reproduces the deterministic tree without them, by design.
+// Time − Duration and ends at Time — no pairing state to hold. Span IDs are
+// SDK-random (round trips of one class legitimately repeat within a step —
+// retries, the registry's 401 token dance — so nothing about the event
+// itself need be a unique identity); correlation across a trace or across
+// traces is attribute-based (runny.cycle_id on the root, runny.pull.id on a
+// shared pull's actions).
 func (a *traceAssembler) httpRoundTrip(e obs.Event) {
 	if e.HTTP == nil {
 		return
@@ -233,8 +223,6 @@ func (a *traceAssembler) httpRoundTrip(e obs.Event) {
 			}
 		}
 		h := e.HTTP
-		sid := traceid.Span(cs.traceID, "http", e.Step, string(h.Class)+"#"+strconv.FormatUint(e.Seq, 10))
-		ctx := withIDs(parent, trace.TraceID(cs.traceID), trace.SpanID(sid))
 		attrs := []attribute.KeyValue{
 			attribute.String("http.request.method", h.Method),
 			attribute.String("server.address", h.Host),
@@ -244,7 +232,7 @@ func (a *traceAssembler) httpRoundTrip(e obs.Event) {
 			attrs = append(attrs, attribute.Int64("runny.http.bytes", h.BytesRead))
 		}
 		start := e.Time.Add(-h.Duration)
-		_, span := a.tracer.Start(ctx, "http "+string(h.Class),
+		_, span := a.tracer.Start(parent, "http "+string(h.Class),
 			trace.WithTimestamp(start),
 			trace.WithSpanKind(trace.SpanKindClient),
 			trace.WithAttributes(attrs...))
@@ -438,43 +426,3 @@ func (a *traceAssembler) cycleFinished(e obs.Event) {
 	}
 	cs.root.End(trace.WithTimestamp(e.Time))
 }
-
-// idsKey carries the deterministic (trace ID, span ID) pair idGenerator
-// hands back for the span about to start — computed by the assembler from
-// internal/traceid, not the generator itself.
-type idsKey struct{}
-
-type computedIDs struct {
-	trace trace.TraceID
-	span  trace.SpanID
-}
-
-func withIDs(ctx context.Context, tid trace.TraceID, sid trace.SpanID) context.Context {
-	return context.WithValue(ctx, idsKey{}, computedIDs{trace: tid, span: sid})
-}
-
-// idGenerator hands back the deterministic IDs the trace assembler
-// precomputed and stashed on the context passed to Tracer.Start. It is
-// installed as this process's IDGenerator only alongside NewTraceConsumer,
-// and nothing else starts spans — a context arriving without stashed IDs
-// means some caller bypassed the assembler, which should fail loudly
-// rather than hand back a span with the wrong identity.
-type idGenerator struct{}
-
-func (idGenerator) NewIDs(ctx context.Context) (trace.TraceID, trace.SpanID) {
-	ids, ok := ctx.Value(idsKey{}).(computedIDs)
-	if !ok {
-		panic("telemetry: span started without traceAssembler-computed IDs")
-	}
-	return ids.trace, ids.span
-}
-
-func (idGenerator) NewSpanID(ctx context.Context, _ trace.TraceID) trace.SpanID {
-	ids, ok := ctx.Value(idsKey{}).(computedIDs)
-	if !ok {
-		panic("telemetry: span started without traceAssembler-computed IDs")
-	}
-	return ids.span
-}
-
-var _ sdktrace.IDGenerator = idGenerator{}

@@ -107,13 +107,10 @@ completion (EOF or close), so the span carries the transfer's true
 duration and byte count (`runny.http.bytes`), a `headers` span event marks
 where waiting ended and transfer began, and a body that dies mid-stream —
 the stall-kill shape — reports the status the headers claimed plus the
-read error as span error status. Two caveats are load-bearing: the shared
+read error as span error status. One caveat is load-bearing: the shared
 pull actor's blob traffic emits nothing because its context carries no
 scope (the same attribution rule that keeps its pull out of any single
-cycle); and HTTP spans are live-only — their span IDs fold in the event
-sequence number precisely because round trips repeat within a step, which
-is the input the record-determined derivation excludes, so a replayed
-`cycle.json` reproduces the deterministic tree without them.
+cycle).
 
 Beyond the step tree, the trace carries the cycle's identity and audit
 detail: the root's attributes include the pool, the assembled runner name,
@@ -131,15 +128,12 @@ determines the event by construction; attributes on actions are reserved
 for action-local facts like the pull id, values that describe one
 execution of one action and die with its span.
 
-Trace and span IDs are deterministic, derived by the OTEL-free
-`internal/traceid` package from a cycle's own identity
-(`instancePrefix`/`slot`/`cycleID`/`started` for the trace ID; the trace ID
-plus the span's kind/step/action for each span ID — inputs a `cycle.json`
-record fully determines, deliberately excluding the live stream's event
-sequence numbers, which the record does not persist). A retained cycle
-always maps to the same trace *and* the same spans, so re-emitting it is
-idempotent, and the same derivation is available to `runnyctl` without
-linking the OTEL SDK.
+Trace and span IDs are SDK-random, assigned the same way any OTEL-instrumented
+process gets them. Correlation is attribute-based instead of ID-based:
+`runny.cycle_id` on the root identifies the cycle a trace belongs to, and
+`runny.pull.id` correlates the cycles that waited on one shared image pull —
+querying by attribute finds the related spans without needing a derived,
+reproducible ID.
 
 The consumer is wired into `cmd/runnyd` only when an endpoint is configured
 — the same off-by-default rule as `Setup` itself, since an emitter costs

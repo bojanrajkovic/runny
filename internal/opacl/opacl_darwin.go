@@ -68,10 +68,16 @@ import (
 	"github.com/bojanrajkovic/runny/internal/bounded"
 )
 
-// maxACLOperators bounds the ALLOW-user entries List reads back from one
-// ACL: a bounded stack buffer, not a per-daemon operator-count limit anyone
-// is expected to approach.
-const maxACLOperators = 64
+// maxACLOperators bounds the ALLOW-user entries List/ListUIDs reads back
+// from one ACL: a bounded stack buffer, not a per-daemon operator-count
+// limit anyone is expected to approach. Entries beyond this are silently
+// dropped (read_acl_allow_uids has no overflow signal), which used to only
+// affect List's display output but now also feeds ListUIDs's per-RPC
+// authorization check (internal/socket/revocation.go) — sized generously
+// (healthy magnitude × a wide margin, not the sum of any real deployment's
+// expected grant count) as a stopgap against that; a real fix would make
+// truncation an explicit, loud error instead of a silent undercount.
+const maxACLOperators = 1024
 
 // ListUIDs reads homeDir's ACL for ALLOW-user-with-write entries and returns
 // the raw uids, skipping the per-entry user.LookupId resolution List does —

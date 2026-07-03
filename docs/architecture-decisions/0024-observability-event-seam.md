@@ -2,6 +2,15 @@
 
 **Status:** Accepted (2026-07-01)
 
+**Amended:** 2026-07-03 — trace and span IDs are SDK-random, not
+deterministically derived from event identity. The determinism served a
+replay-idempotency property (a retained cycle re-emits to the same trace)
+for event-replay tooling that was never built, and the "reusable from
+`runnyctl` without linking the OTEL SDK" derivation package it depended on
+had no importer outside the trace emitter itself. Correlation is
+attribute-based instead (`runny.cycle_id` on the root, `runny.pull.id` on a
+shared pull's spans).
+
 ## Context
 
 runny is built around a truthful record. Every cycle writes a cycle.json
@@ -66,12 +75,12 @@ new action inherits record + trace + metrics without copying instrumentation.
 
 - The **trace emitter** renders the three-level hierarchy — a root span per
   cycle, a child span per FSM step, action spans under their step. Trace and
-  span IDs are derived deterministically from event identity (instance, slot,
-  cycle, step, sequence), so a retained cycle maps to exactly one trace and
-  re-emission is idempotent. Spans export as they complete; the root exports
-  at cycle end, which is inherent to OTLP (there is no span-start wire
-  message). The shared image pull emits under its own identity and waiting
-  cycles record a wait action referencing it — attribution stays honest.
+  span IDs are SDK-random; correlation is attribute-based (`runny.cycle_id`
+  on the root, `runny.pull.id` on a shared pull's spans). Spans export as
+  they complete; the root exports at cycle end, which is inherent to OTLP
+  (there is no span-start wire message). The shared image pull emits under
+  its own identity and waiting cycles record a wait action referencing it —
+  attribution stays honest.
 - The **metrics emitter** derives counters and duration histograms from the
   same events, and gauges from the existing status snapshots at collection
   time.

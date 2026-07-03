@@ -6,6 +6,9 @@
 
 **runny** — an observable macOS GitHub Actions runner daemon: ephemeral, destroy-on-failure runner VMs on Virtualization.framework, fully compatible with tart's bundle/OCI image format but with no tart binary at runtime. Three artifacts: `runnyd` (Go daemon), `runnyctl` (Go CLI), `Runny` (SwiftUI app: menu bar + main window). See `docs/architecture/` for the shape and `docs/architecture-decisions/` for the decisions behind it.
 
+Runny avoids silent failures at all costs: fail loudly, log failures, avoid
+silent outages that leave the operator asking why.
+
 ## Tech stack
 
 Go 1.26 (mise-managed) for daemon + CLI; cgo to Virtualization.framework via `Code-Hex/vz`; SSH via `x/crypto/ssh` only (ADR-0002). Swift/SwiftUI for the app only (ADR-0001). Build: Bazel 9 / bzlmod with gazelle-managed BUILD files (ADR-0005); the `runny.v1` protobuf contract is generated in-graph, never committed (ADR-0006). The full dependency set lives in `go.mod` and `MODULE.bazel` and is not re-listed here.
@@ -15,31 +18,6 @@ Go 1.26 (mise-managed) for daemon + CLI; cgo to Virtualization.framework via `Co
 `bazel build //...` · `bazel test //...` · `bazel run //tools/format` · `bazel run //:gazelle` (after changing Go imports). Dependency changes follow CONTRIBUTING.md's workflow exactly — its flag and step order are load-bearing. Full reference and dev setup: `CONTRIBUTING.md`.
 
 **Darwin-only targets** (vz cgo, the Runny app) build and test only on Darwin. On other hosts, everything pure-Go still builds and tests; for the cross-host loop see CONTRIBUTING.md.
-
-## Source tree
-
-- `cmd/runnyd`, `cmd/runnyctl` — binaries; thin mains over `internal/`.
-- `internal/bounded` — `bounded.Context`: the no-unbounded-operations invariant as a type (ADR-0011); wall-clock and progress-stall bounds.
-- `internal/obs` — the structured observability event stream (ADR-0024): `Event`/`Kind`, the context-carried scope, `Action(ctx, name, fn)`, and `HTTPTransport` (the RoundTripper every egress client wears); the seam every OTLP/actions-artifact consumer builds on, with no telemetry SDK imports.
-- `internal/telemetry` — runny's only OTEL importer (ADR-0024): installs OTLP trace + metric providers from `observability.otlp` config, resource attribution, bounded shutdown; installs nothing when the config block is absent. Also the trace and metrics emitters, the one place either kind of event ever gets folded: the trace side renders a cycle's `obs.Event`s as a `runny.cycle` → `cycle.step` → `cycle.step.action` span tree and a shared image pull's as its own flat `runny.pull` root with `http <class>` children (SDK-random span IDs; the two subtrees correlate by attribute — `runny.cycle_id`/`runny.pull.id` — not by parentage, since a pull belongs to no single cycle); the metrics side folds the same stream into cycle/step/job/action instruments plus the pull/tarball-download ones (no second injected seam), and polls slot statuses into observable gauges.
-- `internal/statemachine` — the destroy-and-recycle FSM (ADR-0004); per-state deadlines, backoff, cycle.json.
-- `internal/clonefile` — the APFS clonefile(2) wrapper: single-file copy-on-write clone (darwin-tagged), used by both the tart bundle clone and the per-cycle runner-tarball clone.
-- `internal/tart` — the tart bundle format: config.json parsing, validation, bundle clone (delegates per file to `internal/clonefile`).
-- `internal/vm` — Virtualization.framework lifecycle via vz (darwin-tagged; ADR-0008) + guest sizing.
-- `internal/oci` — tart-format image pull (non-standard OCI layout, LZ4 layers).
-- `internal/images` — the ENSURE_IMAGE ensurer: image + runner-tarball caching (the tarball download store, cold-start pruned; each cycle clones its own copy before boot), stall watching, pull progress; the shared image-puller actor that lets concurrent slots share one pull and its outcome, incl. a bounded hold on a deterministic disk-headroom failure (ADR-0021). Emits ENSURE_IMAGE action events via `obs.Action`, and the shared puller emits its own pull-scoped events (`obs.WithPull`) — no injected metrics seam, no OTEL imports. Also the on-demand disk reclaim planner used by `runnyctl prune` (see `prune.go`).
-- `internal/sshx` — the only package allowed to construct SSH clients (deadline recipe, ADR-0002).
-- `internal/guest` — what to do over SSH: provision scripts, runner launch, diag pull.
-- `internal/github` — App JWT → installation token → JIT config; runner list/delete (ADR-0003).
-- `internal/home` — the `~/.runny` on-disk layout (images, vms, cycles, logs, socket, instance-id) + config schema and runner-name rules.
-- `internal/cycle` — per-cycle artifact records (cycle.json) and retention.
-- `internal/logring` — log fan-out: file sink + in-memory rings (daemon log, runner output) behind StreamLogs.
-- `internal/socket` — the gRPC server over the unix socket.
-- `proto/runny/v1` — the contract `runnyctl` and Runny both consume.
-- `apps/Runny` — SwiftUI app: MenuBarExtra popover + main window (ADR-0016; ADR-0007: no .xcodeproj, ever).
-- `tools/` — format runner, nogo, platforms, the `config.yaml` JSON Schema generator (`configschema`).
-
-For per-directory detail, read that directory's `CLAUDE.md` if present. For current counts and inventories (states, RPCs, config keys), read the source (the FSM table, the proto file, the config schema); this index does not enumerate them.
 
 ## Documentation map
 
@@ -77,5 +55,5 @@ When planning, building, and shipping a change here:
 6. **Be adversarial: attack your own proposal.** Hunt the failure mode — here that especially means the hung guest, the half-dead VM, the GitHub API blip, the deadline that doesn't fire.
 7. **Record decisions with real alternatives as ADRs, at decision time.** See `docs/documentation-system.md` for what is ADR-worthy.
 8. **Update the docs as part of the change, not after.** The affected architecture doc, directory `CLAUDE.md` sharp edges, and ADRs are part of "done".
-9. **Know what runny optimizes for: silent-failure-proofness over throughput.** When a trade-off pits performance or elegance against "can this hang or fail silently", the latter always wins — that is the lesson the predecessor's 10-week outage paid for.
+9. **Before you start working, walk through the design.** Show the APIs/interfaces, the types, walk the user through the design.
 10. **Before you ship, review the diff with `/code-review`, scaled to the change** — `low`/`medium` for localized changes, `high` for cross-cutting ones, `max` for anything in the state machine, vm, or sshx core.

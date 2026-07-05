@@ -14,8 +14,11 @@ silent outage.
 ## Install
 
 Requires **macOS Sequoia (15.0+)** on **Apple Silicon** and a GitHub App with
-the runner-administration permission. See [docs/deploy.md](docs/deploy.md) for
-GitHub App setup and `config.yaml` authoring.
+the runner-administration permission. **New here? Start with
+[docs/onboarding.md](docs/onboarding.md)** — it walks you from an empty host to
+a runner's first job: the GitHub App, install, config, daemon, and telemetry.
+The quick install below is the short version; [docs/deploy.md](docs/deploy.md)
+is the operator reference.
 
 **Desktop — Runny.app (menu-bar status + daemon manager):**
 
@@ -68,6 +71,7 @@ loop, codesigning tiers, and the CI setup.
 
 | Topic | |
 |---|---|
+| Getting started (zero to first job) | [docs/onboarding.md](docs/onboarding.md) |
 | Install, config, GitHub App setup, migration | [docs/deploy.md](docs/deploy.md) |
 | How it works | [docs/architecture/](docs/architecture/) |
 | Why it works that way | [docs/architecture-decisions/](docs/architecture-decisions/) |

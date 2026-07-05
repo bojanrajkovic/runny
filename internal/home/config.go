@@ -252,6 +252,16 @@ func LoadConfig(path string) (*Config, error) {
 	return parseConfig(raw, path)
 }
 
+// ParseConfig defaults and validates already-read config bytes. path is used
+// only for error messages. For a caller that also needs the raw bytes
+// themselves (e.g. to rewrite them, or to hash them), this is one read
+// shared between both uses — re-reading the file a second time for the parse
+// risks parsing a different version than the one the caller already has in
+// hand (the same hazard LoadConfigSHA reads once to avoid).
+func ParseConfig(raw []byte, path string) (*Config, error) {
+	return parseConfig(raw, path)
+}
+
 // LoadConfigSHA loads the config and returns the SHA-256 (hex) of the exact
 // bytes it parsed. Reading and hashing once makes the audit hash provably
 // describe the validated config: a separate re-read could hash a different

@@ -25,6 +25,9 @@ func installDaemon(args []string) error {
 	operatorFlag := fs.String("operator", "",
 		"operator account the home's inheriting ACL grants (defaults to $SUDO_USER; required "+
 			"when run as root without sudo, where SUDO_USER is unset)")
+	configFlag := fs.String("config", "",
+		"stage this config.yaml (and the keys it references) into the home and validate "+
+			"before starting the daemon; without it, the daemon crash-loops until a config is hand-landed")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -53,10 +56,24 @@ func installDaemon(args []string) error {
 	cfg := sysdaemon.DefaultConfig()
 	cfg.Operator = operator
 	cfg.RunnydPath = runnyd
-	if err := sysdaemon.New(cfg).Install(context.Background()); err != nil {
+	installer := sysdaemon.New(cfg)
+	if *configFlag != "" {
+		plan, err := planStageFromFile(*configFlag, cfg.HomeDir, operator)
+		if err != nil {
+			return err
+		}
+		installer = installer.WithStage(plan)
+	}
+	if err := installer.Install(context.Background()); err != nil {
 		return err
 	}
 	dir := home.Dir(cfg.HomeDir)
+	if *configFlag != "" {
+		fmt.Printf("\nrunnyd is installed, started, and running on the staged config (validated by\n"+
+			"runnyd -test-config before start). Change it later with `runnyctl edit-config`\n"+
+			"— never hand-edit %s and restart.\n", dir.ConfigPath())
+		return nil
+	}
 	fmt.Printf("\nrunnyd is installed and started as %s. Until a valid config is in place it\n"+
 		"crash-loops (expected — not a hang; watch %s/launchd.err.log). Next:\n"+
 		"  1. write %s (your account has write access via the ACL)\n"+
@@ -64,6 +81,39 @@ func installDaemon(args []string) error {
 		"  3. runnyctl doctor   — the daemon comes up on its next restart\n",
 		sysdaemon.ServiceUser, dir.LogsDir(), dir.ConfigPath())
 	return nil
+}
+
+// planStageFromFile reads and parses configPath, resolves operator's home for
+// ~ expansion, computes the StagePlan, and pre-flights every planned key's
+// source file (stat only — nothing is copied yet) so a missing key aborts
+// before install touches the filesystem, rather than mid-stage.
+func planStageFromFile(configPath, homeDir, operator string) (sysdaemon.StagePlan, error) {
+	// Read once and parse those exact bytes — a separate re-read for the parse
+	// could see a different version of the file (a concurrent edit, or a slow
+	// mount) than the one PlanStage rewrites, the same hazard LoadConfigSHA
+	// reads once to avoid.
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return sysdaemon.StagePlan{}, fmt.Errorf("reading %s: %w", configPath, err)
+	}
+	cfg, err := home.ParseConfig(raw, configPath)
+	if err != nil {
+		return sysdaemon.StagePlan{}, err
+	}
+	u, err := user.Lookup(operator)
+	if err != nil {
+		return sysdaemon.StagePlan{}, fmt.Errorf("resolving %s's home for ~ expansion: %w", operator, err)
+	}
+	plan, err := sysdaemon.PlanStage(raw, cfg, homeDir, u.HomeDir)
+	if err != nil {
+		return sysdaemon.StagePlan{}, err
+	}
+	for _, k := range plan.Keys {
+		if _, err := os.Stat(k.Src); err != nil {
+			return sysdaemon.StagePlan{}, fmt.Errorf("private key %s (from %s): %w", k.Src, configPath, err)
+		}
+	}
+	return plan, nil
 }
 
 // uninstallDaemon removes the system LaunchDaemon. It leaves the service account

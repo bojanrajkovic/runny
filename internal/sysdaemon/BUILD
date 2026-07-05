@@ -4,6 +4,7 @@ go_library(
     name = "sysdaemon",
     srcs = [
         "install.go",
+        "stage.go",
         "sysdaemon.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/sysdaemon",
@@ -17,7 +18,10 @@ go_library(
 
 go_test(
     name = "sysdaemon_test",
-    srcs = ["sysdaemon_test.go"],
+    srcs = [
+        "stage_test.go",
+        "sysdaemon_test.go",
+    ],
     embed = [":sysdaemon"],
     deps = [
         "//internal/home",

@@ -88,13 +88,20 @@ commands:
 SLOT accepts the bare slot name (mac-1) or a full runner name as shown
 by status and the GitHub runners page (<prefix>-mac-1-<cycle>).
   doctor              run the daemon's validation checks
-  install-daemon [-operator USER]
+  install-daemon [-operator USER] [-config PATH]
                       install runnyd as a non-root system LaunchDaemon
                       (requires root; macOS only). -operator is the account
                       the home's ACL grants; it defaults to $SUDO_USER and is
-                      required when not run via sudo
+                      required when not run via sudo. -config stages PATH
+                      (and the keys its pools reference) into the home and
+                      validates it before starting the daemon; without it,
+                      the daemon crash-loops until a config is hand-landed
   uninstall-daemon    remove the system LaunchDaemon AND its home (config,
                       key, artifacts — back up first); keeps the _runny account
+  edit-config         visudo for runny: edit the resolved home's config.yaml
+                      in $VISUAL/$EDITOR, validate with runnyd -test-config
+                      (reopening the editor on failure), then reload the
+                      running daemon (or apply on next start)
 `
 
 func main() {
@@ -303,6 +310,8 @@ func (c *ctl) dispatch(ctx context.Context, args []string) error {
 		return c.prune(ctx, *apply)
 	case "operator":
 		return c.operatorDispatch(ctx, rest)
+	case "edit-config":
+		return c.editConfig(ctx, rest)
 	default:
 		flag.Usage()
 		return fmt.Errorf("unknown command %q", cmd)

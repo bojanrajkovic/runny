@@ -7,6 +7,7 @@ load("//tools/sign:sign.bzl", "codesign_binary", "notarize_binary")
 go_library(
     name = "runnyctl_lib",
     srcs = [
+        "editconfig.go",
         "follow.go",
         "installdaemon.go",
         "main.go",

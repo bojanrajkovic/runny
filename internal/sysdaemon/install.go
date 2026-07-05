@@ -42,6 +42,7 @@ type Installer struct {
 	run       Runner
 	writeFile func(path string, data []byte, perm os.FileMode) error
 	log       func(format string, args ...any)
+	plan      *StagePlan // set by WithStage; nil means a bare install (today's crash-loop behavior)
 }
 
 // New builds an Installer that shells out for real and logs progress to stdout.
@@ -52,6 +53,16 @@ func New(cfg Config) *Installer {
 		writeFile: os.WriteFile,
 		log:       func(f string, a ...any) { fmt.Printf(f+"\n", a...) },
 	}
+}
+
+// WithStage attaches a StagePlan (config + key files staged from an authored
+// --config): Install runs stage between ensureHome and bootstrap, and
+// bootstraps only once the staged config passes `runnyd -test-config`. A bare
+// install (no WithStage call) keeps today's behavior: crash-loop until an
+// operator hand-lands config.yaml.
+func (i *Installer) WithStage(p StagePlan) *Installer {
+	i.plan = &p
+	return i
 }
 
 // Install is idempotent: reusing an existing service account (so its uid stays
@@ -75,10 +86,60 @@ func (i *Installer) Install(ctx context.Context) error {
 	if err := i.ensureHome(ctx); err != nil {
 		return err
 	}
+	if i.plan != nil {
+		// Staging validates before bootstrap: a config that fails `runnyd
+		// -test-config` leaves the home scaffolded but NOT started — fix the
+		// authored config and rerun install-daemon (idempotent) rather than
+		// crash-looping a daemon we already know will refuse it.
+		if err := i.stage(ctx, *i.plan); err != nil {
+			return err
+		}
+	}
 	if err := i.writePlistFile(); err != nil {
 		return err
 	}
 	return i.bootstrap(ctx)
+}
+
+// stage copies each planned key into the home (chown operator, 0600 — the file
+// inherits the home's _runny-read ACL by creation, exactly as a hand-cp would),
+// writes plan.Config to <home>/config.yaml, then runs
+// `runnyd -test-config <home>/config.yaml` and returns its verdict as an error
+// on Error status.
+func (i *Installer) stage(ctx context.Context, plan StagePlan) error {
+	for _, k := range plan.Keys {
+		data, err := os.ReadFile(k.Src)
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", k.Src, err)
+		}
+		if err := i.writeOwned(ctx, k.Dst, data); err != nil {
+			return err
+		}
+	}
+	configPath := home.Dir(i.cfg.HomeDir).ConfigPath()
+	if err := i.writeOwned(ctx, configPath, plan.Config); err != nil {
+		return err
+	}
+	if _, err := i.run(ctx, i.cfg.RunnydPath, "-test-config", configPath); err != nil {
+		return fmt.Errorf("staged config failed validation (home left in place; fix %s and rerun install-daemon): %w",
+			configPath, err)
+	}
+	i.log("staged config.yaml and %d key file(s) into %s; validated by %s -test-config",
+		len(plan.Keys), i.cfg.HomeDir, i.cfg.RunnydPath)
+	return nil
+}
+
+// writeOwned writes data to path (0600) then chowns it to the operator — the
+// file inherits the home's _runny-read ACL by creation, exactly as a hand-cp
+// would.
+func (i *Installer) writeOwned(ctx context.Context, path string, data []byte) error {
+	if err := i.writeFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	if _, err := i.run(ctx, "/usr/sbin/chown", i.cfg.Operator, path); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Uninstall removes the LaunchDaemon AND the home, keeping only the service

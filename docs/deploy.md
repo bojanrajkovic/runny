@@ -87,8 +87,15 @@ pools:
       org: my-org
     github:
       app_id: 123456
-      private_key_path: ~/.runny/runner-app.pem
+      private_key_path: /Users/you/.runny/runner-app.pem
 ```
+
+`private_key_path` is read **verbatim** — no `~` or `$HOME` expansion — so it
+must be an absolute path (`internal/github/github.go`'s `os.ReadFile` gets
+whatever string is in the file). `runnyctl install-daemon --config` (below)
+and `runnyctl edit-config` both rewrite an authored path into the resolved
+home for you; hand-authoring a config yourself still needs the literal
+absolute path.
 
 The schema describes the file's **shape** — keys, types, enums, the
 org-or-owner/repo target. The **semantic** rules it can't cleanly express
@@ -284,17 +291,28 @@ For a headless fleet host — no desktop login — runnyd runs as a **non-root
 system LaunchDaemon** under a dedicated service account. One privileged step
 installs it; the daemon then runs unprivileged.
 
+Write a config first (anywhere — it's a one-shot seed, not where it ends up),
+naming your App key's path as it sits on disk right now, then stage it with
+`--config`:
+
 ```sh
 brew install bojanrajkovic/tap/runny
-sudo runnyctl install-daemon
-# then land config + the App key in the system home — your account has write
-# access via an inheriting ACL, so no sudo is needed for edits:
-$EDITOR "/Library/Application Support/runny/config.yaml"
-cp runner-app.pem "/Library/Application Support/runny/"
+sudo runnyctl install-daemon --config ./config.yaml
 runnyctl doctor
 ```
 
-`runnyctl install-daemon` (one `sudo`):
+`--config PATH` reads each pool's `github.private_key_path` as a **source** —
+copies the key(s) it names into the system home, rewrites the config's copy of
+each path to point at the in-home copy (a literal byte substitution, so your
+schema modeline and comments survive), then runs `runnyd -test-config` against
+the staged result. The daemon is bootstrapped **only on a green verdict** — a
+bad config fails synchronously, at the prompt, instead of crash-looping. A
+failed `-test-config` leaves the home scaffolded but not started; fix the
+authored file and rerun the same command (idempotent — re-staging overwrites).
+Pools sharing one App key stage it once; distinct keys that happen to share a
+filename get a disambiguating suffix.
+
+`runnyctl install-daemon` (one `sudo`, with or without `--config`):
 
 - Creates a hidden, home-less service account (`_runny`): no login, no shell, no
   home directory — its entire state lives in the system home.
@@ -305,13 +323,23 @@ runnyctl doctor
   everything — config, the App key, logs, images, VM clones, cycle artifacts,
   and the control socket.
 - Writes `/Library/LaunchDaemons/com.coderinserepeat.runnyd.plist`
-  (`UserName=_runny`, `KeepAlive`) and `launchctl bootstrap system`.
+  (`UserName=_runny`, `KeepAlive`) and, once validated, `launchctl bootstrap system`.
 
-The daemon starts immediately and **crash-loops loudly until a valid
-`config.yaml` is present** (visible in `logs/launchd.err.log` under the home, or
-via `runnyctl doctor`); it comes up on the next restart once the config lands.
-There is no GUI prompt — a launchd-started daemon of any uid is auto-allowed
-Local Network access.
+**Without `--config`**, it registers the daemon before any config exists, and
+the daemon **crash-loops loudly** until you land one by hand:
+
+```sh
+sudo runnyctl install-daemon
+# your account has write access via the inheriting ACL, so no sudo for edits:
+$EDITOR "/Library/Application Support/runny/config.yaml"
+cp runner-app.pem "/Library/Application Support/runny/"
+```
+
+(visible in `logs/launchd.err.log` under the home, or via `runnyctl doctor`);
+it comes up on the next restart once the config lands. Either way, there is no
+GUI prompt — a launchd-started daemon of any uid is auto-allowed Local Network
+access. Once installed, apply any further config change with `runnyctl
+edit-config` (below) — never by hand-editing `config.yaml` and restarting.
 
 The plist points at the `runnyd` beside `runnyctl` (the brew opt symlink, kept
 current by `brew upgrade`). From a checkout, where the built binaries are not
@@ -379,11 +407,31 @@ before its output (warn, never refuse).
 
 ## Applying config changes
 
-runnyd reads `~/.runny/config.yaml` once, at startup. To apply an edit
-gracefully:
+runnyd reads its `config.yaml` once, at startup. The canonical way to change it
+— desktop or headless — is `runnyctl edit-config`: `visudo` semantics for the
+resolved home's config.
 
 ```sh
-# edit ~/.runny/config.yaml, then:
+runnyctl edit-config
+```
+
+It opens the resolved home's `config.yaml` (system home if one exists, else
+`~/.runny`) in `$VISUAL`/`$EDITOR` (falling back to `vi`), seeding a fresh
+skeleton if none exists yet. On save it runs `runnyd -test-config` against your
+edit: an **error** reopens the editor with your changes intact (nothing is ever
+discarded over a typo); a **warning** asks to confirm before applying; **ok**
+proceeds straight through. Once validated it atomically replaces the on-disk
+file and, if the daemon is running, drives the same validated reload as
+`runnyctl reload` below (if it isn't running yet — e.g. a headless home just
+staged by `install-daemon --config`'s next config edit — it reports "applies on
+next start"). No `sudo` is needed for a system daemon's home either: the
+operator reaches it through the install-time inheriting ACL, not ownership.
+
+Editing the file directly (any editor, not through `edit-config`) still works,
+followed by an explicit apply:
+
+```sh
+# edit config.yaml, then:
 runnyctl reload -reason "why"
 # or, unix muscle memory (same validated path, verdict in the daemon log):
 launchctl kill SIGHUP gui/$(id -u)/com.coderinserepeat.runnyd

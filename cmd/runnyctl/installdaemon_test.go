@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"os/user"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -98,5 +101,81 @@ func TestPerUserAgentGuard(t *testing.T) {
 	}
 	if !strings.Contains(warning, op) {
 		t.Errorf("an inconclusive probe must warn (naming the operator), got %q", warning)
+	}
+}
+
+// currentUsername resolves the running test user — the one account
+// planStageFromFile can always look up via user.Lookup on any host, CI included.
+func currentUsername(t *testing.T) string {
+	t.Helper()
+	u, err := user.Current()
+	if err != nil {
+		t.Skipf("user.Current: %v", err)
+	}
+	return u.Username
+}
+
+func TestPlanStageFromFileResolvesAndPreflights(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "runner-app.pem")
+	if err := os.WriteFile(keyPath, []byte("fake key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.yaml")
+	config := "pools:\n" +
+		"  - name: mac\n" +
+		"    os: darwin\n" +
+		"    image: ghcr.io/example/image:latest\n" +
+		"    target:\n" +
+		"      org: my-org\n" +
+		"    github:\n" +
+		"      app_id: 1\n" +
+		"      private_key_path: " + keyPath + "\n"
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := planStageFromFile(configPath, "/Library/Application Support/runny", currentUsername(t))
+	if err != nil {
+		t.Fatalf("planStageFromFile: %v", err)
+	}
+	if len(plan.Keys) != 1 || plan.Keys[0].Src != keyPath {
+		t.Fatalf("plan.Keys = %+v", plan.Keys)
+	}
+	if !strings.Contains(string(plan.Config), "/Library/Application Support/runny/runner-app.pem") {
+		t.Errorf("config not rewritten to the in-home dest: %s", plan.Config)
+	}
+}
+
+// A pool naming a key file that doesn't exist must abort before anything is
+// staged — never a partial copy the operator has to notice and clean up.
+func TestPlanStageFromFileMissingKeyAborts(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	config := "pools:\n" +
+		"  - name: mac\n" +
+		"    os: darwin\n" +
+		"    image: ghcr.io/example/image:latest\n" +
+		"    target:\n" +
+		"      org: my-org\n" +
+		"    github:\n" +
+		"      app_id: 1\n" +
+		"      private_key_path: " + filepath.Join(dir, "missing.pem") + "\n"
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := planStageFromFile(configPath, "/Library/Application Support/runny", currentUsername(t)); err == nil {
+		t.Fatal("planStageFromFile must refuse when a pool's private key is missing")
+	}
+}
+
+func TestPlanStageFromFileRejectsUnparseableConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("not: valid: yaml: at: all:\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := planStageFromFile(configPath, "/Library/Application Support/runny", currentUsername(t)); err == nil {
+		t.Fatal("planStageFromFile must refuse an unparseable config")
 	}
 }

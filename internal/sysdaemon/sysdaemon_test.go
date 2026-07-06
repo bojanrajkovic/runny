@@ -25,8 +25,7 @@ var testOperator = func() string {
 }()
 
 func TestPlist(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.RunnydPath = "/opt/homebrew/bin/runnyd"
+	cfg := Config{RunnydPath: "/opt/homebrew/bin/runnyd"}
 	p := Plist(cfg)
 	// Check keys and values independently — format-agnostic so the test doesn't
 	// pin howett.net/plist's internal whitespace.
@@ -159,9 +158,7 @@ func indexOfCall(calls [][]string, pred func([]string) bool) int {
 }
 
 func newTestInstaller(r *recordedRun, wf func(string, []byte, os.FileMode) error) *Installer {
-	cfg := DefaultConfig()
-	cfg.Operator = testOperator
-	cfg.RunnydPath = "/opt/homebrew/bin/runnyd"
+	cfg := Config{Operator: testOperator, RunnydPath: "/opt/homebrew/bin/runnyd"}
 	return &Installer{cfg: cfg, run: r.run, writeFile: wf, log: func(string, ...any) {}}
 }
 
@@ -222,7 +219,7 @@ func TestInstallPlan(t *testing.T) {
 	}
 
 	// launchctl: bootstrap into system/ then enable.
-	if !exactCall(r.calls, "/bin/launchctl", "bootstrap", "system", inst.cfg.PlistPath()) {
+	if !exactCall(r.calls, "/bin/launchctl", "bootstrap", "system", PlistPath()) {
 		t.Error("missing launchctl bootstrap system")
 	}
 	if !exactCall(r.calls, "/bin/launchctl", "enable", "system/com.coderinserepeat.runnyd") {
@@ -302,10 +299,10 @@ func TestUninstallRemovesHomeKeepsAccount(t *testing.T) {
 	if !exactCall(r.calls, "/bin/launchctl", "print", "system/com.coderinserepeat.runnyd") {
 		t.Error("uninstall must VERIFY the job is gone before removing anything")
 	}
-	if !exactCall(r.calls, "/bin/rm", "-f", inst.cfg.PlistPath()) {
+	if !exactCall(r.calls, "/bin/rm", "-f", PlistPath()) {
 		t.Error("uninstall must remove the plist")
 	}
-	if !exactCall(r.calls, "/bin/rm", "-rf", inst.cfg.HomeDir) {
+	if !exactCall(r.calls, "/bin/rm", "-rf", home.SystemHomeDir) {
 		t.Error("uninstall must purge the home (else it poisons client resolution + leaves the key)")
 	}
 	if i := indexOfCall(r.calls, func(c []string) bool {
@@ -323,10 +320,10 @@ func TestUninstallRefusesWhenJobStillLoaded(t *testing.T) {
 	if err := inst.Uninstall(context.Background()); err == nil {
 		t.Fatal("Uninstall must refuse when the job is still loaded after bootout")
 	}
-	if exactCall(r.calls, "/bin/rm", "-f", inst.cfg.PlistPath()) {
+	if exactCall(r.calls, "/bin/rm", "-f", PlistPath()) {
 		t.Error("must NOT remove the plist while the daemon is still running")
 	}
-	if exactCall(r.calls, "/bin/rm", "-rf", inst.cfg.HomeDir) {
+	if exactCall(r.calls, "/bin/rm", "-rf", home.SystemHomeDir) {
 		t.Error("must NOT purge the home while the daemon is still running")
 	}
 }
@@ -334,7 +331,7 @@ func TestUninstallRefusesWhenJobStillLoaded(t *testing.T) {
 func TestInstallValidatesInputs(t *testing.T) {
 	base := func() *Installer {
 		return &Installer{
-			cfg: DefaultConfig(), run: (&recordedRun{}).run,
+			cfg: Config{}, run: (&recordedRun{}).run,
 			writeFile: func(string, []byte, os.FileMode) error { return nil }, log: func(string, ...any) {},
 		}
 	}

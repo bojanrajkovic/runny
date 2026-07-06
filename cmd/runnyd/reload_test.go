@@ -371,7 +371,7 @@ func TestDeferralPlistPath(t *testing.T) {
 	// The system-daemon path must be the SAME plist respawn.TargetPath then reads;
 	// asserting equality (not just non-empty) catches a drift between the path the
 	// gate hands out and the one launchd actually respawns from.
-	if got, want := deferralPlistPath(home.Dir(home.SystemHomeDir)), sysdaemon.DefaultConfig().PlistPath(); got != want {
+	if got, want := deferralPlistPath(home.Dir(home.SystemHomeDir)), sysdaemon.PlistPath(); got != want {
 		t.Errorf("system daemon: deferralPlistPath = %q, want %q", got, want)
 	}
 	if got := deferralPlistPath(home.Dir("/Users/someone/.runny")); got != "" {

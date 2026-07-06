@@ -47,7 +47,7 @@ func deferralPlistPath(dir home.Dir) string {
 	if dir.String() != home.SystemHomeDir {
 		return ""
 	}
-	return sysdaemon.DefaultConfig().PlistPath()
+	return sysdaemon.PlistPath()
 }
 
 // parseableByRespawnTarget returns true when the binary launchd would respawn

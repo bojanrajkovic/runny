@@ -187,19 +187,16 @@ func PlanImageBundlePrune(imagesDir string, keepPaths, protectRefDirNames map[st
 // and a joined error for any failures. For image-bundle items it also attempts
 // to remove the parent ref dir once all its bundles are gone.
 //
-// An optional guard func may be passed; items for which it returns false are
-// skipped. The caller uses this to re-check live slot state immediately before
-// each deletion, collapsing the re-snapshot and apply into a single call.
-func ApplyPrune(items []PlanItem, guard ...func(PlanItem) bool) (int64, error) {
+// guard, if non-nil, is called for each item; items for which it returns
+// false are skipped. The caller uses this to re-check live slot state
+// immediately before each deletion, collapsing the re-snapshot and apply
+// into a single call.
+func ApplyPrune(items []PlanItem, guard func(PlanItem) bool) (int64, error) {
 	var freed int64
 	var errs []error
 	refDirs := map[string]bool{}
-	var g func(PlanItem) bool
-	if len(guard) > 0 {
-		g = guard[0]
-	}
 	for _, item := range items {
-		if g != nil && !g(item) {
+		if guard != nil && !guard(item) {
 			continue
 		}
 		if err := os.RemoveAll(item.Path); err != nil {
@@ -217,7 +214,7 @@ func ApplyPrune(items []PlanItem, guard ...func(PlanItem) bool) (int64, error) {
 	return freed, errors.Join(errs...)
 }
 
-func applyPrune(items []PlanItem) (int64, error) { return ApplyPrune(items) }
+func applyPrune(items []PlanItem) (int64, error) { return ApplyPrune(items, nil) }
 
 // PruneRunnerCache keeps the `keep` newest tarball versions per OS/arch
 // flavor in cacheDir and deletes the rest. See the original doc comment in

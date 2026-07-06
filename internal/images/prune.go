@@ -214,17 +214,16 @@ func ApplyPrune(items []PlanItem, guard func(PlanItem) bool) (int64, error) {
 	return freed, errors.Join(errs...)
 }
 
-func applyPrune(items []PlanItem) (int64, error) { return ApplyPrune(items, nil) }
-
 // PruneRunnerCache keeps the `keep` newest tarball versions per OS/arch
-// flavor in cacheDir and deletes the rest. See the original doc comment in
-// images.go. This is now a thin wrapper over PlanRunnerCachePrune + applyPrune.
+// flavor in cacheDir and deletes the rest: a thin wrapper over
+// PlanRunnerCachePrune + ApplyPrune, unguarded (no live slot state to
+// re-check — this only runs at cold start).
 func PruneRunnerCache(cacheDir string, keep int) error {
 	items, err := PlanRunnerCachePrune(cacheDir, keep, nil)
 	if err != nil {
 		return err
 	}
-	_, err = applyPrune(items)
+	_, err = ApplyPrune(items, nil)
 	return err
 }
 

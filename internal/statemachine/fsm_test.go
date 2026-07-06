@@ -692,13 +692,17 @@ func (h *harness) eventsForCycle(cycleID string) []obs.Event {
 // cycle's shape (ADR-0024).
 func assertStepEventsMatchRecord(t *testing.T, events []obs.Event, rec *cycle.Record) {
 	t.Helper()
-	var entered, left []obs.StepEvent
+	type stepPair struct {
+		step string
+		obs.StepEvent
+	}
+	var entered, left []stepPair
 	for _, e := range events {
 		switch e.Kind {
 		case obs.KindStepEntered:
-			entered = append(entered, *e.StepInfo)
+			entered = append(entered, stepPair{e.Step, *e.StepInfo})
 		case obs.KindStepLeft:
-			left = append(left, *e.StepInfo)
+			left = append(left, stepPair{e.Step, *e.StepInfo})
 		}
 	}
 	if len(entered) != len(rec.States) {
@@ -708,11 +712,11 @@ func assertStepEventsMatchRecord(t *testing.T, events []obs.Event, rec *cycle.Re
 		t.Fatalf("got %d StepLeft events, want %d (one per StateRecord): %+v", len(left), len(rec.States), left)
 	}
 	for i, sr := range rec.States {
-		if entered[i].State != sr.State {
-			t.Errorf("StepEntered[%d].State = %q, want %q", i, entered[i].State, sr.State)
+		if entered[i].step != sr.State {
+			t.Errorf("StepEntered[%d].step = %q, want %q", i, entered[i].step, sr.State)
 		}
 		got := left[i]
-		if got.State != sr.State || got.Outcome != obs.Outcome(sr.Outcome) || got.Error != sr.Error {
+		if got.step != sr.State || got.Outcome != obs.Outcome(sr.Outcome) || got.Error != sr.Error {
 			t.Errorf("StepLeft[%d] = %+v, want state=%q outcome=%q error=%q", i, got, sr.State, sr.Outcome, sr.Error)
 		}
 	}

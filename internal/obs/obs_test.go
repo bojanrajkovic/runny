@@ -27,10 +27,10 @@ func TestEmitAcrossStepScopesPreservesCycleIdentity(t *testing.T) {
 	prov := WithStep(cctx, "PROVISION")
 
 	Emit(cctx, Event{Kind: KindCycleStarted})
-	Emit(boot, Event{Kind: KindStepEntered, StepInfo: &StepEvent{State: "BOOT"}})
+	Emit(boot, Event{Kind: KindStepEntered, StepInfo: &StepEvent{}})
 	_ = Action(boot, "clone", func(context.Context) error { return nil })
-	Emit(boot, Event{Kind: KindStepLeft, StepInfo: &StepEvent{State: "BOOT", Outcome: OutcomeOK}})
-	Emit(prov, Event{Kind: KindStepEntered, StepInfo: &StepEvent{State: "PROVISION"}})
+	Emit(boot, Event{Kind: KindStepLeft, StepInfo: &StepEvent{Outcome: OutcomeOK}})
+	Emit(prov, Event{Kind: KindStepEntered, StepInfo: &StepEvent{}})
 	Emit(prov, Event{Kind: KindDetail, Detail: &DetailEvent{Text: "2.1 GiB at 41 MiB/s"}})
 	_ = Action(prov, "install-runner", func(context.Context) error { return nil })
 	Emit(cctx, Event{Kind: KindCycleFinished, Finish: &FinishEvent{Result: "success"}})

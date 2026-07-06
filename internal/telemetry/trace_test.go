@@ -44,7 +44,7 @@ func TestTraceConsumerGolden(t *testing.T) {
 
 	emit(obs.Event{
 		Time: at(1), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "BOOT"},
+		StepInfo: &obs.StepEvent{},
 	})
 
 	emit(obs.Event{
@@ -84,12 +84,12 @@ func TestTraceConsumerGolden(t *testing.T) {
 
 	emit(obs.Event{
 		Time: at(8), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "BOOT", Outcome: obs.OutcomeOK},
+		StepInfo: &obs.StepEvent{Outcome: obs.OutcomeOK},
 	})
 
 	emit(obs.Event{
 		Time: at(9), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "JOB"},
+		StepInfo: &obs.StepEvent{},
 	})
 	emit(obs.Event{
 		Time: at(10), Cycle: testCycle, Step: "JOB", Kind: obs.KindJobStarted,
@@ -103,7 +103,7 @@ func TestTraceConsumerGolden(t *testing.T) {
 	})
 	emit(obs.Event{
 		Time: at(12), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "JOB", Outcome: obs.OutcomeOK},
+		StepInfo: &obs.StepEvent{Outcome: obs.OutcomeOK},
 	})
 
 	opUID := uint32(501)
@@ -248,7 +248,7 @@ func TestTraceConsumerConcurrentDetail(t *testing.T) {
 	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
 	emit(obs.Event{
 		Time: at(1), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE"},
+		StepInfo: &obs.StepEvent{},
 	})
 
 	var wg sync.WaitGroup
@@ -266,7 +266,7 @@ func TestTraceConsumerConcurrentDetail(t *testing.T) {
 
 	emit(obs.Event{
 		Time: at(2), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE", Outcome: obs.OutcomeOK},
+		StepInfo: &obs.StepEvent{Outcome: obs.OutcomeOK},
 	})
 	emit(obs.Event{
 		Time: at(3), Cycle: testCycle, Kind: obs.KindCycleFinished,
@@ -285,11 +285,11 @@ func TestTraceConsumerDeadlineIsFailure(t *testing.T) {
 	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
 	emit(obs.Event{
 		Time: at(1), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "BOOT"},
+		StepInfo: &obs.StepEvent{},
 	})
 	emit(obs.Event{
 		Time: at(2), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "BOOT", Outcome: "deadline", Error: "context deadline exceeded"},
+		StepInfo: &obs.StepEvent{Outcome: "deadline", Error: "context deadline exceeded"},
 	})
 	emit(obs.Event{
 		Time: at(3), Cycle: testCycle, Kind: obs.KindCycleFinished,
@@ -319,11 +319,11 @@ func TestTraceConsumerLateJobEndedStillLandsOnRoot(t *testing.T) {
 	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
 	emit(obs.Event{
 		Time: at(1), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "JOB"},
+		StepInfo: &obs.StepEvent{},
 	})
 	emit(obs.Event{
 		Time: at(2), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "JOB", Outcome: obs.OutcomeOK},
+		StepInfo: &obs.StepEvent{Outcome: obs.OutcomeOK},
 	})
 	// The old order: JobEnded after its step closed.
 	emit(obs.Event{
@@ -364,7 +364,7 @@ func TestTraceConsumerImageIdentity(t *testing.T) {
 	emit(obs.Event{Time: at(0), Cycle: ref, Kind: obs.KindCycleStarted})
 	emit(obs.Event{
 		Time: at(1), Cycle: ref, Step: "ENSURE_IMAGE", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE"},
+		StepInfo: &obs.StepEvent{},
 	})
 	emit(obs.Event{
 		Time: at(2), Cycle: ref, Step: "ENSURE_IMAGE", Kind: obs.KindImageInfo,
@@ -376,7 +376,7 @@ func TestTraceConsumerImageIdentity(t *testing.T) {
 	})
 	emit(obs.Event{
 		Time: at(4), Cycle: ref, Step: "ENSURE_IMAGE", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE", Outcome: obs.OutcomeOK},
+		StepInfo: &obs.StepEvent{Outcome: obs.OutcomeOK},
 	})
 	emit(obs.Event{
 		Time: at(5), Cycle: ref, Kind: obs.KindCycleFinished,
@@ -424,7 +424,7 @@ func TestTraceConsumerHTTPSpans(t *testing.T) {
 	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
 	emit(obs.Event{
 		Time: at(1), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE"},
+		StepInfo: &obs.StepEvent{},
 	})
 	emit(obs.Event{
 		Time: at(2), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindActionStarted,
@@ -449,13 +449,13 @@ func TestTraceConsumerHTTPSpans(t *testing.T) {
 	})
 	emit(obs.Event{
 		Time: at(7), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE", Outcome: obs.OutcomeOK},
+		StepInfo: &obs.StepEvent{Outcome: obs.OutcomeOK},
 	})
 	// MINT_JIT has no actions: its round trips parent under the step span,
 	// and a transport-level failure carries error status.
 	emit(obs.Event{
 		Time: at(8), Cycle: testCycle, Step: "MINT_JIT", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "MINT_JIT"},
+		StepInfo: &obs.StepEvent{},
 	})
 	emit(obs.Event{
 		Time: at(10), Cycle: testCycle, Step: "MINT_JIT", Kind: obs.KindHTTP,
@@ -463,7 +463,7 @@ func TestTraceConsumerHTTPSpans(t *testing.T) {
 	})
 	emit(obs.Event{
 		Time: at(11), Cycle: testCycle, Step: "MINT_JIT", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "MINT_JIT", Outcome: obs.OutcomeError, Error: "mint failed"},
+		StepInfo: &obs.StepEvent{Outcome: obs.OutcomeError, Error: "mint failed"},
 	})
 	emit(obs.Event{
 		Time: at(12), Cycle: testCycle, Kind: obs.KindCycleFinished,
@@ -576,7 +576,7 @@ func TestTraceConsumerPullSpans(t *testing.T) {
 	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
 	emit(obs.Event{
 		Time: at(0), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE"},
+		StepInfo: &obs.StepEvent{},
 	})
 	emit(obs.Event{
 		Time: at(0), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindActionStarted,

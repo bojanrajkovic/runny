@@ -92,7 +92,7 @@ func (c *run) beginStep(ctx context.Context, state State, mut func(*Status)) (co
 			mut(st)
 		}
 	})
-	obs.Emit(ctx, obs.Event{Kind: obs.KindStepEntered, StepInfo: &obs.StepEvent{State: string(state)}})
+	obs.Emit(ctx, obs.Event{Kind: obs.KindStepEntered, StepInfo: &obs.StepEvent{}})
 	sr := cycle.StateRecord{State: string(state), Entered: time.Now()}
 	var done bool
 	finish := func(outcome cycle.Outcome, errStr string) {
@@ -103,7 +103,7 @@ func (c *run) beginStep(ctx context.Context, state State, mut func(*Status)) (co
 		sr.Left, sr.Outcome, sr.Error = time.Now(), outcome, errStr
 		c.rec.States = append(c.rec.States, sr)
 		obs.Emit(ctx, obs.Event{Kind: obs.KindStepLeft, StepInfo: &obs.StepEvent{
-			State: string(state), Outcome: obs.Outcome(outcome), Error: errStr,
+			Outcome: obs.Outcome(outcome), Error: errStr,
 			Duration: sr.Left.Sub(sr.Entered),
 		}})
 	}

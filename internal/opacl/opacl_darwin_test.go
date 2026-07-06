@@ -7,11 +7,18 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
 )
+
+// containsUser reports whether ops includes username — test-only, since
+// production code has no need to search the operator list by name.
+func containsUser(ops []Operator, username string) bool {
+	return slices.ContainsFunc(ops, func(o Operator) bool { return o.User == username })
+}
 
 // testGrantee/testReadOnlyGrantee are system accounts present on every Mac
 // that the current (non-root) test user does not already control — the same
@@ -57,7 +64,7 @@ func TestGrantListRevokeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List after grant: %v", err)
 	}
-	if !ContainsUser(ops, testGrantee) {
+	if !containsUser(ops, testGrantee) {
 		t.Fatalf("granted operator %q not found: %+v", testGrantee, ops)
 	}
 
@@ -68,7 +75,7 @@ func TestGrantListRevokeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List after revoke: %v", err)
 	}
-	if ContainsUser(ops, testGrantee) {
+	if containsUser(ops, testGrantee) {
 		t.Fatalf("revoked operator %q still present: %+v", testGrantee, ops)
 	}
 }
@@ -131,10 +138,10 @@ func TestListExcludesReadOnlyACE(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if !ContainsUser(ops, testGrantee) {
+	if !containsUser(ops, testGrantee) {
 		t.Errorf("real operator missing: %+v", ops)
 	}
-	if ContainsUser(ops, testReadOnlyGrantee) {
+	if containsUser(ops, testReadOnlyGrantee) {
 		t.Errorf("read-only (no write) ACE counted as an operator: %+v", ops)
 	}
 }

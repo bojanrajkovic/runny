@@ -10,26 +10,6 @@ type Operator struct {
 	User string
 }
 
-// ContainsUID reports whether ops includes uid.
-func ContainsUID(ops []Operator, uid uint32) bool {
-	for _, op := range ops {
-		if op.UID == uid {
-			return true
-		}
-	}
-	return false
-}
-
-// ContainsUser reports whether ops includes username.
-func ContainsUser(ops []Operator, username string) bool {
-	for _, op := range ops {
-		if op.User == username {
-			return true
-		}
-	}
-	return false
-}
-
 // ACLInherit makes an ACE apply to a directory AND every file/dir created
 // beneath it. Shared by OperatorACE here and the service account's own
 // inheriting ACE in internal/sysdaemon.

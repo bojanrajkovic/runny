@@ -262,7 +262,7 @@ func TestMutateOperatorKillsStreamsOnPartialRevokeFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if opacl.ContainsUser(ops, testGrantee1) {
+	if containsOperatorUser(ops, testGrantee1) {
 		t.Fatalf("home-dir ACL should already be mutated despite the reported apply failure: %+v", ops)
 	}
 

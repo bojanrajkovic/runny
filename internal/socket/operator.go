@@ -80,7 +80,7 @@ func (s *Server) GrantOperator(ctx context.Context, req *runnyv1.GrantOperatorRe
 			if u.Username == "root" || u.Uid == "0" {
 				return status.Error(codes.InvalidArgument, "refusing to grant root")
 			}
-			if opacl.ContainsUID(ops, uid) {
+			if slices.ContainsFunc(ops, func(o opacl.Operator) bool { return o.UID == uid }) {
 				return status.Errorf(codes.FailedPrecondition, "%s is already an operator", u.Username)
 			}
 			return nil
@@ -96,7 +96,7 @@ func (s *Server) RevokeOperator(ctx context.Context, req *runnyv1.RevokeOperator
 	return s.mutateOperator(
 		ctx, req.GetUser(), "revoke",
 		func(ops []opacl.Operator, uid uint32, u *user.User) error {
-			if !opacl.ContainsUID(ops, uid) {
+			if !slices.ContainsFunc(ops, func(o opacl.Operator) bool { return o.UID == uid }) {
 				return status.Errorf(codes.FailedPrecondition, "%s is not an operator", u.Username)
 			}
 			if len(ops) <= 1 {

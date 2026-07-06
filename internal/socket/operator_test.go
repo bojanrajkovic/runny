@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -26,6 +27,17 @@ const (
 	testGrantee1 = "daemon"
 	testGrantee2 = "_www"
 )
+
+// containsOperatorUser/containsOperatorUID are test-only equivalents of the
+// opacl.ContainsUser/ContainsUID helpers production code doesn't need
+// (production searches the operator list by uid alone, inline).
+func containsOperatorUser(ops []opacl.Operator, username string) bool {
+	return slices.ContainsFunc(ops, func(o opacl.Operator) bool { return o.User == username })
+}
+
+func containsOperatorUID(ops []opacl.Operator, uid uint32) bool {
+	return slices.ContainsFunc(ops, func(o opacl.Operator) bool { return o.UID == uid })
+}
 
 func requireGrantees(t *testing.T) {
 	t.Helper()
@@ -119,7 +131,7 @@ func TestGrantOperatorGrantsAndRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("opacl.List: %v", err)
 	}
-	if !opacl.ContainsUser(ops, testGrantee1) {
+	if !containsOperatorUser(ops, testGrantee1) {
 		t.Fatalf("granted operator missing from ACL: %+v", ops)
 	}
 
@@ -215,10 +227,10 @@ func TestRevokeOperatorRevokesAndRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("opacl.List: %v", err)
 	}
-	if opacl.ContainsUser(ops, testGrantee2) {
+	if containsOperatorUser(ops, testGrantee2) {
 		t.Errorf("revoked operator still present: %+v", ops)
 	}
-	if !opacl.ContainsUser(ops, testGrantee1) {
+	if !containsOperatorUser(ops, testGrantee1) {
 		t.Errorf("unrelated operator was removed: %+v", ops)
 	}
 
@@ -242,7 +254,7 @@ func TestRevokeOperatorRevokesAndRecords(t *testing.T) {
 // widening the List-then-mutate race window deterministically instead of
 // hoping real scheduling happens to interleave two goroutines badly.
 func revokePrecheckForTest(ops []opacl.Operator, uid uint32, u *user.User) error {
-	if !opacl.ContainsUID(ops, uid) {
+	if !containsOperatorUID(ops, uid) {
 		return status.Errorf(codes.FailedPrecondition, "%s is not an operator", u.Username)
 	}
 	if len(ops) <= 1 {

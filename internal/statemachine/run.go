@@ -908,19 +908,29 @@ func (c *run) updateAudit(ctx context.Context, idx int, outcome, errStr string) 
 	obs.Emit(ctx, obs.Event{Kind: obs.KindAuditUpdate, Audit: auditEvent(c.rec.InjectedKeys[idx])})
 }
 
+// appendAudit appends entry to the cycle's audit trail, best-effort rewrites
+// the sidecar (logging on failure — c.rec.InjectedKeys, not the sidecar, is
+// cycle.json's eventual truth), and mirrors the append into the event
+// stream. Shared by every non-write-ahead append; appendPending's
+// write-AHEAD entry has its own stricter contract (a sidecar failure there
+// refuses the injection outright, decision 4).
+func (c *run) appendAudit(ctx context.Context, entry cycle.InjectedKey) {
+	c.rec.InjectedKeys = append(c.rec.InjectedKeys, entry)
+	if err := c.writeAuditSidecar(); err != nil {
+		c.deps.Log.Error("debug: audit rewrite failed", "err", err)
+	}
+	c.emitAuditAppend(ctx)
+}
+
 // auditDisarm appends a "disarmed" entry recording why an armed hold was
 // cancelled without DEBUG entry, and rewrites the sidecar (best-effort).
 func (c *run) auditDisarm(ctx context.Context, cause string, level slog.Level) {
-	c.rec.InjectedKeys = append(c.rec.InjectedKeys, cycle.InjectedKey{
+	c.appendAudit(ctx, cycle.InjectedKey{
 		Injected: time.Now(),
 		Outcome:  "disarmed",
 		Error:    cause,
 		State:    string(StateJob),
 	})
-	if err := c.writeAuditSidecar(); err != nil {
-		c.deps.Log.Error("debug: disarm audit rewrite failed", "err", err)
-	}
-	c.emitAuditAppend(ctx)
 	c.deps.Log.Log(context.Background(), level, "debug hold disarmed", "cause", cause)
 }
 
@@ -1073,15 +1083,13 @@ func (c *run) midJobInject(ctx context.Context, cmd Command) {
 		// A command aimed at a LISTENING slot that raced into JOB: refuse —
 		// converting it into a mid-job injection would write contamination
 		// into a CI job's permanent record without consent (decision 15).
-		c.rec.InjectedKeys = append(c.rec.InjectedKeys, cycle.InjectedKey{
+		c.appendAudit(ctx, cycle.InjectedKey{
 			Fingerprint: fp, Comment: cmd.Comment, Injected: time.Now(), Reason: cmd.Reason,
 			Outcome: "refused", State: string(StateJob),
 			Error:        "operator saw " + string(cmd.SeenState) + ", not JOB",
 			OperatorUID:  cmd.OperatorUID,
 			OperatorUser: cmd.OperatorUser,
 		})
-		_ = c.writeAuditSidecar()
-		c.emitAuditAppend(ctx)
 		cmd.reply(DebugKeyReply{Err: errors.New(
 			"a job started before your request was serviced; nothing was injected — re-run debug to inject into the running job",
 		)})
@@ -1091,13 +1099,11 @@ func (c *run) midJobInject(ctx context.Context, cmd Command) {
 	// 1. RE-ARM (exec-free) ONLY for a PROVEN-LANDED key.
 	if c.arm.landed(fp) {
 		c.arm.hold = cmd.Hold
-		c.rec.InjectedKeys = append(c.rec.InjectedKeys, cycle.InjectedKey{
+		c.appendAudit(ctx, cycle.InjectedKey{
 			Fingerprint: fp, Comment: cmd.Comment, Injected: time.Now(), Reason: cmd.Reason,
 			Outcome: "re-armed", State: string(StateJob),
 			OperatorUID: cmd.OperatorUID, OperatorUser: cmd.OperatorUser,
 		})
-		_ = c.writeAuditSidecar()
-		c.emitAuditAppend(ctx)
 		c.setArmedStatus(c.armedDetail(fp, c.arm.hold))
 		cmd.reply(c.armedReply())
 		return
@@ -1163,12 +1169,10 @@ func (c *run) enterPostJobDebug(ctx context.Context) (State, error) {
 
 	// 1. Verified kill, always. At job end the kill prohibition has expired.
 	if err := c.boundedGuest(ctx, secureSSH, c.guest.StopRunner); err != nil {
-		c.rec.InjectedKeys = append(c.rec.InjectedKeys, cycle.InjectedKey{
+		c.appendAudit(ctx, cycle.InjectedKey{
 			Injected: time.Now(), Outcome: "error", State: string(StateJob),
 			Error: "post-job kill unproven: " + err.Error(),
 		})
-		_ = c.writeAuditSidecar()
-		c.emitAuditAppend(ctx)
 		// The hold is NOT entered — an unproven kill must not hold a
 		// job-eligible guest. Clear the armed status now so DebugHoldArmed can't
 		// linger into teardown.
@@ -1249,13 +1253,11 @@ func (c *run) debugReArm(ctx context.Context, cmd Command,
 	// entry this cycle (survives a guest reboot).
 	if c.keyInstalledThisCycle(cmd.Fingerprint) {
 		newUntil := reset()
-		c.rec.InjectedKeys = append(c.rec.InjectedKeys, cycle.InjectedKey{
+		c.appendAudit(ctx, cycle.InjectedKey{
 			Fingerprint: cmd.Fingerprint, Comment: cmd.Comment, Injected: time.Now(), Reason: cmd.Reason,
 			Outcome: "re-armed", State: string(StateDebug),
 			OperatorUID: cmd.OperatorUID, OperatorUser: cmd.OperatorUser,
 		})
-		_ = c.writeAuditSidecar()
-		c.emitAuditAppend(ctx)
 		cmd.reply(DebugKeyReply{User: c.deps.Pool.SSHUser, HostKeys: c.guest.HostKeys(), HoldUntil: newUntil})
 		return false
 	}

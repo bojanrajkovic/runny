@@ -756,17 +756,6 @@ func lookupUsername(uid uint32) string {
 	}
 }
 
-// injectionAborted reports whether ctx already ended (canceled or deadline
-// exceeded), converting it to the same gRPC status InjectDebugKey's
-// post-enqueue select uses for the identical condition — so both call sites
-// agree on what the client sees. nil means ctx is still live.
-func injectionAborted(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return status.FromContextError(err).Err()
-	}
-	return nil
-}
-
 func (s *Server) InjectDebugKey(ctx context.Context, req *runnyv1.InjectDebugKeyRequest) (*runnyv1.InjectDebugKeyResponse, error) {
 	slot, err := s.findSlot(req.GetSlot())
 	if err != nil {
@@ -812,9 +801,11 @@ func (s *Server) InjectDebugKey(ctx context.Context, req *runnyv1.InjectDebugKey
 
 	// The lookup above can take up to usernameLookupBound; a client that
 	// canceled or hit its own deadline during that stall must not have a key
-	// installed after being told the request ended.
-	if err := injectionAborted(ctx); err != nil {
-		return nil, err
+	// installed after being told the request ended. Converts the same way
+	// the post-enqueue select below does for the identical condition, so
+	// both call sites agree on what the client sees.
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
 	}
 
 	reply := make(chan statemachine.DebugKeyReply, 1)

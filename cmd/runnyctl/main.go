@@ -4,8 +4,6 @@ package main
 
 import (
 	"context"
-	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alecthomas/kong"
 	"golang.org/x/term"
 
 	"github.com/rivo/uniseg"
@@ -36,106 +35,53 @@ import (
 // version is stamped by Bazel under --config=release.
 var version = "dev"
 
-const usage = `runnyctl — control surface for runnyd
-
-usage: runnyctl [-json] <command> [args]
-
-commands:
-  version             print the client version
-  status              one-shot slot status
-  watch               follow status transitions
-  logs [SLOT] [-daemon] [-replay N] [-follow=false]
-                      stream runner output (all slots, or just SLOT);
-                      -daemon streams runnyd's own log instead
-  recycle SLOT [-reason WHY] [-force]
-                      destroy SLOT's current cycle and start fresh;
-                      -force is required to recycle a DEBUG hold or to
-                      cancel a RUNNING job
-  debug SLOT [-pubkey FILE] [-hold DUR] [-reason TEXT] [-no-exec]
-                      inject FILE's public key (default ~/.ssh/id_ed25519.pub)
-                      into SLOT's live guest. Idle (LISTENING): the slot
-                      freezes in DEBUG — runner killed (verified), no jobs,
-                      max-idle suspended. Running a job (JOB): the key is
-                      installed immediately (the job is NOT touched) and the
-                      slot holds in DEBUG when the job ends. Rerun with the
-                      same key to extend; a new key to add. Release with
-                      'runnyctl recycle SLOT -force' (auto-releases after
-                      -hold; default/cap limits.max_debug_hold). When stdin
-                      is a TTY, execs directly into ssh after printing connect
-                      info; -no-exec prints only.
-  pause SLOT          hold SLOT after its current cycle drains
-  resume SLOT         release a paused SLOT
-  reload [-reason WHY]
-                      validate the config on disk; if valid, drain the
-                      fleet (running jobs finish first) and restart
-                      runnyd on it (clears operator pauses)
-  upgrade-daemon [-force]
-                      validate the in-place config with the on-disk (newer)
-                      runnyd, then drain-gated reload onto it after a
-                      brew upgrade; -force upgrades despite warnings (never
-                      over a hard error)
-  why SLOT [-cycles N]
-                      render SLOT's recent cycle timelines
-  prune [-apply]      show stale image bundles and runner tarballs that
-                      can be reclaimed (dry run by default); -apply deletes them
-  operator grant USER    grant USER (name or uid) operator status — reachable
-                          on the control socket with no daemon restart
-  operator revoke USER   revoke USER's operator status
-  operator list           list granted operators, with who granted them and when
-                          ("(install)" = the install-time bootstrap operator).
-                          System-daemon-only: a per-user daemon has a single owner.
-
-SLOT accepts the bare slot name (mac-1) or a full runner name as shown
-by status and the GitHub runners page (<prefix>-mac-1-<cycle>).
-  doctor              run the daemon's validation checks
-  install-daemon [-operator USER] [-config PATH]
-                      install runnyd as a non-root system LaunchDaemon
-                      (requires root; macOS only). -operator is the account
-                      the home's ACL grants; it defaults to $SUDO_USER and is
-                      required when not run via sudo. -config stages PATH
-                      (and the keys its pools reference) into the home and
-                      validates it before starting the daemon; without it,
-                      the daemon crash-loops until a config is hand-landed
-  uninstall-daemon    remove the system LaunchDaemon AND its home (config,
-                      key, artifacts — back up first); keeps the _runny account
-  edit-config         visudo for runny: edit the resolved home's config.yaml
-                      in $VISUAL/$EDITOR, validate with runnyd -test-config
-                      (reopening the editor on failure), then reload the
-                      running daemon (or apply on next start)
-`
-
 func main() {
 	if err := run(); err != nil {
-		// -h/-help on any subcommand surfaces as flag.ErrHelp (the per-command
-		// flag sets discard their own output); print usage once and exit 0, the
-		// same outcome the top-level `runnyctl -h` already produces.
-		if errors.Is(err, flag.ErrHelp) {
-			fmt.Fprint(os.Stderr, usage)
-			return
-		}
 		fmt.Fprintln(os.Stderr, "runnyctl:", err)
 		os.Exit(1)
 	}
 }
 
+// newKong builds the runnyctl parser over the CLI grammar. Writers and the exit
+// hook are injected so tests can capture output and suppress os.Exit; production
+// passes the real stdio and os.Exit (kong prints --help and exits 0 itself,
+// leaving only parse and command errors to return).
+func newKong(cli *CLI, stdout, stderr io.Writer, exit func(int)) (*kong.Kong, error) {
+	// No kong.UsageOnError(): it only fires via FatalIfErrorf, which exits with
+	// kong's usage-error code (80). Returning the parse error to main() instead
+	// keeps the daemon's uniform exit-1 contract; kong's own message already
+	// lists the commands on a bad/absent one.
+	return kong.New(
+		cli,
+		kong.Name("runnyctl"),
+		kong.Description("control surface for runnyd, speaking runny.v1 over the daemon's unix socket"),
+		kong.Writers(stdout, stderr),
+		kong.Exit(exit),
+	)
+}
+
 func run() error {
-	jsonOut := flag.Bool("json", false, "emit protojson instead of human rendering")
-	flag.Usage = func() { fmt.Fprint(os.Stderr, usage) }
-	flag.Parse()
-	args := flag.Args()
-	if len(args) == 0 {
-		flag.Usage()
-		return fmt.Errorf("a command is required")
+	cli := &CLI{}
+	parser, err := newKong(cli, os.Stdout, os.Stderr, os.Exit)
+	if err != nil {
+		return err
+	}
+	// A parse error (unknown/absent command, bad flag, missing arg) returns to
+	// main(), which prints "runnyctl: <err>" and exits 1 — the uniform error
+	// contract. kong handles --help itself during Parse (prints help, exits 0).
+	kctx, err := parser.Parse(os.Args[1:])
+	if err != nil {
+		return err
 	}
 
 	// Local privileged commands create/destroy the system daemon: they run as
 	// root (sudo), never dial a daemon, and must branch before the client home +
 	// gRPC setup below (which a not-yet-installed daemon has nothing to answer).
-	switch args[0] {
-	case "install-daemon":
-		return installDaemon(args[1:])
-	case "uninstall-daemon":
-		return uninstallDaemon(args[1:])
+	// kong.Command() is the bare command name for these (no positional args), so
+	// the two-case gate matches exactly.
+	switch kctx.Command() {
+	case "install-daemon", "uninstall-daemon":
+		return kctx.Run()
 	}
 
 	dir, err := home.ResolveClient()
@@ -149,19 +95,20 @@ func run() error {
 		return err
 	}
 	defer conn.Close()
-	client := runnyv1.NewRunnyServiceClient(conn)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	c := &ctl{client: client, json: *jsonOut, out: os.Stdout, err: os.Stderr}
+	c := &ctl{client: runnyv1.NewRunnyServiceClient(conn), json: cli.JSON, out: os.Stdout, err: os.Stderr}
 	// A skew warning before any command output, on every daemon-dialing path.
-	// version is the one local command that must work without a daemon, so it is
-	// excluded — it returns below before any RPC.
-	if args[0] != "version" {
+	// version is the one command that must work without a daemon, so it is
+	// excluded — its Run makes no RPC.
+	if kctx.Command() != "version" {
 		c.warnSkew(ctx)
 	}
-	err = c.dispatch(ctx, args)
+	kctx.BindTo(ctx, (*context.Context)(nil))
+	kctx.Bind(c)
+	err = kctx.Run()
 	// codes.Unavailable is overloaded: a transport/dial failure (the daemon was
 	// never reached), a LIVE daemon's application response ("slot is not accepting
 	// commands"), and a stream that broke after connecting all use it. Only the
@@ -173,180 +120,6 @@ func run() error {
 		return connHint(err, socketPath, socketFileExists(socketPath))
 	}
 	return err
-}
-
-// dispatch runs a single runnyctl command. args[0] is the command (guaranteed
-// non-empty by run); the remainder are its arguments. Every command parses its
-// own flag set via subFlags, so the global -json is honored after the
-// subcommand too and an unknown trailing flag errors rather than being
-// swallowed or exiting the process (issue #47).
-func (c *ctl) dispatch(ctx context.Context, args []string) error {
-	switch cmd, rest := args[0], args[1:]; cmd {
-	case "version":
-		fs, j := subFlags("version")
-		if err := c.parseNoArgs(fs, j, rest); err != nil {
-			return err
-		}
-		fmt.Fprintln(c.out, version)
-		return nil
-	case "status":
-		fs, j := subFlags("status")
-		if err := c.parseNoArgs(fs, j, rest); err != nil {
-			return err
-		}
-		return c.status(ctx)
-	case "watch":
-		fs, j := subFlags("watch")
-		if err := c.parseNoArgs(fs, j, rest); err != nil {
-			return err
-		}
-		return c.watch(ctx)
-	case "logs":
-		fs, j := subFlags("logs")
-		replay := fs.Int("replay", 50, "buffered lines to replay")
-		follow := fs.Bool("follow", true, "keep following after the replay")
-		daemon := fs.Bool("daemon", false, "stream the daemon's own log instead of runner output")
-		// SLOT is optional here, so logs can't use slotArg (which requires
-		// exactly one); validate the at-most-one rule over the same parser.
-		positional, err := c.parseArgs(fs, j, rest)
-		if err != nil {
-			return err
-		}
-		if len(positional) > 1 {
-			return fmt.Errorf("logs takes at most one SLOT argument")
-		}
-		slot := ""
-		if len(positional) == 1 {
-			slot = positional[0]
-		}
-		if *daemon && slot != "" {
-			return fmt.Errorf("-daemon and a slot filter are mutually exclusive")
-		}
-		return c.logs(ctx, *replay, *follow, *daemon, slot)
-	case "recycle":
-		fs, j := subFlags("recycle")
-		reason := fs.String("reason", "operator request", "reason recorded in the cycle")
-		force := fs.Bool("force", false, "recycle a DEBUG hold, or cancel a RUNNING job")
-		slot, err := c.slotArg(fs, j, rest)
-		if err != nil {
-			return err
-		}
-		return c.recycle(ctx, slot, *reason, *force)
-	case "debug":
-		fs, j := subFlags("debug")
-		pubkey := fs.String("pubkey", "", "public key file (default ~/.ssh/id_ed25519.pub)")
-		hold := fs.Duration("hold", 0, "auto-release after this long (0 = limits.max_debug_hold)")
-		reason := fs.String("reason", "", "audit note")
-		noExec := fs.Bool("no-exec", false, "print connect info without exec'ing into ssh")
-		slot, err := c.slotArg(fs, j, rest)
-		if err != nil {
-			return err
-		}
-		return c.debug(ctx, slot, *pubkey, *hold, *reason, *noExec)
-	case "pause":
-		fs, j := subFlags("pause")
-		slot, err := c.slotArg(fs, j, rest)
-		if err != nil {
-			return err
-		}
-		return c.pause(ctx, slot)
-	case "resume":
-		fs, j := subFlags("resume")
-		slot, err := c.slotArg(fs, j, rest)
-		if err != nil {
-			return err
-		}
-		_, err = c.client.Resume(ctx, &runnyv1.ResumeRequest{Slot: slot})
-		if err == nil {
-			fmt.Fprintf(c.out, "%s resumed\n", slot)
-		}
-		return err
-	case "reload":
-		fs, j := subFlags("reload")
-		reason := fs.String("reason", "", "reason recorded in the daemon log and cycle records")
-		wait := fs.Bool("wait", false, "follow the drain and confirm the respawn came up on this config")
-		respawnTimeout := fs.Duration("respawn-timeout", 90*time.Second, "max wait for the respawn after the daemon exits")
-		timeout := fs.Duration("timeout", 0, "optional hard cap on the entire wait (0 = none)")
-		if err := c.parseNoArgs(fs, j, rest); err != nil {
-			return err
-		}
-		if *wait {
-			return c.reloadWait(ctx, *reason,
-				func(ctx context.Context, req *runnyv1.ReloadRequest) (*runnyv1.ReloadResponse, error) {
-					return c.client.Reload(ctx, req)
-				},
-				defaultFollowOpts(*respawnTimeout, *timeout))
-		}
-		return c.reload(ctx, *reason)
-	case "upgrade-daemon":
-		fs, j := subFlags("upgrade-daemon")
-		force := fs.Bool("force", false, "upgrade despite config warnings (never overrides a hard error)")
-		respawnTimeout := fs.Duration("respawn-timeout", 90*time.Second, "max wait for the respawn after the daemon exits")
-		timeout := fs.Duration("timeout", 0, "optional hard cap on the entire wait (0 = none)")
-		if err := c.parseNoArgs(fs, j, rest); err != nil {
-			return err
-		}
-		return c.upgradeDaemon(ctx, *force, defaultFollowOpts(*respawnTimeout, *timeout))
-	case "why":
-		fs, j := subFlags("why")
-		cycles := fs.Int("cycles", 1, "how many recent cycles")
-		slot, err := c.slotArg(fs, j, rest)
-		if err != nil {
-			return err
-		}
-		return c.why(ctx, slot, *cycles)
-	case "doctor":
-		fs, j := subFlags("doctor")
-		if err := c.parseNoArgs(fs, j, rest); err != nil {
-			return err
-		}
-		return c.doctor(ctx)
-	case "prune":
-		fs, j := subFlags("prune")
-		apply := fs.Bool("apply", false, "delete the reclaimable items (default: dry run)")
-		if err := c.parseNoArgs(fs, j, rest); err != nil {
-			return err
-		}
-		return c.prune(ctx, *apply)
-	case "operator":
-		return c.operatorDispatch(ctx, rest)
-	case "edit-config":
-		return c.editConfig(ctx, rest)
-	default:
-		flag.Usage()
-		return fmt.Errorf("unknown command %q", cmd)
-	}
-}
-
-// subFlags builds a subcommand flag set. It uses ContinueOnError so a bad flag
-// surfaces as an ordinary runnyctl error (printed once with the runnyctl:
-// prefix, and unit-testable) instead of a bare os.Exit(2), and discards the
-// flag package's own output so that error isn't also printed unprefixed. Every
-// subcommand registers -json here, so the global flag is accepted after the
-// command as well as before it (issue #47); fold the returned bool into c.json
-// with useJSON once parsing succeeds.
-func subFlags(name string) (*flag.FlagSet, *bool) {
-	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	return fs, fs.Bool("json", false, "emit protojson instead of human rendering")
-}
-
-// useJSON folds a subcommand's trailing -json into the effective output mode,
-// OR-ing it with the global flag already in c.json so -json works in either
-// position.
-func (c *ctl) useJSON(local *bool) { c.json = c.json || *local }
-
-// parseNoArgs parses fs for a subcommand that takes no positional arguments,
-// folding -json. A stray positional errors rather than being silently ignored.
-func (c *ctl) parseNoArgs(fs *flag.FlagSet, j *bool, args []string) error {
-	positional, err := c.parseArgs(fs, j, args)
-	if err != nil {
-		return err
-	}
-	if len(positional) != 0 {
-		return fmt.Errorf("%s takes no arguments (got %q)", fs.Name(), positional[0])
-	}
-	return nil
 }
 
 // shouldHint reports whether a command's terminal error warrants the home-aware
@@ -383,47 +156,6 @@ func connHint(err error, socketPath string, socketExists bool) error {
 func socketFileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
-}
-
-// parseArgs parses fs allowing flags and positional arguments to interleave in
-// any order. Go's flag package stops at the first positional, so a flag written
-// after a SLOT (`recycle -force mac-1 -json`) would otherwise be lost; this
-// re-parses past each positional, collecting them, so the trailing -json (and
-// any other global flag) is honored wherever it sits (issue #47). It folds a
-// trailing -json on success, so callers can't forget the fold.
-func (c *ctl) parseArgs(fs *flag.FlagSet, j *bool, args []string) ([]string, error) {
-	var positional []string
-	for {
-		if err := fs.Parse(args); err != nil {
-			return nil, err
-		}
-		if fs.NArg() == 0 {
-			break
-		}
-		positional = append(positional, fs.Arg(0))
-		args = fs.Args()[1:]
-	}
-	c.useJSON(j)
-	return positional, nil
-}
-
-// oneArg parses a command that requires exactly one positional argument
-// named argName — in any position relative to the flags — and folds a
-// trailing -json.
-func (c *ctl) oneArg(fs *flag.FlagSet, j *bool, args []string, argName string) (string, error) {
-	positional, err := c.parseArgs(fs, j, args)
-	if err != nil {
-		return "", err
-	}
-	if len(positional) != 1 {
-		return "", fmt.Errorf("exactly one %s argument is required", argName)
-	}
-	return positional[0], nil
-}
-
-// slotArg is oneArg specialized for the common SLOT case.
-func (c *ctl) slotArg(fs *flag.FlagSet, j *bool, args []string) (string, error) {
-	return c.oneArg(fs, j, args, "SLOT")
 }
 
 type ctl struct {
@@ -653,7 +385,7 @@ func (c *ctl) logs(ctx context.Context, replay int, follow, daemon bool, slot st
 }
 
 func (c *ctl) recycle(ctx context.Context, slot, reason string, force bool) error {
-	// Guard DEBUG and JOB: both need -force, and JOB additionally requires the
+	// Guard DEBUG and JOB: both need --force, and JOB additionally requires the
 	// cancel_running_job consent flag — which runnyctl sets only after
 	// OBSERVING JOB, so a send-time race can never cancel a job the operator
 	// didn't see.
@@ -662,24 +394,24 @@ func (c *ctl) recycle(ctx context.Context, slot, reason string, force bool) erro
 	if err != nil {
 		// The guard is best-effort client-side UX, but a plain recycle still
 		// releases a DEBUG hold daemon-side (holdForDebug's CmdRecycle arm has
-		// no -force check). Without -force we cannot tell whether this recycle
+		// no --force check). Without --force we cannot tell whether this recycle
 		// would destroy a held guest, so refuse rather than silently proceeding
 		// — a status blip must not let an unintended recycle through. With
-		// -force the operator has already consented to whatever shape the slot
+		// --force the operator has already consented to whatever shape the slot
 		// is in, so proceed.
 		if !force {
-			return fmt.Errorf("cannot read slot status to check for a debug hold or running job (%w); pass -force to recycle anyway", err)
+			return fmt.Errorf("cannot read slot status to check for a debug hold or running job (%w); pass --force to recycle anyway", err)
 		}
 	} else if st := findSlotStatus(resp, slot); st != nil {
 		switch st.GetState() {
 		case runnyv1.SlotState_SLOT_STATE_DEBUG:
 			if !force {
-				return fmt.Errorf("slot %s is holding for debug; pass -force to recycle (this destroys the held guest)", slot)
+				return fmt.Errorf("slot %s is holding for debug; pass --force to recycle (this destroys the held guest)", slot)
 			}
 		case runnyv1.SlotState_SLOT_STATE_JOB:
 			if !force {
 				job := st.GetJob().GetName()
-				return fmt.Errorf("slot %s is running job %q (%s); recycling cancels it — pass -force",
+				return fmt.Errorf("slot %s is running job %q (%s); recycling cancels it — pass --force",
 					slot, job, durString(time.Since(st.GetStateEntered().AsTime())))
 			}
 			cancelJob = true
@@ -755,7 +487,7 @@ func (c *ctl) renderDebug(slot string, resp *runnyv1.InjectDebugKeyResponse) {
 		fmt.Fprintf(c.out, "  connect:  %s\n", conn)
 		c.renderHostKeys(resp.GetHostKeys())
 		fmt.Fprintln(c.out, "  hold:     starts when the job ends")
-		fmt.Fprintf(c.out, "  release:  runnyctl recycle %s -force   ·   extend: re-run this command\n", slot)
+		fmt.Fprintf(c.out, "  release:  runnyctl recycle %s --force   ·   extend: re-run this command\n", slot)
 		return
 	}
 	fmt.Fprintf(c.out, "%s: debug key %s installed; the slot is frozen in DEBUG\n", slot, resp.GetFingerprint())
@@ -765,7 +497,7 @@ func (c *ctl) renderDebug(slot string, resp *runnyv1.InjectDebugKeyResponse) {
 		fmt.Fprintf(c.out, "  hold:     auto-releases %s (in %s)\n",
 			hu.AsTime().Local().Format(time.RFC3339), durString(time.Until(hu.AsTime())))
 	}
-	fmt.Fprintf(c.out, "  release:  runnyctl recycle %s -force   ·   extend: re-run this command\n", slot)
+	fmt.Fprintf(c.out, "  release:  runnyctl recycle %s --force   ·   extend: re-run this command\n", slot)
 }
 
 func (c *ctl) renderHostKeys(keys []string) {
@@ -1163,7 +895,7 @@ func trunc(s string, n int) string {
 // registry never reached" byte-identical on pinned fleets (a resolve of a
 // pin always returns the pin), corrupting the cell's one rule. Registry
 // and namespace are also dropped, so cross-registry refs with the same
-// final segment render identically — `runnyctl -json status` carries the
+// final segment render identically — `runnyctl --json status` carries the
 // full ref and digest when that matters.
 func imageCell(ref, digest string) string {
 	name, _ := splitPin(ref)
@@ -1228,7 +960,7 @@ func shortHex(h string) string {
 // sequences like "1️⃣" (digit + VS16 + U+20E3) — render as two on some terminals
 // and can nudge a row's alignment. That residual is accepted: chasing each
 // cluster class would mean hand-coding against a single terminal's rendering, and
-// `runnyctl -json` is exact when precise output matters.
+// `runnyctl --json` is exact when precise output matters.
 func cellWidth(s string) int { return uniseg.StringWidth(s) }
 
 // pad right-pads s with spaces to display width w.

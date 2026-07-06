@@ -54,13 +54,14 @@ func TestResolveOperator(t *testing.T) {
 }
 
 // install-daemon takes --operator now; an unknown flag must still be named (not
-// swallowed) and a stray positional refused — both before any privileged step, so
-// the assertions are host-independent (they never reach the darwin/root gate).
+// swallowed) and a stray positional refused. kong rejects both at parse time,
+// before Run — so the assertions are host-independent (they never reach the
+// darwin/root gate inside installDaemon).
 func TestInstallDaemonRejectsBadArgs(t *testing.T) {
-	if err := installDaemon([]string{"-bogus"}); err == nil || !strings.Contains(err.Error(), "bogus") {
+	if err := runArgs(t, &ctl{}, "install-daemon", "--bogus"); err == nil || !strings.Contains(err.Error(), "bogus") {
 		t.Errorf("an unknown flag should be surfaced by name; got %v", err)
 	}
-	if err := installDaemon([]string{"extra"}); err == nil || !strings.Contains(err.Error(), "positional") {
+	if err := runArgs(t, &ctl{}, "install-daemon", "extra"); err == nil || !strings.Contains(err.Error(), "unexpected") {
 		t.Errorf("a stray positional should be refused; got %v", err)
 	}
 }

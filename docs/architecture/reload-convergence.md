@@ -122,7 +122,7 @@ and wording; the diagram tracks it but the code is canonical.
 
 ## Clients
 
-- **`runnyctl reload -wait`** drives the full sequence: it opens the stream,
+- **`runnyctl reload --wait`** drives the full sequence: it opens the stream,
   validates, follows the live drain, then confirms the respawn and prints the
   verdict (`-respawn-timeout` caps AWAIT-RESPAWN; `-timeout` is the optional
   end-to-end cap, off by default). Without `-wait` the command returns as soon as

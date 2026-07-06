@@ -607,7 +607,7 @@ func TestAwaitRespawnTimesOut(t *testing.T) {
 	}
 }
 
-// The -wait JSON output is ONE document: the accepted ReloadResponse plus the
+// The --wait JSON output is ONE document: the accepted ReloadResponse plus the
 // respawn status when one was seen, omitted otherwise.
 func TestEmitReloadWaitSingleDocument(t *testing.T) {
 	accepted := &runnyv1.ReloadResponse{Accepted: true, ConfigSha256: wantSHA, AcceptingBootId: "A"}

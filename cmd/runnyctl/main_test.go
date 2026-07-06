@@ -19,6 +19,34 @@ import (
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
+// runArgs parses args through the real kong grammar and runs the selected
+// command against c. It is the test seam onto the production dispatch path (kong
+// parse → bind → Run), minus the home-resolution/dial that run() layers on top.
+// Nil writers on c default to io.Discard so a parse-only test needs no buffers.
+func runArgs(t *testing.T, c *ctl, args ...string) error {
+	t.Helper()
+	stdout, stderr := c.out, c.err
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	cli := &CLI{}
+	parser, err := newKong(cli, stdout, stderr, func(int) {})
+	if err != nil {
+		t.Fatalf("newKong: %v", err)
+	}
+	kctx, err := parser.Parse(args)
+	if err != nil {
+		return err
+	}
+	c.json = cli.JSON
+	kctx.BindTo(context.Background(), (*context.Context)(nil))
+	kctx.Bind(c)
+	return kctx.Run()
+}
+
 // A BACKOFF slot must surface how long until it retries — the time-in-state
 // column alone doesn't answer the question an operator is actually asking.
 func TestRenderStatusShowsBackoffRemaining(t *testing.T) {
@@ -395,7 +423,7 @@ func TestRenderCycleShowsImageRef(t *testing.T) {
 // or shutdown-interrupted cycle must read as such at a glance, not as a
 // failure with a suspicious error string, even though Result is "failure"
 // for both (the timeline stays truthful). The reason the operator typed
-// (carried in FailureError) must survive: `runnyctl recycle -reason` exists
+// (carried in FailureError) must survive: `runnyctl recycle --reason` exists
 // so `why` can answer "why was this healthy slot recycled". The ending values
 // come from the real cycle constants, not string literals — renaming a
 // constant must turn this red, not silently unstyle `why`.
@@ -509,39 +537,47 @@ func TestRenderStatusNoRetryWhenBackoffElapsed(t *testing.T) {
 	}
 }
 
-func TestUsageMentionsReload(t *testing.T) {
-	if !strings.Contains(usage, "reload") {
-		t.Error("usage does not mention the reload command")
+func TestCLIHasReloadCommand(t *testing.T) {
+	parser, err := newKong(&CLI{}, io.Discard, io.Discard, func(int) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, n := range parser.Model.Children {
+		if n.Name == "reload" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the CLI grammar has no reload command")
 	}
 }
 
-// Issue #47: a global flag (-json) must be honored AFTER the subcommand, not
-// only before it — `runnyctl status -json` must match `runnyctl -json status`.
+// Issue #47: the global --json must be honored AFTER the subcommand, not only
+// before it — `runnyctl status --json` must match `runnyctl --json status`.
+// kong resolves the root flag in either position, so this is now inherent.
 func TestDispatchTrailingJSONMatchesLeading(t *testing.T) {
 	resp := &runnyv1.GetStatusResponse{Version: "test", DaemonStarted: timestamppb.New(time.Now())}
-	render := func(setup func(*ctl), args ...string) string {
+	render := func(args ...string) string {
 		var buf bytes.Buffer
 		c := &ctl{client: &fakeRecycleClient{status: resp}, out: &buf, err: &bytes.Buffer{}}
-		if setup != nil {
-			setup(c)
-		}
-		if err := c.dispatch(context.Background(), args); err != nil {
-			t.Fatalf("dispatch %v: %v", args, err)
+		if err := runArgs(t, c, args...); err != nil {
+			t.Fatalf("run %v: %v", args, err)
 		}
 		return buf.String()
 	}
-	trailing := render(nil, "status", "-json")                  // runnyctl status -json
-	leading := render(func(c *ctl) { c.json = true }, "status") // runnyctl -json status
+	trailing := render("status", "--json") // runnyctl status --json
+	leading := render("--json", "status")  // runnyctl --json status
 	if trailing != leading {
-		t.Errorf("trailing vs leading -json differ:\n%q\nvs\n%q", trailing, leading)
+		t.Errorf("trailing vs leading --json differ:\n%q\nvs\n%q", trailing, leading)
 	}
 	if !strings.HasPrefix(strings.TrimSpace(trailing), "{") {
-		t.Errorf("status -json did not emit JSON:\n%s", trailing)
+		t.Errorf("status --json did not emit JSON:\n%s", trailing)
 	}
 }
 
-// An unknown trailing flag must error rather than be swallowed (no-flagset
-// command) or kill the process via os.Exit (a command with its own flagset).
+// An unknown trailing flag must error (naming it) rather than be swallowed or
+// kill the process via os.Exit — for a no-arg command and a slot command alike.
 func TestDispatchRejectsUnknownTrailingFlag(t *testing.T) {
 	mk := func() *ctl {
 		return &ctl{
@@ -554,10 +590,8 @@ func TestDispatchRejectsUnknownTrailingFlag(t *testing.T) {
 			out: &bytes.Buffer{}, err: &bytes.Buffer{},
 		}
 	}
-	// A no-flagset command (status) and a slot command (recycle, via slotArg)
-	// must both surface the bad flag as a returnable error naming it.
-	for _, args := range [][]string{{"status", "-bogus"}, {"recycle", "mac-1", "-bogus"}} {
-		err := mk().dispatch(context.Background(), args)
+	for _, args := range [][]string{{"status", "--bogus"}, {"recycle", "mac-1", "--bogus"}} {
+		err := runArgs(t, mk(), args...)
 		if err == nil {
 			t.Errorf("%v: unknown trailing flag was swallowed; expected an error", args)
 			continue
@@ -568,12 +602,23 @@ func TestDispatchRejectsUnknownTrailingFlag(t *testing.T) {
 	}
 }
 
-// A stray positional on a no-argument command is not silently ignored — the
-// same anti-swallow principle reload already applies to its own positionals.
+// A stray positional on a no-argument command is not silently ignored.
 func TestDispatchRejectsStrayPositional(t *testing.T) {
 	c := &ctl{client: &fakeRecycleClient{status: &runnyv1.GetStatusResponse{}}, out: &bytes.Buffer{}, err: &bytes.Buffer{}}
-	if err := c.dispatch(context.Background(), []string{"status", "mac-1"}); err == nil {
+	if err := runArgs(t, c, "status", "mac-1"); err == nil {
 		t.Error("status with a stray positional was swallowed; expected an error")
+	}
+}
+
+// A required-SLOT command must reject a missing positional — the guard the old
+// slotArg's "exactly one SLOT" check gave, now carried by kong's `arg:""` (no
+// optional:""). Parse fails before Run, so no client is dialed. This pins that a
+// stray optional:"" on any Slot field can't silently make the arg optional.
+func TestRequiredSlotRejectsMissing(t *testing.T) {
+	for _, cmd := range []string{"recycle", "debug", "pause", "resume", "why"} {
+		if err := runArgs(t, &ctl{}, cmd); err == nil {
+			t.Errorf("%s with no SLOT should have errored on the missing positional", cmd)
+		}
 	}
 }
 
@@ -593,57 +638,54 @@ func (fakeLogsClient) StreamLogs(_ context.Context, _ *runnyv1.StreamLogsRequest
 	return fakeLogStream{}, nil
 }
 
-// Issue #47, flag-first ordering: a trailing -json after `-flag SLOT` must still
-// be honored, not rejected as a second positional. Go's flag package stops at
-// the first positional, so slotArg must parse flags and positionals interspersed
-// (the case Codex flagged on PR #106).
-func TestSlotArgHonorsTrailingFlagAfterSlot(t *testing.T) {
-	c := &ctl{out: &bytes.Buffer{}}
-	fs, j := subFlags("recycle")
-	force := fs.Bool("force", false, "")
-	slot, err := c.slotArg(fs, j, []string{"-force", "mac-1", "-json"})
-	if err != nil {
-		t.Fatalf("recycle -force mac-1 -json: %v", err)
-	}
-	if slot != "mac-1" {
-		t.Errorf("slot = %q, want mac-1", slot)
-	}
-	if !*force {
-		t.Error("-force before the slot was not parsed")
+// Issue #47, flag-first ordering: a flag before the slot AND a trailing --json
+// after it must both parse, not be rejected as a second positional. kong
+// interleaves flags and positionals natively.
+func TestRecycleFlagInterleaving(t *testing.T) {
+	fc := &fakeRecycleClient{status: &runnyv1.GetStatusResponse{Slots: []*runnyv1.SlotStatus{{
+		Slot: "mac-1", State: runnyv1.SlotState_SLOT_STATE_LISTENING,
+		StateEntered: timestamppb.New(time.Now()),
+	}}}}
+	c := &ctl{client: fc, out: &bytes.Buffer{}, err: &bytes.Buffer{}}
+	if err := runArgs(t, c, "recycle", "--force", "mac-1", "--json"); err != nil {
+		t.Fatalf("recycle --force mac-1 --json: %v", err)
 	}
 	if !c.json {
-		t.Error("trailing -json after a flag-first slot was not folded")
+		t.Error("trailing --json after a flag-first slot was not honored")
+	}
+	if fc.recycled == nil || fc.recycled.GetSlot() != "mac-1" {
+		t.Errorf("slot not parsed from interleaved args: %+v", fc.recycled)
 	}
 }
 
-// logs' optional SLOT does not route through slotArg, yet a flag written AFTER
-// the slot — the documented `logs [SLOT] [-daemon] [-replay N] [-follow=false]`
-// form — must parse, not be rejected as a second positional (issue #47).
+// logs' optional SLOT and its flags — the documented
+// `logs [SLOT] [--daemon] [--replay N] [--no-follow]` form — must parse in any
+// order (issue #47).
 func TestDispatchLogsAcceptsFlagAfterSlot(t *testing.T) {
 	for _, args := range [][]string{
-		{"logs", "mac-1", "-replay", "10"},          // slot then flag (the broken form)
-		{"logs", "mac-1", "-json"},                  // slot then -json
-		{"logs", "-replay", "10", "mac-1"},          // flag then slot
-		{"logs", "-replay", "10", "mac-1", "-json"}, // flag, slot, trailing -json (Codex's case)
-		{"logs", "mac-1"},                           // bare slot
-		{"logs"},                                    // no slot
+		{"logs", "mac-1", "--replay", "10"},           // slot then flag
+		{"logs", "mac-1", "--json"},                   // slot then --json
+		{"logs", "--replay", "10", "mac-1"},           // flag then slot
+		{"logs", "--replay", "10", "mac-1", "--json"}, // flag, slot, trailing --json
+		{"logs", "mac-1"},                             // bare slot
+		{"logs"},                                      // no slot
 	} {
 		c := &ctl{client: fakeLogsClient{}, out: &bytes.Buffer{}, err: &bytes.Buffer{}}
-		if err := c.dispatch(context.Background(), args); err != nil {
+		if err := runArgs(t, c, args...); err != nil {
 			t.Errorf("logs %v: unexpected error: %v", args[1:], err)
 		}
 	}
 	// Two SLOT positionals is still an error.
 	c := &ctl{client: fakeLogsClient{}, out: &bytes.Buffer{}, err: &bytes.Buffer{}}
-	if err := c.dispatch(context.Background(), []string{"logs", "mac-1", "mac-2"}); err == nil {
+	if err := runArgs(t, c, "logs", "mac-1", "mac-2"); err == nil {
 		t.Error("logs with two SLOT positionals should error")
 	}
-	// -daemon alongside a slot is still mutually exclusive (a different error,
+	// --daemon alongside a slot is still mutually exclusive (a different error,
 	// not the positional-count one).
 	c = &ctl{client: fakeLogsClient{}, out: &bytes.Buffer{}, err: &bytes.Buffer{}}
-	err := c.dispatch(context.Background(), []string{"logs", "mac-1", "-daemon"})
+	err := runArgs(t, c, "logs", "mac-1", "--daemon")
 	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
-		t.Errorf("logs mac-1 -daemon should fail as mutually exclusive; got %v", err)
+		t.Errorf("logs mac-1 --daemon should fail as mutually exclusive; got %v", err)
 	}
 }
 
@@ -980,27 +1022,27 @@ func TestRecycleGuardsDebugAndJob(t *testing.T) {
 		}}}
 	}
 
-	// DEBUG without -force is refused, with no Recycle sent.
+	// DEBUG without --force is refused, with no Recycle sent.
 	fc := &fakeRecycleClient{status: statusWith(runnyv1.SlotState_SLOT_STATE_DEBUG)}
 	c := &ctl{client: fc, out: &bytes.Buffer{}}
 	if err := c.recycle(context.Background(), "mac-1", "x", false); err == nil {
-		t.Error("DEBUG recycle without -force should be refused")
+		t.Error("DEBUG recycle without --force should be refused")
 	}
 	if fc.recycled != nil {
 		t.Error("a refused DEBUG recycle must not send Recycle")
 	}
 
-	// JOB without -force is refused.
+	// JOB without --force is refused.
 	fc = &fakeRecycleClient{status: statusWith(runnyv1.SlotState_SLOT_STATE_JOB)}
 	c = &ctl{client: fc, out: &bytes.Buffer{}}
 	if err := c.recycle(context.Background(), "mac-1", "x", false); err == nil {
-		t.Error("JOB recycle without -force should be refused")
+		t.Error("JOB recycle without --force should be refused")
 	}
 	if fc.recycled != nil {
 		t.Error("a refused JOB recycle must not send Recycle")
 	}
 
-	// JOB with -force sets cancel_running_job (the operator OBSERVED JOB).
+	// JOB with --force sets cancel_running_job (the operator OBSERVED JOB).
 	fc = &fakeRecycleClient{status: statusWith(runnyv1.SlotState_SLOT_STATE_JOB)}
 	c = &ctl{client: fc, out: &bytes.Buffer{}}
 	if err := c.recycle(context.Background(), "mac-1", "x", true); err != nil {
@@ -1020,19 +1062,19 @@ func TestRecycleGuardsDebugAndJob(t *testing.T) {
 		t.Errorf("LISTENING recycle must not cancel a job: %+v", fc.recycled)
 	}
 
-	// GetStatus failure without -force REFUSES rather than silently degrading:
+	// GetStatus failure without --force REFUSES rather than silently degrading:
 	// the guard cannot tell whether the recycle would destroy a debug hold, and
 	// a plain recycle releases a hold daemon-side regardless.
 	fc = &fakeRecycleClient{statusErr: errors.New("status rpc blip")}
 	c = &ctl{client: fc, out: &bytes.Buffer{}}
 	if err := c.recycle(context.Background(), "mac-1", "x", false); err == nil {
-		t.Error("recycle should refuse when status is unreadable and -force is absent")
+		t.Error("recycle should refuse when status is unreadable and --force is absent")
 	}
 	if fc.recycled != nil {
-		t.Error("a status-blip recycle without -force must not send Recycle")
+		t.Error("a status-blip recycle without --force must not send Recycle")
 	}
 
-	// GetStatus failure WITH -force proceeds: the operator consented to whatever
+	// GetStatus failure WITH --force proceeds: the operator consented to whatever
 	// shape the slot is in.
 	fc = &fakeRecycleClient{statusErr: errors.New("status rpc blip")}
 	c = &ctl{client: fc, out: &bytes.Buffer{}}

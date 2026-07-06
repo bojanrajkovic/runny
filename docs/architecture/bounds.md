@@ -82,7 +82,7 @@ per-check backstop is never one.
 
 ## This applies to client UX as rigorously as to daemon internals
 
-The principle is not a daemon-only concern. `runnyctl reload -wait` and the Runny
+The principle is not a daemon-only concern. `runnyctl reload --wait` and the Runny
 app are bounded by magnitude-matched backstops, never by a sum of the daemon's
 internal budgets: the reload preflight RPC carries a flat backstop over a
 healthy-slow preflight; the respawn wait a flat backstop over a healthy cold

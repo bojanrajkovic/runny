@@ -30,12 +30,7 @@ pools: []
 // daemon (or report it applies on next start). Works for both the per-user and
 // system home — the operator reaches the system home via its inheriting ACL,
 // so no sudo is needed either way.
-func (c *ctl) editConfig(ctx context.Context, args []string) error {
-	fs, j := subFlags("edit-config")
-	if err := c.parseNoArgs(fs, j, args); err != nil {
-		return err
-	}
-
+func (c *ctl) editConfig(ctx context.Context) error {
 	dir, err := home.ResolveClient()
 	if err != nil {
 		return err

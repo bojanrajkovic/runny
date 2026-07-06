@@ -584,7 +584,7 @@ func resetTimer(t *time.Timer, d time.Duration) {
 	t.Reset(d)
 }
 
-// emitReloadWait writes the whole -wait result as ONE JSON document: the
+// emitReloadWait writes the whole --wait result as ONE JSON document: the
 // accepted ReloadResponse plus the respawn status when one was observed.
 // respawn is omitted when no successor was seen (a Ctrl-C, a stall, or a
 // respawn timeout).

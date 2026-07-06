@@ -42,7 +42,7 @@ key to revoke and no persistence to clean up.
 
 ## Decision
 
-`runnyctl debug <slot> [-pubkey FILE] [-hold DUR] [-reason TEXT]` sends one
+`runnyctl debug <slot> [--pubkey FILE] [--hold DUR] [--reason TEXT]` sends one
 `InjectDebugKey` RPC. The socket server canonicalizes the key (re-marshals to a
 `type base64` line — no client bytes reach a guest shell), validates the hold
 against `limits.max_debug_hold`, and enqueues a `CmdDebugKey` on the slot's

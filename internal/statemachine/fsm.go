@@ -201,7 +201,7 @@ type Command struct {
 	// is never recorded (see setPaused).
 	ID string
 	// CancelJob applies to CmdRecycle only: consent to cancel a RUNNING job
-	// (decision 14). runnyctl sets it via its -force guard after observing
+	// (decision 14). runnyctl sets it via its --force guard after observing
 	// JOB. Without it, a mid-job recycle disarms any debug hold and the job
 	// runs to its normal end.
 	CancelJob bool

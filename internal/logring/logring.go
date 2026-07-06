@@ -6,7 +6,6 @@ package logring
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -54,14 +53,19 @@ func (r *Ring) add(e Entry) {
 // rather than wedging the producer.
 func (r *Ring) Add(e Entry) { r.add(e) }
 
-// Snapshot returns up to the last n entries without subscribing.
-func (r *Ring) Snapshot(n int) []Entry {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// tailLocked returns up to the last n entries of buf. Caller must hold r.mu.
+func (r *Ring) tailLocked(n int) []Entry {
 	start := max(len(r.buf)-n, 0)
 	out := make([]Entry, len(r.buf)-start)
 	copy(out, r.buf[start:])
 	return out
+}
+
+// Snapshot returns up to the last n entries without subscribing.
+func (r *Ring) Snapshot(n int) []Entry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.tailLocked(n)
 }
 
 // Subscribe registers a follower and returns up to the last `replay` entries
@@ -78,9 +82,7 @@ func (r *Ring) Subscribe(replay int) ([]Entry, <-chan Entry, func()) {
 	ch := make(chan Entry, 256)
 	var snap []Entry
 	if replay > 0 {
-		start := max(len(r.buf)-replay, 0)
-		snap = make([]Entry, len(r.buf)-start)
-		copy(snap, r.buf[start:])
+		snap = r.tailLocked(replay)
 	}
 	r.subs[id] = ch
 	r.mu.Unlock()
@@ -154,8 +156,3 @@ func (h *Handler) WithGroup(name string) slog.Handler {
 }
 
 var _ slog.Handler = (*Handler)(nil)
-
-// Verify Entry formats reasonably for human rendering.
-func (e Entry) String() string {
-	return fmt.Sprintf("%s %-5s %s", e.Time.Format(time.RFC3339), e.Level, e.Message)
-}

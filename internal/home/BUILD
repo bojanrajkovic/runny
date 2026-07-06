@@ -7,6 +7,7 @@ go_library(
         "home.go",
         "instance.go",
         "operatorgrants.go",
+        "testconfig.go",
         "warnings.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/home",

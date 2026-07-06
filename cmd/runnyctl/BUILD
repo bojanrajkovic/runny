@@ -64,6 +64,7 @@ go_test(
     embed = [":runnyctl_lib"],
     deps = [
         "//internal/cycle",
+        "//internal/home",
         "//internal/launchd",
         "//internal/socket",
         "//proto/runny/v1:runny",

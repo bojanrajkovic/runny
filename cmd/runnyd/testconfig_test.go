@@ -26,7 +26,7 @@ var bigHost = home.HostResources{LogicalCores: 64, PhysicalRAMGB: 256}
 // verdictFor validates body against the conservative worst-case prefix (the
 // stateless gate's fallback) — deterministic regardless of the test host's
 // hostname or persisted instance-id.
-func verdictFor(t *testing.T, body []byte, host home.HostResources) configVerdict {
+func verdictFor(t *testing.T, body []byte, host home.HostResources) home.Verdict {
 	t.Helper()
 	return testConfigVerdict(writeTestConfigFile(t, body), home.WorstCasePrefix(), host)
 }

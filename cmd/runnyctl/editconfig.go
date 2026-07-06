@@ -84,7 +84,7 @@ func (c *ctl) editConfig(ctx context.Context) error {
 			fmt.Fprintln(c.out, "no changes")
 			return nil
 		}
-		v, err := runConfigGate(runnyd, tmpPath)
+		v, err := home.RunTestConfig(ctx, runnyd, tmpPath)
 		if err != nil {
 			return err
 		}
@@ -95,14 +95,14 @@ func (c *ctl) editConfig(ctx context.Context) error {
 			fmt.Fprintf(c.err, "error: %s\n", e)
 		}
 		switch v.Status {
-		case verdictOK:
-		case verdictWarn:
+		case home.VerdictOK:
+		case home.VerdictWarn:
 			if !confirmYN("apply despite the warning(s) above?") {
 				fmt.Fprintln(c.err, "reopening the editor…")
 				continue
 			}
 		default:
-			// verdictError, or any status this runnyctl doesn't recognize — fail
+			// home.VerdictError, or any status this runnyctl doesn't recognize — fail
 			// closed like decideUpgrade does for the same contract (upgradedaemon.go):
 			// an unrecognized status must never be treated as an implicit ok.
 			fmt.Fprintln(c.err, "fix the error(s) above — reopening the editor…")

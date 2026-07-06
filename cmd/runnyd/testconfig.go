@@ -10,22 +10,6 @@ import (
 	"github.com/bojanrajkovic/runny/internal/home"
 )
 
-// configVerdict is the machine-readable result of `runnyd -test-config`: the
-// cross-language contract the Swift app and runnyctl both parse to gate a daemon
-// update. Status is ok|warn|error; errors and warnings are always arrays (never
-// null). The schema is stable surface, versioned with the daemon.
-type configVerdict struct {
-	Status   string         `json:"status"`
-	Errors   []string       `json:"errors"`
-	Warnings []home.Warning `json:"warnings"`
-}
-
-const (
-	verdictOK    = "ok"
-	verdictWarn  = "warn"
-	verdictError = "error"
-)
-
 // testConfigVerdict validates a config file with the LOCAL startup-blocking
 // checks the respawn hard-fails on — strict parse + validate (LoadConfig), then
 // the shared localConfigChecks (GitHub private-key parse, the macOS guest cap,
@@ -38,10 +22,10 @@ const (
 // upgrade — the private-key check is a local file read + PEM/RSA parse, no
 // round-trip. The prefix is injected (see gatePrefix) so the verdict is a pure
 // function of its inputs.
-func testConfigVerdict(configPath, prefix string, host home.HostResources) configVerdict {
+func testConfigVerdict(configPath, prefix string, host home.HostResources) home.Verdict {
 	cfg, err := home.LoadConfig(configPath)
 	if err != nil {
-		return configVerdict{Status: verdictError, Errors: splitLines(err.Error()), Warnings: []home.Warning{}}
+		return home.Verdict{Status: home.VerdictError, Errors: splitLines(err.Error()), Warnings: []home.Warning{}}
 	}
 
 	errs := []string{}
@@ -54,14 +38,14 @@ func testConfigVerdict(configPath, prefix string, host home.HostResources) confi
 		warns = []home.Warning{}
 	}
 
-	status := verdictOK
+	status := home.VerdictOK
 	switch {
 	case len(errs) > 0:
-		status = verdictError
+		status = home.VerdictError
 	case len(warns) > 0:
-		status = verdictWarn
+		status = home.VerdictWarn
 	}
-	return configVerdict{Status: status, Errors: errs, Warnings: warns}
+	return home.Verdict{Status: status, Errors: errs, Warnings: warns}
 }
 
 // runTestConfig validates the config and prints the verdict JSON to stdout, then
@@ -76,7 +60,7 @@ func runTestConfig(configPath string) error {
 		return fmt.Errorf("marshaling verdict: %w", err)
 	}
 	fmt.Println(string(b))
-	if v.Status == verdictError {
+	if v.Status == home.VerdictError {
 		os.Exit(1)
 	}
 	return nil

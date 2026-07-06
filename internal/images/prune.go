@@ -58,7 +58,7 @@ func PlanRunnerCachePrune(cacheDir string, keep int, protect map[string]bool) ([
 			}
 			items = append(items, PlanItem{
 				Path:   filepath.Join(cacheDir, name),
-				Bytes:  fileSize(filepath.Join(cacheDir, name)),
+				Bytes:  diskBytes(filepath.Join(cacheDir, name)),
 				Kind:   "runner-tarball",
 				Reason: "dead .partial",
 				Label:  name,
@@ -93,7 +93,7 @@ func PlanRunnerCachePrune(cacheDir string, keep int, protect map[string]bool) ([
 			}
 			items = append(items, PlanItem{
 				Path:   filepath.Join(cacheDir, t.name),
-				Bytes:  fileSize(filepath.Join(cacheDir, t.name)),
+				Bytes:  diskBytes(filepath.Join(cacheDir, t.name)),
 				Kind:   "runner-tarball",
 				Reason: "superseded",
 				Label:  t.name,
@@ -229,8 +229,6 @@ func PruneRunnerCache(cacheDir string, keep int) error {
 }
 
 // ---- helpers -----------------------------------------------------------------
-
-func fileSize(path string) int64 { return diskBytes(path) }
 
 func dirSize(path string) int64 {
 	var total int64

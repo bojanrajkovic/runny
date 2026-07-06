@@ -428,10 +428,10 @@ func (e *Ensurer) downloadTarball(ctx context.Context, dest, assetURL, wantSHA s
 		return err
 	}
 	prog := newProgress(report, log, e.StallBudget)
-	body := io.TeeReader(dresp.Body, progressWriter(func(n int64) {
+	body := io.TeeReader(dresp.Body, oci.ProgressWriter{Fn: func(n int64) {
 		stall.Feed(n)
 		prog.feed(n)
-	}))
+	}})
 	h := sha256.New()
 	_, err = io.Copy(io.MultiWriter(f, h), body)
 	prog.stop()
@@ -467,14 +467,6 @@ func stallErr(wctx context.Context, err error, doing string) error {
 		return fmt.Errorf("%s: %w", doing, cause)
 	}
 	return fmt.Errorf("%s: %w", doing, err)
-}
-
-// progressWriter adapts a byte-delta callback to io.Writer for TeeReader.
-type progressWriter func(int64)
-
-func (p progressWriter) Write(b []byte) (int, error) {
-	p(int64(len(b)))
-	return len(b), nil
 }
 
 // tarballClient is http.DefaultClient plus the obs transport: the runner

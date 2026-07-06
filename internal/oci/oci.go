@@ -661,17 +661,20 @@ func HumanBytes(n int64) string {
 	}
 }
 
-// progressWriter forwards write lengths to a progress callback. It holds no
-// shared state of its own, but pull runs several of these concurrently (one per
-// errgroup layer), so fn is called from multiple goroutines — see Client.Progress
-// for the goroutine-safety contract callers must honor.
-type progressWriter struct{ fn func(int64) }
+// ProgressWriter adapts a byte-delta callback to io.Writer for a TeeReader.
+// Fn holds no shared state of its own, but a caller may run several of these
+// concurrently (pull's errgroup fans one per disk layer), so Fn must be
+// goroutine-safe — see Client.Progress for the contract this client's own
+// callback honors. Exported because internal/images' runner-tarball download
+// wants the identical adapter; two copies of this had already drifted apart
+// once (see HumanBytes).
+type ProgressWriter struct{ Fn func(int64) }
 
-func (p progressWriter) Write(b []byte) (int, error) {
-	if p.fn != nil {
-		p.fn(int64(len(b)))
+func (p ProgressWriter) Write(b []byte) (int, error) {
+	if p.Fn != nil {
+		p.Fn(int64(len(b)))
 	}
 	return len(b), nil
 }
 
-func (c *Client) progressWriter() io.Writer { return progressWriter{fn: c.Progress} }
+func (c *Client) progressWriter() io.Writer { return ProgressWriter{Fn: c.Progress} }

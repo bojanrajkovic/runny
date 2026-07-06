@@ -39,12 +39,6 @@ type stopOps interface {
 // racing into its Error state. Overridable in tests.
 var stopSettle = 10 * time.Second
 
-// abandonedStopTimeout bounds the detached best-effort force stop of a machine
-// whose boot blew its deadline (vz_darwin.go). That path has no caller ctx left
-// to bound it, so this is the only thing keeping its wait finite — and the
-// signal that gets a wedged force stop logged rather than silently parked.
-var abandonedStopTimeout = 30 * time.Second
-
 // stopMachine runs the bounded stop sequence every platform shares: an
 // optional graceful RequestStop bounded by grace, then a force stop. done
 // closes when the machine reaches a terminal state (Stopped or Error). Force

@@ -15,12 +15,11 @@ import (
 )
 
 var testCycle = obs.CycleRef{
-	InstancePrefix: "host-abcd1234",
-	Slot:           "pool-0",
-	Pool:           "macos-arm",
-	CycleID:        "a1b2c3d4",
-	RunnerName:     "host-abcd1234-pool-0-a1b2c3d4",
-	Started:        time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC),
+	Slot:       "pool-0",
+	Pool:       "macos-arm",
+	CycleID:    "a1b2c3d4",
+	RunnerName: "host-abcd1234-pool-0-a1b2c3d4",
+	Started:    time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC),
 }
 
 func newTestAssembler(t *testing.T) (obs.Emitter, *tracetest.InMemoryExporter) {

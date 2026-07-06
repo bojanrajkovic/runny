@@ -10,7 +10,7 @@ import (
 )
 
 func testCycle() CycleRef {
-	return CycleRef{InstancePrefix: "host-ab12cd34", Slot: "slot-0", CycleID: "deadbeef", Started: time.Now()}
+	return CycleRef{Slot: "slot-0", CycleID: "deadbeef", Started: time.Now()}
 }
 
 // Every event emitted through a cycle's step scopes — however many the FSM

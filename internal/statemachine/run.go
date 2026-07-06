@@ -164,13 +164,12 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	cctx, ccancel := context.WithCancelCause(ctx)
 	defer ccancel(nil)
 	cctx = obs.WithCycle(cctx, c.deps.Events, obs.CycleRef{
-		InstancePrefix: c.deps.InstancePrefix,
-		Slot:           c.name,
-		Pool:           c.deps.Pool.Name,
-		Image:          c.deps.Pool.Image,
-		CycleID:        c.rec.CycleID,
-		RunnerName:     c.runnerName,
-		Started:        c.rec.Started,
+		Slot:       c.name,
+		Pool:       c.deps.Pool.Name,
+		Image:      c.deps.Pool.Image,
+		CycleID:    c.rec.CycleID,
+		RunnerName: c.runnerName,
+		Started:    c.rec.Started,
 	})
 	obs.Emit(cctx, obs.Event{Kind: obs.KindCycleStarted})
 	stopWatch := make(chan struct{})

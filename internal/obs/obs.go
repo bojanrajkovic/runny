@@ -110,9 +110,8 @@ func ErrText(err error) string {
 // attributes, the metrics side's pool label): all of it is known at cycle
 // start, so it rides the ref instead of needing events of its own.
 type CycleRef struct {
-	InstancePrefix string
-	Slot           string
-	Pool           string
+	Slot string
+	Pool string
 	// Image is the pool's configured image ref (intent, from config) — the
 	// resolved digest is learned mid-cycle and travels as an ImageEvent.
 	Image      string

@@ -38,6 +38,16 @@ type DoctorCheck struct {
 	Detail string
 }
 
+// checksToProto converts a slice of DoctorCheck to their wire shape, nil in
+// nil out — same as the hand-rolled append loops it replaces.
+func checksToProto(checks []DoctorCheck) []*runnyv1.DoctorCheck {
+	var out []*runnyv1.DoctorCheck
+	for _, c := range checks {
+		out = append(out, &runnyv1.DoctorCheck{Name: c.Name, Ok: c.OK, Detail: c.Detail})
+	}
+	return out
+}
+
 // ReloadResult mirrors runny.v1.ReloadResponse: the verdict of a reload
 // preflight plus the drain it did (or did not) start. The daemon owns the
 // drain; this is only the synchronous answer.
@@ -638,12 +648,8 @@ func (s *Server) reloadResponse(r ReloadResult) *runnyv1.ReloadResponse {
 		// a follower needs no pre-RPC status read to baseline against — the
 		// respawn is then identified by a boot_id that differs from this one.
 		AcceptingBootId: s.BootID,
-	}
-	for _, c := range r.FailedChecks {
-		resp.FailedChecks = append(resp.FailedChecks, &runnyv1.DoctorCheck{Name: c.Name, Ok: c.OK, Detail: c.Detail})
-	}
-	for _, c := range r.Warnings {
-		resp.Warnings = append(resp.Warnings, &runnyv1.DoctorCheck{Name: c.Name, Ok: c.OK, Detail: c.Detail})
+		FailedChecks:    checksToProto(r.FailedChecks),
+		Warnings:        checksToProto(r.Warnings),
 	}
 	return resp
 }
@@ -701,11 +707,7 @@ func (s *Server) Why(ctx context.Context, req *runnyv1.WhyRequest) (*runnyv1.Why
 }
 
 func (s *Server) Doctor(ctx context.Context, _ *runnyv1.DoctorRequest) (*runnyv1.DoctorResponse, error) {
-	resp := &runnyv1.DoctorResponse{}
-	for _, c := range s.DoctorFn(ctx) {
-		resp.Checks = append(resp.Checks, &runnyv1.DoctorCheck{Name: c.Name, Ok: c.OK, Detail: c.Detail})
-	}
-	return resp, nil
+	return &runnyv1.DoctorResponse{Checks: checksToProto(s.DoctorFn(ctx))}, nil
 }
 
 // usernameLookupBound caps how long InjectDebugKey waits on lookupUsername:

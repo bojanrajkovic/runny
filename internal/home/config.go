@@ -245,11 +245,8 @@ func (d Duration) MarshalYAML() ([]byte, error) {
 
 // LoadConfig reads, defaults, and validates the config file.
 func LoadConfig(path string) (*Config, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading config: %w", err)
-	}
-	return parseConfig(raw, path)
+	cfg, _, err := LoadConfigSHA(path)
+	return cfg, err
 }
 
 // ParseConfig defaults and validates already-read config bytes. path is used
@@ -259,7 +256,17 @@ func LoadConfig(path string) (*Config, error) {
 // risks parsing a different version than the one the caller already has in
 // hand (the same hazard LoadConfigSHA reads once to avoid).
 func ParseConfig(raw []byte, path string) (*Config, error) {
-	return parseConfig(raw, path)
+	var c Config
+	if err := yaml.UnmarshalWithOptions(raw, &c, yaml.Strict()); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	c.applyDefaults()
+	// validate() reads no header values, so it can run (and join errors)
+	// even when expansion failed.
+	if err := errors.Join(c.expandOTLPHeaders(), c.validate()); err != nil {
+		return nil, fmt.Errorf("invalid config %s: %w", path, err)
+	}
+	return &c, nil
 }
 
 // LoadConfigSHA loads the config and returns the SHA-256 (hex) of the exact
@@ -276,25 +283,11 @@ func LoadConfigSHA(path string) (*Config, string, error) {
 	// still name the rejected file version, while the accept path's hash
 	// provably describes what validated (both from this one read).
 	sha := fmt.Sprintf("%x", sha256.Sum256(raw))
-	cfg, err := parseConfig(raw, path)
+	cfg, err := ParseConfig(raw, path)
 	if err != nil {
 		return nil, sha, err
 	}
 	return cfg, sha, nil
-}
-
-func parseConfig(raw []byte, path string) (*Config, error) {
-	var c Config
-	if err := yaml.UnmarshalWithOptions(raw, &c, yaml.Strict()); err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", path, err)
-	}
-	c.applyDefaults()
-	// validate() reads no header values, so it can run (and join errors)
-	// even when expansion failed.
-	if err := errors.Join(c.expandOTLPHeaders(), c.validate()); err != nil {
-		return nil, fmt.Errorf("invalid config %s: %w", path, err)
-	}
-	return &c, nil
 }
 
 // envPlaceholderRE is the Collector's ${env:VAR} placeholder syntax. Only

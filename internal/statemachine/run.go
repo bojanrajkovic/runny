@@ -630,12 +630,7 @@ func (c *run) listenAndRunJob(ctx context.Context) (bool, State, error) {
 
 // runnerRegistered reports whether name appears among runners.
 func runnerRegistered(runners []github.Runner, name string) bool {
-	for _, r := range runners {
-		if r.Name == name {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(runners, func(r github.Runner) bool { return r.Name == name })
 }
 
 // maxJobName caps the guest-controlled job name. The name is sliced from the
@@ -827,12 +822,7 @@ type debugArm struct {
 }
 
 func (a *debugArm) landed(fp string) bool {
-	for _, k := range a.keys {
-		if k.fingerprint == fp && k.landed {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(a.keys, func(k armedKey) bool { return k.fingerprint == fp && k.landed })
 }
 
 // writeAuditSidecar writes the cycle's InjectedKeys to the operator-access.json
@@ -1298,12 +1288,9 @@ func (c *run) debugReArm(ctx context.Context, cmd Command,
 // keyInstalledThisCycle reports whether fp has an ok/armed/re-armed audit
 // entry this cycle — the DEBUG re-arm consults outcomes, not raw membership.
 func (c *run) keyInstalledThisCycle(fp string) bool {
-	for _, k := range c.rec.InjectedKeys {
-		if k.Fingerprint == fp && keyOutcomeLanded(k.Outcome) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(c.rec.InjectedKeys, func(k cycle.InjectedKey) bool {
+		return k.Fingerprint == fp && keyOutcomeLanded(k.Outcome)
+	})
 }
 
 // keyOutcomeLanded reports whether outcome means the key provably reached the
@@ -1320,12 +1307,9 @@ func keyOutcomeLanded(outcome string) bool {
 // len==0 check skips), so false negatives lose recordings and false positives
 // cost one no-op SSH command.
 func anyKeyLanded(rec *cycle.Record) bool {
-	for _, k := range rec.InjectedKeys {
-		if keyOutcomeLanded(k.Outcome) || k.Outcome == "error" {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(rec.InjectedKeys, func(k cycle.InjectedKey) bool {
+		return keyOutcomeLanded(k.Outcome) || k.Outcome == "error"
+	})
 }
 
 // drainForCompletion non-blockingly drains c.proc.Lines after jctx fires: a

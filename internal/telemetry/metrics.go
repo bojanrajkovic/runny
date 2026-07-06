@@ -69,43 +69,36 @@ type metricsConsumer struct {
 
 func (m *metricsConsumer) instruments(meter metric.Meter) error {
 	var errs []error
-	var err error
-	m.cycleCount, err = meter.Int64Counter("runny.cycle.count",
-		metric.WithUnit("{cycle}"),
-		metric.WithDescription("Finished runner cycles, by recorded result and persisted ending classification."))
-	errs = append(errs, err)
-	m.cycleDuration, err = meter.Float64Histogram("runny.cycle.duration",
-		metric.WithUnit("s"),
-		metric.WithDescription("Wall-clock duration of a finished cycle, start to CycleFinished."))
-	errs = append(errs, err)
-	m.stepDuration, err = meter.Float64Histogram("runny.step.duration",
-		metric.WithUnit("s"),
-		metric.WithDescription("Duration of one FSM step, StepEntered to StepLeft, by outcome."))
-	errs = append(errs, err)
-	m.jobCount, err = meter.Int64Counter("runny.job.count",
-		metric.WithUnit("{job}"),
-		metric.WithDescription("GitHub Actions jobs finished on a slot's runner, by outcome."))
-	errs = append(errs, err)
-	m.jobDuration, err = meter.Float64Histogram("runny.job.duration",
-		metric.WithUnit("s"),
-		metric.WithDescription("Duration of one job, JobStarted to JobEnded."))
-	errs = append(errs, err)
-	m.actionDuration, err = meter.Float64Histogram("runny.action.duration",
-		metric.WithUnit("s"),
-		metric.WithDescription("Duration of one obs.Action sub-step within an FSM step."))
-	errs = append(errs, err)
-	m.pullDuration, err = meter.Float64Histogram("runny.image.pull.duration",
-		metric.WithUnit("s"),
-		metric.WithDescription("Wall-clock lifetime of one underlying image pull, including disk holds and re-attempts, recorded once at its terminal outcome regardless of how many slots shared it."))
-	errs = append(errs, err)
-	m.pullBytes, err = meter.Float64Histogram("runny.image.pull.bytes",
-		metric.WithUnit("By"),
-		metric.WithDescription("Bytes transferred by one underlying image pull, cumulative across its attempts (can exceed the image size on retry)."))
-	errs = append(errs, err)
-	m.tarballDuration, err = meter.Float64Histogram("runny.runner_tarball.download.duration",
-		metric.WithUnit("s"),
-		metric.WithDescription("Duration of one actual runner-tarball download — cache hits and slots that waited out a peer's download record nothing."))
-	errs = append(errs, err)
+	counter := func(name, unit, desc string) metric.Int64Counter {
+		c, err := meter.Int64Counter(name, metric.WithUnit(unit), metric.WithDescription(desc))
+		errs = append(errs, err)
+		return c
+	}
+	hist := func(name, unit, desc string) metric.Float64Histogram {
+		h, err := meter.Float64Histogram(name, metric.WithUnit(unit), metric.WithDescription(desc))
+		errs = append(errs, err)
+		return h
+	}
+
+	m.cycleCount = counter("runny.cycle.count", "{cycle}",
+		"Finished runner cycles, by recorded result and persisted ending classification.")
+	m.cycleDuration = hist("runny.cycle.duration", "s",
+		"Wall-clock duration of a finished cycle, start to CycleFinished.")
+	m.stepDuration = hist("runny.step.duration", "s",
+		"Duration of one FSM step, StepEntered to StepLeft, by outcome.")
+	m.jobCount = counter("runny.job.count", "{job}",
+		"GitHub Actions jobs finished on a slot's runner, by outcome.")
+	m.jobDuration = hist("runny.job.duration", "s",
+		"Duration of one job, JobStarted to JobEnded.")
+	m.actionDuration = hist("runny.action.duration", "s",
+		"Duration of one obs.Action sub-step within an FSM step.")
+	m.pullDuration = hist("runny.image.pull.duration", "s",
+		"Wall-clock lifetime of one underlying image pull, including disk holds and re-attempts, recorded once at its terminal outcome regardless of how many slots shared it.")
+	m.pullBytes = hist("runny.image.pull.bytes", "By",
+		"Bytes transferred by one underlying image pull, cumulative across its attempts (can exceed the image size on retry).")
+	m.tarballDuration = hist("runny.runner_tarball.download.duration", "s",
+		"Duration of one actual runner-tarball download — cache hits and slots that waited out a peer's download record nothing.")
+
 	return errors.Join(errs...)
 }
 
@@ -211,26 +204,28 @@ type SlotSnapshot struct {
 // need to narrate.
 func RegisterGauges(meter metric.Meter, poll func() []SlotSnapshot, states []string, homePath string) error {
 	var errs []error
-	state, err := meter.Int64ObservableGauge("runny.slot.state",
-		metric.WithDescription("1 when the slot is in the labeled FSM state, else 0; one series per (pool, slot, state)."))
-	errs = append(errs, err)
-	entered, err := meter.Int64ObservableGauge("runny.slot.state_entered_time",
-		metric.WithUnit("s"),
-		metric.WithDescription("Unix seconds the slot entered its current state; time-in-state = now minus this."))
-	errs = append(errs, err)
-	failures, err := meter.Int64ObservableGauge("runny.slot.consecutive_failures",
-		metric.WithDescription("Current consecutive-failure streak feeding the slot's backoff."))
-	errs = append(errs, err)
-	wedged, err := meter.Int64ObservableGauge("runny.slot.wedged",
-		metric.WithDescription("1 when the slot's guest survived force-stop and the slot is parked until daemon restart."))
-	errs = append(errs, err)
-	paused, err := meter.Int64ObservableGauge("runny.slot.paused",
-		metric.WithDescription("1 when the slot is operator-paused."))
-	errs = append(errs, err)
-	disk, err := meter.Int64ObservableGauge("runny.home.disk.free_bytes",
-		metric.WithUnit("By"),
-		metric.WithDescription("Available bytes on the runny home filesystem, as ENSURE_IMAGE's headroom checks see it."))
-	errs = append(errs, err)
+	gauge := func(name, unit, desc string) metric.Int64ObservableGauge {
+		opts := []metric.Int64ObservableGaugeOption{metric.WithDescription(desc)}
+		if unit != "" {
+			opts = append(opts, metric.WithUnit(unit))
+		}
+		g, err := meter.Int64ObservableGauge(name, opts...)
+		errs = append(errs, err)
+		return g
+	}
+
+	state := gauge("runny.slot.state", "",
+		"1 when the slot is in the labeled FSM state, else 0; one series per (pool, slot, state).")
+	entered := gauge("runny.slot.state_entered_time", "s",
+		"Unix seconds the slot entered its current state; time-in-state = now minus this.")
+	failures := gauge("runny.slot.consecutive_failures", "",
+		"Current consecutive-failure streak feeding the slot's backoff.")
+	wedged := gauge("runny.slot.wedged", "",
+		"1 when the slot's guest survived force-stop and the slot is parked until daemon restart.")
+	paused := gauge("runny.slot.paused", "",
+		"1 when the slot is operator-paused.")
+	disk := gauge("runny.home.disk.free_bytes", "By",
+		"Available bytes on the runny home filesystem, as ENSURE_IMAGE's headroom checks see it.")
 	if err := errors.Join(errs...); err != nil {
 		return err
 	}
@@ -242,7 +237,7 @@ func RegisterGauges(meter metric.Meter, poll func() []SlotSnapshot, states []str
 		return 0
 	}
 
-	_, err = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+	_, err := meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		for _, s := range poll() {
 			slotAttrs := metric.WithAttributes(
 				attribute.String("pool", s.Pool), attribute.String("slot", s.Slot),

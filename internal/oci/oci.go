@@ -664,6 +664,18 @@ func truncateFile(path string, size int64) error {
 	return f.Truncate(size)
 }
 
+// ShortDigest is the one display convention for digests: strip a leading
+// "sha256:" and keep the first 12 hex characters (shorter input is returned
+// as-is). Exported so every caller that prints a digest for a human — the
+// prune planner included — renders it the same way.
+func ShortDigest(d string) string {
+	d = strings.TrimPrefix(d, "sha256:")
+	if len(d) > 12 {
+		d = d[:12]
+	}
+	return d
+}
+
 // HumanBytes renders a byte count for humans. Exported because the pull
 // progress reporting in internal/images speaks the same dialect — two
 // copies of this had already drifted apart once.

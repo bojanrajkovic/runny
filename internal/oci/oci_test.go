@@ -92,6 +92,20 @@ func randomBytes(n int) []byte {
 	return b
 }
 
+func TestShortDigest(t *testing.T) {
+	cases := map[string]string{
+		"sha256:aabbccddeeff00112233": "aabbccddeeff",
+		"sha256:aabbcc":               "aabbcc",       // shorter than 12: returned as-is
+		"aabbccddeeff00112233":        "aabbccddeeff", // no prefix, still truncated
+		"":                            "",
+	}
+	for in, want := range cases {
+		if got := ShortDigest(in); got != want {
+			t.Errorf("ShortDigest(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestParseRef(t *testing.T) {
 	cases := []struct {
 		in   string

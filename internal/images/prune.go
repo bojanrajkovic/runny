@@ -254,9 +254,5 @@ func digestLabel(dirName string) string {
 	if !strings.HasPrefix(digest, "sha256:") {
 		return digest
 	}
-	hex := digest[7:]
-	if len(hex) > 12 {
-		hex = hex[:12]
-	}
-	return "sha256:" + hex
+	return "sha256:" + oci.ShortDigest(digest)
 }

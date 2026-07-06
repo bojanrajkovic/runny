@@ -7,39 +7,6 @@ import (
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
-// operatorDispatch handles the "operator" command group — runnyctl's first
-// subcommand group; grant/revoke/list are one cohesive noun, unlike the
-// otherwise-flat command set.
-func (c *ctl) operatorDispatch(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("operator requires a subcommand: grant, revoke, or list")
-	}
-	switch verb, rest := args[0], args[1:]; verb {
-	case "grant":
-		fs, j := subFlags("operator grant")
-		user, err := c.oneArg(fs, j, rest, "USER")
-		if err != nil {
-			return err
-		}
-		return c.operatorGrant(ctx, user)
-	case "revoke":
-		fs, j := subFlags("operator revoke")
-		user, err := c.oneArg(fs, j, rest, "USER")
-		if err != nil {
-			return err
-		}
-		return c.operatorRevoke(ctx, user)
-	case "list":
-		fs, j := subFlags("operator list")
-		if err := c.parseNoArgs(fs, j, rest); err != nil {
-			return err
-		}
-		return c.operatorList(ctx)
-	default:
-		return fmt.Errorf("unknown operator subcommand %q (want grant, revoke, or list)", verb)
-	}
-}
-
 func (c *ctl) operatorGrant(ctx context.Context, user string) error {
 	resp, err := c.client.GrantOperator(ctx, &runnyv1.GrantOperatorRequest{User: user})
 	if err != nil {

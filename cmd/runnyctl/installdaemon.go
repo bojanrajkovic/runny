@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/user"
 	"runtime"
@@ -18,26 +16,13 @@ import (
 // privileged local command (run via `sudo runnyctl install-daemon`), never a
 // daemon RPC — the daemon does not exist yet. The plist points at the runnyd
 // sibling of this runnyctl, and the inheriting ACL grants the operator account
-// (the --operator flag, else the human who ran sudo via SUDO_USER).
-func installDaemon(args []string) error {
-	fs := flag.NewFlagSet("install-daemon", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	operatorFlag := fs.String("operator", "",
-		"operator account the home's inheriting ACL grants (defaults to $SUDO_USER; required "+
-			"when run as root without sudo, where SUDO_USER is unset)")
-	configFlag := fs.String("config", "",
-		"stage this config.yaml (and the keys it references) into the home and validate "+
-			"before starting the daemon; without it, the daemon crash-loops until a config is hand-landed")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return fmt.Errorf("install-daemon takes no positional arguments (got %q)", fs.Arg(0))
-	}
+// (the --operator flag, else the human who ran sudo via SUDO_USER). Both
+// arguments arrive already parsed by kong (see InstallDaemonCmd).
+func installDaemon(operatorFlag, configFlag string) error {
 	if err := requireDarwinRoot("install-daemon"); err != nil {
 		return err
 	}
-	operator, err := resolveOperator(*operatorFlag, os.Getenv("SUDO_USER"))
+	operator, err := resolveOperator(operatorFlag, os.Getenv("SUDO_USER"))
 	if err != nil {
 		return err
 	}
@@ -57,8 +42,8 @@ func installDaemon(args []string) error {
 	cfg.Operator = operator
 	cfg.RunnydPath = runnyd
 	installer := sysdaemon.New(cfg)
-	if *configFlag != "" {
-		plan, err := planStageFromFile(*configFlag, cfg.HomeDir, operator)
+	if configFlag != "" {
+		plan, err := planStageFromFile(configFlag, cfg.HomeDir, operator)
 		if err != nil {
 			return err
 		}
@@ -68,7 +53,7 @@ func installDaemon(args []string) error {
 		return err
 	}
 	dir := home.Dir(cfg.HomeDir)
-	if *configFlag != "" {
+	if configFlag != "" {
 		fmt.Printf("\nrunnyd is installed, started, and running on the staged config (validated by\n"+
 			"runnyd -test-config before start). Change it later with `runnyctl edit-config`\n"+
 			"— never hand-edit %s and restart.\n", dir.ConfigPath())
@@ -118,26 +103,12 @@ func planStageFromFile(configPath, homeDir, operator string) (sysdaemon.StagePla
 
 // uninstallDaemon removes the system LaunchDaemon. It leaves the service account
 // and the home (config, key, artifacts) intact — see sysdaemon.Installer.Uninstall.
-func uninstallDaemon(args []string) error {
-	if err := parseNoFlagArgs("uninstall-daemon", args); err != nil {
-		return err
-	}
+// It takes no arguments; kong rejects any before this runs (see UninstallDaemonCmd).
+func uninstallDaemon() error {
 	if err := requireDarwinRoot("uninstall-daemon"); err != nil {
 		return err
 	}
 	return sysdaemon.New(sysdaemon.DefaultConfig()).Uninstall(context.Background())
-}
-
-func parseNoFlagArgs(name string, args []string) error {
-	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return fmt.Errorf("%s takes no arguments (got %q)", name, fs.Arg(0))
-	}
-	return nil
 }
 
 func requireDarwinRoot(name string) error {

@@ -114,7 +114,7 @@ func (c *ctl) upgradeDaemon(ctx context.Context, force bool, opts followOpts) er
 	if proceed, refusal := decideUpgrade(v.Status, force); !proceed {
 		return fmt.Errorf("%s", refusal)
 	}
-	// Narration goes to stderr — stdout is reloadWait's contract (the -json reload
+	// Narration goes to stderr — stdout is reloadWait's contract (the --json reload
 	// document must not be preceded by prose).
 	fmt.Fprintln(c.err, "config accepted by the new runnyd — draining and respawning onto it…")
 	// Use UpgradeReload so the daemon can defer a config-parse failure to the

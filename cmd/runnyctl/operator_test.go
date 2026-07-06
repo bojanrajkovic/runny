@@ -181,18 +181,16 @@ func TestOperatorListEmpty(t *testing.T) {
 	}
 }
 
-func TestOperatorDispatchUnknownSubcommand(t *testing.T) {
-	c := &ctl{client: &fakeOperatorClient{}, out: &bytes.Buffer{}}
-	err := c.dispatch(t.Context(), []string{"operator", "frobnicate"})
-	if err == nil {
+func TestOperatorUnknownSubcommand(t *testing.T) {
+	c := &ctl{client: &fakeOperatorClient{}, out: &bytes.Buffer{}, err: &bytes.Buffer{}}
+	if err := runArgs(t, c, "operator", "frobnicate"); err == nil {
 		t.Fatal("expected an error for an unknown operator subcommand")
 	}
 }
 
-func TestOperatorDispatchNoSubcommand(t *testing.T) {
-	c := &ctl{client: &fakeOperatorClient{}, out: &bytes.Buffer{}}
-	err := c.dispatch(t.Context(), []string{"operator"})
-	if err == nil {
+func TestOperatorNoSubcommand(t *testing.T) {
+	c := &ctl{client: &fakeOperatorClient{}, out: &bytes.Buffer{}, err: &bytes.Buffer{}}
+	if err := runArgs(t, c, "operator"); err == nil {
 		t.Fatal("expected an error when operator is called with no subcommand")
 	}
 }

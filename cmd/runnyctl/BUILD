@@ -7,6 +7,7 @@ load("//tools/sign:sign.bzl", "codesign_binary", "notarize_binary")
 go_library(
     name = "runnyctl_lib",
     srcs = [
+        "cli.go",
         "editconfig.go",
         "follow.go",
         "installdaemon.go",
@@ -24,6 +25,7 @@ go_library(
         "//internal/sysdaemon",
         "//internal/versioncore",
         "//proto/runny/v1:runny",
+        "@com_github_alecthomas_kong//:kong",
         "@com_github_rivo_uniseg//:uniseg",
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//codes",

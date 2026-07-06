@@ -3,13 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/bojanrajkovic/runny/internal/home"
-	"github.com/bojanrajkovic/runny/internal/sysdaemon"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
@@ -41,13 +39,9 @@ func decideUpgrade(status string, force bool) (proceed bool, refusal string) {
 // binary delivery, so there is no re-stage here, and the daemon never
 // self-upgrades: this is operator-driven.
 func (c *ctl) upgradeDaemon(ctx context.Context, force bool, opts followOpts) error {
-	exe, err := os.Executable()
+	runnyd, err := resolveRunnyd()
 	if err != nil {
-		return fmt.Errorf("locating runnyctl: %w", err)
-	}
-	runnyd := sysdaemon.ResolveRunnydPath(exe)
-	if _, err := os.Stat(runnyd); err != nil {
-		return fmt.Errorf("runnyd not found next to runnyctl at %s: %w", runnyd, err)
+		return err
 	}
 	dir, err := home.ResolveClient()
 	if err != nil {

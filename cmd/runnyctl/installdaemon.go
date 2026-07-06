@@ -29,14 +29,9 @@ func installDaemon(operatorFlag, configFlag string) error {
 	if err := checkNoPerUserAgent(operator); err != nil {
 		return err
 	}
-	exe, err := os.Executable()
+	runnyd, err := resolveRunnyd()
 	if err != nil {
-		return fmt.Errorf("locating runnyctl: %w", err)
-	}
-	runnyd := sysdaemon.ResolveRunnydPath(exe)
-	if _, err := os.Stat(runnyd); err != nil {
-		return fmt.Errorf("runnyd not found next to runnyctl at %s: %w\n"+
-			"  for a from-checkout build, use tools/deploy/install-system.sh with RUNNYD=/path/to/runnyd", runnyd, err)
+		return fmt.Errorf("%w\n  for a from-checkout build, use tools/deploy/install-system.sh with RUNNYD=/path/to/runnyd", err)
 	}
 	cfg := sysdaemon.DefaultConfig()
 	cfg.Operator = operator
@@ -109,6 +104,22 @@ func uninstallDaemon() error {
 		return err
 	}
 	return sysdaemon.New(sysdaemon.DefaultConfig()).Uninstall(context.Background())
+}
+
+// resolveRunnyd locates the runnyd sibling of the running runnyctl (via
+// sysdaemon.ResolveRunnydPath) and confirms it exists, returning an error
+// naming the expected path when it's not there. Shared by every command that
+// execs the on-disk runnyd (install-daemon, edit-config, upgrade-daemon).
+func resolveRunnyd() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("locating runnyctl: %w", err)
+	}
+	runnyd := sysdaemon.ResolveRunnydPath(exe)
+	if _, err := os.Stat(runnyd); err != nil {
+		return "", fmt.Errorf("runnyd not found next to runnyctl at %s: %w", runnyd, err)
+	}
+	return runnyd, nil
 }
 
 func requireDarwinRoot(name string) error {

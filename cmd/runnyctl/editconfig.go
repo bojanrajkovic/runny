@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/bojanrajkovic/runny/internal/home"
-	"github.com/bojanrajkovic/runny/internal/sysdaemon"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
@@ -37,13 +36,9 @@ func (c *ctl) editConfig(ctx context.Context) error {
 	}
 	configPath := dir.ConfigPath()
 
-	exe, err := os.Executable()
+	runnyd, err := resolveRunnyd()
 	if err != nil {
-		return fmt.Errorf("locating runnyctl: %w", err)
-	}
-	runnyd := sysdaemon.ResolveRunnydPath(exe)
-	if _, err := os.Stat(runnyd); err != nil {
-		return fmt.Errorf("runnyd not found next to runnyctl at %s: %w", runnyd, err)
+		return err
 	}
 
 	seed, err := os.ReadFile(configPath)

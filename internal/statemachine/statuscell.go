@@ -113,18 +113,13 @@ func (c *statusCell) setPaused(p bool, cmdID string) {
 	c.notify(fns, snap)
 }
 
-// appendBounded returns ids with id appended, retaining at most max entries
-// (oldest evicted). It always allocates a fresh backing array so a status
-// value already snapshotted under the lock keeps its own stable slice — a
-// later append must not mutate an array a prior snapshot still references.
-func appendBounded(ids []string, id string, max int) []string {
-	next := make([]string, 0, max)
-	if len(ids) >= max {
-		next = append(next, ids[len(ids)-max+1:]...)
-	} else {
-		next = append(next, ids...)
-	}
-	return append(next, id)
+// appendBounded returns ids with id appended, retaining at most limit entries
+// (oldest evicted). slices.Clone always allocates a fresh backing array, even
+// when the sliced region is the full input, so a status value already
+// snapshotted under the lock keeps its own stable slice — a later append must
+// not mutate an array a prior snapshot still references.
+func appendBounded(ids []string, id string, limit int) []string {
+	return append(slices.Clone(ids[max(0, len(ids)-limit+1):]), id)
 }
 
 // failureCount returns the current failure streak.

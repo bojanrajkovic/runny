@@ -61,10 +61,10 @@ struct RunnyApp: App {
     }
 
     init() {
-        // Drop UserDefaults keys retired by removed surfaces (the old
-        // home-override field) so orphaned state doesn't linger across
-        // upgrades. Idempotent — safe to run on every launch.
-        RetiredDefaults.prune()
+        // The "Runny home" Settings override was retired when the home was fixed
+        // at ~/.runny; drop any value a prior version left in defaults. Idempotent
+        // (removing an absent key is a no-op) — safe to run on every launch.
+        UserDefaults.standard.removeObject(forKey: "runnyHomeOverride")
         // LSUIElement keeps us out of the Dock at launch; the coordinator
         // flips to .regular while the main window is open.
         NSApp?.setActivationPolicy(.accessory)

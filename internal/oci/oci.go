@@ -170,28 +170,46 @@ func (c *Client) ResolveWithDiskBytes(ctx bounded.Context, ref Ref) (string, int
 	if err != nil {
 		return "", 0, err
 	}
-	var total int64
-	for i := range m.Layers {
-		l := m.Layers[i]
+	_, _, total, err := diskLayerSizes(m.Layers)
+	if err != nil {
+		return "", 0, err
+	}
+	return digest, total, nil
+}
+
+// diskLayerSizes validates the disk layers among descs (skipping any
+// non-disk layer, e.g. config/nvram) and returns, for the disk layers found
+// in manifest order: each one's offset into disk.img (the running total
+// before it), its declared uncompressed size, and the grand total. A
+// disk-prefixed layer of an unsupported version, or one declaring a
+// non-positive or overflowing size, is an error. The annotated sizes decide
+// file offsets during pull, so the pre-flight size check
+// (ResolveWithDiskBytes) and the pull itself (pull) must validate them
+// identically — this is the one place that does.
+func diskLayerSizes(descs []descriptor) (offsets, sizes []int64, total int64, err error) {
+	for i := range descs {
+		l := descs[i]
 		if !strings.HasPrefix(l.MediaType, mediaTypeDiskPrefix) {
 			continue
 		}
 		if l.MediaType != mediaTypeDiskV2 {
-			return "", 0, fmt.Errorf("unsupported disk layer type %s (only disk.v2 supported)", l.MediaType)
+			return nil, nil, 0, fmt.Errorf("unsupported disk layer type %s (only disk.v2 supported)", l.MediaType)
 		}
 		n, err := l.uncompressedSize()
 		if err != nil {
-			return "", 0, err
+			return nil, nil, 0, err
 		}
 		if n <= 0 {
-			return "", 0, fmt.Errorf("disk layer %s declares non-positive uncompressed size %d", l.Digest, n)
+			return nil, nil, 0, fmt.Errorf("disk layer %s declares non-positive uncompressed size %d", l.Digest, n)
 		}
 		if total > math.MaxInt64-n {
-			return "", 0, fmt.Errorf("disk layer sizes overflow the total image size")
+			return nil, nil, 0, fmt.Errorf("disk layer sizes overflow the total image size")
 		}
+		offsets = append(offsets, total)
+		sizes = append(sizes, n)
 		total += n
 	}
-	return digest, total, nil
+	return offsets, sizes, total, nil
 }
 
 // Pull downloads the image into destDir as a tart bundle (config.json,
@@ -217,9 +235,6 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 		case l.MediaType == mediaTypeNVRAM:
 			nvramLayer = &m.Layers[i]
 		case strings.HasPrefix(l.MediaType, mediaTypeDiskPrefix):
-			if l.MediaType != mediaTypeDiskV2 {
-				return "", fmt.Errorf("unsupported disk layer type %s (only disk.v2 supported)", l.MediaType)
-			}
 			diskLayers = append(diskLayers, l)
 		}
 	}
@@ -243,23 +258,9 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 	// would silently overwrite its neighbor while every digest still checks
 	// out (digests cover the compressed stream, not the decoded bytes).
 	diskPath := filepath.Join(destDir, "disk.img")
-	var total int64
-	offsets := make([]int64, len(diskLayers))
-	sizes := make([]int64, len(diskLayers))
-	for i, l := range diskLayers {
-		offsets[i] = total
-		n, err := l.uncompressedSize()
-		if err != nil {
-			return "", err
-		}
-		if n <= 0 {
-			return "", fmt.Errorf("disk layer %s declares non-positive uncompressed size %d", l.Digest, n)
-		}
-		if total > math.MaxInt64-n {
-			return "", fmt.Errorf("disk layer sizes overflow the total image size")
-		}
-		sizes[i] = n
-		total += n
+	offsets, sizes, total, err := diskLayerSizes(diskLayers)
+	if err != nil {
+		return "", err
 	}
 	// Refuse a doomed pull up front: the decompressed image must fit. Hours
 	// of download ending in ENOSPC is the silent-failure shape this daemon

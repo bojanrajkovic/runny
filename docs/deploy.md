@@ -385,7 +385,7 @@ the desktop-GUI install channel. From a copy of Runny in `/Applications`:
 - A **Start** affordance appears in the menu bar and main window when the agent is
   installed but the daemon isn't running.
 - After upgrading the app to a newer build, **"Update Daemon"** drains running
-  jobs, then restarts onto the freshly-bundled binary (a `runnyctl reload -wait`
+  jobs, then restarts onto the freshly-bundled binary (a `runnyctl reload --wait`
   by another name).
 - Toggling it off uninstalls the agent; mid-job it warns that the running job is
   abandoned.
@@ -432,7 +432,7 @@ followed by an explicit apply:
 
 ```sh
 # edit config.yaml, then:
-runnyctl reload -reason "why"
+runnyctl reload --reason "why"
 # or, unix muscle memory (same validated path, verdict in the daemon log):
 launchctl kill SIGHUP gui/$(id -u)/com.coderinserepeat.runnyd
 ```
@@ -491,7 +491,7 @@ config — it execs the on-disk `runnyd -test-config ~/.runny/config.yaml` (loca
 checks only, no network) and reads the JSON verdict:
 
 - **OK** → it issues the drain-gated reload (running jobs finish first, then
-  launchd cold-starts the new binary), the same path as `runnyctl reload -wait`.
+  launchd cold-starts the new binary), the same path as `runnyctl reload --wait`.
 - **Warn** → it prints the warnings and refuses unless you pass `-force`; the
   upgrade still works, the config just has a soft footgun (e.g. an aggregate
   resource overcommit or a too-short deadline).

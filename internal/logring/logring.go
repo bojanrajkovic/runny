@@ -69,7 +69,7 @@ func (r *Ring) Snapshot(n int) []Entry {
 // snapshot arrive only on the channel — no gaps, no duplicates. The replay is
 // returned as a slice rather than sent through the channel because `replay`
 // is client-controlled and the ring outsizes the channel buffer: a blocking
-// send here, under r.mu, once let `runnyctl logs -replay N` wedge every slog
+// send here, under r.mu, once let `runnyctl logs --replay N` wedge every slog
 // call in the daemon. Call the returned cancel to unsubscribe.
 func (r *Ring) Subscribe(replay int) ([]Entry, <-chan Entry, func()) {
 	r.mu.Lock()

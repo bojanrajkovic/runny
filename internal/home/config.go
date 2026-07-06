@@ -167,7 +167,7 @@ type Limits struct {
 	// ReconcileInterval is the LISTENING-state GitHub registration check.
 	ReconcileInterval Duration `yaml:"reconcile_interval"`
 	// MaxDebugHold is the default and the cap for a DEBUG hold (runnyctl
-	// debug -hold): the auto-release backstop for a forgotten held guest,
+	// debug --hold): the auto-release backstop for a forgotten held guest,
 	// which occupies a macOS guest-cap slot. For a mid-job injection the
 	// clock starts when the job ends, so worst-case slot occupancy is
 	// max_job_duration + max_debug_hold. Out-of-range (negative, over-cap)

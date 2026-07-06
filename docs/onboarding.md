@@ -187,7 +187,7 @@ dials the collector the way it dials GitHub. `headers` carries backend auth
 the collector's `${env:VAR}` syntax, resolved once at load. An unset variable
 refuses the config rather than exporting an empty credential.
 
-Apply the change with `runnyctl reload -reason "enable telemetry"`. Traces
+Apply the change with `runnyctl reload --reason "enable telemetry"`. Traces
 arrive as one span tree per runner cycle; metrics as `runny.*` instruments.
 [docs/deploy.md](deploy.md#enabling-otlp-telemetry) has the collector-pipeline
 caveats and a full set of PromQL query recipes;

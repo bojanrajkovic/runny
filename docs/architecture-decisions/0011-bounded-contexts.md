@@ -95,7 +95,7 @@ The type forces a bound to exist and names its kind; it says nothing about the
 treat the bound as a backstop rather than a target, and never derive a wait from
 a sum of upstream budgets — is the
 [bounds principle](../architecture/bounds.md). It applies to every constructor
-above and to the client-side waits (`runnyctl reload -wait`, the app) that are
+above and to the client-side waits (`runnyctl reload --wait`, the app) that are
 not themselves `bounded.Context` call sites.
 
 ## Rejected alternatives

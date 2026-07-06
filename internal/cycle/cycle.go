@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 )
@@ -230,21 +229,13 @@ func (s Store) WriteArtifact(r *Record, name string, data []byte) error {
 // cycle.json is not written until the cycle ends, so without this it would be
 // synthesized as a phantom orphan-failure on every healthy in-progress cycle.
 func (s Store) Recent(n int, liveCycleID string) ([]*Record, error) {
-	entries, err := os.ReadDir(s.SlotDir)
-	if os.IsNotExist(err) {
+	names, err := s.dirNamesNewestFirst()
+	if err != nil {
+		return nil, err
+	}
+	if names == nil { // SlotDir doesn't exist: no cycles have run yet
 		return nil, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("listing cycles: %w", err)
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if e.IsDir() {
-			names = append(names, e.Name())
-		}
-	}
-	// Directory names sort chronologically by construction.
-	sort.Sort(sort.Reverse(sort.StringSlice(names)))
 	if n > 0 && len(names) > n {
 		names = names[:n]
 	}
@@ -308,15 +299,18 @@ func (s Store) synthesizeOrphan(dir string) *Record {
 	}
 }
 
-// Prune enforces retention: keep at most keepCount cycles and remove
-// anything older than maxAge.
-func (s Store) Prune(keepCount int, maxAge time.Duration, now time.Time) error {
+// dirNamesNewestFirst lists SlotDir's cycle directories (skipping any
+// non-directory entries), newest first. Directory names sort chronologically
+// by construction (Store.Dir's RFC3339-prefixed name), so a plain string sort
+// reversed is the newest-first order. Returns (nil, nil) when SlotDir doesn't
+// exist yet (no cycles have run).
+func (s Store) dirNamesNewestFirst() ([]string, error) {
 	entries, err := os.ReadDir(s.SlotDir)
 	if os.IsNotExist(err) {
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("listing cycles: %w", err)
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
@@ -324,7 +318,18 @@ func (s Store) Prune(keepCount int, maxAge time.Duration, now time.Time) error {
 			names = append(names, e.Name())
 		}
 	}
-	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	slices.Sort(names)
+	slices.Reverse(names)
+	return names, nil
+}
+
+// Prune enforces retention: keep at most keepCount cycles and remove
+// anything older than maxAge.
+func (s Store) Prune(keepCount int, maxAge time.Duration, now time.Time) error {
+	names, err := s.dirNamesNewestFirst()
+	if err != nil {
+		return err
+	}
 	for i, name := range names {
 		tooMany := keepCount > 0 && i >= keepCount
 		tooOld := maxAge > 0 && olderThan(name, now.Add(-maxAge))

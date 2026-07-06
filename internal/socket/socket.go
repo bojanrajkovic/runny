@@ -28,6 +28,7 @@ import (
 	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/logring"
 	"github.com/bojanrajkovic/runny/internal/statemachine"
+	"github.com/bojanrajkovic/runny/internal/versioncore"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
@@ -79,15 +80,11 @@ type DrainState struct {
 }
 
 // WireProtocolVersion is the daemon's wire-contract version, published in
-// GetStatusResponse.protocol_version. Bump it when the daemon gains a feature a
-// client must detect before relying on it. Version 1 introduced pause/resume
-// command acknowledgement (SlotStatus.recent_applied_command_ids): a client
-// confirms a pause/resume from the command id only against a daemon advertising
-// >= 1. Version 2 introduced reload-convergence confirmation (boot_id,
-// config_sha256, drain_seq, exit_held): a reload-following client confirms the
-// respawn by boot_id flip + config hash only against a daemon advertising >= 2,
-// and otherwise falls back to daemon_started and warns it cannot verify.
-const WireProtocolVersion uint32 = 2
+// GetStatusResponse.protocol_version. Aliases versioncore.WireProtocolVersion
+// (the canonical definition, in a stdlib-only leaf runnyctl can import
+// without dragging in this package's cgo/vz-heavy dependency graph) so
+// existing callers in this package keep the shorter name.
+const WireProtocolVersion = versioncore.WireProtocolVersion
 
 // maxCommandIDLen bounds the optional pause/resume command id the client echoes
 // back for acknowledgement. The app sends a UUID (36 chars); the cap is generous

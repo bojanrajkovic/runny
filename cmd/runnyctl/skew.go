@@ -8,14 +8,6 @@ import (
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
-// expectedProtocolVersion is the wire-protocol version runnyctl's generated
-// stubs were built against — the exact protocol it expects, kept in lockstep
-// with the daemon's socket.WireProtocolVersion (bump both together). The
-// protocol axis warns only when the daemon is BEHIND this; a newer daemon
-// degrades nothing. This is not a backstop or a cap — the healthy-magnitude
-// sizing rule does not apply.
-const expectedProtocolVersion uint32 = 2
-
 // versionSkew classifies the skew between this runnyctl and the runnyd it dials,
 // returning a one-line warning and whether to print it. Warn, never refuse — the
 // CLI mirror of the app's skew verdict: a runnyctl that came from the .app bundle
@@ -74,7 +66,7 @@ func (c *ctl) warnSkew(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	if w, skewed := versionSkew(version, resp.GetVersion(), expectedProtocolVersion, resp.GetProtocolVersion()); skewed {
+	if w, skewed := versionSkew(version, resp.GetVersion(), versioncore.WireProtocolVersion, resp.GetProtocolVersion()); skewed {
 		fmt.Fprintln(c.err, w)
 	}
 }

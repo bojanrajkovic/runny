@@ -20,6 +20,7 @@ go_library(
         "//internal/logring",
         "//internal/opacl",
         "//internal/statemachine",
+        "//internal/versioncore",
         "//proto/runny/v1:runny",
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//codes",

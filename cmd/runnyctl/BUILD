@@ -67,7 +67,6 @@ go_test(
         "//internal/cycle",
         "//internal/home",
         "//internal/launchd",
-        "//internal/socket",
         "//proto/runny/v1:runny",
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//codes",

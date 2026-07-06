@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
-# Derives runny's version (ADR-0010): svu computes the conventional-commit
-# implied next version; this wrapper only decides clean release (exactly on
-# the tag) vs -beta.<shortsha> pre-release.
+# Derives runny's version (ADR-0010): the baseline is the last STABLE tag,
+# found via `git describe --exclude` (real exclusion, unlike svu's glob-only
+# --tag.pattern) rather than svu's own "current" — svu's current is just the
+# latest tag of any kind, so it drifts once a manual beta tag exists between
+# stable releases. Pinning svu's --tag.pattern to that one literal stable tag
+# keeps its bump computation in sync with release-please's manifest-anchored
+# view. This wrapper then only decides clean release (exactly on the tag) vs
+# -beta.<shortsha> pre-release.
 set -euo pipefail
 
-next=$(svu next)
-current=$(svu current 2>/dev/null || echo v0.0.0)
+stable=$(git describe --tags --exclude='*-beta*' --abbrev=0 2>/dev/null || echo v0.0.0)
+next=$(svu next --tag.pattern "$stable")
+current=$(svu current --tag.pattern "$stable" 2>/dev/null || echo v0.0.0)
 
 if [ "$next" = "$current" ] &&
 	[ "$(git rev-list -n 1 "$current" 2>/dev/null || echo none)" = "$(git rev-parse HEAD)" ]; then

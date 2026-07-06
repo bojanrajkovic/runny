@@ -255,6 +255,13 @@ func (c Command) reply(r DebugKeyReply) {
 	}
 }
 
+// expired reports whether a command was dequeued after its deadline — a
+// command stranded in a slot's queue with nobody left to serve it in time.
+// Zero Expires means the command carries no deadline (never expires).
+func (c Command) expired() bool {
+	return !c.Expires.IsZero() && time.Now().After(c.Expires)
+}
+
 // Status is the live snapshot the control surface renders.
 type Status struct {
 	Slot string
@@ -464,7 +471,7 @@ func (s *Slot) handleIdleCommand(cmd Command) {
 	case CmdDebugKey:
 		// No guest exists in BACKOFF. An expired command (the common stranded
 		// case) reads as expired; an unexpired one as the precise reason.
-		if !cmd.Expires.IsZero() && time.Now().After(cmd.Expires) {
+		if cmd.expired() {
 			cmd.reply(DebugKeyReply{Err: errors.New("command expired; nothing was injected")})
 			return
 		}

@@ -193,7 +193,7 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 				case CmdDebugKey:
 					// Boot-path states have no usable hardened guest yet
 					// (issue #39): reply and do nothing.
-					if !cmd.Expires.IsZero() && time.Now().After(cmd.Expires) {
+					if cmd.expired() {
 						cmd.reply(DebugKeyReply{Err: errors.New("command expired; nothing was injected")})
 					} else {
 						cmd.reply(DebugKeyReply{Err: errors.New("slot is mid-boot; key injection needs LISTENING, JOB, or DEBUG")})
@@ -791,6 +791,23 @@ func (c *run) watchJob(jctx, cctx context.Context) (bool, error) {
 
 // ---- debug-key injection (issue #39) ---------------------------------------
 
+// rejectStale replies and reports true if cmd is stale: expired in queue, or
+// aimed at a cycle other than this one (the operator's stale-CycleID consent
+// pin, decision 15). Every CmdDebugKey entry point past the boot-path states
+// shares this guard so the two staleness checks and their reply text can't
+// drift apart between freezeForDebug, midJobInject, and debugReArm.
+func (c *run) rejectStale(cmd Command) bool {
+	if cmd.expired() {
+		cmd.reply(DebugKeyReply{Err: errors.New("command expired; nothing was injected")})
+		return true
+	}
+	if cmd.CycleID != "" && cmd.CycleID != c.rec.CycleID {
+		cmd.reply(DebugKeyReply{Err: fmt.Errorf("cycle %s already ended; nothing was injected", cmd.CycleID)})
+		return true
+	}
+	return false
+}
+
 // armedKey records ONE mid-job install attempt and whether it provably landed
 // (grep read-back ok). The `landed` bit is load-bearing: a retry of the same
 // fingerprint after an AMBIGUOUS error must NOT take the exec-free re-arm path
@@ -972,12 +989,7 @@ func (c *run) freezeForDebug(ctx context.Context, cmd Command,
 	secureSSH := c.deps.Config.Deadlines.SecureSSH.D()
 
 	// 0. Guards.
-	if !cmd.Expires.IsZero() && time.Now().After(cmd.Expires) {
-		cmd.reply(DebugKeyReply{Err: errors.New("command expired; nothing was injected")})
-		return false, "", "", nil
-	}
-	if cmd.CycleID != "" && cmd.CycleID != c.rec.CycleID {
-		cmd.reply(DebugKeyReply{Err: fmt.Errorf("cycle %s already ended; nothing was injected", cmd.CycleID)})
+	if c.rejectStale(cmd) {
 		return false, "", "", nil
 	}
 
@@ -1054,12 +1066,7 @@ func (c *run) midJobInject(ctx context.Context, cmd Command) {
 	fp := cmd.Fingerprint
 
 	// 0. Guards.
-	if !cmd.Expires.IsZero() && time.Now().After(cmd.Expires) {
-		cmd.reply(DebugKeyReply{Err: errors.New("command expired; nothing was injected")})
-		return
-	}
-	if cmd.CycleID != "" && cmd.CycleID != c.rec.CycleID {
-		cmd.reply(DebugKeyReply{Err: fmt.Errorf("cycle %s already ended; nothing was injected", cmd.CycleID)})
+	if c.rejectStale(cmd) {
 		return
 	}
 	if cmd.SeenState != StateJob {
@@ -1225,12 +1232,7 @@ func (c *run) holdForDebug(ctx context.Context, holdUntil time.Time) (State, err
 func (c *run) debugReArm(ctx context.Context, cmd Command,
 	hold *time.Timer, secureSSH time.Duration, finish func(cycle.Outcome, string),
 ) (ended bool) {
-	if !cmd.Expires.IsZero() && time.Now().After(cmd.Expires) {
-		cmd.reply(DebugKeyReply{Err: errors.New("command expired; nothing was injected")})
-		return false
-	}
-	if cmd.CycleID != "" && cmd.CycleID != c.rec.CycleID {
-		cmd.reply(DebugKeyReply{Err: fmt.Errorf("cycle %s already ended; nothing was injected", cmd.CycleID)})
+	if c.rejectStale(cmd) {
 		return false
 	}
 	// reset moves the auto-release deadline to now+cmd.Hold and publishes it,

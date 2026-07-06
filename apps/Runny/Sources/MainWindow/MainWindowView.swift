@@ -178,20 +178,13 @@ struct DaemonCard: View {
     private var tooltip: String {
         var parts: [String] = []
         if let started = store.daemonStarted {
-            parts.append("Up since \(Self.clock.string(from: started))")
+            parts.append("Up since \(started.formatted(date: .omitted, time: .standard))")
         }
         if let last = store.lastUpdate {
-            parts.append("last contact \(Self.clock.string(from: last))")
+            parts.append("last contact \(last.formatted(date: .omitted, time: .standard))")
         }
         return parts.joined(separator: " · ")
     }
-
-    static let clock: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .none
-        formatter.timeStyle = .medium
-        return formatter
-    }()
 }
 
 struct SidebarSlotRow: View {

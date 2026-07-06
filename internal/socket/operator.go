@@ -58,16 +58,6 @@ func resolveOperatorAccount(input string) (*user.User, error) {
 	return nil, fmt.Errorf("no such user %q: %w", input, lookupErr)
 }
 
-// resolveOperatorAccountOrStatus wraps a lookup miss as InvalidArgument (a
-// wrong argument, not the caller's transient fault).
-func resolveOperatorAccountOrStatus(input string) (*user.User, error) {
-	u, err := resolveOperatorAccount(input)
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
-	}
-	return u, nil
-}
-
 // operatorIdentity resolves the calling peer's kernel-authenticated uid and
 // best-effort username — the one resolver behind grant attribution,
 // injected-key audit rows, and lifecycle-command log lines. A nil uid means
@@ -138,9 +128,11 @@ func (s *Server) mutateOperator(
 	precheck func(ops []opacl.Operator, uid uint32, u *user.User) error,
 	apply func(actx bounded.Context, homeDir, sock, username string) error,
 ) (*runnyv1.OperatorMutation, error) {
-	u, err := resolveOperatorAccountOrStatus(userArg)
+	u, err := resolveOperatorAccount(userArg)
 	if err != nil {
-		return nil, err
+		// InvalidArgument: a lookup miss is a wrong argument, not the
+		// caller's transient fault.
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
 	uid64, err := strconv.ParseUint(u.Uid, 10, 32)
 	if err != nil {

@@ -1551,15 +1551,10 @@ final class DaemonStore {
     }
 
     /// Pure: numeric (not lexical) compare of two `x.y.z` cores — so 0.10.0 > 0.9.0.
+    /// `.numeric` compares each dot-separated run of digits as a number, which is
+    /// exactly the regex-normalized triple this always receives.
     nonisolated static func semverGreater(_ a: String, _ b: String) -> Bool {
-        let pa = a.split(separator: ".").map { Int($0) ?? 0 }
-        let pb = b.split(separator: ".").map { Int($0) ?? 0 }
-        for i in 0 ..< max(pa.count, pb.count) {
-            let x = i < pa.count ? pa[i] : 0
-            let y = i < pb.count ? pb[i] : 0
-            if x != y { return x > y }
-        }
-        return false
+        a.compare(b, options: .numeric) == .orderedDescending
     }
 
     /// Pure: same-core-older-protocol — the upgrade window the version compare

@@ -57,7 +57,7 @@ type Ensurer struct {
 	// attempt/diskFree pattern): resolve is the registry manifest
 	// round-trip, acquire subscribes to the shared pull of dir.
 	resolve func(ctx context.Context) (string, error)
-	acquire func(dir string, ref oci.Ref, report func(string)) (*subscription, func())
+	acquire func(dir string, ref oci.Ref, report func(string)) (chan ensureResult, func())
 }
 
 func (e *Ensurer) resolveBudget() time.Duration {
@@ -131,7 +131,7 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string), onDigestResol
 		// disk hold, and a panic is converted to a terminal error) — or this
 		// ctx is cancelled.
 		select {
-		case res := <-sub.done:
+		case res := <-sub:
 			if res.err != nil {
 				return res.err
 			}

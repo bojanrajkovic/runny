@@ -48,7 +48,7 @@ func testPullerWithSeams(dir string,
 func testAcquire(t *testing.T, dir string, report func(string),
 	attempt func(context.Context) (string, error),
 	diskFree func(string) (uint64, error),
-) (*subscription, func()) {
+) (chan ensureResult, func()) {
 	t.Helper()
 	return acquirePuller(dir, report, testPullerWithSeams(dir, attempt, diskFree))
 }
@@ -58,17 +58,17 @@ func testAcquire(t *testing.T, dir string, report func(string),
 func testAcquireWithEvents(t *testing.T, dir string, emit obs.Emitter,
 	attempt func(context.Context) (string, error),
 	diskFree func(string) (uint64, error),
-) (*subscription, func()) {
+) (chan ensureResult, func()) {
 	t.Helper()
 	proto := testPullerWithSeams(dir, attempt, diskFree)
 	proto.events = emit
 	return acquirePuller(dir, nil, proto)
 }
 
-func recvWithin(t *testing.T, sub *subscription, within time.Duration) ensureResult {
+func recvWithin(t *testing.T, sub chan ensureResult, within time.Duration) ensureResult {
 	t.Helper()
 	select {
-	case r := <-sub.done:
+	case r := <-sub:
 		return r
 	case <-time.After(within):
 		t.Fatal("timed out waiting for puller result")
@@ -278,7 +278,7 @@ func TestPullerRegistryRaceNoHang(t *testing.T) {
 			defer wg.Done()
 			sub, rel := testAcquire(t, dir, nil, attempt, okFree(0))
 			select {
-			case <-sub.done:
+			case <-sub:
 			case <-time.After(2 * time.Second):
 				t.Error("subscriber hung — attached to a dead puller")
 			}

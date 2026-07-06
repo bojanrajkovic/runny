@@ -97,30 +97,18 @@ func (c *Config) Warnings(host HostResources) []Warning {
 		})
 	}
 
-	// Deadlines below the floor, checked in a fixed order for deterministic
-	// output. Limits are deliberately excluded — the floor reflects guest-op
-	// latency, not the much larger limit budgets (max_job_duration, max_idle).
-	for _, f := range []struct {
-		name string
-		d    Duration
-	}{
-		{"deadlines.clone", c.Deadlines.Clone},
-		{"deadlines.boot", c.Deadlines.Boot},
-		{"deadlines.await_ip", c.Deadlines.AwaitIP},
-		{"deadlines.await_ssh", c.Deadlines.AwaitSSH},
-		{"deadlines.mint_jit", c.Deadlines.MintJIT},
-		{"deadlines.provision", c.Deadlines.Provision},
-		{"deadlines.teardown", c.Deadlines.Teardown},
-		{"deadlines.secure_ssh", c.Deadlines.SecureSSH},
-		{"deadlines.pull_stall", c.Deadlines.PullStall},
-		{"deadlines.resolve", c.Deadlines.Resolve},
-	} {
-		if f.d > 0 && f.d.D() < deadlineFloor {
+	// Deadlines below the floor, checked in deadlineFields' fixed order for
+	// deterministic output. Limits are deliberately excluded — the floor
+	// reflects guest-op latency, not the much larger limit budgets
+	// (max_job_duration, max_idle).
+	for _, f := range deadlineFields {
+		d := *f.get(&c.Deadlines)
+		if d > 0 && d.D() < deadlineFloor {
 			ws = append(ws, Warning{
 				Kind: WarnDeadlineTooShort,
 				Message: fmt.Sprintf(
 					"%s is %v, below the %v floor — likely a typo that will time out every cycle",
-					f.name, f.d.D(), deadlineFloor,
+					f.name, d.D(), deadlineFloor,
 				),
 			})
 		}

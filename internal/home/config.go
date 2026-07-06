@@ -158,6 +158,31 @@ type Deadlines struct {
 	Resolve Duration `yaml:"resolve"`
 }
 
+// deadlineField is one row of deadlineFields: the config key name, an
+// accessor onto the field it defaults/validates, and its default value.
+type deadlineField struct {
+	name string
+	get  func(*Deadlines) *Duration
+	def  time.Duration
+}
+
+// deadlineFields is the single source of truth for every deadlines.* field —
+// applyDefaults, validate, and Warnings' floor check all iterate this same
+// table, so adding a deadline is a one-row change instead of three edits that
+// can silently drift apart.
+var deadlineFields = []deadlineField{
+	{"deadlines.clone", func(d *Deadlines) *Duration { return &d.Clone }, 10 * time.Second},
+	{"deadlines.boot", func(d *Deadlines) *Duration { return &d.Boot }, 30 * time.Second},
+	{"deadlines.await_ip", func(d *Deadlines) *Duration { return &d.AwaitIP }, 60 * time.Second},
+	{"deadlines.await_ssh", func(d *Deadlines) *Duration { return &d.AwaitSSH }, 90 * time.Second},
+	{"deadlines.mint_jit", func(d *Deadlines) *Duration { return &d.MintJIT }, 30 * time.Second},
+	{"deadlines.provision", func(d *Deadlines) *Duration { return &d.Provision }, 180 * time.Second},
+	{"deadlines.teardown", func(d *Deadlines) *Duration { return &d.Teardown }, 60 * time.Second},
+	{"deadlines.secure_ssh", func(d *Deadlines) *Duration { return &d.SecureSSH }, 15 * time.Second},
+	{"deadlines.pull_stall", func(d *Deadlines) *Duration { return &d.PullStall }, 3 * time.Minute},
+	{"deadlines.resolve", func(d *Deadlines) *Duration { return &d.Resolve }, 60 * time.Second},
+}
+
 type Limits struct {
 	MaxJobDuration Duration `yaml:"max_job_duration"`
 	// MaxIdle recycles a LISTENING runner to absorb image updates.
@@ -352,16 +377,9 @@ func (c *Config) applyDefaults() {
 			}
 		}
 	}
-	def(&c.Deadlines.Clone, 10*time.Second)
-	def(&c.Deadlines.Boot, 30*time.Second)
-	def(&c.Deadlines.AwaitIP, 60*time.Second)
-	def(&c.Deadlines.AwaitSSH, 90*time.Second)
-	def(&c.Deadlines.MintJIT, 30*time.Second)
-	def(&c.Deadlines.Provision, 180*time.Second)
-	def(&c.Deadlines.Teardown, 60*time.Second)
-	def(&c.Deadlines.SecureSSH, 15*time.Second)
-	def(&c.Deadlines.PullStall, 3*time.Minute)
-	def(&c.Deadlines.Resolve, 60*time.Second)
+	for _, f := range deadlineFields {
+		def(f.get(&c.Deadlines), f.def)
+	}
 	def(&c.Limits.MaxJobDuration, 2*time.Hour)
 	def(&c.Limits.MaxIdle, 24*time.Hour)
 	def(&c.Limits.BackoffBase, 5*time.Second)
@@ -441,17 +459,9 @@ func (c *Config) validate() error {
 	// anything non-positive here was set negative explicitly. A negative
 	// budget would fail every operation instantly — or, before this check,
 	// panicked the stall watcher's ticker.
-	for name, d := range map[string]Duration{
-		"deadlines.clone":           c.Deadlines.Clone,
-		"deadlines.boot":            c.Deadlines.Boot,
-		"deadlines.await_ip":        c.Deadlines.AwaitIP,
-		"deadlines.await_ssh":       c.Deadlines.AwaitSSH,
-		"deadlines.mint_jit":        c.Deadlines.MintJIT,
-		"deadlines.provision":       c.Deadlines.Provision,
-		"deadlines.teardown":        c.Deadlines.Teardown,
-		"deadlines.secure_ssh":      c.Deadlines.SecureSSH,
-		"deadlines.pull_stall":      c.Deadlines.PullStall,
-		"deadlines.resolve":         c.Deadlines.Resolve,
+	// Non-deadline positive-duration limits, kept separate from
+	// deadlineFields below: these aren't part of the shared deadlines table.
+	positive := map[string]Duration{
 		"limits.max_job_duration":   c.Limits.MaxJobDuration,
 		"limits.max_idle":           c.Limits.MaxIdle,
 		"limits.backoff_base":       c.Limits.BackoffBase,
@@ -459,7 +469,11 @@ func (c *Config) validate() error {
 		"limits.reconcile_interval": c.Limits.ReconcileInterval,
 		"limits.max_debug_hold":     c.Limits.MaxDebugHold,
 		"retention.max_age":         c.Retention.MaxAge,
-	} {
+	}
+	for _, f := range deadlineFields {
+		positive[f.name] = *f.get(&c.Deadlines)
+	}
+	for name, d := range positive {
 		if d <= 0 {
 			errs = append(errs, fmt.Errorf("%s must be positive, got %v", name, d.D()))
 		}

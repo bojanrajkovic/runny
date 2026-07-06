@@ -22,6 +22,7 @@ go_library(
         "//internal/cycle",
         "//internal/home",
         "//internal/launchd",
+        "//internal/oci",
         "//internal/sysdaemon",
         "//internal/versioncore",
         "//proto/runny/v1:runny",

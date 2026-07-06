@@ -29,6 +29,7 @@ import (
 
 	"github.com/bojanrajkovic/runny/internal/cycle"
 	"github.com/bojanrajkovic/runny/internal/home"
+	"github.com/bojanrajkovic/runny/internal/oci"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
@@ -734,16 +735,16 @@ func (c *ctl) prune(ctx context.Context, apply bool) error {
 	if len(bundles) > 0 {
 		fmt.Fprintln(c.out, "image bundles:")
 		for _, it := range bundles {
-			fmt.Fprintf(c.out, "  %-12s  %s  (%s)\n", formatBytes(it.GetBytes()), it.GetLabel(), it.GetReason())
+			fmt.Fprintf(c.out, "  %-12s  %s  (%s)\n", oci.HumanBytes(it.GetBytes()), it.GetLabel(), it.GetReason())
 		}
 	}
 	if len(tarballs) > 0 {
 		fmt.Fprintln(c.out, "runner tarballs:")
 		for _, it := range tarballs {
-			fmt.Fprintf(c.out, "  %-12s  %s  (%s)\n", formatBytes(it.GetBytes()), it.GetLabel(), it.GetReason())
+			fmt.Fprintf(c.out, "  %-12s  %s  (%s)\n", oci.HumanBytes(it.GetBytes()), it.GetLabel(), it.GetReason())
 		}
 	}
-	fmt.Fprintf(c.out, "%s %s\n", verb, formatBytes(resp.GetReclaimedBytes()))
+	fmt.Fprintf(c.out, "%s %s\n", verb, oci.HumanBytes(resp.GetReclaimedBytes()))
 	for _, sk := range resp.GetSkips() {
 		fmt.Fprintf(c.out, "skip: %s — %s (kept intact)\n", sk.GetRef(), sk.GetReason())
 	}
@@ -754,20 +755,6 @@ func (c *ctl) prune(ctx context.Context, apply bool) error {
 		return fmt.Errorf("prune completed with errors")
 	}
 	return nil
-}
-
-// formatBytes renders a byte count as a human-readable string (GiB > MiB > KiB > B).
-func formatBytes(b int64) string {
-	switch {
-	case b >= 1<<30:
-		return fmt.Sprintf("%.1f GiB", float64(b)/float64(1<<30))
-	case b >= 1<<20:
-		return fmt.Sprintf("%.1f MiB", float64(b)/float64(1<<20))
-	case b >= 1<<10:
-		return fmt.Sprintf("%.1f KiB", float64(b)/float64(1<<10))
-	default:
-		return fmt.Sprintf("%d B", b)
-	}
 }
 
 func (c *ctl) pause(ctx context.Context, slot string) error {

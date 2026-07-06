@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bojanrajkovic/runny/internal/home"
+	"github.com/bojanrajkovic/runny/internal/launchd"
 	"github.com/bojanrajkovic/runny/internal/opacl"
 )
 
@@ -170,20 +171,21 @@ func (i *Installer) Uninstall(ctx context.Context) error {
 	return nil
 }
 
-// jobLoaded reports whether the system job is still registered with launchd.
-// `launchctl print system/<label>` exits zero (and prints the job) when loaded,
-// and exits nonzero with "Could not find ... in domain" when gone — the success
-// case for uninstall. Any other error is inconclusive and surfaced to the caller
-// rather than swallowed.
+// jobLoaded reports whether the system job is still registered with launchd,
+// via the same launchctl-print tri-state launchd.Classify uses for the
+// per-user-agent probe (launchd.go): Registered when loaded, NotRegistered on
+// the gone-after-bootout success case, Indeterminate — surfaced to the caller
+// rather than swallowed — for anything else (a timeout, a permission denial).
 func (i *Installer) jobLoaded(ctx context.Context) (bool, error) {
 	out, err := i.run(ctx, "/bin/launchctl", "print", "system/"+Label)
-	if err == nil {
+	switch launchd.Classify(out, err) {
+	case launchd.Registered:
 		return true, nil
-	}
-	if strings.Contains(strings.ToLower(out), "could not find") {
+	case launchd.NotRegistered:
 		return false, nil
+	default:
+		return false, err
 	}
-	return false, err
 }
 
 func (i *Installer) ensureAccount(ctx context.Context) error {

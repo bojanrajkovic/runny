@@ -313,6 +313,34 @@ func PullInProgress(destDir string) bool {
 	return len(semAny.(chan struct{})) > 0
 }
 
+// AcquireSlot serializes concurrent callers on the per-key capacity-1
+// semaphore in locks (creating it on first use), returning a release func
+// that MUST be called (defer it) to free the slot. An uncontended caller
+// proceeds immediately; a contended one blocks on onWait (if non-nil, called
+// once, before blocking) and then waits interruptibly until the holder
+// releases or ctx ends — a mutex would make that wait both uninterruptible
+// (an operator recycle couldn't free a waiter) and invisible (no chance to
+// report it). desc names what's contended, for the ctx-cancelled error.
+// Exported because internal/images' tarball-download lock is the identical
+// pattern as this package's own pullLocks.
+func AcquireSlot(ctx context.Context, locks *sync.Map, key, desc string, onWait func()) (func(), error) {
+	semAny, _ := locks.LoadOrStore(key, make(chan struct{}, 1))
+	sem := semAny.(chan struct{})
+	select {
+	case sem <- struct{}{}:
+	default:
+		if onWait != nil {
+			onWait()
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("waiting for a concurrent %s: %w", desc, context.Cause(ctx))
+		}
+	}
+	return func() { <-sem }, nil
+}
+
 // PullTo pulls into a sibling temp dir and renames into place, so destDir
 // either exists complete or not at all — ENSURE_IMAGE's idempotence depends
 // on this. The bounded.Context is typically stall-bounded (Stall.Watch):
@@ -325,20 +353,11 @@ func PullInProgress(destDir string) bool {
 // delete the winner's freshly placed bundle, or a half-written disk.img
 // could be renamed into place and pass Verify forever.
 func (c *Client) PullTo(ctx bounded.Context, ref Ref, destDir string) (string, error) {
-	semAny, _ := pullLocks.LoadOrStore(destDir, make(chan struct{}, 1))
-	sem := semAny.(chan struct{})
-	select {
-	case sem <- struct{}{}:
-	default:
-		// Contended: another pull into this destination is in flight. Block
-		// interruptibly until it finishes (then take the cache hit) or ctx ends.
-		select {
-		case sem <- struct{}{}:
-		case <-ctx.Done():
-			return "", fmt.Errorf("waiting for a concurrent pull into %s: %w", destDir, context.Cause(ctx))
-		}
+	release, err := AcquireSlot(ctx, &pullLocks, destDir, "pull into "+destDir, nil)
+	if err != nil {
+		return "", err
 	}
-	defer func() { <-sem }()
+	defer release()
 
 	// A cache hit must pass the same completeness bar the consumer applies
 	// (tart.Bundle.Verify), not just "manifest.json exists" — a manifest

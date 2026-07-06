@@ -350,21 +350,15 @@ func (e *Ensurer) ensureRunnerTarball(ctx context.Context, report func(string)) 
 			return rerr
 		}
 
-		semAny, _ := tarballLocks.LoadOrStore(assetName, make(chan struct{}, 1))
-		sem := semAny.(chan struct{})
-		select {
-		case sem <- struct{}{}:
-		default:
+		release, err := oci.AcquireSlot(ctx, &tarballLocks, assetName, "download of "+assetName, func() {
 			if report != nil {
 				report("waiting for a concurrent download of " + assetName)
 			}
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				return fmt.Errorf("waiting for a concurrent download of %s: %w", assetName, context.Cause(ctx))
-			}
+		})
+		if err != nil {
+			return err
 		}
-		defer func() { <-sem }()
+		defer release()
 
 		dest := filepath.Join(e.Home.RunnerCacheDir(), assetName)
 		if _, statErr := os.Stat(dest); statErr == nil {

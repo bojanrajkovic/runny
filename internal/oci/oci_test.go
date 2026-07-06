@@ -141,8 +141,6 @@ func newFakeRegistry(t *testing.T, config, nvram, disk []byte) *fakeRegistry {
 	l1, l2 := appleLZ4Encode(t, disk[:half], 16*1024), appleLZ4Encode(t, disk[half:], 16*1024)
 
 	m := manifest{
-		SchemaVersion: 2,
-		MediaType:     manifestAccept,
 		Layers: []descriptor{
 			{MediaType: mediaTypeConfig, Digest: add(config), Size: int64(len(config))},
 			{

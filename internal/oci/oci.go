@@ -112,9 +112,7 @@ func (r Ref) String() string {
 }
 
 type manifest struct {
-	SchemaVersion int          `json:"schemaVersion"`
-	MediaType     string       `json:"mediaType"`
-	Layers        []descriptor `json:"layers"`
+	Layers []descriptor `json:"layers"`
 }
 
 type descriptor struct {

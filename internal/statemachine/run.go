@@ -643,7 +643,8 @@ const maxJobName = 256
 // trimmed and capped at maxJobName bytes on a valid-UTF-8 boundary (a naive
 // byte slice could split a multibyte rune and write U+FFFD to disk/the wire).
 func jobNameFromMarker(markerLine string) string {
-	name := strings.TrimSpace(markerLine[strings.Index(markerLine, markerJobStarted)+len(markerJobStarted):])
+	_, after, _ := strings.Cut(markerLine, markerJobStarted)
+	name := strings.TrimSpace(after)
 	if len(name) > maxJobName {
 		name = strings.ToValidUTF8(name[:maxJobName], "")
 	}

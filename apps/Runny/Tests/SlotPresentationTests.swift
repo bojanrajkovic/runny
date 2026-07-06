@@ -145,16 +145,6 @@ final class PresentationFormattingTests: XCTestCase {
         XCTAssertEqual(SlotPresentation.duration(59.6), "1m")
     }
 
-    func testStateLabelPausedAndWedged() {
-        var status = Runny_V1_SlotStatus()
-        status.state = .listening
-        XCTAssertEqual(SlotPresentation.stateLabel(status), "LISTENING")
-        status.paused = true
-        XCTAssertEqual(SlotPresentation.stateLabel(status), "LISTENING*")
-        status.wedged = true
-        XCTAssertEqual(SlotPresentation.stateLabel(status), "WEDGED!")
-    }
-
     func testDisplayNameFallsBackToSlotInBackoff() {
         var status = Runny_V1_SlotStatus()
         status.slot = "mac-2"
@@ -185,13 +175,10 @@ final class StatePhraseTests: XCTestCase {
         XCTAssertEqual(Runny_V1_SlotState.UNRECOGNIZED(42).phrase, "State 42")
     }
 
-    func testStatePhraseIsTheGuiVoiceWhileLabelStaysCliToken() {
+    func testStatePhraseHumanizesTheWireToken() {
         var status = Runny_V1_SlotStatus()
         status.state = .ensureImage
-        // The two surfaces diverge by design: phrase humanizes, label mirrors
-        // runnyctl's token verbatim.
         XCTAssertEqual(SlotPresentation.statePhrase(status), "Pulling image")
-        XCTAssertEqual(SlotPresentation.stateLabel(status), "ENSURE_IMAGE")
     }
 
     func testWedgedOverridesPhraseEverywhere() {
@@ -202,13 +189,12 @@ final class StatePhraseTests: XCTestCase {
     }
 
     func testPausedIsNotFoldedIntoThePhrase() {
-        // Paused is surfaced separately (chip / Info toggle), so unlike
-        // stateLabel's "*" it must not leak into the phrase.
+        // Paused is surfaced separately (chip / Info toggle) — it must not
+        // leak into the phrase.
         var status = Runny_V1_SlotStatus()
         status.state = .listening
         status.paused = true
         XCTAssertEqual(SlotPresentation.statePhrase(status), "Listening")
-        XCTAssertEqual(SlotPresentation.stateLabel(status), "LISTENING*")
     }
 }
 

@@ -29,13 +29,6 @@ enum SlotPresentation {
         )
     }
 
-    /// The STATE label: name, with runnyctl's paused/wedged treatment —
-    /// "*" suffix while paused, replaced entirely by "WEDGED!" when wedged.
-    static func stateLabel(_ slot: Runny_V1_SlotStatus) -> String {
-        if slot.wedged { return "WEDGED!" }
-        return slot.state.displayName + (slot.paused ? "*" : "")
-    }
-
     /// Human-readable state for the badge and sidebar — the GUI voice, not
     /// the CLI token. Wedged still overrides everything ("Wedged"); paused is
     /// surfaced separately (a chip / the Info toggle), not folded in here.

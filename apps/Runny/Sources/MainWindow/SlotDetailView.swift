@@ -46,9 +46,8 @@ struct SlotDetailView: View {
         // the header rising under the title bar (where macOS 26.0.x eats the
         // click). Recycle is a daemon no-op in BACKOFF (no guest), disabled there.
         .navigationTitle(SlotPresentation.displayName(slot))
-        // GUI voice (statePhrase), not the CLI token (stateLabel) — the subtitle
-        // sits beside the human runner name, so "Wedged"/"Listening", never
-        // "WEDGED!"/"LISTENING".
+        // GUI voice (statePhrase) sits beside the human runner name, so
+        // "Wedged"/"Listening", never the CLI's "WEDGED!"/"LISTENING".
         .navigationSubtitle(SlotPresentation.statePhrase(slot))
         .toolbar {
             ToolbarItem(placement: .primaryAction) {

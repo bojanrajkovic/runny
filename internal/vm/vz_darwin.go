@@ -260,8 +260,7 @@ type vzMachine struct {
 	done chan struct{}
 }
 
-func (m *vzMachine) MAC() string           { return m.mac }
-func (m *vzMachine) Done() <-chan struct{} { return m.done }
+func (m *vzMachine) MAC() string { return m.mac }
 
 func (m *vzMachine) watchState() {
 	defer close(m.done)

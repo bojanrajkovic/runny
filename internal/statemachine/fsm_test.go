@@ -97,7 +97,6 @@ func (m *fakeMachine) Stop(bounded.Context, time.Duration) error {
 	}
 	return nil
 }
-func (m *fakeMachine) Done() <-chan struct{} { return m.done }
 
 type fakeVM struct {
 	machine      *fakeMachine

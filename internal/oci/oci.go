@@ -674,15 +674,3 @@ func (p progressWriter) Write(b []byte) (int, error) {
 }
 
 func (c *Client) progressWriter() io.Writer { return progressWriter{fn: c.Progress} }
-
-// WithHTTPClient overrides the transport (tests; custom CA setups). The
-// caller's client is used as given except that its transport is wrapped in
-// the obs one — a custom-CA registry must not silently lose its egress
-// events.
-func (c *Client) WithHTTPClient(hc *http.Client) *Client {
-	wrapped := *hc
-	wrapped.Transport = &obs.HTTPTransport{Base: hc.Transport}
-	hc = &wrapped
-	c.hc = hc
-	return c
-}

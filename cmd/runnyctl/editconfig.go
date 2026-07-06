@@ -118,11 +118,7 @@ func (c *ctl) editConfig(ctx context.Context) error {
 		fmt.Fprintln(c.out, "daemon not running; this config applies on next start")
 		return nil
 	}
-	return c.reloadWait(ctx, "runnyctl edit-config",
-		func(ctx context.Context, req *runnyv1.ReloadRequest) (*runnyv1.ReloadResponse, error) {
-			return c.client.Reload(ctx, req)
-		},
-		defaultFollowOpts(90*time.Second, 0))
+	return c.reloadWait(ctx, "runnyctl edit-config", c.plainReload, defaultFollowOpts(90*time.Second, 0))
 }
 
 // openEditor runs $VISUAL, else $EDITOR, else vi on path, connected to the

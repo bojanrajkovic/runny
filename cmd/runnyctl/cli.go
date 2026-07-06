@@ -121,11 +121,7 @@ type ReloadCmd struct {
 
 func (r *ReloadCmd) Run(c *ctl, ctx context.Context) error {
 	if r.Wait {
-		return c.reloadWait(ctx, r.Reason,
-			func(ctx context.Context, req *runnyv1.ReloadRequest) (*runnyv1.ReloadResponse, error) {
-				return c.client.Reload(ctx, req)
-			},
-			defaultFollowOpts(r.RespawnTimeout, r.Timeout))
+		return c.reloadWait(ctx, r.Reason, c.plainReload, defaultFollowOpts(r.RespawnTimeout, r.Timeout))
 	}
 	return c.reload(ctx, r.Reason)
 }

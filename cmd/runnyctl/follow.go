@@ -96,6 +96,13 @@ var errStalled = errors.New("daemon stopped making drain progress (no advance wi
 // both use ReloadRequest / ReloadResponse, so the method is interchangeable.
 type reloadMethod func(context.Context, *runnyv1.ReloadRequest) (*runnyv1.ReloadResponse, error)
 
+// plainReload adapts the daemon's plain Reload RPC to reloadMethod, for the two
+// --wait callers (ReloadCmd, edit-config) that don't need UpgradeReload's
+// config-parse-deferral semantics.
+func (c *ctl) plainReload(ctx context.Context, req *runnyv1.ReloadRequest) (*runnyv1.ReloadResponse, error) {
+	return c.client.Reload(ctx, req)
+}
+
 // reloadWait runs the reload (via method) and follows it to convergence.
 // Success is never "the socket came back": it is a genuinely new process
 // (a changed boot_id) serving the exact config hash the reload returned. The

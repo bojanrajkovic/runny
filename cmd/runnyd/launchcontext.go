@@ -20,17 +20,6 @@ const (
 	launchOrphaned                        // reparented to launchd after self-daemonizing — silently denied
 )
 
-func (c launchContext) String() string {
-	switch c {
-	case launchLaunchd:
-		return "launchd"
-	case launchOrphaned:
-		return "orphaned"
-	default:
-		return "foreground"
-	}
-}
-
 // orphanedDenyDetail explains the self-daemonized state wherever it surfaces —
 // the local-network doctor check and the startup log. It names both the cause
 // and the fix, since this is exactly the silent failure runny exists to kill.

@@ -790,10 +790,7 @@ func (c *ctl) reload(ctx context.Context, reason string) error {
 }
 
 func (c *ctl) renderReload(resp *runnyv1.ReloadResponse) error {
-	sha := resp.GetConfigSha256()
-	if len(sha) > 12 {
-		sha = sha[:12]
-	}
+	sha := shortHex(resp.GetConfigSha256())
 	warn := func() {
 		for _, w := range resp.GetWarnings() {
 			fmt.Fprintf(c.out, "warning: %s — %s\n", w.GetName(), w.GetDetail())
@@ -838,8 +835,6 @@ func durString(d time.Duration) string {
 	switch {
 	case d < 0:
 		return "0s"
-	case d < time.Minute:
-		return d.Round(time.Second).String()
 	case d < time.Hour:
 		return d.Round(time.Second).String()
 	default:

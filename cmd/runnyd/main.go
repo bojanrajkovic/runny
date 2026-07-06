@@ -1085,10 +1085,7 @@ func short(digest string) string {
 // pool images (0 when none resolved successfully).
 func checkDiskHeadroom(freeBytes uint64, maxImageBytes int64) (bool, string) {
 	const minFloor = 30 << 30 // 30 GiB — the pre-image-awareness floor
-	floor := uint64(maxImageBytes) + oci.PullHeadroom
-	if floor < minFloor {
-		floor = minFloor
-	}
+	floor := max(uint64(maxImageBytes)+oci.PullHeadroom, minFloor)
 	freeGB := freeBytes >> 30 // for display only
 	if freeBytes < floor {
 		floorGB := (floor + (1 << 30) - 1) >> 30 // ceiling for display

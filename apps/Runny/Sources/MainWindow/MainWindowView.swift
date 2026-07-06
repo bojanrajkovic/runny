@@ -79,6 +79,16 @@ struct MainWindowView: View {
     }
 }
 
+extension Binding where Value == Bool {
+    /// The "is there something to show" shape every alert/confirmation gated on
+    /// an optional or an emptiness check shares: true from `isPresented`, and
+    /// setting false invokes `clear` (dismiss). Only the presence test and the
+    /// clear action differ per site.
+    init(isPresented: @escaping () -> Bool, clear: @escaping () -> Void) {
+        self.init(get: isPresented, set: { if !$0 { clear() } })
+    }
+}
+
 /// The two transient command channels (failure alert, advisory note) for a
 /// scene root, with their nil→bool binding boilerplate in one place — the
 /// alert counterpart to the popover's StatusBanners.
@@ -101,8 +111,8 @@ struct CommandAlerts: ViewModifier {
 
     private func binding(_ keyPath: ReferenceWritableKeyPath<DaemonStore, String?>) -> Binding<Bool> {
         Binding(
-            get: { store[keyPath: keyPath] != nil },
-            set: { if !$0 { store[keyPath: keyPath] = nil } }
+            isPresented: { store[keyPath: keyPath] != nil },
+            clear: { store[keyPath: keyPath] = nil }
         )
     }
 }

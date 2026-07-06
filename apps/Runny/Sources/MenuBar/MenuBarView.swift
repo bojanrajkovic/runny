@@ -399,10 +399,7 @@ struct RecycleConfirmation: ViewModifier {
     }
 
     private var isPresented: Binding<Bool> {
-        Binding(
-            get: { store.recycleConfirm != nil },
-            set: { if !$0 { store.recycleConfirm = nil } }
-        )
+        Binding(isPresented: { store.recycleConfirm != nil }, clear: { store.recycleConfirm = nil })
     }
 
     private var title: String {

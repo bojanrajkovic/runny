@@ -74,12 +74,8 @@ func (s *Server) GrantOperator(ctx context.Context, req *runnyv1.GrantOperatorRe
 	if err := s.requireSystemDaemon(); err != nil {
 		return nil, err
 	}
-	return s.grantOperator(ctx, req.GetUser())
-}
-
-func (s *Server) grantOperator(ctx context.Context, userArg string) (*runnyv1.OperatorMutation, error) {
 	return s.mutateOperator(
-		ctx, userArg, "grant",
+		ctx, req.GetUser(), "grant",
 		func(ops []opacl.Operator, uid uint32, u *user.User) error {
 			if u.Username == "root" || u.Uid == "0" {
 				return status.Error(codes.InvalidArgument, "refusing to grant root")
@@ -97,12 +93,8 @@ func (s *Server) RevokeOperator(ctx context.Context, req *runnyv1.RevokeOperator
 	if err := s.requireSystemDaemon(); err != nil {
 		return nil, err
 	}
-	return s.revokeOperator(ctx, req.GetUser())
-}
-
-func (s *Server) revokeOperator(ctx context.Context, userArg string) (*runnyv1.OperatorMutation, error) {
 	return s.mutateOperator(
-		ctx, userArg, "revoke",
+		ctx, req.GetUser(), "revoke",
 		func(ops []opacl.Operator, uid uint32, u *user.User) error {
 			if !opacl.ContainsUID(ops, uid) {
 				return status.Errorf(codes.FailedPrecondition, "%s is not an operator", u.Username)

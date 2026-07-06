@@ -19,6 +19,7 @@ import (
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
 	"github.com/bojanrajkovic/runny/internal/opacl"
+	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
 // newGateTestHome builds a fresh temp home dir (with a stand-in socket file,
@@ -220,10 +221,10 @@ func TestMutateOperatorKillsStreamsOnPartialRevokeFailure(t *testing.T) {
 	s := newOperatorTestServer(t)
 	s.gate = newOperatorGate(true, s.HomeDir.String())
 	callerCtx := asOperator(t.Context(), 501)
-	if _, err := s.grantOperator(callerCtx, testGrantee1); err != nil {
+	if _, err := s.GrantOperator(callerCtx, &runnyv1.GrantOperatorRequest{User: testGrantee1}); err != nil {
 		t.Fatalf("grant: %v", err)
 	}
-	if _, err := s.grantOperator(callerCtx, testGrantee2); err != nil {
+	if _, err := s.GrantOperator(callerCtx, &runnyv1.GrantOperatorRequest{User: testGrantee2}); err != nil {
 		t.Fatalf("grant 2 (so revoke isn't also the last-operator case): %v", err)
 	}
 

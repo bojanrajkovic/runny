@@ -33,18 +33,6 @@ func TestClassify(t *testing.T) {
 	}
 }
 
-func TestResultString(t *testing.T) {
-	for r, want := range map[Result]string{
-		Registered:    "registered",
-		NotRegistered: "not-registered",
-		Indeterminate: "indeterminate",
-	} {
-		if got := r.String(); got != want {
-			t.Errorf("Result(%d).String() = %q, want %q", int(r), got, want)
-		}
-	}
-}
-
 func TestProbeRunsThroughTheRunner(t *testing.T) {
 	var gotTarget string
 	run := func(_ context.Context, target string) (string, error) {

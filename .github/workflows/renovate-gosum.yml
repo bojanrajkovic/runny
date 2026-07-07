@@ -1,0 +1,111 @@
+# Hosted Renovate's gomod artifact updater always fails on this repo: its
+# `go get -t ./...` re-resolution step (run before `go mod tidy`, and not
+# reachable by the gomodTidyE postUpdateOption) hits proto/runny/v1's
+# in-graph-only import (ADR-0006) — `go get` lost its own `-e` tolerance flag
+# when Go moved to module mode, so there's no config that saves this step.
+# Every gomod-manager Renovate PR therefore arrives with a bumped go.mod and a
+# stale go.sum. This regenerates go.sum (gazelle + bazel mod tidy too, in case
+# a future bump adds/removes a package, not just a pure version bump) and
+# pushes it back to the Renovate branch — the same shape as
+# renovate-lockfile.yml solves the analogous MODULE.bazel.lock problem.
+#
+# No paths filter, unlike renovate-lockfile.yml: renovate.json5 enables
+# :maintainLockFilesWeekly (via config:best-practices), whose combined
+# lock-file-maintenance branch can touch go.sum-adjacent state without a
+# go.mod require-line diff, so a `go.mod`-only filter would miss it. The
+# regen step is idempotent and the push step only commits when something
+# actually changed, so triggering broadly just costs one cheap no-op run
+# on pushes that don't need it — cheaper than a silently-missed regen.
+#
+# Triggered on push (not pull_request) for the same reason as
+# renovate-lockfile.yml: environment protection evaluates a pull_request job
+# against the merge ref, which no branch policy can match; push runs against
+# refs/heads/renovate/*, which the releaser-app policy allows. The bot's own
+# push here CAN re-trigger this workflow (no paths filter excludes it), but
+# that second run finds nothing left to fix and exits without pushing — one
+# harmless extra run, not a loop.
+#
+# The push uses an App token, not GITHUB_TOKEN: GitHub suppresses workflow
+# triggers for GITHUB_TOKEN pushes, so CI would never run on the fixed head.
+name: renovate-gosum
+
+on:
+  push:
+    branches:
+      - "renovate/**"
+
+# A newer push to the branch supersedes any in-flight regen.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  regen:
+    name: regenerate go.sum
+    # No actor condition: push events only fire from same-repo branches, the
+    # branch filter is renovate/**, and the environment ref policy re-checks —
+    # an actor check would be re-run-spoofable anyway (zizmor bot-conditions).
+    runs-on: ubuntu-latest
+    # The App private key lives on releaser-app (see release-please.yml);
+    # the environment's ref policy additionally restricts it to renovate/*.
+    environment: releaser-app
+    permissions:
+      contents: read # checkout only; the push uses the App token
+    steps:
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app
+        with:
+          app-id: ${{ vars.RELEASER_APP_ID }}
+          private-key: ${{ secrets.RELEASER_APP_PRIVATE_KEY }}
+          # go.sum push to this repo's Renovate branch only.
+          permission-contents: write
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.ref_name }}
+          persist-credentials: false
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        with:
+          # No caches: go.sum feeds every later build — the same cold
+          # reasoning as the artifact job (CI security).
+          cache: false
+      - name: regenerate go.sum
+        # CONTRIBUTING.md's documented dependency workflow, in order: -e
+        # tolerates the in-graph-only proto import that plain `go mod tidy`
+        # (and Renovate's own `go get -t ./...`) aborts on; gazelle must run
+        # before `bazel mod tidy` so new BUILD references exist when
+        # use_repo is recomputed.
+        run: |
+          mise x -- go mod tidy -e
+          mise x -- bazel run //:gazelle
+          mise x -- bazel mod tidy
+      - name: push if changed
+        env:
+          TOKEN: ${{ steps.app.outputs.token }}
+          BRANCH: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          # `git add` first: this repo's BUILD files are named bare `BUILD`,
+          # not `BUILD.bazel`, and `git commit -- <pathspec>` alone never
+          # picks up a brand-new untracked file even if it matches — only
+          # `git add` does. Staging before diffing catches that same case
+          # (a bump rare enough to add a package gazelle needs a new BUILD
+          # for). Two BUILD patterns, not one: git's non-glob-magic pathspec
+          # `**/BUILD` matches nested BUILD files but not a root-level
+          # ./BUILD (it can't cross a leading path separator the way a shell
+          # globstar would) — this repo has one, so it needs its own pattern.
+          # go.mod is included too: `go mod tidy` can rewrite go.mod itself
+          # (missing/unused requires), not just go.sum.
+          git add -- go.mod go.sum MODULE.bazel BUILD '**/BUILD'
+          # Nothing else can be staged after that add, so a bare --cached
+          # diff (no pathspec) is exactly "did any of those paths change".
+          if git diff --cached --quiet; then
+            echo "go.sum already current; nothing to push"
+            exit 0
+          fi
+          # gitIgnoredAuthors in renovate.json5 must keep matching this email,
+          # or Renovate treats the branch as human-edited and stops rebasing.
+          git -c user.name="runny-release[bot]" -c user.email="noreply@coderinserepeat.com" \
+            commit -m "chore(deps): regenerate go.sum"
+          git push "https://x-access-token:${TOKEN}@github.com/${REPO}.git" "HEAD:${BRANCH}"

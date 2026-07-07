@@ -422,14 +422,17 @@ const PoolNamePattern = `^[a-z0-9][a-z0-9-]*$`
 
 var poolNameRE = regexp.MustCompile(PoolNamePattern)
 
-// positiveDuration appends a "%s must be positive" error to errs when d<=0 —
-// the shared floor every duration field in this config uses except
+// positiveDuration returns a "%s must be positive" error when d<=0, else nil
+// — the shared floor every duration field in this config uses except
 // observability.otlp.metrics_interval, which has its own, higher floor and
-// is checked inline where the rest of OTLP's validation already lives.
-func positiveDuration(errs *[]error, name string, d Duration) {
+// is checked inline where the rest of OTLP's validation already lives. A nil
+// return composes directly into errs via append, same as every other check
+// in validate() (errors.Join drops the nils).
+func positiveDuration(name string, d Duration) error {
 	if d <= 0 {
-		*errs = append(*errs, fmt.Errorf("%s must be positive, got %v", name, d.D()))
+		return fmt.Errorf("%s must be positive, got %v", name, d.D())
 	}
+	return nil
 }
 
 func (c *Config) validate() error {
@@ -486,10 +489,10 @@ func (c *Config) validate() error {
 	// budget would fail every operation instantly — or, before this check,
 	// panicked the stall watcher's ticker.
 	for _, f := range allDurationFields {
-		positiveDuration(&errs, f.name, *f.get(c))
+		errs = append(errs, positiveDuration(f.name, *f.get(c)))
 	}
 	for i, p := range c.Pools {
-		positiveDuration(&errs, fmt.Sprintf("pools[%d]: ssh_timeout", i), p.SSHTimeout)
+		errs = append(errs, positiveDuration(fmt.Sprintf("pools[%d]: ssh_timeout", i), p.SSHTimeout))
 	}
 	// Not a Duration (a cycle count), so it isn't in allDurationFields, but the
 	// same silent-wrong-policy risk applies: Store.Prune's count-based branch

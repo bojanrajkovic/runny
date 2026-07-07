@@ -15,6 +15,16 @@ common:ci --lockfile_mode=error
 # to. Both pure-Go and cgo (vz) packages support -race on the build hosts.
 test:race --@rules_go//go/config:race
 
+# Coverage. rules_apple's macOS link action doesn't wire in the profile
+# runtime that --collect_code_coverage's compile-side instrumentation needs
+# (a rules_apple/rules_swift gap, not a bug in our BUILD files): without it,
+# linking any target that pulls in RunnyLib or its SwiftNIO deps fails with
+# undefined __llvm_profile_runtime / llvm_gcda_* symbols. --coverage on the
+# link step pulls in libclang_rt.profile, which provides both symbol sets
+# (Swift's source-based counters and the gcov-style ones SwiftNIO's vendored
+# C targets emit) from the same archive.
+coverage --linkopt=--coverage
+
 # Per-user overrides (gitignored); keep last so it wins.
 try-import %workspace%/user.bazelrc
 

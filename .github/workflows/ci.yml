@@ -95,6 +95,37 @@ jobs:
       - name: test (race)
         run: mise x -- bazel test --config=ci --config=race -- //... -//apps/Runny/...
 
+  # Combined Go+Swift lcov report, uploaded to Codecov for visibility only —
+  # codecov.yml turns off the project/patch status checks, so a coverage
+  # drop never fails a PR. macOS so the Swift side is included; the
+  # coverage config's --linkopt=--coverage (.bazelrc) is what makes that
+  # link succeed at all.
+  coverage:
+    name: coverage (informational)
+    runs-on: macos-26
+    # Dedicated environment (no branch restriction — this runs on every PR,
+    # not just main) so CODECOV_TOKEN is scoped like every other secret here.
+    environment: coverage
+    permissions:
+      contents: read # checkout only
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/bazel
+          key: bazel-${{ runner.os }}-coverage-${{ hashFiles('MODULE.bazel', '.mise.toml') }}
+          restore-keys: bazel-${{ runner.os }}-coverage-
+      - name: coverage
+        run: mise x -- bazel coverage --config=ci --combined_report=lcov -- //...
+      - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: bazel-out/_coverage/_coverage_report.dat
+          fail_ci_if_error: false
+
   # The workflows themselves are attack surface (template injection,
   # unpinned actions, excessive permissions, leaked App tokens): zizmor
   # audits them. The pre-commit hook runs the same audit --offline via the

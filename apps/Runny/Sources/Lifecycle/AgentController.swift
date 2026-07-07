@@ -315,6 +315,16 @@ final class AgentController {
         return ownership == expected
     }
 
+    /// The Login Items approval CTA both surfaces (the Settings row, the Start
+    /// affordance) raise: re-gather ownership and open Login Items only if it
+    /// still reads `awaitingApproval` — a foreign owner that appeared since
+    /// render must suppress this rather than direct a competing approval.
+    func openLoginItemsIfStillAwaiting() async {
+        if await revalidate(.awaitingApproval) {
+            SMAppService.openSystemSettingsLoginItems()
+        }
+    }
+
     /// The app owns an installed agent right now — the predicate the update affordance
     /// and every act-time drain share. Read CACHED here (the render path can't await);
     /// `confirmedSelfManaged()` is the act-time form that re-gathers first. The two

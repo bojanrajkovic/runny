@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/user"
@@ -31,7 +32,10 @@ func installDaemon(operatorFlag, configFlag string) error {
 	}
 	runnyd, err := resolveRunnyd()
 	if err != nil {
-		return fmt.Errorf("%w\n  for a from-checkout build, use tools/deploy/install-system.sh with RUNNYD=/path/to/runnyd", err)
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w\n  for a from-checkout build, use tools/deploy/install-system.sh with RUNNYD=/path/to/runnyd", err)
+		}
+		return err
 	}
 	cfg := sysdaemon.Config{Operator: operator, RunnydPath: runnyd}
 	installer := sysdaemon.New(cfg)

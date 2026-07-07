@@ -386,12 +386,18 @@ func run() error {
 
 	// Reload entry point, shared by the Reload RPC, UpgradeReload RPC, and
 	// SIGHUP (below) — see runReload's doc comment for the shared semantics.
+	// requestReload binds the fixed deps (reloadMu, logger, dir, configPath,
+	// d, slots) once, so every call site below passes only what actually
+	// varies per caller — source, reason, and deferToRespawnTarget.
 	var reloadMu sync.Mutex
+	requestReload := func(ctx context.Context, source, reason string, deferToRespawnTarget bool) socket.ReloadResult {
+		return runReload(ctx, &reloadMu, logger, dir, configPath, d, slots, source, reason, deferToRespawnTarget)
+	}
 	srv.ReloadFn = func(ctx context.Context, reason string) socket.ReloadResult {
-		return runReload(ctx, &reloadMu, logger, dir, configPath, d, slots, "rpc", reason, false)
+		return requestReload(ctx, "rpc", reason, false)
 	}
 	srv.UpgradeReloadFn = func(ctx context.Context, reason string) socket.ReloadResult {
-		return runReload(ctx, &reloadMu, logger, dir, configPath, d, slots, "rpc/upgrade", reason, true)
+		return requestReload(ctx, "rpc/upgrade", reason, true)
 	}
 	srv.DrainFn = d.State
 	srv.PruneFn = func(ctx context.Context, apply bool) socket.PrunePlan {
@@ -458,7 +464,7 @@ func run() error {
 				d.recheck()
 				continue
 			}
-			_ = runReload(ctx, &reloadMu, logger, dir, configPath, d, slots, "SIGHUP", "", false)
+			_ = requestReload(ctx, "SIGHUP", "", false)
 		}
 	}()
 
@@ -587,16 +593,19 @@ func runReload(ctx context.Context, reloadMu *sync.Mutex, logger *slog.Logger, d
 	}
 }
 
-// runPrune computes (and, when apply, executes) the reclaim plan for stale
-// image bundles and runner tarballs: the keep-set built from live slot
-// statuses, per-pool digest resolution against the registry, and — on apply
-// — a final re-snapshot of live slot state immediately before deleting, so an
-// artifact a slot adopted while the (potentially slow) plan phase ran is never
-// reclaimed out from under it.
-func runPrune(ctx context.Context, apply bool, slots []*statemachine.Slot, dir home.Dir, cfg *home.Config) socket.PrunePlan {
-	// Build the keep-set from live slot statuses.
-	keepPaths := map[string]bool{}
-	protectTarballs := map[string]bool{}
+// liveKeepSets snapshots live slot statuses into the image-bundle keep-set
+// (by image+digest) and the runner-tarball keep-set (by RunnerVersion),
+// protecting the latter against concurrent prune via
+// images.ProtectActiveTarballs — including a tarball whose download is in
+// flight but whose RunnerVersion has not been published to slot status yet
+// (the tarball ensure completes before Ensure returns, so there is a window
+// where the tarball is cached but the slot still shows RunnerVersion="").
+// runPrune calls this once for the plan-phase snapshot and, on apply, again
+// immediately before deleting — the two snapshots must use identical
+// protection semantics, which is why this is the one place that builds them.
+func liveKeepSets(slots []*statemachine.Slot, dir home.Dir) (keepPaths, protectTarballs map[string]bool) {
+	keepPaths = map[string]bool{}
+	protectTarballs = map[string]bool{}
 	for _, slot := range slots {
 		st := slot.Status()
 		if st.ImageDigest != "" {
@@ -606,11 +615,19 @@ func runPrune(ctx context.Context, apply bool, slots []*statemachine.Slot, dir h
 			protectTarballs[st.RunnerVersion] = true
 		}
 	}
-	// Protect tarballs whose download is in flight but whose RunnerVersion
-	// has not been published to slot status yet (the tarball ensure
-	// completes before Ensure returns, so there is a window where the
-	// tarball is cached but the slot still shows RunnerVersion="").
 	images.ProtectActiveTarballs(protectTarballs)
+	return keepPaths, protectTarballs
+}
+
+// runPrune computes (and, when apply, executes) the reclaim plan for stale
+// image bundles and runner tarballs: the keep-set built from live slot
+// statuses, per-pool digest resolution against the registry, and — on apply
+// — a final re-snapshot of live slot state immediately before deleting, so an
+// artifact a slot adopted while the (potentially slow) plan phase ran is never
+// reclaimed out from under it.
+func runPrune(ctx context.Context, apply bool, slots []*statemachine.Slot, dir home.Dir, cfg *home.Config) socket.PrunePlan {
+	// Build the keep-set from live slot statuses.
+	keepPaths, protectTarballs := liveKeepSets(slots, dir)
 	// Resolve current digest for each configured pool ref.
 	protectRefDirNames := map[string]bool{}
 	configuredRefs := map[string]string{}
@@ -663,18 +680,7 @@ func runPrune(ctx context.Context, apply bool, slots []*statemachine.Slot, dir h
 		// Re-snapshot live slot state immediately before deleting to
 		// protect artifacts adopted by slots that left BACKOFF during the
 		// potentially-slow plan phase (registry resolves + dir walks).
-		liveKeep := map[string]bool{}
-		liveTarball := map[string]bool{}
-		for _, slot := range slots {
-			st := slot.Status()
-			if st.ImageDigest != "" {
-				liveKeep[dir.ImageBundleDir(st.Image, st.ImageDigest)] = true
-			}
-			if st.RunnerVersion != "" {
-				liveTarball[st.RunnerVersion] = true
-			}
-		}
-		images.ProtectActiveTarballs(liveTarball)
+		liveKeep, liveTarball := liveKeepSets(slots, dir)
 		plan.ReclaimedBytes, plan.ApplyErr = images.ApplyPrune(combined, func(it images.PlanItem) bool {
 			switch it.Kind {
 			case "image-bundle":

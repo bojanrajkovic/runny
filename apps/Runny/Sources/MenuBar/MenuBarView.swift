@@ -124,23 +124,35 @@ struct MenuBarView: View {
     }
 }
 
-/// One banner vocabulary for drain/error/note across the popover. A nil
-/// dismiss closure renders a non-dismissible banner (the drain state, which
-/// clears itself from snapshots).
-struct StatusBanner: View {
-    let text: String
+/// One banner shell for drain/error/note/app-update across the popover: an
+/// icon, arbitrary content, and an optional dismiss. A nil dismiss closure
+/// renders a non-dismissible banner (the drain state, which clears itself
+/// from snapshots).
+struct StatusBanner<Content: View>: View {
     let systemImage: String
     let tint: Color
     var dismiss: (() -> Void)?
+    let content: Content
+
+    init(
+        systemImage: String, tint: Color, dismiss: (() -> Void)? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.systemImage = systemImage
+        self.tint = tint
+        self.dismiss = dismiss
+        self.content = content()
+    }
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: systemImage)
                 .foregroundStyle(tint)
                 .font(.caption)
-            Text(text)
-                .font(.caption)
-                .foregroundStyle(.primary)
+            // Capped at the shell level (not per content type) so no banner —
+            // text or the app-update's link/command pair — grows the popover
+            // past a few lines.
+            content
                 .lineLimit(3)
             Spacer(minLength: 4)
             if let dismiss {
@@ -157,18 +169,25 @@ struct StatusBanner: View {
     }
 }
 
-/// The app-update notify banner. Distinct from `StatusBanner` because it needs
-/// a clickable release-page link and a copyable brew-upgrade command — the
-/// standard banner's text-only shape can't carry those without restructuring it.
+extension StatusBanner where Content == Text {
+    /// The plain-text convenience most banners use (drain/error/note/skew).
+    init(text: String, systemImage: String, tint: Color, dismiss: (() -> Void)? = nil) {
+        self.init(systemImage: systemImage, tint: tint, dismiss: dismiss) {
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.primary)
+        }
+    }
+}
+
+/// The app-update notify banner: a `StatusBanner` whose content is a clickable
+/// release-page link and a copyable brew-upgrade command, rather than plain text.
 struct AppUpdateBanner: View {
     let update: DaemonStore.AppUpdate
     let dismiss: () -> Void
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Image(systemName: "arrow.down.circle")
-                .foregroundStyle(Color.blue)
-                .font(.caption)
+        StatusBanner(systemImage: "arrow.down.circle", tint: .blue, dismiss: dismiss) {
             VStack(alignment: .leading, spacing: 2) {
                 Link("Runny \(update.version) available", destination: update.url)
                     .font(.caption)
@@ -177,16 +196,7 @@ struct AppUpdateBanner: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
-            Spacer(minLength: 4)
-            Button(action: dismiss) {
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
         }
-        .padding(.horizontal, Metrics.pad)
-        .padding(.vertical, 6)
-        .background(Color.blue.opacity(0.08))
     }
 }
 

@@ -3,6 +3,7 @@ package sysdaemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/user"
 	"slices"
@@ -350,5 +351,71 @@ func TestInstallValidatesInputs(t *testing.T) {
 	badOp.cfg.RunnydPath = "/x/runnyd"
 	if err := badOp.Install(context.Background()); err == nil {
 		t.Error("Install with an unresolvable operator must error before any mutation")
+	}
+}
+
+// newStagingInstaller is newTestInstaller plus the account-creation reads a
+// staged Install needs to reach stage() at all.
+func newStagingInstaller(r *recordedRun, testConfig verdictTester) *Installer {
+	r.readErr = errors.New("eDSRecordNotFound")
+	r.listOut = map[string]string{"PrimaryGroupID": "staff 20\n", "UniqueID": "root 0\n"}
+	inst := newTestInstaller(r, func(string, []byte, os.FileMode) error { return nil })
+	inst.testConfig = testConfig
+	return inst.WithStage(StagePlan{Config: []byte("pools: []\n")})
+}
+
+// A warn-tier verdict must not be silently discarded just because -test-config
+// exits 0 — the fresh-install moment is the one chance the operator has to see
+// it before the daemon comes up on it.
+func TestStageSurfacesWarningsAndProceeds(t *testing.T) {
+	r := &recordedRun{}
+	var logs []string
+	inst := newStagingInstaller(r, func(context.Context, string, string) (home.Verdict, error) {
+		return home.Verdict{Status: home.VerdictWarn, Warnings: []home.Warning{
+			{Kind: home.WarnResourceOvercommit, Message: "cpu oversubscribed"},
+		}}, nil
+	})
+	inst.log = func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+	if err := inst.Install(context.Background()); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if !slices.ContainsFunc(logs, func(l string) bool { return strings.Contains(l, "cpu oversubscribed") }) {
+		t.Errorf("warn-tier verdict's warning was not logged; got %v", logs)
+	}
+	if !exactCall(r.calls, "/bin/launchctl", "bootstrap", "system", PlistPath()) {
+		t.Error("a warn-tier verdict must still let install proceed to bootstrap")
+	}
+}
+
+// An error-tier verdict must still block install and leave the home in place
+// without bootstrapping — exactly what gating on the exit code alone already
+// gave us; parsing the JSON must not regress that.
+func TestStageFailsOnErrorVerdictAndSkipsBootstrap(t *testing.T) {
+	r := &recordedRun{}
+	inst := newStagingInstaller(r, func(context.Context, string, string) (home.Verdict, error) {
+		return home.Verdict{Status: home.VerdictError, Errors: []string{"pools[0].github.app_id: required"}}, nil
+	})
+	err := inst.Install(context.Background())
+	if err == nil {
+		t.Fatal("Install must refuse an error-tier staged config")
+	}
+	if !strings.Contains(err.Error(), "app_id: required") {
+		t.Errorf("error must surface the verdict's errors, got: %v", err)
+	}
+	if exactCall(r.calls, "/bin/launchctl", "bootstrap", "system", PlistPath()) {
+		t.Error("must not bootstrap over a staged config that failed validation")
+	}
+}
+
+// A status this runnyctl/runnyd version doesn't recognize must fail closed,
+// matching decideUpgrade and edit-config's gates on the same contract — never
+// treated as an implicit ok.
+func TestStageFailsClosedOnUnrecognizedStatus(t *testing.T) {
+	r := &recordedRun{}
+	inst := newStagingInstaller(r, func(context.Context, string, string) (home.Verdict, error) {
+		return home.Verdict{Status: "future-status"}, nil
+	})
+	if err := inst.Install(context.Background()); err == nil {
+		t.Error("an unrecognized verdict status must fail closed, not be treated as ok")
 	}
 }

@@ -13,6 +13,7 @@ go_library(
         "//internal/home",
         "//internal/launchd",
         "//internal/opacl",
+        "//internal/testconfig",
         "@net_howett_plist//:plist",
     ],
 )

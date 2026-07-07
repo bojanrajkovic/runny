@@ -167,6 +167,7 @@ func TestLoadConfigValidation(t *testing.T) {
 		{"negative secure_ssh", minimalConfig + "deadlines:\n  secure_ssh: -15s\n", "secure_ssh must be positive"},
 		{"negative max_debug_hold", minimalConfig + "limits:\n  max_debug_hold: -1h\n", "max_debug_hold must be positive"},
 		{"negative retention max_age", minimalConfig + "retention:\n  max_age: -24h\n", "retention.max_age must be positive"},
+		{"negative cycles_per_slot", minimalConfig + "retention:\n  cycles_per_slot: -5\n", "cycles_per_slot must be positive"},
 		{"malformed otlp endpoint", minimalConfig + "observability:\n  otlp:\n    endpoint: \"://bad\"\n", "observability.otlp.endpoint"},
 		{"bad otlp scheme", minimalConfig + "observability:\n  otlp:\n    endpoint: ftp://collector.example:4317\n", "observability.otlp.endpoint"},
 		{"otlp endpoint missing host", minimalConfig + "observability:\n  otlp:\n    endpoint: https://\n", "observability.otlp.endpoint"},

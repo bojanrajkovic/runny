@@ -9,12 +9,21 @@
 # pushes it back to the Renovate branch — the same shape as
 # renovate-lockfile.yml solves the analogous MODULE.bazel.lock problem.
 #
+# No paths filter, unlike renovate-lockfile.yml: renovate.json5 enables
+# :maintainLockFilesWeekly (via config:best-practices), whose combined
+# lock-file-maintenance branch can touch go.sum-adjacent state without a
+# go.mod require-line diff, so a `go.mod`-only filter would miss it. The
+# regen step is idempotent and the push step only commits when something
+# actually changed, so triggering broadly just costs one cheap no-op run
+# on pushes that don't need it — cheaper than a silently-missed regen.
+#
 # Triggered on push (not pull_request) for the same reason as
 # renovate-lockfile.yml: environment protection evaluates a pull_request job
 # against the merge ref, which no branch policy can match; push runs against
 # refs/heads/renovate/*, which the releaser-app policy allows. The bot's own
-# push here only touches go.sum (and, rarely, BUILD/MODULE.bazel), which the
-# paths filter below excludes, so it cannot re-trigger itself.
+# push here CAN re-trigger this workflow (no paths filter excludes it), but
+# that second run finds nothing left to fix and exits without pushing — one
+# harmless extra run, not a loop.
 #
 # The push uses an App token, not GITHUB_TOKEN: GitHub suppresses workflow
 # triggers for GITHUB_TOKEN pushes, so CI would never run on the fixed head.
@@ -24,8 +33,6 @@ on:
   push:
     branches:
       - "renovate/**"
-    paths:
-      - "go.mod"
 
 # A newer push to the branch supersedes any in-flight regen.
 concurrency:
@@ -84,9 +91,16 @@ jobs:
           # picks up a brand-new untracked file even if it matches — only
           # `git add` does. Staging before diffing catches that same case
           # (a bump rare enough to add a package gazelle needs a new BUILD
-          # for).
-          git add -- go.sum MODULE.bazel '**/BUILD'
-          if git diff --quiet --cached -- go.sum MODULE.bazel '**/BUILD'; then
+          # for). Two BUILD patterns, not one: git's non-glob-magic pathspec
+          # `**/BUILD` matches nested BUILD files but not a root-level
+          # ./BUILD (it can't cross a leading path separator the way a shell
+          # globstar would) — this repo has one, so it needs its own pattern.
+          # go.mod is included too: `go mod tidy` can rewrite go.mod itself
+          # (missing/unused requires), not just go.sum.
+          git add -- go.mod go.sum MODULE.bazel BUILD '**/BUILD'
+          # Nothing else can be staged after that add, so a bare --cached
+          # diff (no pathspec) is exactly "did any of those paths change".
+          if git diff --cached --quiet; then
             echo "go.sum already current; nothing to push"
             exit 0
           fi

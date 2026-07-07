@@ -1030,7 +1030,7 @@ func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*gi
 				if cached {
 					cacheNote = " (cached)"
 				}
-				add(name, true, fmt.Sprintf("%s → %s (%s uncompressed%s)", ref, oci.ShortDigest(digest), oci.HumanBytes(diskBytes), cacheNote))
+				add(name, true, fmt.Sprintf("%s → sha256:%s (%s uncompressed%s)", ref, oci.ShortDigest(digest), oci.HumanBytes(diskBytes), cacheNote))
 				if !cached && diskBytes > maxImageBytes {
 					maxImageBytes = diskBytes
 				}

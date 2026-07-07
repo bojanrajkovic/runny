@@ -1423,16 +1423,10 @@ func (c *run) teardown(ctx context.Context) bool {
 			// A pull that succeeded but whose artifact never landed must
 			// not report ok — the operator would go looking for a
 			// runner-diag.log that doesn't exist.
-			dir, derr := c.store.Dir(c.rec)
-			if derr != nil {
-				c.deps.Log.Debug("post-mortem dir lookup failed", "err", derr)
-				return derr
-			}
-			if werr := writeFile(dir, "runner-diag.log", diag); werr != nil {
+			if werr := c.store.WriteArtifact(c.rec, "runner-diag.log", diag); werr != nil {
 				c.deps.Log.Debug("post-mortem write failed", "err", werr)
 				return werr
 			}
-			c.rec.Artifacts = append(c.rec.Artifacts, "runner-diag.log")
 			return nil
 		})
 	}
@@ -1451,16 +1445,10 @@ func (c *run) teardown(ctx context.Context) bool {
 			if len(session) == 0 {
 				return nil
 			}
-			dir, derr := c.store.Dir(c.rec)
-			if derr != nil {
-				c.deps.Log.Debug("debug session dir lookup failed", "err", derr)
-				return derr
-			}
-			if werr := writeFile(dir, "debug-session.log", stripTerminalCodes(session)); werr != nil {
+			if werr := c.store.WriteArtifact(c.rec, "debug-session.log", stripTerminalCodes(session)); werr != nil {
 				c.deps.Log.Debug("debug session write failed", "err", werr)
 				return werr
 			}
-			c.rec.Artifacts = append(c.rec.Artifacts, "debug-session.log")
 			return nil
 		})
 	}

@@ -12,9 +12,9 @@ import (
 	"strings"
 )
 
-// WireProtocolVersion is the runny.v1 wire-contract version, published in
-// GetStatusResponse.protocol_version (internal/socket aliases this const) and
-// mirrored by runnyctl's expected-protocol check (cmd/runnyctl/skew.go).
+// WireProtocolVersion is the runny.v1 wire-contract version, published by the
+// daemon in GetStatusResponse.protocol_version and read by runnyctl's skew
+// check (cmd/runnyctl/skew.go) — one const, both sides, no lockstep bump.
 // Defined here — a stdlib-only leaf both internal/socket and runnyctl can
 // import — rather than in internal/socket, so runnyctl need not pull in
 // internal/socket's much heavier dependency graph (statemachine, cgo/vz) just

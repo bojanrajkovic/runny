@@ -13,15 +13,6 @@ final class CycleHistoryModelTests: XCTestCase {
         return s
     }
 
-    private func poll(timeout: TimeInterval = 2, _ condition: () -> Bool) async -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if condition() { return true }
-            try? await Task.sleep(for: .milliseconds(10))
-        }
-        return condition()
-    }
-
     func testRefreshPopulatesCyclesFromClient() async {
         let store = DaemonStore()
         let fake = FakeRunnyClient()

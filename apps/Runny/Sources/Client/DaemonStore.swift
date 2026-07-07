@@ -378,10 +378,10 @@ final class DaemonStore {
         let url: URL
     }
 
-    /// The client of the current healthy stream — typed to the DaemonStore-
-    /// scoped RunnyServiceClient seam (not the full RunnyClient API) so tests
-    /// can substitute a fake here. nil while unreachable — actions fail fast
-    /// instead of hanging.
+    /// The client of the current healthy stream; log/timeline views borrow
+    /// it. Typed to the RunnyServiceClient seam, not the concrete RunnyClient,
+    /// so tests can substitute a fake here. nil while unreachable — actions
+    /// fail fast instead of hanging.
     private(set) var client: (any RunnyServiceClient)?
 
     /// Sets `client` directly, bypassing the connection-establishment flow

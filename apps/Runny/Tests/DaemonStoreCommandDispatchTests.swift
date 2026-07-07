@@ -20,19 +20,6 @@ final class DaemonStoreCommandDispatchTests: XCTestCase {
         return s
     }
 
-    /// Polls `condition` until it's true or `timeout` elapses — `run()`'s
-    /// dispatch Task runs on the same MainActor executor as the poll loop, so
-    /// a fake with no artificial delay resolves within a scheduling tick, not
-    /// the full timeout; this only guards against actually hanging.
-    private func poll(timeout: TimeInterval = 2, _ condition: () -> Bool) async -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if condition() { return true }
-            try? await Task.sleep(for: .milliseconds(10))
-        }
-        return condition()
-    }
-
     func testPauseSlotDispatchesToClient() async {
         let store = DaemonStore()
         let fake = FakeRunnyClient()

@@ -33,7 +33,6 @@ final class FakeRunnyClient: RunnyServiceClient, @unchecked Sendable {
     private(set) var resumeCalls: [(slot: String, commandID: String)] = []
     private(set) var reloadCalls: [String] = []
     private(set) var doctorCallCount = 0
-    private(set) var shutdownCallCount = 0
     private(set) var whyCalls: [(slot: String, cycles: UInt32)] = []
     private(set) var streamLogsCalls: [(slot: String?, daemon: Bool, replay: UInt32)] = []
     private(set) var streamLogsCancelCount = 0
@@ -96,7 +95,5 @@ final class FakeRunnyClient: RunnyServiceClient, @unchecked Sendable {
         return LogStreamHandle(lines: stream) { [weak self] in self?.streamLogsCancelCount += 1 }
     }
 
-    func shutdown() async {
-        shutdownCallCount += 1
-    }
+    func shutdown() async {}
 }

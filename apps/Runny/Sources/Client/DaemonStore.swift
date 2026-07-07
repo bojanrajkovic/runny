@@ -528,7 +528,7 @@ final class DaemonStore {
         // per-user ~/.runny). A per-user→system-daemon transition appearing after
         // the watch arms is caught by the reconnect backoff's re-resolve; this
         // watch is a fast-retry optimization, not the only path.
-        let fd = open(RunnyHome.socketDirectory.path, O_EVTONLY)
+        let fd = open(RunnyHome.directory.path, O_EVTONLY)
         guard fd >= 0 else { return }
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd, eventMask: .write, queue: .main
@@ -715,17 +715,6 @@ final class DaemonStore {
         }
     }
 
-    /// Should confirming `confirmedID` retract the current command banner, whose
-    /// provenance is `errorID`? Only when the banner belongs to that exact
-    /// command. The banner is a single scalar shared across slots, so a
-    /// confirmation must never clear a *different* command's failure banner — a
-    /// `nil` provenance (a banner with no owning command, e.g. unreachable or a
-    /// file-not-found) never matches. Pure and static so the invariant is
-    /// testable in isolation, like `isConfirmed`.
-    nonisolated static func bannerBelongs(to errorID: String?, confirmedID: String) -> Bool {
-        errorID == confirmedID
-    }
-
     private func confirmPending() {
         let now = Date()
         for (slotName, command) in pending {
@@ -744,8 +733,10 @@ final class DaemonStore {
                 // command — the scalar is shared across slots, so without the
                 // provenance check a confirmation here could wipe a genuine
                 // failure banner for a different slot (a silent failure, the one
-                // thing this surface exists to prevent).
-                if Self.bannerBelongs(to: commandErrorID, confirmedID: command.id) {
+                // thing this surface exists to prevent). A nil provenance (a
+                // banner with no owning command, e.g. unreachable or a
+                // file-not-found) never matches.
+                if commandErrorID == command.id {
                     commandError = nil
                 }
             } else if now.timeIntervalSince(command.requestedAt) > Self.confirmBound(for: command.kind) {
@@ -1160,17 +1151,15 @@ final class DaemonStore {
                 guard !Task.isCancelled else { return }
                 // Only an accepted reload (re)arms the pending tracking. A refusal
                 // must NOT cancel an earlier accepted reload still draining toward
-                // its respawn — that one keeps its convergence verdict; the refusal
-                // only surfaces the failed checks.
-                pendingReload = Self.pendingAfterAttempt(
-                    existing: pendingReload,
-                    accepted: resp.accepted
-                        ? PendingReload(
-                            acceptingBootID: resp.acceptingBootID, priorStart: priorStart,
-                            wantSHA: resp.configSha256, acceptedAt: Date()
-                        )
-                        : nil
-                )
+                // its respawn — that one keeps its convergence verdict (nil-coalescing
+                // to `pendingReload` below); the refusal only surfaces the failed checks.
+                let accepted = resp.accepted
+                    ? PendingReload(
+                        acceptingBootID: resp.acceptingBootID, priorStart: priorStart,
+                        wantSHA: resp.configSha256, acceptedAt: Date()
+                    )
+                    : nil
+                pendingReload = accepted ?? pendingReload
                 guard resp.accepted else {
                     commandError = Self.describeRefusal(resp)
                     return
@@ -1224,17 +1213,6 @@ final class DaemonStore {
         return "the daemon didn't confirm the reload (" + error.localizedDescription
             + "); it may have accepted it and started draining — check `runnyctl status`, "
             + "then re-run reload if it didn't take"
-    }
-
-    /// Pure: the pending reload after an attempt resolves. Only an accepted reload
-    /// changes it (the `accepted` value); a refusal or transport failure (nil)
-    /// returns the EXISTING pending untouched — an earlier accepted reload is still
-    /// draining toward its respawn and keeps its convergence verdict rather than
-    /// being cancelled by a later attempt. Static so the rule is unit-testable.
-    nonisolated static func pendingAfterAttempt(
-        existing: PendingReload?, accepted: PendingReload?
-    ) -> PendingReload? {
-        accepted ?? existing
     }
 
     /// Is `st`'s identity a genuinely new process versus the reload we baselined?
@@ -1406,7 +1384,7 @@ final class DaemonStore {
         protocolVersion: UInt32, gotSHA: String, wantSHA: String,
         jobInFlight: Bool, reDraining: String
     ) -> ReloadOutcome {
-        let want = shortSHA(wantSHA)
+        let want = String(wantSHA.prefix(12))
         let note = reDraining.isEmpty
             ? "" : " (the new daemon is already draining again: \(reDraining))"
         if protocolVersion < 2 || gotSHA.isEmpty {
@@ -1418,7 +1396,7 @@ final class DaemonStore {
         }
         if gotSHA != wantSHA {
             return ReloadOutcome(
-                text: "daemon respawned on config \(shortSHA(gotSHA)), NOT the config you "
+                text: "daemon respawned on config \(String(gotSHA.prefix(12))), NOT the config you "
                     + "reloaded (\(want)) — the on-disk file changed during the drain",
                 severity: .failure
             )
@@ -1433,10 +1411,6 @@ final class DaemonStore {
         return ReloadOutcome(
             text: "reloaded: respawned on config \(want)\(note)", severity: .success
         )
-    }
-
-    nonisolated static func shortSHA(_ s: String) -> String {
-        s.count > 12 ? String(s.prefix(12)) : s
     }
 
     // MARK: - App-update notify (fetch GitHub releases/latest, fail-quiet)

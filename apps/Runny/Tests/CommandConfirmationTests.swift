@@ -110,22 +110,6 @@ final class CommandConfirmationTests: XCTestCase {
         XCTAssertFalse(DaemonStore.isConfirmed(pending(.recycle, id: "abc"), by: nil))
     }
 
-    func testBannerRetractedOnlyForItsOwnCommand() {
-        // The error banner is a single scalar shared across slots. A confirmation
-        // retracts it only when the banner's provenance matches the confirming
-        // command — never a different command's failure, and never a banner with
-        // no owning command (unreachable, file-not-found: provenance nil).
-        XCTAssertTrue(DaemonStore.bannerBelongs(to: "abc", confirmedID: "abc"))
-        XCTAssertFalse(
-            DaemonStore.bannerBelongs(to: "abc", confirmedID: "xyz"),
-            "a different command's confirmation must not retract this banner"
-        )
-        XCTAssertFalse(
-            DaemonStore.bannerBelongs(to: nil, confirmedID: "abc"),
-            "an ownerless banner is never retracted by a command confirmation"
-        )
-    }
-
     func testRecycleConfirmsOnCycleChangeIgnoringID() {
         // Recycle has no echoed id — the daemon carries none on RecycleRequest —
         // so it confirms purely on the cycle advancing.

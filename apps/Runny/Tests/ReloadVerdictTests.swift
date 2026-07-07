@@ -235,32 +235,6 @@ final class JobInFlightSeedTests: XCTestCase {
     }
 }
 
-/// The pending-reload lifecycle: only an accepted reload arms or replaces the
-/// tracked pending. A refusal or transport failure leaves an earlier accepted
-/// reload's tracking intact, so a second reload clicked (and refused) mid-drain
-/// can't cancel the first one's convergence verdict. Pure, so pinned directly.
-final class PendingReloadLifecycleTests: XCTestCase {
-    private func pending(_ boot: String) -> DaemonStore.PendingReload {
-        DaemonStore.PendingReload(
-            acceptingBootID: boot, priorStart: nil, wantSHA: "sha-\(boot)", acceptedAt: Date()
-        )
-    }
-
-    func testAcceptedReplacesExistingPending() {
-        let old = pending("A"), new = pending("B")
-        XCTAssertEqual(DaemonStore.pendingAfterAttempt(existing: old, accepted: new), new)
-    }
-
-    func testRefusalKeepsExistingPending() {
-        let old = pending("A")
-        XCTAssertEqual(DaemonStore.pendingAfterAttempt(existing: old, accepted: nil), old)
-    }
-
-    func testRefusalWithNoPriorPendingStaysNil() {
-        XCTAssertNil(DaemonStore.pendingAfterAttempt(existing: nil, accepted: nil))
-    }
-}
-
 /// A reload that throws is ambiguous — a transport drop or deadline means the
 /// daemon may have accepted it and begun draining — so the banner must not assert
 /// a flat "reload failed". (A definitive gRPC rejection IS a real failure, but

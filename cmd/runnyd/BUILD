@@ -47,6 +47,7 @@ go_library(
         "//internal/sysdaemon",
         "//internal/tart",
         "//internal/telemetry",
+        "//internal/testconfig",
         "//internal/versioncore",
         "//proto/runny/v1:runny",
         "@io_opentelemetry_go_otel//:otel",

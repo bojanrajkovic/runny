@@ -24,6 +24,7 @@ go_library(
         "//internal/launchd",
         "//internal/oci",
         "//internal/sysdaemon",
+        "//internal/testconfig",
         "//internal/versioncore",
         "//proto/runny/v1:runny",
         "@com_github_alecthomas_kong//:kong",

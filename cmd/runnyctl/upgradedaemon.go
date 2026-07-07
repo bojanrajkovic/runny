@@ -8,6 +8,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/bojanrajkovic/runny/internal/home"
+	"github.com/bojanrajkovic/runny/internal/testconfig"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
@@ -47,7 +48,7 @@ func (c *ctl) upgradeDaemon(ctx context.Context, force bool, opts followOpts) er
 	if err != nil {
 		return err
 	}
-	v, err := home.RunTestConfig(ctx, runnyd, dir.ConfigPath())
+	v, err := testconfig.RunTestConfig(ctx, runnyd, dir.ConfigPath())
 	if err != nil {
 		return err
 	}

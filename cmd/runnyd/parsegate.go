@@ -10,6 +10,7 @@ import (
 	"github.com/bojanrajkovic/runny/internal/respawn"
 	"github.com/bojanrajkovic/runny/internal/socket"
 	"github.com/bojanrajkovic/runny/internal/sysdaemon"
+	"github.com/bojanrajkovic/runny/internal/testconfig"
 )
 
 // testConfigTimeout bounds the `<target> -test-config <config>` exec. The new
@@ -23,14 +24,14 @@ type configTester func(ctx context.Context, targetPath, configPath string) bool
 
 // execConfigTest is the production configTester: a deadline-bounded
 // `<targetPath> -test-config <configPath>`, delegating the exec-and-parse to
-// home.RunTestConfig (shared with runnyctl's upgrade gate). Treats both "ok"
-// and "warn" as acceptable — the operator already consented to warn-tier
+// testconfig.RunTestConfig (shared with runnyctl's upgrade gate). Treats both
+// "ok" and "warn" as acceptable — the operator already consented to warn-tier
 // configs via `upgrade-daemon --force` (the gate that ran before we arrived
 // here).
 func execConfigTest(ctx context.Context, targetPath, configPath string) bool {
 	cctx, cancel := context.WithTimeout(ctx, testConfigTimeout)
 	defer cancel()
-	v, err := home.RunTestConfig(cctx, targetPath, configPath)
+	v, err := testconfig.RunTestConfig(cctx, targetPath, configPath)
 	if err != nil {
 		return false
 	}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bojanrajkovic/runny/internal/home"
+	"github.com/bojanrajkovic/runny/internal/testconfig"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
@@ -79,7 +80,7 @@ func (c *ctl) editConfig(ctx context.Context) error {
 			fmt.Fprintln(c.out, "no changes")
 			return nil
 		}
-		v, err := home.RunTestConfig(ctx, runnyd, tmpPath)
+		v, err := testconfig.RunTestConfig(ctx, runnyd, tmpPath)
 		if err != nil {
 			return err
 		}

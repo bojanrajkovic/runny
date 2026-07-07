@@ -25,6 +25,7 @@ go_test(
         "instance_test.go",
         "operatorgrants_test.go",
         "resolve_test.go",
+        "testconfig_test.go",
         "warnings_test.go",
     ],
     embed = [":home"],

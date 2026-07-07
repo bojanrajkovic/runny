@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -48,21 +47,5 @@ func TestDecideUpgradeRefusalMessages(t *testing.T) {
 	}
 	if _, r := decideUpgrade(home.VerdictError, true); strings.Contains(r, "--force") {
 		t.Errorf("error refusal must not suggest --force (it can't override a hard error): %q", r)
-	}
-}
-
-// home.Verdict must decode the cross-language contract runnyd -test-config emits —
-// a json-tag typo here would silently misread every verdict.
-func TestConfigVerdictUnmarshalsContract(t *testing.T) {
-	const j = `{"status":"warn","errors":["image-ref: pool mac: bad"],"warnings":[{"kind":"deadline-too-short","message":"too short"}]}`
-	var v home.Verdict
-	if err := json.Unmarshal([]byte(j), &v); err != nil {
-		t.Fatal(err)
-	}
-	if v.Status != home.VerdictWarn || len(v.Errors) != 1 || len(v.Warnings) != 1 {
-		t.Fatalf("decoded shape wrong: %+v", v)
-	}
-	if v.Warnings[0].Kind != "deadline-too-short" || v.Warnings[0].Message != "too short" {
-		t.Errorf("warning decode wrong: %+v", v.Warnings[0])
 	}
 }

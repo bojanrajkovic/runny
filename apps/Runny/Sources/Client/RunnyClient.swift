@@ -62,6 +62,33 @@ final class RunnyClient: @unchecked Sendable {
         CallOptions(timeLimit: .timeout(timeout))
     }
 
+    /// Bridges any AsyncSequence — a grpc-swift call's response stream, whose
+    /// concrete type (GRPCAsyncResponseStream, GRPCAsyncServerStreamingCall's
+    /// responseStream) isn't publicly constructible — into an
+    /// AsyncThrowingStream, which is: the one shape watchStatus and
+    /// streamLogs both need so FakeRunnyClient can produce the same type.
+    /// Forwarding stops when `source` ends, throws, or the returned stream's
+    /// consumer cancels; this does not itself end `source` — a caller that
+    /// needs that (streamLogs, whose RPC must be explicitly cancelled to
+    /// release the server-side ring subscription) still owns that separately.
+    private static func bridge<S: AsyncSequence & Sendable>(
+        _ source: S
+    ) -> AsyncThrowingStream<S.Element, Error> where S.Element: Sendable {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    for try await element in source {
+                        continuation.yield(element)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     /// Time and log one unary RPC's full lifecycle — send, return, or throw — so a
     /// command that never lands leaves a trace instead of silence.
     private func logged<T>(_ name: String, _ op: () async throws -> T) async throws -> T {
@@ -85,25 +112,29 @@ final class RunnyClient: @unchecked Sendable {
 
     /// The long-lived status stream. No time limit here by design: the
     /// supervision bounds (first-snapshot deadline, staleness watchdog) live
-    /// in DaemonStore, which owns this stream's lifecycle.
-    func watchStatus() -> GRPCAsyncResponseStream<Runny_V1_GetStatusResponse> {
-        stub.watchStatus(.init())
+    /// in DaemonStore, which owns this stream's lifecycle. DaemonStore only
+    /// ever iterates this (AsyncSequence conformance), never calls a
+    /// gRPC-specific method on it, so `bridge`'s type change is transparent
+    /// to its one caller.
+    func watchStatus() -> AsyncThrowingStream<Runny_V1_GetStatusResponse, Error> {
+        Self.bridge(stub.watchStatus(.init()))
     }
 
-    /// Returns the call, not just its `responseStream`: the channel is shared
-    /// across log views, so a consumer can't close it to stop the RPC —
-    /// cancelling the consuming Task doesn't reach the server. The caller must
-    /// `.cancel()` this call object to actually end the StreamLogs RPC and
-    /// release the server-side ring subscription.
-    func streamLogs(slot: String?, daemon: Bool, replay: UInt32)
-        -> GRPCAsyncServerStreamingCall<Runny_V1_StreamLogsRequest, Runny_V1_LogLine>
-    {
+    /// Returns a handle carrying explicit `.cancel()`, not just the line
+    /// stream: the channel is shared across log views, so a consumer can't
+    /// close it to stop the RPC — cancelling the consuming Task doesn't reach
+    /// the server. The caller must `.cancel()` the handle to actually end the
+    /// StreamLogs RPC and release the server-side ring subscription; `bridge`
+    /// only stops forwarding, it doesn't reach the call, so that cancel is
+    /// wired separately here.
+    func streamLogs(slot: String?, daemon: Bool, replay: UInt32) -> LogStreamHandle {
         var request = Runny_V1_StreamLogsRequest()
         request.replay = replay
         request.follow = true
         request.daemon = daemon
         if let slot { request.slot = slot }
-        return stub.makeStreamLogsCall(request)
+        let call = stub.makeStreamLogsCall(request)
+        return LogStreamHandle(lines: Self.bridge(call.responseStream)) { call.cancel() }
     }
 
     /// `cancelRunningJob` is the wire form of the CLI's `-force`: in JOB it
@@ -180,6 +211,8 @@ final class RunnyClient: @unchecked Sendable {
         try? await channel.close().get()
     }
 }
+
+extension RunnyClient: RunnyServiceClient {}
 
 extension Error {
     /// The gRPC status code, when this error carries one.

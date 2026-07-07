@@ -26,12 +26,6 @@ func stripTerminalCodes(b []byte) []byte {
 
 // Small fs helpers kept separate so fsm.go stays pure control flow.
 
-func writeFile(dir, name string, data []byte) error {
-	// 0o600: post-mortem artifacts include runner _diag tails, which can
-	// carry unmasked job secrets on verbose runs.
-	return os.WriteFile(filepath.Join(dir, name), data, 0o600)
-}
-
 // cloneRunnerTarball CoW-clones this cycle's resolved runner tarball (basename
 // tarball) from the shared download store into the slot's own mount dir, which
 // is then mounted read-only into the guest. The cycle owns the clone end to

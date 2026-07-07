@@ -46,8 +46,6 @@ type Machine interface {
 	// Stop requests a graceful stop, waits up to grace, then force-stops.
 	// It must not fail-and-leave-running: force is the floor.
 	Stop(ctx bounded.Context, grace time.Duration) error
-	// Done is closed when the guest stops for any reason.
-	Done() <-chan struct{}
 }
 
 // Manager boots bundles.

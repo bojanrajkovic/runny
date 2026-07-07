@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/user"
@@ -29,21 +30,17 @@ func installDaemon(operatorFlag, configFlag string) error {
 	if err := checkNoPerUserAgent(operator); err != nil {
 		return err
 	}
-	exe, err := os.Executable()
+	runnyd, err := resolveRunnyd()
 	if err != nil {
-		return fmt.Errorf("locating runnyctl: %w", err)
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w\n  for a from-checkout build, use tools/deploy/install-system.sh with RUNNYD=/path/to/runnyd", err)
+		}
+		return err
 	}
-	runnyd := sysdaemon.ResolveRunnydPath(exe)
-	if _, err := os.Stat(runnyd); err != nil {
-		return fmt.Errorf("runnyd not found next to runnyctl at %s: %w\n"+
-			"  for a from-checkout build, use tools/deploy/install-system.sh with RUNNYD=/path/to/runnyd", runnyd, err)
-	}
-	cfg := sysdaemon.DefaultConfig()
-	cfg.Operator = operator
-	cfg.RunnydPath = runnyd
+	cfg := sysdaemon.Config{Operator: operator, RunnydPath: runnyd}
 	installer := sysdaemon.New(cfg)
 	if configFlag != "" {
-		plan, err := planStageFromFile(configFlag, cfg.HomeDir, operator)
+		plan, err := planStageFromFile(configFlag, home.SystemHomeDir, operator)
 		if err != nil {
 			return err
 		}
@@ -52,7 +49,7 @@ func installDaemon(operatorFlag, configFlag string) error {
 	if err := installer.Install(context.Background()); err != nil {
 		return err
 	}
-	dir := home.Dir(cfg.HomeDir)
+	dir := home.Dir(home.SystemHomeDir)
 	if configFlag != "" {
 		fmt.Printf("\nrunnyd is installed, started, and running on the staged config (validated by\n"+
 			"runnyd -test-config before start). Change it later with `runnyctl edit-config`\n"+
@@ -108,7 +105,23 @@ func uninstallDaemon() error {
 	if err := requireDarwinRoot("uninstall-daemon"); err != nil {
 		return err
 	}
-	return sysdaemon.New(sysdaemon.DefaultConfig()).Uninstall(context.Background())
+	return sysdaemon.New(sysdaemon.Config{}).Uninstall(context.Background())
+}
+
+// resolveRunnyd locates the runnyd sibling of the running runnyctl (via
+// sysdaemon.ResolveRunnydPath) and confirms it exists, returning an error
+// naming the expected path when it's not there. Shared by every command that
+// execs the on-disk runnyd (install-daemon, edit-config, upgrade-daemon).
+func resolveRunnyd() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("locating runnyctl: %w", err)
+	}
+	runnyd := sysdaemon.ResolveRunnydPath(exe)
+	if _, err := os.Stat(runnyd); err != nil {
+		return "", fmt.Errorf("runnyd not found next to runnyctl at %s: %w", runnyd, err)
+	}
+	return runnyd, nil
 }
 
 func requireDarwinRoot(name string) error {

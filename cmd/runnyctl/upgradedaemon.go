@@ -1,40 +1,15 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
-	"os/exec"
-	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/bojanrajkovic/runny/internal/home"
-	"github.com/bojanrajkovic/runny/internal/sysdaemon"
+	"github.com/bojanrajkovic/runny/internal/testconfig"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
-)
-
-// configVerdict mirrors runnyd -test-config's JSON contract — the gate the new
-// binary runs against the in-place config. The JSON is the contract; this struct
-// tracks it (the Swift app keeps its own copy).
-type configVerdict struct {
-	Status   string           `json:"status"`
-	Errors   []string         `json:"errors"`
-	Warnings []verdictWarning `json:"warnings"`
-}
-
-type verdictWarning struct {
-	Kind    string `json:"kind"`
-	Message string `json:"message"`
-}
-
-const (
-	verdictOK    = "ok"
-	verdictWarn  = "warn"
-	verdictError = "error"
 )
 
 // decideUpgrade maps a gate verdict status to whether to proceed with the
@@ -45,40 +20,18 @@ const (
 // rejects.
 func decideUpgrade(status string, force bool) (proceed bool, refusal string) {
 	switch status {
-	case verdictOK:
+	case home.VerdictOK:
 		return true, ""
-	case verdictWarn:
+	case home.VerdictWarn:
 		if force {
 			return true, ""
 		}
 		return false, "config has warnings; re-run with --force to upgrade anyway"
-	case verdictError:
+	case home.VerdictError:
 		return false, "the new runnyd rejects the in-place config — upgrade refused (fix the config first)"
 	default:
 		return false, fmt.Sprintf("runnyd -test-config returned an unexpected status %q", status)
 	}
-}
-
-// runConfigGate execs the on-disk runnyd's -test-config against configPath and
-// returns the parsed verdict. The exit code mirrors the status (non-zero on
-// error) but the JSON is the contract and is printed in every case, so the
-// verdict is parsed from stdout regardless of the exit code; only a missing
-// binary or unparseable output is a hard error.
-func runConfigGate(runnydPath, configPath string) (configVerdict, error) {
-	var out, errb bytes.Buffer
-	cmd := exec.Command(runnydPath, "-test-config", configPath)
-	cmd.Stdout, cmd.Stderr = &out, &errb
-	runErr := cmd.Run()
-	var v configVerdict
-	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &v); err != nil {
-		if detail := strings.TrimSpace(errb.String()); runErr != nil && detail != "" {
-			return configVerdict{}, fmt.Errorf("running %s -test-config: %v: %s", runnydPath, runErr, detail)
-		} else if runErr != nil {
-			return configVerdict{}, fmt.Errorf("running %s -test-config: %w", runnydPath, runErr)
-		}
-		return configVerdict{}, fmt.Errorf("%s -test-config produced no parseable verdict", runnydPath)
-	}
-	return v, nil
 }
 
 // upgradeDaemon gates a daemon update on the on-disk (newer) runnyd validating
@@ -87,19 +40,15 @@ func runConfigGate(runnydPath, configPath string) (configVerdict, error) {
 // binary delivery, so there is no re-stage here, and the daemon never
 // self-upgrades: this is operator-driven.
 func (c *ctl) upgradeDaemon(ctx context.Context, force bool, opts followOpts) error {
-	exe, err := os.Executable()
+	runnyd, err := resolveRunnyd()
 	if err != nil {
-		return fmt.Errorf("locating runnyctl: %w", err)
-	}
-	runnyd := sysdaemon.ResolveRunnydPath(exe)
-	if _, err := os.Stat(runnyd); err != nil {
-		return fmt.Errorf("runnyd not found next to runnyctl at %s: %w", runnyd, err)
+		return err
 	}
 	dir, err := home.ResolveClient()
 	if err != nil {
 		return err
 	}
-	v, err := runConfigGate(runnyd, dir.ConfigPath())
+	v, err := testconfig.RunTestConfig(ctx, runnyd, dir.ConfigPath())
 	if err != nil {
 		return err
 	}

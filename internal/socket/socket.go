@@ -28,6 +28,7 @@ import (
 	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/logring"
 	"github.com/bojanrajkovic/runny/internal/statemachine"
+	"github.com/bojanrajkovic/runny/internal/versioncore"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
@@ -36,6 +37,16 @@ type DoctorCheck struct {
 	Name   string
 	OK     bool
 	Detail string
+}
+
+// checksToProto converts a slice of DoctorCheck to their wire shape, nil in
+// nil out — same as the hand-rolled append loops it replaces.
+func checksToProto(checks []DoctorCheck) []*runnyv1.DoctorCheck {
+	var out []*runnyv1.DoctorCheck
+	for _, c := range checks {
+		out = append(out, &runnyv1.DoctorCheck{Name: c.Name, Ok: c.OK, Detail: c.Detail})
+	}
+	return out
 }
 
 // ReloadResult mirrors runny.v1.ReloadResponse: the verdict of a reload
@@ -67,17 +78,6 @@ type DrainState struct {
 	// stall timer when it changes.
 	Seq uint64
 }
-
-// WireProtocolVersion is the daemon's wire-contract version, published in
-// GetStatusResponse.protocol_version. Bump it when the daemon gains a feature a
-// client must detect before relying on it. Version 1 introduced pause/resume
-// command acknowledgement (SlotStatus.recent_applied_command_ids): a client
-// confirms a pause/resume from the command id only against a daemon advertising
-// >= 1. Version 2 introduced reload-convergence confirmation (boot_id,
-// config_sha256, drain_seq, exit_held): a reload-following client confirms the
-// respawn by boot_id flip + config hash only against a daemon advertising >= 2,
-// and otherwise falls back to daemon_started and warns it cannot verify.
-const WireProtocolVersion uint32 = 2
 
 // maxCommandIDLen bounds the optional pause/resume command id the client echoes
 // back for acknowledgement. The app sends a UUID (36 chars); the cap is generous
@@ -332,7 +332,7 @@ func (s *Server) snapshot() *runnyv1.GetStatusResponse {
 		DaemonStarted:   timestamppb.New(s.Started),
 		Version:         s.Version,
 		Draining:        ds.Reason,
-		ProtocolVersion: WireProtocolVersion,
+		ProtocolVersion: versioncore.WireProtocolVersion,
 		BootId:          s.BootID,
 		ConfigSha256:    s.ConfigSHA256,
 		DrainSeq:        ds.Seq,
@@ -638,12 +638,8 @@ func (s *Server) reloadResponse(r ReloadResult) *runnyv1.ReloadResponse {
 		// a follower needs no pre-RPC status read to baseline against — the
 		// respawn is then identified by a boot_id that differs from this one.
 		AcceptingBootId: s.BootID,
-	}
-	for _, c := range r.FailedChecks {
-		resp.FailedChecks = append(resp.FailedChecks, &runnyv1.DoctorCheck{Name: c.Name, Ok: c.OK, Detail: c.Detail})
-	}
-	for _, c := range r.Warnings {
-		resp.Warnings = append(resp.Warnings, &runnyv1.DoctorCheck{Name: c.Name, Ok: c.OK, Detail: c.Detail})
+		FailedChecks:    checksToProto(r.FailedChecks),
+		Warnings:        checksToProto(r.Warnings),
 	}
 	return resp
 }
@@ -701,11 +697,7 @@ func (s *Server) Why(ctx context.Context, req *runnyv1.WhyRequest) (*runnyv1.Why
 }
 
 func (s *Server) Doctor(ctx context.Context, _ *runnyv1.DoctorRequest) (*runnyv1.DoctorResponse, error) {
-	resp := &runnyv1.DoctorResponse{}
-	for _, c := range s.DoctorFn(ctx) {
-		resp.Checks = append(resp.Checks, &runnyv1.DoctorCheck{Name: c.Name, Ok: c.OK, Detail: c.Detail})
-	}
-	return resp, nil
+	return &runnyv1.DoctorResponse{Checks: checksToProto(s.DoctorFn(ctx))}, nil
 }
 
 // usernameLookupBound caps how long InjectDebugKey waits on lookupUsername:
@@ -756,17 +748,6 @@ func lookupUsername(uid uint32) string {
 	}
 }
 
-// injectionAborted reports whether ctx already ended (canceled or deadline
-// exceeded), converting it to the same gRPC status InjectDebugKey's
-// post-enqueue select uses for the identical condition — so both call sites
-// agree on what the client sees. nil means ctx is still live.
-func injectionAborted(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return status.FromContextError(err).Err()
-	}
-	return nil
-}
-
 func (s *Server) InjectDebugKey(ctx context.Context, req *runnyv1.InjectDebugKeyRequest) (*runnyv1.InjectDebugKeyResponse, error) {
 	slot, err := s.findSlot(req.GetSlot())
 	if err != nil {
@@ -812,9 +793,11 @@ func (s *Server) InjectDebugKey(ctx context.Context, req *runnyv1.InjectDebugKey
 
 	// The lookup above can take up to usernameLookupBound; a client that
 	// canceled or hit its own deadline during that stall must not have a key
-	// installed after being told the request ended.
-	if err := injectionAborted(ctx); err != nil {
-		return nil, err
+	// installed after being told the request ended. Converts the same way
+	// the post-enqueue select below does for the identical condition, so
+	// both call sites agree on what the client sees.
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
 	}
 
 	reply := make(chan statemachine.DebugKeyReply, 1)

@@ -112,9 +112,7 @@ func (r Ref) String() string {
 }
 
 type manifest struct {
-	SchemaVersion int          `json:"schemaVersion"`
-	MediaType     string       `json:"mediaType"`
-	Layers        []descriptor `json:"layers"`
+	Layers []descriptor `json:"layers"`
 }
 
 type descriptor struct {
@@ -172,28 +170,46 @@ func (c *Client) ResolveWithDiskBytes(ctx bounded.Context, ref Ref) (string, int
 	if err != nil {
 		return "", 0, err
 	}
-	var total int64
-	for i := range m.Layers {
-		l := m.Layers[i]
+	_, _, total, err := diskLayerSizes(m.Layers)
+	if err != nil {
+		return "", 0, err
+	}
+	return digest, total, nil
+}
+
+// diskLayerSizes validates the disk layers among descs (skipping any
+// non-disk layer, e.g. config/nvram) and returns, for the disk layers found
+// in manifest order: each one's offset into disk.img (the running total
+// before it), its declared uncompressed size, and the grand total. A
+// disk-prefixed layer of an unsupported version, or one declaring a
+// non-positive or overflowing size, is an error. The annotated sizes decide
+// file offsets during pull, so the pre-flight size check
+// (ResolveWithDiskBytes) and the pull itself (pull) must validate them
+// identically — this is the one place that does.
+func diskLayerSizes(descs []descriptor) (offsets, sizes []int64, total int64, err error) {
+	for i := range descs {
+		l := descs[i]
 		if !strings.HasPrefix(l.MediaType, mediaTypeDiskPrefix) {
 			continue
 		}
 		if l.MediaType != mediaTypeDiskV2 {
-			return "", 0, fmt.Errorf("unsupported disk layer type %s (only disk.v2 supported)", l.MediaType)
+			return nil, nil, 0, fmt.Errorf("unsupported disk layer type %s (only disk.v2 supported)", l.MediaType)
 		}
 		n, err := l.uncompressedSize()
 		if err != nil {
-			return "", 0, err
+			return nil, nil, 0, err
 		}
 		if n <= 0 {
-			return "", 0, fmt.Errorf("disk layer %s declares non-positive uncompressed size %d", l.Digest, n)
+			return nil, nil, 0, fmt.Errorf("disk layer %s declares non-positive uncompressed size %d", l.Digest, n)
 		}
 		if total > math.MaxInt64-n {
-			return "", 0, fmt.Errorf("disk layer sizes overflow the total image size")
+			return nil, nil, 0, fmt.Errorf("disk layer sizes overflow the total image size")
 		}
+		offsets = append(offsets, total)
+		sizes = append(sizes, n)
 		total += n
 	}
-	return digest, total, nil
+	return offsets, sizes, total, nil
 }
 
 // Pull downloads the image into destDir as a tart bundle (config.json,
@@ -219,15 +235,20 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 		case l.MediaType == mediaTypeNVRAM:
 			nvramLayer = &m.Layers[i]
 		case strings.HasPrefix(l.MediaType, mediaTypeDiskPrefix):
-			if l.MediaType != mediaTypeDiskV2 {
-				return "", fmt.Errorf("unsupported disk layer type %s (only disk.v2 supported)", l.MediaType)
-			}
 			diskLayers = append(diskLayers, l)
 		}
 	}
 	if configLayer == nil || nvramLayer == nil || len(diskLayers) == 0 {
 		return "", fmt.Errorf("manifest %s is not a tart image (config=%v nvram=%v disks=%d)",
 			digest, configLayer != nil, nvramLayer != nil, len(diskLayers))
+	}
+
+	// Validate disk layers before downloading anything: an unsupported disk
+	// layer type must be refused up front, not after config.json/nvram.bin
+	// have already been pulled.
+	offsets, sizes, total, err := diskLayerSizes(diskLayers)
+	if err != nil {
+		return "", err
 	}
 
 	// Small layers: straight blob writes.
@@ -245,24 +266,6 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 	// would silently overwrite its neighbor while every digest still checks
 	// out (digests cover the compressed stream, not the decoded bytes).
 	diskPath := filepath.Join(destDir, "disk.img")
-	var total int64
-	offsets := make([]int64, len(diskLayers))
-	sizes := make([]int64, len(diskLayers))
-	for i, l := range diskLayers {
-		offsets[i] = total
-		n, err := l.uncompressedSize()
-		if err != nil {
-			return "", err
-		}
-		if n <= 0 {
-			return "", fmt.Errorf("disk layer %s declares non-positive uncompressed size %d", l.Digest, n)
-		}
-		if total > math.MaxInt64-n {
-			return "", fmt.Errorf("disk layer sizes overflow the total image size")
-		}
-		sizes[i] = n
-		total += n
-	}
 	// Refuse a doomed pull up front: the decompressed image must fit. Hours
 	// of download ending in ENOSPC is the silent-failure shape this daemon
 	// exists to kill (and these images are large — 80GB+ uncompressed).
@@ -314,6 +317,34 @@ func PullInProgress(destDir string) bool {
 	return len(semAny.(chan struct{})) > 0
 }
 
+// AcquireSlot serializes concurrent callers on the per-key capacity-1
+// semaphore in locks (creating it on first use), returning a release func
+// that MUST be called (defer it) to free the slot. An uncontended caller
+// proceeds immediately; a contended one blocks on onWait (if non-nil, called
+// once, before blocking) and then waits interruptibly until the holder
+// releases or ctx ends — a mutex would make that wait both uninterruptible
+// (an operator recycle couldn't free a waiter) and invisible (no chance to
+// report it). desc names what's contended, for the ctx-cancelled error.
+// Exported because internal/images' tarball-download lock is the identical
+// pattern as this package's own pullLocks.
+func AcquireSlot(ctx context.Context, locks *sync.Map, key, desc string, onWait func()) (func(), error) {
+	semAny, _ := locks.LoadOrStore(key, make(chan struct{}, 1))
+	sem := semAny.(chan struct{})
+	select {
+	case sem <- struct{}{}:
+	default:
+		if onWait != nil {
+			onWait()
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("waiting for a concurrent %s: %w", desc, context.Cause(ctx))
+		}
+	}
+	return func() { <-sem }, nil
+}
+
 // PullTo pulls into a sibling temp dir and renames into place, so destDir
 // either exists complete or not at all — ENSURE_IMAGE's idempotence depends
 // on this. The bounded.Context is typically stall-bounded (Stall.Watch):
@@ -326,20 +357,11 @@ func PullInProgress(destDir string) bool {
 // delete the winner's freshly placed bundle, or a half-written disk.img
 // could be renamed into place and pass Verify forever.
 func (c *Client) PullTo(ctx bounded.Context, ref Ref, destDir string) (string, error) {
-	semAny, _ := pullLocks.LoadOrStore(destDir, make(chan struct{}, 1))
-	sem := semAny.(chan struct{})
-	select {
-	case sem <- struct{}{}:
-	default:
-		// Contended: another pull into this destination is in flight. Block
-		// interruptibly until it finishes (then take the cache hit) or ctx ends.
-		select {
-		case sem <- struct{}{}:
-		case <-ctx.Done():
-			return "", fmt.Errorf("waiting for a concurrent pull into %s: %w", destDir, context.Cause(ctx))
-		}
+	release, err := AcquireSlot(ctx, &pullLocks, destDir, "pull into "+destDir, nil)
+	if err != nil {
+		return "", err
 	}
-	defer func() { <-sem }()
+	defer release()
 
 	// A cache hit must pass the same completeness bar the consumer applies
 	// (tart.Bundle.Verify), not just "manifest.json exists" — a manifest
@@ -646,6 +668,18 @@ func truncateFile(path string, size int64) error {
 	return f.Truncate(size)
 }
 
+// ShortDigest is the one display convention for digests: strip a leading
+// "sha256:" and keep the first 12 hex characters (shorter input is returned
+// as-is). Exported so every caller that prints a digest for a human — the
+// prune planner included — renders it the same way.
+func ShortDigest(d string) string {
+	d = strings.TrimPrefix(d, "sha256:")
+	if len(d) > 12 {
+		d = d[:12]
+	}
+	return d
+}
+
 // HumanBytes renders a byte count for humans. Exported because the pull
 // progress reporting in internal/images speaks the same dialect — two
 // copies of this had already drifted apart once.
@@ -662,29 +696,20 @@ func HumanBytes(n int64) string {
 	}
 }
 
-// progressWriter forwards write lengths to a progress callback. It holds no
-// shared state of its own, but pull runs several of these concurrently (one per
-// errgroup layer), so fn is called from multiple goroutines — see Client.Progress
-// for the goroutine-safety contract callers must honor.
-type progressWriter struct{ fn func(int64) }
+// ProgressWriter adapts a byte-delta callback to io.Writer for a TeeReader.
+// Fn holds no shared state of its own, but a caller may run several of these
+// concurrently (pull's errgroup fans one per disk layer), so Fn must be
+// goroutine-safe — see Client.Progress for the contract this client's own
+// callback honors. Exported because internal/images' runner-tarball download
+// wants the identical adapter; two copies of this had already drifted apart
+// once (see HumanBytes).
+type ProgressWriter struct{ Fn func(int64) }
 
-func (p progressWriter) Write(b []byte) (int, error) {
-	if p.fn != nil {
-		p.fn(int64(len(b)))
+func (p ProgressWriter) Write(b []byte) (int, error) {
+	if p.Fn != nil {
+		p.Fn(int64(len(b)))
 	}
 	return len(b), nil
 }
 
-func (c *Client) progressWriter() io.Writer { return progressWriter{fn: c.Progress} }
-
-// WithHTTPClient overrides the transport (tests; custom CA setups). The
-// caller's client is used as given except that its transport is wrapped in
-// the obs one — a custom-CA registry must not silently lose its egress
-// events.
-func (c *Client) WithHTTPClient(hc *http.Client) *Client {
-	wrapped := *hc
-	wrapped.Transport = &obs.HTTPTransport{Base: hc.Transport}
-	hc = &wrapped
-	c.hc = hc
-	return c
-}
+func (c *Client) progressWriter() io.Writer { return ProgressWriter{Fn: c.Progress} }

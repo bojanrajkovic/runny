@@ -79,6 +79,16 @@ struct MainWindowView: View {
     }
 }
 
+extension Binding where Value == Bool {
+    /// The "is there something to show" shape every alert/confirmation gated on
+    /// an optional or an emptiness check shares: true from `isPresented`, and
+    /// setting false invokes `clear` (dismiss). Only the presence test and the
+    /// clear action differ per site.
+    init(isPresented: @escaping () -> Bool, clear: @escaping () -> Void) {
+        self.init(get: isPresented, set: { if !$0 { clear() } })
+    }
+}
+
 /// The two transient command channels (failure alert, advisory note) for a
 /// scene root, with their nil→bool binding boilerplate in one place — the
 /// alert counterpart to the popover's StatusBanners.
@@ -101,8 +111,8 @@ struct CommandAlerts: ViewModifier {
 
     private func binding(_ keyPath: ReferenceWritableKeyPath<DaemonStore, String?>) -> Binding<Bool> {
         Binding(
-            get: { store[keyPath: keyPath] != nil },
-            set: { if !$0 { store[keyPath: keyPath] = nil } }
+            isPresented: { store[keyPath: keyPath] != nil },
+            clear: { store[keyPath: keyPath] = nil }
         )
     }
 }
@@ -114,7 +124,6 @@ extension View {
 /// Compact daemon status: connection, version, uptime, last update.
 struct DaemonCard: View {
     @Environment(DaemonStore.self) private var store
-    @Environment(AgentController.self) private var agent
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -147,13 +156,7 @@ struct DaemonCard: View {
             // app-installed agent is newer than the running daemon.
             DaemonUpdateAffordance()
             HStack {
-                Button(store.reloadInFlight ? "Validating…" : "Reload Config…") {
-                    // Shared gate (explicitUpdate: false — this button's drain dialog is
-                    // the consent): an upgrade reload runs the gate (Warn/Error pop up, OK
-                    // shows the drain confirm); a plain reload gets the generic confirm.
-                    Task { await startGatedReload(store, agent, explicitUpdate: false) }
-                }
-                .disabled(store.reloadInFlight || store.client == nil)
+                ReloadButton(title: "Reload Config…")
                 // Manual re-dial of the same daemon at the fixed ~/.runny.
                 // Disabled while a reload is draining so a re-dial can't tear
                 // down the stream and discard the convergence verdict mid-drain;
@@ -178,20 +181,13 @@ struct DaemonCard: View {
     private var tooltip: String {
         var parts: [String] = []
         if let started = store.daemonStarted {
-            parts.append("Up since \(Self.clock.string(from: started))")
+            parts.append("Up since \(started.formatted(date: .omitted, time: .standard))")
         }
         if let last = store.lastUpdate {
-            parts.append("last contact \(Self.clock.string(from: last))")
+            parts.append("last contact \(last.formatted(date: .omitted, time: .standard))")
         }
         return parts.joined(separator: " · ")
     }
-
-    static let clock: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .none
-        formatter.timeStyle = .medium
-        return formatter
-    }()
 }
 
 struct SidebarSlotRow: View {

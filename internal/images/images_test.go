@@ -92,10 +92,10 @@ func TestEnsureEmitsResolveAndWaitForPull(t *testing.T) {
 		resolve: func(ctx context.Context) (string, error) {
 			return "sha256:abc", nil
 		},
-		acquire: func(destDir string, ref oci.Ref, report func(string)) (*subscription, func()) {
+		acquire: func(destDir string, ref oci.Ref, report func(string)) (chan ensureResult, func()) {
 			fakeBundle(t, destDir)
-			sub := &subscription{done: make(chan ensureResult, 1)}
-			sub.done <- ensureResult{digest: "sha256:abc", bundle: tart.Bundle(destDir)}
+			sub := make(chan ensureResult, 1)
+			sub <- ensureResult{digest: "sha256:abc", bundle: tart.Bundle(destDir)}
 			return sub, func() {}
 		},
 	}
@@ -133,7 +133,7 @@ func TestEnsureCacheHitEmitsNoWaitForPull(t *testing.T) {
 		Home:    home.Dir(dir),
 		Ref:     ref,
 		resolve: func(ctx context.Context) (string, error) { return "sha256:hit", nil },
-		acquire: func(string, oci.Ref, func(string)) (*subscription, func()) {
+		acquire: func(string, oci.Ref, func(string)) (chan ensureResult, func()) {
 			t.Error("cache hit must not subscribe to the shared puller")
 			return nil, nil
 		},

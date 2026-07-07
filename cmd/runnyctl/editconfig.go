@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/bojanrajkovic/runny/internal/home"
-	"github.com/bojanrajkovic/runny/internal/sysdaemon"
+	"github.com/bojanrajkovic/runny/internal/testconfig"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
@@ -37,13 +37,9 @@ func (c *ctl) editConfig(ctx context.Context) error {
 	}
 	configPath := dir.ConfigPath()
 
-	exe, err := os.Executable()
+	runnyd, err := resolveRunnyd()
 	if err != nil {
-		return fmt.Errorf("locating runnyctl: %w", err)
-	}
-	runnyd := sysdaemon.ResolveRunnydPath(exe)
-	if _, err := os.Stat(runnyd); err != nil {
-		return fmt.Errorf("runnyd not found next to runnyctl at %s: %w", runnyd, err)
+		return err
 	}
 
 	seed, err := os.ReadFile(configPath)
@@ -84,7 +80,7 @@ func (c *ctl) editConfig(ctx context.Context) error {
 			fmt.Fprintln(c.out, "no changes")
 			return nil
 		}
-		v, err := runConfigGate(runnyd, tmpPath)
+		v, err := testconfig.RunTestConfig(ctx, runnyd, tmpPath)
 		if err != nil {
 			return err
 		}
@@ -95,14 +91,14 @@ func (c *ctl) editConfig(ctx context.Context) error {
 			fmt.Fprintf(c.err, "error: %s\n", e)
 		}
 		switch v.Status {
-		case verdictOK:
-		case verdictWarn:
+		case home.VerdictOK:
+		case home.VerdictWarn:
 			if !confirmYN("apply despite the warning(s) above?") {
 				fmt.Fprintln(c.err, "reopening the editor…")
 				continue
 			}
 		default:
-			// verdictError, or any status this runnyctl doesn't recognize — fail
+			// home.VerdictError, or any status this runnyctl doesn't recognize — fail
 			// closed like decideUpgrade does for the same contract (upgradedaemon.go):
 			// an unrecognized status must never be treated as an implicit ok.
 			fmt.Fprintln(c.err, "fix the error(s) above — reopening the editor…")
@@ -114,7 +110,7 @@ func (c *ctl) editConfig(ctx context.Context) error {
 	if err := os.Rename(tmpPath, configPath); err != nil {
 		return fmt.Errorf("applying the edited config: %w", err)
 	}
-	fmt.Fprintf(c.out, "config saved (sha256 %.12x)\n", sha256.Sum256(after))
+	fmt.Fprintf(c.out, "config saved (sha256 %s)\n", shortHex(fmt.Sprintf("%x", sha256.Sum256(after))))
 
 	pctx, cancel := context.WithTimeout(ctx, probeCallTimeout)
 	_, statusErr := c.client.GetStatus(pctx, &runnyv1.GetStatusRequest{})
@@ -123,11 +119,7 @@ func (c *ctl) editConfig(ctx context.Context) error {
 		fmt.Fprintln(c.out, "daemon not running; this config applies on next start")
 		return nil
 	}
-	return c.reloadWait(ctx, "runnyctl edit-config",
-		func(ctx context.Context, req *runnyv1.ReloadRequest) (*runnyv1.ReloadResponse, error) {
-			return c.client.Reload(ctx, req)
-		},
-		defaultFollowOpts(90*time.Second, 0))
+	return c.reloadWait(ctx, "runnyctl edit-config", c.plainReload, defaultFollowOpts(90*time.Second, 0))
 }
 
 // openEditor runs $VISUAL, else $EDITOR, else vi on path, connected to the

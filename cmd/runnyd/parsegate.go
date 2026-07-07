@@ -1,18 +1,16 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os/exec"
 	"time"
 
 	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/respawn"
 	"github.com/bojanrajkovic/runny/internal/socket"
 	"github.com/bojanrajkovic/runny/internal/sysdaemon"
+	"github.com/bojanrajkovic/runny/internal/testconfig"
 )
 
 // testConfigTimeout bounds the `<target> -test-config <config>` exec. The new
@@ -25,20 +23,19 @@ const testConfigTimeout = 10 * time.Second
 type configTester func(ctx context.Context, targetPath, configPath string) bool
 
 // execConfigTest is the production configTester: a deadline-bounded
-// `<targetPath> -test-config <configPath>`. Treats both "ok" and "warn" as
-// acceptable — the operator already consented to warn-tier configs via
-// `upgrade-daemon --force` (the gate that ran before we arrived here).
+// `<targetPath> -test-config <configPath>`, delegating the exec-and-parse to
+// testconfig.RunTestConfig (shared with runnyctl's upgrade gate). Treats both
+// "ok" and "warn" as acceptable — the operator already consented to warn-tier
+// configs via `upgrade-daemon --force` (the gate that ran before we arrived
+// here).
 func execConfigTest(ctx context.Context, targetPath, configPath string) bool {
 	cctx, cancel := context.WithTimeout(ctx, testConfigTimeout)
 	defer cancel()
-	// The exit code mirrors the verdict status but the JSON stdout is the
-	// contract — parse it regardless of the exit code, same as runConfigGate.
-	out, _ := exec.CommandContext(cctx, targetPath, "-test-config", configPath).Output()
-	var v configVerdict
-	if err := json.Unmarshal(bytes.TrimSpace(out), &v); err != nil {
+	v, err := testconfig.RunTestConfig(cctx, targetPath, configPath)
+	if err != nil {
 		return false
 	}
-	return v.Status == verdictOK || v.Status == verdictWarn
+	return v.Status == home.VerdictOK || v.Status == home.VerdictWarn
 }
 
 // deferralPlistPath returns the system LaunchDaemon plist to consult for
@@ -51,7 +48,7 @@ func deferralPlistPath(dir home.Dir) string {
 	if dir.String() != home.SystemHomeDir {
 		return ""
 	}
-	return sysdaemon.DefaultConfig().PlistPath()
+	return sysdaemon.PlistPath()
 }
 
 // parseableByRespawnTarget returns true when the binary launchd would respawn

@@ -132,19 +132,11 @@ final class DaemonStore {
     /// control.
     var dismissedSkew: SkewVerdict?
 
-    /// The latest Runny release newer than this app's stamped version, or nil
-    /// when the app is current, no check has run yet, or the check failed
-    /// (fail-quiet — silence is better than a false "you're behind" banner).
-    /// Set by the 24h timer + launch + manual "Check for Updates…" check.
-    private(set) var availableUpdate: AppUpdate?
-    /// The update the operator dismissed — keyed on the version string so a
-    /// re-check of the same release stays quiet, but a newer release is new news.
-    var dismissedUpdate: AppUpdate?
-    /// The banner to show: `availableUpdate` minus what was dismissed. A
-    /// dismissed "v0.7.0" stays gone until a "v0.7.1" check arrives.
-    var shownUpdate: AppUpdate? {
-        availableUpdate.flatMap { $0.version == dismissedUpdate?.version ? nil : $0 }
-    }
+    /// The app-update poll (GitHub releases/latest, fail-quiet) lives in its own
+    /// type — it shares no state with the connection FSM, only the `appVersion`
+    /// constant below. Not `private`: `MenuBarView` reads `shownUpdate`/sets
+    /// `dismissedUpdate` on it directly.
+    let updateMonitor = AppUpdateMonitor()
 
     /// The live skew — gated on a healthy connection only. The main-window card
     /// reads this and renders it as an always-on status row, like the draining
@@ -271,8 +263,9 @@ final class DaemonStore {
     /// Set the command banner and record which command it belongs to. The
     /// assignment fires `commandError`'s didSet (clearing the id), then we set
     /// the real provenance — so the final state is `(text, id)` regardless of
-    /// what the id was before.
-    private func setCommandError(_ text: String, id: String?) {
+    /// what the id was before. Not `private`: tests use it to seed a banner's
+    /// provenance without a live command RPC.
+    func setCommandError(_ text: String, id: String?) {
         commandError = text
         commandErrorID = id
     }
@@ -296,7 +289,9 @@ final class DaemonStore {
     /// concurrent nudge from the other surface backs off instead of racing it.
     private var autoApplyTask: Task<Void, Never>?
 
-    private(set) var pending: [String: PendingCommand] = [:]
+    /// Not `private(set)`: tests seed a command directly here to drive
+    /// `confirmPending()`'s real retraction logic without a live command RPC.
+    var pending: [String: PendingCommand] = [:]
     /// Ids a snapshot confirmed in the last confirm→catch window, so a late RPC
     /// error doesn't contradict a confirmation the operator can already see.
     private var recentlyConfirmed = RecentlyConfirmed()
@@ -306,8 +301,10 @@ final class DaemonStore {
     /// across a respawn, boot id does not), the config hash the reload validated
     /// (so the respawn can be confirmed to have loaded that file), and the
     /// pre-reload start time as the protocol-1 fallback discriminator. nil when
-    /// no reload is in flight.
-    private var pendingReload: PendingReload?
+    /// no reload is in flight. Read-only outside this file: only
+    /// `applyReloadResponse`/`noteRespawnIfReady`/etc. set it — the readable half
+    /// of the testable seam `reloadPending` already exposes existence-only for.
+    private(set) var pendingReload: PendingReload?
     /// True while a reload is draining toward its respawn (a pendingReload is
     /// armed) — the window in which a manual Reconnect would tear down the stream
     /// and silently discard the convergence verdict the operator is waiting on.
@@ -386,13 +383,11 @@ final class DaemonStore {
     private(set) var client: RunnyClient?
 
     private var supervisor: Task<Void, Never>?
-    private var updateCheckTask: Task<Void, Never>?
     private var sleepTask: Task<Void, Never>?
     private var retryNow = false
     private var attemptLastMessage: Date?
     private var failedAttemptsSinceConnected = 0
     private var wakeObserver: NSObjectProtocol?
-    private var checkForUpdatesObserver: NSObjectProtocol?
     private var socketWatch: DispatchSourceFileSystemObject?
 
     static let establishmentBound: TimeInterval = 5
@@ -458,19 +453,8 @@ final class DaemonStore {
         }
         watchHomeDirectory()
         supervisor = Task { await superviseForever() }
-        // App-update check: fires on launch, then every 24h, and on the
-        // "Check for Updates…" menu command. App-lifetime — NOT cancelled by
-        // restart(), which is connection-scoped. The notification lets the
-        // menu item trigger an immediate check without threading the store
-        // into the command infrastructure.
-        if updateCheckTask == nil {
-            checkForUpdatesObserver = NotificationCenter.default.addObserver(
-                forName: .runnyCheckForAppUpdates, object: nil, queue: .main
-            ) { [weak self] _ in
-                Task { @MainActor in await self?.runUpdateCheck() }
-            }
-            updateCheckTask = Task { await updateCheckLoop() }
-        }
+        // App-lifetime — NOT cancelled by restart(), which is connection-scoped.
+        updateMonitor.start()
     }
 
     /// Manual re-dial: tear down the supervisor and socket watch, then start()
@@ -528,7 +512,7 @@ final class DaemonStore {
         // per-user ~/.runny). A per-user→system-daemon transition appearing after
         // the watch arms is caught by the reconnect backoff's re-resolve; this
         // watch is a fast-retry optimization, not the only path.
-        let fd = open(RunnyHome.socketDirectory.path, O_EVTONLY)
+        let fd = open(RunnyHome.directory.path, O_EVTONLY)
         guard fd >= 0 else { return }
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd, eventMask: .write, queue: .main
@@ -657,7 +641,9 @@ final class DaemonStore {
         return "no socket at \(RunnyHome.displaySocketPath) — is runnyd running, or using a different home?"
     }
 
-    private func apply(_ snapshot: Runny_V1_GetStatusResponse) {
+    /// Not `private`: tests drive a snapshot's full apply — including
+    /// `confirmPending()`'s retraction logic — without a live WatchStatus stream.
+    func apply(_ snapshot: Runny_V1_GetStatusResponse) {
         connection = .connected
         slots = snapshot.slots.sorted { $0.slot < $1.slot }
         daemonVersion = snapshot.version
@@ -715,17 +701,6 @@ final class DaemonStore {
         }
     }
 
-    /// Should confirming `confirmedID` retract the current command banner, whose
-    /// provenance is `errorID`? Only when the banner belongs to that exact
-    /// command. The banner is a single scalar shared across slots, so a
-    /// confirmation must never clear a *different* command's failure banner — a
-    /// `nil` provenance (a banner with no owning command, e.g. unreachable or a
-    /// file-not-found) never matches. Pure and static so the invariant is
-    /// testable in isolation, like `isConfirmed`.
-    nonisolated static func bannerBelongs(to errorID: String?, confirmedID: String) -> Bool {
-        errorID == confirmedID
-    }
-
     private func confirmPending() {
         let now = Date()
         for (slotName, command) in pending {
@@ -744,8 +719,10 @@ final class DaemonStore {
                 // command — the scalar is shared across slots, so without the
                 // provenance check a confirmation here could wipe a genuine
                 // failure banner for a different slot (a silent failure, the one
-                // thing this surface exists to prevent).
-                if Self.bannerBelongs(to: commandErrorID, confirmedID: command.id) {
+                // thing this surface exists to prevent). A nil provenance (a
+                // banner with no owning command, e.g. unreachable or a
+                // file-not-found) never matches.
+                if commandErrorID == command.id {
                     commandError = nil
                 }
             } else if now.timeIntervalSince(command.requestedAt) > Self.confirmBound(for: command.kind) {
@@ -1158,40 +1135,7 @@ final class DaemonStore {
             do {
                 let resp = try await client.reload(reason: "operator request (Runny)")
                 guard !Task.isCancelled else { return }
-                // Only an accepted reload (re)arms the pending tracking. A refusal
-                // must NOT cancel an earlier accepted reload still draining toward
-                // its respawn — that one keeps its convergence verdict; the refusal
-                // only surfaces the failed checks.
-                pendingReload = Self.pendingAfterAttempt(
-                    existing: pendingReload,
-                    accepted: resp.accepted
-                        ? PendingReload(
-                            acceptingBootID: resp.acceptingBootID, priorStart: priorStart,
-                            wantSHA: resp.configSha256, acceptedAt: Date()
-                        )
-                        : nil
-                )
-                guard resp.accepted else {
-                    commandError = Self.describeRefusal(resp)
-                    return
-                }
-                // An accepted update reload records the attempt — so a respawn that
-                // comes back still older surfaces "update didn't take", while a
-                // cancelled or refused one never does.
-                if isUpdate { daemonUpdateAttempted = true }
-                // Seed from the slots visible at acceptance, so a daemon that
-                // dies before its next snapshot still carries a job-in-flight
-                // warning into the verdict; later old-process snapshots refine it.
-                reloadJobInFlight = Self.anyJobRunning(slots)
-                reloadStallSeq = drainSeq
-                reloadStallSince = Date()
-                var notes = resp.warnings.filter { !$0.ok }.map { "\($0.name): \($0.detail)" }
-                if resp.acceptingBootID.isEmpty {
-                    notes.append("this daemon predates boot-id reporting — confirming the respawn by start time only; a stalled drain can't be detected either (no drain-progress signal before protocol 2)")
-                }
-                if !notes.isEmpty {
-                    commandNote = "reload accepted — " + notes.joined(separator: "; ")
-                }
+                applyReloadResponse(resp, priorStart: priorStart, isUpdate: isUpdate)
                 // The drain itself shows through the live WatchStatus stream; the
                 // respawn is resolved by noteRespawnIfReady on a later snapshot.
             } catch {
@@ -1210,31 +1154,48 @@ final class DaemonStore {
         }
     }
 
-    /// Pure: the operator banner for a reload that threw. A definitive rejection
-    /// (the daemon refused before acting) is a real failure, surfaced verbatim;
-    /// any other throw — a transport drop or a deadline — is AMBIGUOUS, since the
-    /// daemon may have accepted the reload and begun draining. The ambiguous banner
-    /// says the outcome is unknown and how to confirm it rather than claiming a
-    /// failure that may not have happened. Static so the wording is unit-testable;
-    /// reuses the same definitive-vs-ambiguous split the command path uses.
-    nonisolated static func reloadThrowBanner(_ error: Error) -> String {
-        if error.isDefinitiveRejection {
-            return "reload failed: " + (error.grpcMessage ?? error.localizedDescription)
+    /// `performReload()`'s only reaction to an answered RPC: arm/replace the
+    /// pending tracking on acceptance, or leave an earlier accepted reload's
+    /// tracking untouched on refusal (nil-coalescing to `pendingReload`, never
+    /// dropping it) — the failed checks are surfaced either way. An accepted
+    /// reload also seeds the drain/job-in-flight bookkeeping the respawn verdict
+    /// needs. Not `private`: this is the real state transition (not a
+    /// duplicate/pure verdict of it), factored out so the refusal-preserves-an-
+    /// earlier-pending contract runs against a real (if canned) `ReloadResponse`
+    /// without a live daemon — mirrors `trackReloadDrain`/`noteRespawnIfReady`,
+    /// the other instance methods that react to real state rather than compute a
+    /// verdict from parameters.
+    func applyReloadResponse(
+        _ resp: Runny_V1_ReloadResponse, priorStart: Date?, isUpdate: Bool
+    ) {
+        let accepted = resp.accepted
+            ? PendingReload(
+                acceptingBootID: resp.acceptingBootID, priorStart: priorStart,
+                wantSHA: resp.configSha256, acceptedAt: Date()
+            )
+            : nil
+        pendingReload = accepted ?? pendingReload
+        guard resp.accepted else {
+            commandError = Self.describeRefusal(resp)
+            return
         }
-        return "the daemon didn't confirm the reload (" + error.localizedDescription
-            + "); it may have accepted it and started draining — check `runnyctl status`, "
-            + "then re-run reload if it didn't take"
-    }
-
-    /// Pure: the pending reload after an attempt resolves. Only an accepted reload
-    /// changes it (the `accepted` value); a refusal or transport failure (nil)
-    /// returns the EXISTING pending untouched — an earlier accepted reload is still
-    /// draining toward its respawn and keeps its convergence verdict rather than
-    /// being cancelled by a later attempt. Static so the rule is unit-testable.
-    nonisolated static func pendingAfterAttempt(
-        existing: PendingReload?, accepted: PendingReload?
-    ) -> PendingReload? {
-        accepted ?? existing
+        // An accepted update reload records the attempt — so a respawn that
+        // comes back still older surfaces "update didn't take", while a
+        // cancelled or refused one never does.
+        if isUpdate { daemonUpdateAttempted = true }
+        // Seed from the slots visible at acceptance, so a daemon that
+        // dies before its next snapshot still carries a job-in-flight
+        // warning into the verdict; later old-process snapshots refine it.
+        reloadJobInFlight = Self.anyJobRunning(slots)
+        reloadStallSeq = drainSeq
+        reloadStallSince = Date()
+        var notes = resp.warnings.filter { !$0.ok }.map { "\($0.name): \($0.detail)" }
+        if resp.acceptingBootID.isEmpty {
+            notes.append("this daemon predates boot-id reporting — confirming the respawn by start time only; a stalled drain can't be detected either (no drain-progress signal before protocol 2)")
+        }
+        if !notes.isEmpty {
+            commandNote = "reload accepted — " + notes.joined(separator: "; ")
+        }
     }
 
     /// Is `st`'s identity a genuinely new process versus the reload we baselined?
@@ -1277,47 +1238,6 @@ final class DaemonStore {
                 + "progress and may be hung; check `runnyctl status`"
             pendingReload = nil
             reloadStallSince = nil
-        }
-    }
-
-    /// Pure: should a mid-drain reload be declared wedged? Only protocol >= 2
-    /// publishes `drain_seq`, the progress signal the stall rests on; a pre-2
-    /// daemon pins it at 0, so its drain can't be progress-bounded and must not
-    /// trip the stall — which would degrade into a wall-clock cap on a drain that
-    /// can validly run as long as any bounded state allows. Also suppressed while
-    /// any slot is still working an active state (each is bounded daemon-side by
-    /// its own per-state deadline — PROVISION alone is 180s, twice the window) or
-    /// the exit gate is held. Static so the gate is unit-testable without a live
-    /// daemon; mirrors runnyctl's stall carve-out in `streamDrain`.
-    nonisolated static func drainStalled(
-        protocolVersion: UInt32, stalledFor: TimeInterval, bound: TimeInterval,
-        anySlotActive: Bool, exitHeld: Bool
-    ) -> Bool {
-        guard protocolVersion >= 2 else { return false }
-        return !anySlotActive && !exitHeld && stalledFor > bound
-    }
-
-    /// Whether any slot is running a job. The reload's job-in-flight seed (at
-    /// acceptance) and its per-snapshot refinement share this, so a job present
-    /// when the daemon goes down is caught even if no further snapshot arrives.
-    /// Only a running JOB counts — a pull or a debug hold is not an interrupted job.
-    nonisolated static func anyJobRunning(_ slots: [Runny_V1_SlotStatus]) -> Bool {
-        slots.contains { $0.state == .job }
-    }
-
-    /// Whether any slot is still working toward convergence. Mirrors the daemon's
-    /// own stable predicate (Wedged || (Paused && BACKOFF)): a slot is quiescent
-    /// only when wedged or PAUSED in BACKOFF, so a slot working a cycle state OR
-    /// sitting UNPAUSED in BACKOFF (still backing off, up to the backoff cap,
-    /// before the drainer's pause lands) counts as active. Each active case is
-    /// bounded daemon-side, so a frozen drain_seq while a slot is active is that
-    /// bound's business, not a hang. The stall fires only once every slot is
-    /// quiescent yet the daemon still hasn't exited. Mirrors runnyctl's
-    /// `anySlotActive`.
-    nonisolated static func anySlotActive(_ slots: [Runny_V1_SlotStatus]) -> Bool {
-        slots.contains { slot in
-            guard !slot.wedged, slot.state != .unspecified else { return false }
-            return !(slot.state == .backoff && slot.paused)
         }
     }
 
@@ -1365,274 +1285,11 @@ final class DaemonStore {
         reloadStallSince = nil
     }
 
-    /// Pure: has the respawn-silence deadline passed? Silence is measured from the
-    /// later of acceptance and the last snapshot — never from a snapshot that
-    /// predates acceptance, so a stream already near-stale when the operator hit
-    /// Reload can't bank that pre-acceptance quiet against the respawn wait. A
-    /// post-acceptance snapshot (lastUpdate > acceptedAt) moves the anchor forward;
-    /// a daemon that dies at acceptance and never returns trips it `bound` after
-    /// acceptance. Static so it's unit-testable without a live stream.
-    nonisolated static func respawnSilenceExpired(
-        acceptedAt: Date, lastUpdate: Date?, now: Date, bound: TimeInterval
-    ) -> Bool {
-        let anchor = max(acceptedAt, lastUpdate ?? acceptedAt)
-        return now.timeIntervalSince(anchor) > bound
-    }
-
-    /// Pure: turns a refused ReloadResponse into the operator-facing banner —
-    /// the failed checks, plus the loud warning when a drain is already running
-    /// and WILL load the invalid file. Static so it's unit-testable.
-    nonisolated static func describeRefusal(_ resp: Runny_V1_ReloadResponse) -> String {
-        var lines = [
-            "reload refused — the new config failed validation; the running daemon is unchanged",
-        ]
-        for check in resp.failedChecks where !check.ok {
-            lines.append("• \(check.name): \(check.detail)")
-        }
-        if !resp.draining.isEmpty {
-            lines.append(
-                "WARNING: the daemon is already draining (\(resp.draining)) and the "
-                    + "respawn WILL load this invalid config — fix it before the drain converges"
-            )
-        }
-        return lines.joined(separator: "\n")
-    }
-
-    /// Pure: the whole respawn taxonomy against the validated config, mirroring
-    /// runnyctl's `respawnVerdict`. Static so every branch is unit-testable. A
-    /// `.failure` is config drift (the operator must act); the job-in-flight case
-    /// is a `.warning` (the config IS live, but a job may have been interrupted).
-    nonisolated static func respawnVerdict(
-        protocolVersion: UInt32, gotSHA: String, wantSHA: String,
-        jobInFlight: Bool, reDraining: String
-    ) -> ReloadOutcome {
-        let want = shortSHA(wantSHA)
-        let note = reDraining.isEmpty
-            ? "" : " (the new daemon is already draining again: \(reDraining))"
-        if protocolVersion < 2 || gotSHA.isEmpty {
-            return ReloadOutcome(
-                text: "daemon respawned, but it doesn't report its running config hash — "
-                    + "can't verify it came up on \(want); upgrade runnyd to confirm\(note)",
-                severity: .warning
-            )
-        }
-        if gotSHA != wantSHA {
-            return ReloadOutcome(
-                text: "daemon respawned on config \(shortSHA(gotSHA)), NOT the config you "
-                    + "reloaded (\(want)) — the on-disk file changed during the drain",
-                severity: .failure
-            )
-        }
-        if jobInFlight {
-            return ReloadOutcome(
-                text: "daemon respawned on config \(want), but the previous daemon went down "
-                    + "with a job still running — it may have been interrupted\(note)",
-                severity: .warning
-            )
-        }
-        return ReloadOutcome(
-            text: "reloaded: respawned on config \(want)\(note)", severity: .success
-        )
-    }
-
-    nonisolated static func shortSHA(_ s: String) -> String {
-        s.count > 12 ? String(s.prefix(12)) : s
-    }
-
-    // MARK: - App-update notify (fetch GitHub releases/latest, fail-quiet)
-
-    private func updateCheckLoop() async {
-        await runUpdateCheck()
-        while !Task.isCancelled {
-            try? await Task.sleep(for: .seconds(86400))
-            if Task.isCancelled { return }
-            await runUpdateCheck()
-        }
-    }
-
-    private func runUpdateCheck() async {
-        let enabled = UserDefaults.standard.object(forKey: Prefs.checkForAppUpdates) as? Bool ?? true
-        guard enabled else { return }
-        if let result = await AppUpdateChecker.fetch(appVersion: Self.appVersion) {
-            availableUpdate = result
-        }
-    }
-
-    // MARK: - Version skew (warn, never refuse)
-
-    /// The `x.y.z` core of a version string — the leading `\d+.\d+.\d+`, or nil if
-    /// the string doesn't start with one. The daemon publishes its full build
-    /// label (`0.6.0-beta.<sha>`) while the app's bundle version is already
-    /// stripped to its core by the build, so normalizing both sides to the core
-    /// before comparing keeps a same-commit beta pair from false-alarming. The
-    /// match is anchored at the start, mirroring the build's `re.match` capture, so
-    /// a label that doesn't begin with `x.y.z` (empty, a dev label, an unexpected
-    /// prefix) yields nil → quiet rather than mis-extracting a triple from
-    /// somewhere in the middle.
-    nonisolated static func versionCore(_ s: String) -> String? {
-        guard let range = s.range(of: #"^\d+\.\d+\.\d+"#, options: .regularExpression)
-        else { return nil }
-        return String(s[range])
-    }
-
-    /// Pure: is `latestTag` (the GitHub API's `tag_name`, e.g. `"v0.7.0"`) a
-    /// release strictly newer than `appVersion`? Returns the normalized `x.y.z`
-    /// core of the release if it is, nil otherwise. Fail-quiet: an unstamped app
-    /// (`0.0.0`), an unparseable tag, or an equal/older release all return nil.
-    /// Strips a leading `v` before normalizing; handles `-beta.<sha>` suffixes via
-    /// `versionCore`'s anchored match — the same normalization the skew detector uses.
-    nonisolated static func releaseNewerThanApp(appVersion: String, latestTag: String) -> String? {
-        let tag = latestTag.hasPrefix("v") ? String(latestTag.dropFirst()) : latestTag
-        guard
-            let latestCore = versionCore(tag),
-            let appCore = versionCore(appVersion), appCore != unstampedVersion
-        else { return nil }
-        return semverGreater(latestCore, appCore) ? latestCore : nil
-    }
-
-    /// Pure: the version-skew verdict between this app and the daemon it watches,
-    /// or nil when they match, the daemon's version isn't known yet, the app is an
-    /// unstamped dev build, or the daemon is merely newer (the safe monotone
-    /// direction). Static and parameterized on the four facts — never reading
-    /// `Bundle.main` — so every branch is unit-testable without a live daemon.
-    ///
-    /// Two independent axes, neither implied by the other:
-    ///  - `versionMismatch`: the normalized `x.y.z` cores differ — the shared-host
-    ///    brew-daemon-at-another-release case. Symmetric.
-    ///  - `protocolBehind`: the cores match but the daemon's protocol is below what
-    ///    this app's wire stubs expect — the new-app/old-daemon upgrade window,
-    ///    invisible to the version axis (same `x.y.z`) and the ONLY detector for it.
-    nonisolated static func skewVerdict(
-        appVersion: String, appExpectedProtocol: UInt32,
-        daemonVersion: String, daemonProtocol: UInt32
-    ) -> SkewVerdict? {
-        // No version heard from the daemon yet (fresh connect, or a daemon
-        // predating the field): never warn about a version we don't have.
-        guard let daemonCore = versionCore(daemonVersion) else { return nil }
-        // An unstamped dev build — or a missing bundle key coalesced to the
-        // unstamped sentinel — must not wear a permanent false banner. It accepts
-        // that a dev build could miss a real skew; a dev build is never a shipped
-        // install.
-        guard let appCore = versionCore(appVersion), appCore != unstampedVersion
-        else { return nil }
-        // Different release lines — the shared-host / lagging-channel case. Name
-        // the normalized cores, not the daemon's full suffix-bearing string: a
-        // same-core rebuild that only rotates the build sha must not change the
-        // verdict and re-pop a dismissed banner. The full daemon version is shown
-        // in the version line above either surface.
-        if appCore != daemonCore {
-            return SkewVerdict(
-                kind: .versionMismatch,
-                text: "this app is \(appCore) but the daemon is \(daemonCore) — "
-                    + "different releases; upgrade the lagging install"
-            )
-        }
-        // Same release, but the daemon predates a capability this app's stubs
-        // expect — the upgrade window the matched cores hide. `<`, not `!=`: a
-        // newer daemon serving an older-expecting app degrades nothing.
-        if daemonProtocol < appExpectedProtocol {
-            return SkewVerdict(
-                kind: .protocolBehind,
-                text: "the running daemon predates a capability this app expects — "
-                    + "some features may not work; upgrade or restart runnyd"
-            )
-        }
-        return nil
-    }
-
-    /// Pure: is the app a strictly newer build than the daemon? The direction the
-    /// symmetric skew verdict doesn't compute. False for an unstamped dev app (it
-    /// can't meaningfully "update" anything) or a daemon with no version yet.
-    nonisolated static func appNewerThanDaemon(appVersion: String, daemonVersion: String) -> Bool {
-        guard let app = versionCore(appVersion), app != unstampedVersion,
-              let daemon = versionCore(daemonVersion)
-        else { return false }
-        return semverGreater(app, daemon)
-    }
-
-    /// Pure: numeric (not lexical) compare of two `x.y.z` cores — so 0.10.0 > 0.9.0.
-    nonisolated static func semverGreater(_ a: String, _ b: String) -> Bool {
-        let pa = a.split(separator: ".").map { Int($0) ?? 0 }
-        let pb = b.split(separator: ".").map { Int($0) ?? 0 }
-        for i in 0 ..< max(pa.count, pb.count) {
-            let x = i < pa.count ? pa[i] : 0
-            let y = i < pb.count ? pb[i] : 0
-            if x != y { return x > y }
-        }
-        return false
-    }
-
-    /// Pure: same-core-older-protocol — the upgrade window the version compare
-    /// alone misses (e.g. a beta/rebuild whose stubs expect a newer protocol). A
-    /// reload moves launchd onto the bundled binary, so it IS update-eligible for
-    /// an app-installed agent. Mirrors `skewVerdict`'s protocol axis.
-    nonisolated static func protocolBehind(
-        appVersion: String, daemonVersion: String, daemonProtocol: UInt32, appExpectedProtocol: UInt32
-    ) -> Bool {
-        guard let app = versionCore(appVersion), app != unstampedVersion,
-              let daemon = versionCore(daemonVersion), app == daemon
-        else { return false }
-        return daemonProtocol < appExpectedProtocol
-    }
-
-    /// Pure: the daemon-update surface. Offered ONLY for an app-installed agent the
-    /// app is ahead of on EITHER axis — a newer version core, or the same core with
-    /// an older protocol (a reload picks up the bundled binary either way). A
-    /// brew/manual daemon would drain its fleet for a respawn of the same binary, so
-    /// it never sees this. While the update reload drains, `inProgress`; after it
-    /// resolves still-behind, `didNotTake` (named, loud).
-    nonisolated static func daemonUpdate(
-        agentInstalled: Bool, agentCanonical: Bool, runningBundleCanonical: Bool,
-        appNewer: Bool, protocolBehind: Bool, daemonCore: String,
-        reloadPending: Bool, attempted: Bool
-    ) -> DaemonUpdate {
-        // agentCanonical: the registered job points at THIS app's /Applications
-        // bundle (a reload respawns it). runningBundleCanonical: the RUNNING bundle
-        // IS that /Applications app — so the appNewer comparison reflects the binary
-        // the reload will actually respawn. Both are required: a newer app run from
-        // Downloads (running bundle not canonical) reads as appNewer, but the reload
-        // respawns the older /Applications binary, so the update could never take.
-        guard agentInstalled, agentCanonical, runningBundleCanonical, appNewer || protocolBehind
-        else { return .none }
-        if reloadPending { return .inProgress }
-        if attempted { return .didNotTake(daemonCore: daemonCore) }
-        return .available
-    }
-
-    /// Pure: whether to ATTEMPT auto-apply — the cheap precondition checked before
-    /// the async revalidate + config-compat probe. Fires only when the default-on
-    /// setting is enabled, an update is actually on offer (`.available`), and none has
-    /// been attempted this cycle. `attempted` (`daemonUpdateAttempted`) is the loop
-    /// backstop: a non-converged update leaves it set, so a `didNotTake` drops to the
-    /// manual "Try Again" rather than an auto-retry drain loop. The OK-only gate (Warn/
-    /// Error never auto-apply) and the confirmed-`.selfManaged` ownership check happen
-    /// after this, in the trigger.
-    nonisolated static func autoApplyShouldAttempt(settingOn: Bool, update: DaemonUpdate, attempted: Bool) -> Bool {
-        settingOn && update == .available && !attempted
-    }
-
     /// Pure: must the uninstall raise the abandon confirmation? Yes whenever a live
     /// guest is present OR the live-guest state is UNKNOWN — a disconnected or
     /// pre-first-snapshot store reports an empty list that means "no snapshot", not
     /// "no guest", so an empty list is safe to skip only while connected.
     nonisolated static func uninstallNeedsConfirmation(connected: Bool, liveGuestSlots: [String]) -> Bool {
         !liveGuestSlots.isEmpty || !connected
-    }
-
-    /// Pure: the skew to actually render, applying the two visibility gates that
-    /// keep the detector from itself failing silently. Static so both are
-    /// unit-testable without a live store.
-    ///  - Connection gate: on a drop/stale/unreachable transition the supervisor
-    ///    flips `connection` WITHOUT calling `apply()`, so a stored `skew` would
-    ///    linger and assert skew about a daemon that may have recycled — show
-    ///    nothing unless the connection is live.
-    ///  - Dismiss gate: suppress a skew the operator dismissed, keyed on the full
-    ///    `Equatable` verdict, so a worsening or different-axis skew on the same
-    ///    version string is new news and re-surfaces.
-    nonisolated static func gatedSkew(
-        skew: SkewVerdict?, connection: ConnectionState, dismissed: SkewVerdict?
-    ) -> SkewVerdict? {
-        guard connection == .connected, let skew, skew != dismissed else { return nil }
-        return skew
     }
 }

@@ -170,11 +170,11 @@ struct ConfigGateAlerts: ViewModifier {
     }
 
     private var warnPresented: Binding<Bool> {
-        Binding(get: { !store.configGateWarnings.isEmpty }, set: { if !$0 { store.clearConfigGate() } })
+        Binding(isPresented: { !store.configGateWarnings.isEmpty }, clear: { store.clearConfigGate() })
     }
 
     private var blockPresented: Binding<Bool> {
-        Binding(get: { store.configGateBlock != nil }, set: { if !$0 { store.clearConfigGate() } })
+        Binding(isPresented: { store.configGateBlock != nil }, clear: { store.clearConfigGate() })
     }
 
     private var warnMessage: String {

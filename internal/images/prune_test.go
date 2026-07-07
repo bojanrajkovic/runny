@@ -218,7 +218,7 @@ func TestPlanRunnerCachePrunePlansReleasedPartial(t *testing.T) {
 }
 
 // TestPruneRunnerCacheBackwardCompat: existing cold-start call still works
-// (PruneRunnerCache = PlanRunnerCachePrune + applyPrune).
+// (PruneRunnerCache = PlanRunnerCachePrune + ApplyPrune).
 func TestPruneRunnerCacheBackwardCompat(t *testing.T) {
 	dir := t.TempDir()
 	files := []string{

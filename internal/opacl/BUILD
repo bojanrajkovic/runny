@@ -65,10 +65,7 @@ go_library(
 
 go_test(
     name = "opacl_test",
-    srcs = [
-        "opacl_darwin_test.go",
-        "opacl_test.go",
-    ],
+    srcs = ["opacl_darwin_test.go"],
     embed = [":opacl"],
     deps = select({
         "@rules_go//go/platform:darwin": [

@@ -24,17 +24,6 @@ const (
 	Registered
 )
 
-func (r Result) String() string {
-	switch r {
-	case Registered:
-		return "registered"
-	case NotRegistered:
-		return "not-registered"
-	default:
-		return "indeterminate"
-	}
-}
-
 // probeTimeout bounds one `launchctl print`: a wedged launchd must not hang the
 // caller (a doctor suite, an install command).
 const probeTimeout = 5 * time.Second

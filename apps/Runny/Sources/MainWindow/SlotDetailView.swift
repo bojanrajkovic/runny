@@ -46,9 +46,8 @@ struct SlotDetailView: View {
         // the header rising under the title bar (where macOS 26.0.x eats the
         // click). Recycle is a daemon no-op in BACKOFF (no guest), disabled there.
         .navigationTitle(SlotPresentation.displayName(slot))
-        // GUI voice (statePhrase), not the CLI token (stateLabel) — the subtitle
-        // sits beside the human runner name, so "Wedged"/"Listening", never
-        // "WEDGED!"/"LISTENING".
+        // GUI voice (statePhrase) sits beside the human runner name, so
+        // "Wedged"/"Listening", never the CLI's "WEDGED!"/"LISTENING".
         .navigationSubtitle(SlotPresentation.statePhrase(slot))
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -185,7 +184,7 @@ struct InfoTab: View {
                 if !slot.runnerName.isEmpty {
                     DetailRow(label: "Runner name", value: slot.runnerName, mono: true, truncate: true, copyable: true)
                 }
-                DetailRow(label: "Entered", value: Self.timestamp.string(from: slot.stateEntered.dateValue))
+                DetailRow(label: "Entered", value: slot.stateEntered.dateValue.formatted(date: .abbreviated, time: .standard))
                 if !slot.cycleID.isEmpty {
                     DetailRow(label: "Cycle", value: slot.cycleID, mono: true, copyable: true)
                 }
@@ -204,7 +203,7 @@ struct InfoTab: View {
                 }
                 if slot.hasJob {
                     DetailRow(label: "Job", value: slot.job.name)
-                    DetailRow(label: "Job started", value: Self.timestamp.string(from: slot.job.started.dateValue))
+                    DetailRow(label: "Job started", value: slot.job.started.dateValue.formatted(date: .abbreviated, time: .standard))
                     if !slot.job.operatorKeys.isEmpty {
                         // Security-relevant: the job ran with an operator debug
                         // key in its trust environment.
@@ -215,7 +214,7 @@ struct InfoTab: View {
                     DetailRow(label: "Debug hold", value: "armed — enters DEBUG when the job ends", tint: .purple)
                 }
                 if slot.hasDebugHoldExpires {
-                    DetailRow(label: "Debug hold expires", value: Self.timestamp.string(from: slot.debugHoldExpires.dateValue), tint: .purple)
+                    DetailRow(label: "Debug hold expires", value: slot.debugHoldExpires.dateValue.formatted(date: .abbreviated, time: .standard), tint: .purple)
                 }
                 if slot.wedged {
                     DetailRow(label: "Wedged", value: "parked until the daemon restarts", tint: .red)
@@ -233,13 +232,6 @@ struct InfoTab: View {
             .padding()
         }
     }
-
-    static let timestamp: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .medium
-        return formatter
-    }()
 }
 
 /// One Info-card row: secondary label left, value right, tighter than a

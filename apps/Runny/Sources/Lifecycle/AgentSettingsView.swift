@@ -1,4 +1,3 @@
-import ServiceManagement
 import SwiftUI
 
 /// The app's Settings surface. The app is non-privileged — it never installs the
@@ -185,10 +184,9 @@ struct AgentInstallRow: View {
             // Re-gather before sending the user to approve: approval launches the
             // RunAtLoad agent OUTSIDE the spawn gate, so a foreign owner that appeared
             // since render must suppress this rather than direct an approval that creates
-            // a competing manager. revalidate publishes the fresh verdict, flipping the
-            // surface to the observer banner when it no longer reads awaitingApproval.
+            // a competing manager.
             Button("Open Login Items…") {
-                Task { if await agent.revalidate(.awaitingApproval) { SMAppService.openSystemSettingsLoginItems() } }
+                Task { await agent.openLoginItemsIfStillAwaiting() }
             }
             .controlSize(.small)
         }

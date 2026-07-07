@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bojanrajkovic/runny/internal/home"
+	"github.com/bojanrajkovic/runny/internal/launchd"
 	"github.com/bojanrajkovic/runny/internal/opacl"
 )
 
@@ -116,7 +117,7 @@ func (i *Installer) stage(ctx context.Context, plan StagePlan) error {
 			return err
 		}
 	}
-	configPath := home.Dir(i.cfg.HomeDir).ConfigPath()
+	configPath := home.Dir(home.SystemHomeDir).ConfigPath()
 	if err := i.writeOwned(ctx, configPath, plan.Config); err != nil {
 		return err
 	}
@@ -125,7 +126,7 @@ func (i *Installer) stage(ctx context.Context, plan StagePlan) error {
 			configPath, err)
 	}
 	i.log("staged config.yaml and %d key file(s) into %s; validated by %s -test-config",
-		len(plan.Keys), i.cfg.HomeDir, i.cfg.RunnydPath)
+		len(plan.Keys), home.SystemHomeDir, i.cfg.RunnydPath)
 	return nil
 }
 
@@ -152,38 +153,39 @@ func (i *Installer) writeOwned(ctx context.Context, path string, data []byte) er
 // so the plist and home are removed only after launchctl confirms the job is gone,
 // never over a still-running KeepAlive daemon.
 func (i *Installer) Uninstall(ctx context.Context) error {
-	_, _ = i.run(ctx, "/bin/launchctl", "bootout", "system/"+i.cfg.Label)
+	_, _ = i.run(ctx, "/bin/launchctl", "bootout", "system/"+Label)
 	switch loaded, err := i.jobLoaded(ctx); {
 	case err != nil:
-		return fmt.Errorf("could not confirm %s was unloaded after bootout: %w", i.cfg.Label, err)
+		return fmt.Errorf("could not confirm %s was unloaded after bootout: %w", Label, err)
 	case loaded:
-		return fmt.Errorf("%s is still loaded after bootout; refusing to remove the plist and home over a running daemon", i.cfg.Label)
+		return fmt.Errorf("%s is still loaded after bootout; refusing to remove the plist and home over a running daemon", Label)
 	}
-	if _, err := i.run(ctx, "/bin/rm", "-f", i.cfg.PlistPath()); err != nil {
+	if _, err := i.run(ctx, "/bin/rm", "-f", PlistPath()); err != nil {
 		return err
 	}
-	if _, err := i.run(ctx, "/bin/rm", "-rf", i.cfg.HomeDir); err != nil {
+	if _, err := i.run(ctx, "/bin/rm", "-rf", home.SystemHomeDir); err != nil {
 		return err
 	}
 	i.log("removed the system LaunchDaemon (%s) and %s; the %s account is kept for reinstall",
-		i.cfg.Label, i.cfg.HomeDir, i.cfg.ServiceUser)
+		Label, home.SystemHomeDir, ServiceUser)
 	return nil
 }
 
-// jobLoaded reports whether the system job is still registered with launchd.
-// `launchctl print system/<label>` exits zero (and prints the job) when loaded,
-// and exits nonzero with "Could not find ... in domain" when gone — the success
-// case for uninstall. Any other error is inconclusive and surfaced to the caller
-// rather than swallowed.
+// jobLoaded reports whether the system job is still registered with launchd,
+// via the same launchctl-print tri-state launchd.Classify uses for the
+// per-user-agent probe (launchd.go): Registered when loaded, NotRegistered on
+// the gone-after-bootout success case, Indeterminate — surfaced to the caller
+// rather than swallowed — for anything else (a timeout, a permission denial).
 func (i *Installer) jobLoaded(ctx context.Context) (bool, error) {
-	out, err := i.run(ctx, "/bin/launchctl", "print", "system/"+i.cfg.Label)
-	if err == nil {
+	out, err := i.run(ctx, "/bin/launchctl", "print", "system/"+Label)
+	switch launchd.Classify(out, err) {
+	case launchd.Registered:
 		return true, nil
-	}
-	if strings.Contains(strings.ToLower(out), "could not find") {
+	case launchd.NotRegistered:
 		return false, nil
+	default:
+		return false, err
 	}
-	return false, err
 }
 
 func (i *Installer) ensureAccount(ctx context.Context) error {
@@ -195,14 +197,14 @@ func (i *Installer) ensureAccount(ctx context.Context) error {
 	// uid, a real home) must never be silently adopted, because the installer
 	// would chown the system home and run the daemon as it, handing the App key
 	// and socket to the wrong principal.
-	out, err := i.run(ctx, "/usr/bin/dscl", ".", "-read", "/Users/"+i.cfg.ServiceUser,
+	out, err := i.run(ctx, "/usr/bin/dscl", ".", "-read", "/Users/"+ServiceUser,
 		"UniqueID", "UserShell", "NFSHomeDirectory")
 	if err == nil {
 		if verr := verifyServiceAccount(out); verr != nil {
 			return fmt.Errorf("an account %q already exists but is not the runny service account (%v); "+
-				"remove or rename it, then reinstall", i.cfg.ServiceUser, verr)
+				"remove or rename it, then reinstall", ServiceUser, verr)
 		}
-		i.log("service account %s already exists — reusing it", i.cfg.ServiceUser)
+		i.log("service account %s already exists — reusing it", ServiceUser)
 		return nil
 	}
 	gid, err := i.freeID(ctx, "/Groups", "PrimaryGroupID")
@@ -214,7 +216,7 @@ func (i *Installer) ensureAccount(ctx context.Context) error {
 		return fmt.Errorf("allocating uid: %w", err)
 	}
 	g, u := strconv.Itoa(gid), strconv.Itoa(uid)
-	grp, usr := "/Groups/"+i.cfg.ServiceGroup, "/Users/"+i.cfg.ServiceUser
+	grp, usr := "/Groups/"+ServiceGroup, "/Users/"+ServiceUser
 	// Hidden (IsHidden), no login shell, home /var/empty (its real home is the
 	// system home, which it needs no $HOME to reach).
 	steps := [][]string{
@@ -234,7 +236,7 @@ func (i *Installer) ensureAccount(ctx context.Context) error {
 			return err
 		}
 	}
-	i.log("created service account %s (uid %s, gid %s, hidden, no home)", i.cfg.ServiceUser, u, g)
+	i.log("created service account %s (uid %s, gid %s, hidden, no home)", ServiceUser, u, g)
 	return nil
 }
 
@@ -247,8 +249,8 @@ func (i *Installer) freeID(ctx context.Context, dsclPath, attr string) (int, err
 }
 
 func (i *Installer) ensureHome(ctx context.Context) error {
-	owner := i.cfg.ServiceUser + ":" + i.cfg.ServiceGroup
-	logs := home.Dir(i.cfg.HomeDir).LogsDir()
+	owner := ServiceUser + ":" + ServiceGroup
+	logs := home.Dir(home.SystemHomeDir).LogsDir()
 	// Set the home's mode + dual inheriting ACL BEFORE creating logs/, so logs
 	// (and every dir the daemon's Ensure() later creates) inherits the ACEs. The
 	// ACL ops are RECURSIVE (-R): a changed parent ACL does NOT retroactively
@@ -259,12 +261,12 @@ func (i *Installer) ensureHome(ctx context.Context) error {
 	// a success the operator/daemon can't actually use. -N first clears any stale
 	// ACL across the tree so the two ACEs don't stack on a reinstall.
 	steps := [][]string{
-		{"/bin/mkdir", "-p", i.cfg.HomeDir},
-		{"/usr/sbin/chown", owner, i.cfg.HomeDir},
-		{"/bin/chmod", "0700", i.cfg.HomeDir},
-		{"/bin/chmod", "-R", "-N", i.cfg.HomeDir},
-		{"/bin/chmod", "-R", "+a", opacl.OperatorACE(i.cfg.Operator), i.cfg.HomeDir},
-		{"/bin/chmod", "-R", "+a", serviceACE(i.cfg.ServiceUser), i.cfg.HomeDir},
+		{"/bin/mkdir", "-p", home.SystemHomeDir},
+		{"/usr/sbin/chown", owner, home.SystemHomeDir},
+		{"/bin/chmod", "0700", home.SystemHomeDir},
+		{"/bin/chmod", "-R", "-N", home.SystemHomeDir},
+		{"/bin/chmod", "-R", "+a", opacl.OperatorACE(i.cfg.Operator), home.SystemHomeDir},
+		{"/bin/chmod", "-R", "+a", serviceACE(ServiceUser), home.SystemHomeDir},
 		{"/bin/mkdir", "-p", logs},
 		{"/usr/sbin/chown", owner, logs},
 	}
@@ -274,12 +276,12 @@ func (i *Installer) ensureHome(ctx context.Context) error {
 		}
 	}
 	i.log("prepared %s (0700, owned by %s, dual inheriting ACL: %s + %s)",
-		i.cfg.HomeDir, i.cfg.ServiceUser, i.cfg.Operator, i.cfg.ServiceUser)
+		home.SystemHomeDir, ServiceUser, i.cfg.Operator, ServiceUser)
 	return nil
 }
 
 func (i *Installer) writePlistFile() error {
-	p := i.cfg.PlistPath()
+	p := PlistPath()
 	if err := i.writeFile(p, []byte(Plist(i.cfg)), 0o644); err != nil {
 		return fmt.Errorf("writing %s: %w", p, err)
 	}
@@ -288,15 +290,14 @@ func (i *Installer) writePlistFile() error {
 }
 
 func (i *Installer) bootstrap(ctx context.Context) error {
-	label := i.cfg.Label
 	// bootout a prior generation if one is loaded; nonzero "not loaded" is fine.
-	_, _ = i.run(ctx, "/bin/launchctl", "bootout", "system/"+label)
-	if _, err := i.run(ctx, "/bin/launchctl", "bootstrap", "system", i.cfg.PlistPath()); err != nil {
+	_, _ = i.run(ctx, "/bin/launchctl", "bootout", "system/"+Label)
+	if _, err := i.run(ctx, "/bin/launchctl", "bootstrap", "system", PlistPath()); err != nil {
 		return err
 	}
-	if _, err := i.run(ctx, "/bin/launchctl", "enable", "system/"+label); err != nil {
+	if _, err := i.run(ctx, "/bin/launchctl", "enable", "system/"+Label); err != nil {
 		return err
 	}
-	i.log("bootstrapped %s into system/ (runs as %s)", label, i.cfg.ServiceUser)
+	i.log("bootstrapped %s into system/ (runs as %s)", Label, ServiceUser)
 	return nil
 }

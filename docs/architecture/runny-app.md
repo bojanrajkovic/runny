@@ -209,26 +209,35 @@ parses to `0.7.0`), and is quiet for: an equal or older tag, an unstamped app
 (`0.0.0`), and a malformed tag. Numeric semver compare (`semverGreater`) prevents
 the `0.9` vs `0.10` lexical trap.
 
+**Owner** — the whole poll lives in `AppUpdateMonitor` (`Client/AppUpdateMonitor.swift`),
+not `DaemonStore`: it shares no state with the connection FSM, only the
+`DaemonStore.appVersion` constant. `DaemonStore` holds one instance
+(`updateMonitor`); views reach it directly (`store.updateMonitor.shownUpdate`) —
+there is no forwarding on `DaemonStore` itself.
+
 **Trigger** — checked on first `start()` call, every 24 hours, and on a
 manual "Check for Updates…" command (app menu, `CommandGroup(after: .appInfo)`).
-The 24h loop runs inside `updateCheckTask`, which mirrors the `wakeObserver`
-nil-guard: it is initialized once in `start()` and survives `restart()` (which
-is connection-scoped). The menu-item → store bridge goes through
-`NotificationCenter` (`NSNotification.Name.runnyCheckForAppUpdates`) — the
-commands scene has no `@Environment` access path to `DaemonStore`.
+The 24h loop runs inside `AppUpdateMonitor.checkTask` (started by
+`AppUpdateMonitor.start()`, called from `DaemonStore.start()`), which mirrors the
+`wakeObserver` nil-guard: it is initialized once and survives `DaemonStore.restart()`
+(which is connection-scoped) since `AppUpdateMonitor` isn't touched by it. The
+menu-item → monitor bridge goes through `NotificationCenter`
+(`NSNotification.Name.runnyCheckForAppUpdates`) — the commands scene has no
+`@Environment` access path to `AppUpdateMonitor`.
 
-**Pref** — `Prefs.checkForAppUpdates` (default-on) is read by `runUpdateCheck()`
+**Pref** — `Prefs.checkForAppUpdates` (default-on) is read by `AppUpdateMonitor.runCheck()`
 from `UserDefaults.standard` each time it fires; a disabled check returns early.
 The toggle lives in **Settings → Updates**.
 
-**Dismissal** — `DaemonStore.shownUpdate` is `availableUpdate` minus the
+**Dismissal** — `AppUpdateMonitor.shownUpdate` is `availableUpdate` minus the
 `dismissedUpdate` version: dismissing "v0.7.0" stays quiet until "v0.7.1"
 arrives as new news (same keying as `shownSkew` / `dismissedSkew`).
 
-**Banner** — `AppUpdateBanner` in `MenuBarView.swift` is distinct from
-`StatusBanner` because it needs a clickable `Link` to the release page plus
-`textSelection`-enabled brew-upgrade command text, which the plain-text banner
-shape can't carry without restructuring it.
+**Banner** — `AppUpdateBanner` in `MenuBarView.swift` is a `StatusBanner` call
+site: `StatusBanner` is a generic shell (icon, arbitrary content, optional
+dismiss), and `AppUpdateBanner` supplies the content — a clickable `Link` to the
+release page plus `textSelection`-enabled brew-upgrade command text — rather
+than the plain-text convenience the other banners use.
 
 ## Reload
 

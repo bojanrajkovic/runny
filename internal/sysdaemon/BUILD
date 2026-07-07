@@ -11,6 +11,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/home",
+        "//internal/launchd",
         "//internal/opacl",
         "@net_howett_plist//:plist",
     ],

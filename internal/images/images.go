@@ -57,7 +57,7 @@ type Ensurer struct {
 	// attempt/diskFree pattern): resolve is the registry manifest
 	// round-trip, acquire subscribes to the shared pull of dir.
 	resolve func(ctx context.Context) (string, error)
-	acquire func(dir string, ref oci.Ref, report func(string)) (*subscription, func())
+	acquire func(dir string, ref oci.Ref, report func(string)) (chan ensureResult, func())
 }
 
 func (e *Ensurer) resolveBudget() time.Duration {
@@ -131,7 +131,7 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string), onDigestResol
 		// disk hold, and a panic is converted to a terminal error) — or this
 		// ctx is cancelled.
 		select {
-		case res := <-sub.done:
+		case res := <-sub:
 			if res.err != nil {
 				return res.err
 			}
@@ -350,21 +350,15 @@ func (e *Ensurer) ensureRunnerTarball(ctx context.Context, report func(string)) 
 			return rerr
 		}
 
-		semAny, _ := tarballLocks.LoadOrStore(assetName, make(chan struct{}, 1))
-		sem := semAny.(chan struct{})
-		select {
-		case sem <- struct{}{}:
-		default:
+		release, err := oci.AcquireSlot(ctx, &tarballLocks, assetName, "download of "+assetName, func() {
 			if report != nil {
 				report("waiting for a concurrent download of " + assetName)
 			}
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				return fmt.Errorf("waiting for a concurrent download of %s: %w", assetName, context.Cause(ctx))
-			}
+		})
+		if err != nil {
+			return err
 		}
-		defer func() { <-sem }()
+		defer release()
 
 		dest := filepath.Join(e.Home.RunnerCacheDir(), assetName)
 		if _, statErr := os.Stat(dest); statErr == nil {
@@ -428,10 +422,10 @@ func (e *Ensurer) downloadTarball(ctx context.Context, dest, assetURL, wantSHA s
 		return err
 	}
 	prog := newProgress(report, log, e.StallBudget)
-	body := io.TeeReader(dresp.Body, progressWriter(func(n int64) {
+	body := io.TeeReader(dresp.Body, oci.ProgressWriter{Fn: func(n int64) {
 		stall.Feed(n)
 		prog.feed(n)
-	}))
+	}})
 	h := sha256.New()
 	_, err = io.Copy(io.MultiWriter(f, h), body)
 	prog.stop()
@@ -467,14 +461,6 @@ func stallErr(wctx context.Context, err error, doing string) error {
 		return fmt.Errorf("%s: %w", doing, cause)
 	}
 	return fmt.Errorf("%s: %w", doing, err)
-}
-
-// progressWriter adapts a byte-delta callback to io.Writer for TeeReader.
-type progressWriter func(int64)
-
-func (p progressWriter) Write(b []byte) (int, error) {
-	p(int64(len(b)))
-	return len(b), nil
 }
 
 // tarballClient is http.DefaultClient plus the obs transport: the runner

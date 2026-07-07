@@ -29,6 +29,7 @@ import (
 
 	"github.com/bojanrajkovic/runny/internal/cycle"
 	"github.com/bojanrajkovic/runny/internal/home"
+	"github.com/bojanrajkovic/runny/internal/oci"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
@@ -597,7 +598,7 @@ func (c *ctl) renderCycle(rec *runnyv1.CycleRecord) {
 	ref, _ := splitPin(rec.GetImage())
 	img := ref
 	if d := rec.GetImageDigest(); d != "" {
-		short := "sha256:" + shortDigest(d)
+		short := "sha256:" + oci.ShortDigest(d)
 		if img == "" {
 			img = short
 		} else {
@@ -734,16 +735,16 @@ func (c *ctl) prune(ctx context.Context, apply bool) error {
 	if len(bundles) > 0 {
 		fmt.Fprintln(c.out, "image bundles:")
 		for _, it := range bundles {
-			fmt.Fprintf(c.out, "  %-12s  %s  (%s)\n", formatBytes(it.GetBytes()), it.GetLabel(), it.GetReason())
+			fmt.Fprintf(c.out, "  %-12s  %s  (%s)\n", oci.HumanBytes(it.GetBytes()), it.GetLabel(), it.GetReason())
 		}
 	}
 	if len(tarballs) > 0 {
 		fmt.Fprintln(c.out, "runner tarballs:")
 		for _, it := range tarballs {
-			fmt.Fprintf(c.out, "  %-12s  %s  (%s)\n", formatBytes(it.GetBytes()), it.GetLabel(), it.GetReason())
+			fmt.Fprintf(c.out, "  %-12s  %s  (%s)\n", oci.HumanBytes(it.GetBytes()), it.GetLabel(), it.GetReason())
 		}
 	}
-	fmt.Fprintf(c.out, "%s %s\n", verb, formatBytes(resp.GetReclaimedBytes()))
+	fmt.Fprintf(c.out, "%s %s\n", verb, oci.HumanBytes(resp.GetReclaimedBytes()))
 	for _, sk := range resp.GetSkips() {
 		fmt.Fprintf(c.out, "skip: %s — %s (kept intact)\n", sk.GetRef(), sk.GetReason())
 	}
@@ -754,20 +755,6 @@ func (c *ctl) prune(ctx context.Context, apply bool) error {
 		return fmt.Errorf("prune completed with errors")
 	}
 	return nil
-}
-
-// formatBytes renders a byte count as a human-readable string (GiB > MiB > KiB > B).
-func formatBytes(b int64) string {
-	switch {
-	case b >= 1<<30:
-		return fmt.Sprintf("%.1f GiB", float64(b)/float64(1<<30))
-	case b >= 1<<20:
-		return fmt.Sprintf("%.1f MiB", float64(b)/float64(1<<20))
-	case b >= 1<<10:
-		return fmt.Sprintf("%.1f KiB", float64(b)/float64(1<<10))
-	default:
-		return fmt.Sprintf("%d B", b)
-	}
 }
 
 func (c *ctl) pause(ctx context.Context, slot string) error {
@@ -803,10 +790,7 @@ func (c *ctl) reload(ctx context.Context, reason string) error {
 }
 
 func (c *ctl) renderReload(resp *runnyv1.ReloadResponse) error {
-	sha := resp.GetConfigSha256()
-	if len(sha) > 12 {
-		sha = sha[:12]
-	}
+	sha := shortHex(resp.GetConfigSha256())
 	warn := func() {
 		for _, w := range resp.GetWarnings() {
 			fmt.Fprintf(c.out, "warning: %s — %s\n", w.GetName(), w.GetDetail())
@@ -851,8 +835,6 @@ func durString(d time.Duration) string {
 	switch {
 	case d < 0:
 		return "0s"
-	case d < time.Minute:
-		return d.Round(time.Second).String()
 	case d < time.Hour:
 		return d.Round(time.Second).String()
 	default:
@@ -909,7 +891,7 @@ func imageCell(ref, digest string) string {
 	if digest == "" {
 		return name
 	}
-	return name + "@" + shortDigest(digest)
+	return name + "@" + oci.ShortDigest(digest)
 }
 
 // splitPin separates a configured "@sha256:..." digest pin from an image ref,
@@ -932,13 +914,8 @@ func runnerVersionDisplay(assetName string) string {
 	return assetName
 }
 
-// shortDigest renders a digest (with or without the "sha256:" algorithm
-// prefix) as docker-style 12-hex — the one abbreviation both image views use.
-func shortDigest(digest string) string {
-	return shortHex(strings.TrimPrefix(digest, "sha256:"))
-}
-
-// shortHex is the docker-style 12-hex short form of a digest's hex.
+// shortHex is the docker-style 12-hex short form of a config SHA's hex.
+// Image digests go through oci.ShortDigest, the shared display convention.
 func shortHex(h string) string {
 	if len(h) > 12 {
 		return h[:12]

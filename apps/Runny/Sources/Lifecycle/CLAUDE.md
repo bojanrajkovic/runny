@@ -11,8 +11,12 @@ Same split as `Client/DaemonStore.swift`: a **pure decision layer**
 (`LaunchAgentStatus.swift` — `nonisolated static` verdicts over plain value
 types) plus a **thin side-effect wrapper** (`AgentController`) that owns the
 `SMAppService`/`launchctl` calls behind a `ServiceRegistrar` protocol seam. The
-verdicts are unit-tested without launchd; the side-effecting seam is mocked,
-never exercised live in tests.
+verdicts (`classify`, `parseLaunchctlProgram`, `LaunchdProbe.classify`) are
+unit-tested without launchd, mocked via `ServiceRegistrar`/fake inputs.
+`LaunchdProbe`'s own `probe()` has no seam left — it calls `BoundedProcess`
+directly — so `LaunchdProbeTests` exercises it live against real processes
+(`/bin/echo`, `/bin/sleep`, `launchctl`), pinning `BoundedProcess`'s wall-clock
+bound rather than mocking it away.
 
 ## Sharp edges
 

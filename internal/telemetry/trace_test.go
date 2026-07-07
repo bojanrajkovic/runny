@@ -15,12 +15,11 @@ import (
 )
 
 var testCycle = obs.CycleRef{
-	InstancePrefix: "host-abcd1234",
-	Slot:           "pool-0",
-	Pool:           "macos-arm",
-	CycleID:        "a1b2c3d4",
-	RunnerName:     "host-abcd1234-pool-0-a1b2c3d4",
-	Started:        time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC),
+	Slot:       "pool-0",
+	Pool:       "macos-arm",
+	CycleID:    "a1b2c3d4",
+	RunnerName: "host-abcd1234-pool-0-a1b2c3d4",
+	Started:    time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC),
 }
 
 func newTestAssembler(t *testing.T) (obs.Emitter, *tracetest.InMemoryExporter) {
@@ -45,7 +44,7 @@ func TestTraceConsumerGolden(t *testing.T) {
 
 	emit(obs.Event{
 		Time: at(1), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "BOOT"},
+		StepInfo: &obs.StepEvent{},
 	})
 
 	emit(obs.Event{
@@ -85,12 +84,12 @@ func TestTraceConsumerGolden(t *testing.T) {
 
 	emit(obs.Event{
 		Time: at(8), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "BOOT", Outcome: obs.OutcomeOK},
+		StepInfo: &obs.StepEvent{Outcome: obs.OutcomeOK},
 	})
 
 	emit(obs.Event{
 		Time: at(9), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "JOB"},
+		StepInfo: &obs.StepEvent{},
 	})
 	emit(obs.Event{
 		Time: at(10), Cycle: testCycle, Step: "JOB", Kind: obs.KindJobStarted,
@@ -104,7 +103,7 @@ func TestTraceConsumerGolden(t *testing.T) {
 	})
 	emit(obs.Event{
 		Time: at(12), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "JOB", Outcome: obs.OutcomeOK},
+		StepInfo: &obs.StepEvent{Outcome: obs.OutcomeOK},
 	})
 
 	opUID := uint32(501)
@@ -249,7 +248,7 @@ func TestTraceConsumerConcurrentDetail(t *testing.T) {
 	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
 	emit(obs.Event{
 		Time: at(1), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE"},
+		StepInfo: &obs.StepEvent{},
 	})
 
 	var wg sync.WaitGroup
@@ -267,7 +266,7 @@ func TestTraceConsumerConcurrentDetail(t *testing.T) {
 
 	emit(obs.Event{
 		Time: at(2), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE", Outcome: obs.OutcomeOK},
+		StepInfo: &obs.StepEvent{Outcome: obs.OutcomeOK},
 	})
 	emit(obs.Event{
 		Time: at(3), Cycle: testCycle, Kind: obs.KindCycleFinished,
@@ -286,11 +285,11 @@ func TestTraceConsumerDeadlineIsFailure(t *testing.T) {
 	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
 	emit(obs.Event{
 		Time: at(1), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "BOOT"},
+		StepInfo: &obs.StepEvent{},
 	})
 	emit(obs.Event{
 		Time: at(2), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "BOOT", Outcome: "deadline", Error: "context deadline exceeded"},
+		StepInfo: &obs.StepEvent{Outcome: "deadline", Error: "context deadline exceeded"},
 	})
 	emit(obs.Event{
 		Time: at(3), Cycle: testCycle, Kind: obs.KindCycleFinished,
@@ -320,11 +319,11 @@ func TestTraceConsumerLateJobEndedStillLandsOnRoot(t *testing.T) {
 	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
 	emit(obs.Event{
 		Time: at(1), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "JOB"},
+		StepInfo: &obs.StepEvent{},
 	})
 	emit(obs.Event{
 		Time: at(2), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "JOB", Outcome: obs.OutcomeOK},
+		StepInfo: &obs.StepEvent{Outcome: obs.OutcomeOK},
 	})
 	// The old order: JobEnded after its step closed.
 	emit(obs.Event{
@@ -365,7 +364,7 @@ func TestTraceConsumerImageIdentity(t *testing.T) {
 	emit(obs.Event{Time: at(0), Cycle: ref, Kind: obs.KindCycleStarted})
 	emit(obs.Event{
 		Time: at(1), Cycle: ref, Step: "ENSURE_IMAGE", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE"},
+		StepInfo: &obs.StepEvent{},
 	})
 	emit(obs.Event{
 		Time: at(2), Cycle: ref, Step: "ENSURE_IMAGE", Kind: obs.KindImageInfo,
@@ -377,7 +376,7 @@ func TestTraceConsumerImageIdentity(t *testing.T) {
 	})
 	emit(obs.Event{
 		Time: at(4), Cycle: ref, Step: "ENSURE_IMAGE", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE", Outcome: obs.OutcomeOK},
+		StepInfo: &obs.StepEvent{Outcome: obs.OutcomeOK},
 	})
 	emit(obs.Event{
 		Time: at(5), Cycle: ref, Kind: obs.KindCycleFinished,
@@ -425,7 +424,7 @@ func TestTraceConsumerHTTPSpans(t *testing.T) {
 	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
 	emit(obs.Event{
 		Time: at(1), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE"},
+		StepInfo: &obs.StepEvent{},
 	})
 	emit(obs.Event{
 		Time: at(2), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindActionStarted,
@@ -450,13 +449,13 @@ func TestTraceConsumerHTTPSpans(t *testing.T) {
 	})
 	emit(obs.Event{
 		Time: at(7), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE", Outcome: obs.OutcomeOK},
+		StepInfo: &obs.StepEvent{Outcome: obs.OutcomeOK},
 	})
 	// MINT_JIT has no actions: its round trips parent under the step span,
 	// and a transport-level failure carries error status.
 	emit(obs.Event{
 		Time: at(8), Cycle: testCycle, Step: "MINT_JIT", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "MINT_JIT"},
+		StepInfo: &obs.StepEvent{},
 	})
 	emit(obs.Event{
 		Time: at(10), Cycle: testCycle, Step: "MINT_JIT", Kind: obs.KindHTTP,
@@ -464,7 +463,7 @@ func TestTraceConsumerHTTPSpans(t *testing.T) {
 	})
 	emit(obs.Event{
 		Time: at(11), Cycle: testCycle, Step: "MINT_JIT", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "MINT_JIT", Outcome: obs.OutcomeError, Error: "mint failed"},
+		StepInfo: &obs.StepEvent{Outcome: obs.OutcomeError, Error: "mint failed"},
 	})
 	emit(obs.Event{
 		Time: at(12), Cycle: testCycle, Kind: obs.KindCycleFinished,
@@ -570,14 +569,14 @@ func TestTraceConsumerHTTPSpans(t *testing.T) {
 func TestTraceConsumerPullSpans(t *testing.T) {
 	emit, exp := newTestAssembler(t)
 
-	pull := &obs.PullRef{ID: "pull-abc123", Ref: "ghcr.io/x@sha256:d34d", Digest: "sha256:d34d", Started: at(0)}
+	pull := &obs.PullRef{ID: "pull-abc123", Ref: "ghcr.io/x@sha256:d34d", Digest: "sha256:d34d"}
 
 	// The cycle side: ENSURE_IMAGE's wait-for-pull action, carrying the same
 	// pull id the pull side will carry on its root.
 	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
 	emit(obs.Event{
 		Time: at(0), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "ENSURE_IMAGE"},
+		StepInfo: &obs.StepEvent{},
 	})
 	emit(obs.Event{
 		Time: at(0), Cycle: testCycle, Step: "ENSURE_IMAGE", Kind: obs.KindActionStarted,
@@ -659,7 +658,7 @@ func TestTraceConsumerPullSpans(t *testing.T) {
 func TestTraceConsumerPullFailureStatus(t *testing.T) {
 	emit, exp := newTestAssembler(t)
 
-	pull := &obs.PullRef{ID: "pull-fail", Ref: "ghcr.io/x", Digest: "sha256:x", Started: at(0)}
+	pull := &obs.PullRef{ID: "pull-fail", Ref: "ghcr.io/x", Digest: "sha256:x"}
 	emit(obs.Event{Time: at(0), Pull: pull, Kind: obs.KindPullStarted})
 	emit(obs.Event{Time: at(1), Pull: pull, Kind: obs.KindPullFinished, PullInfo: &obs.PullEvent{
 		Outcome: obs.OutcomeError, Error: "registry 503", Duration: time.Second,
@@ -683,7 +682,7 @@ func TestTraceConsumerPullFailureStatus(t *testing.T) {
 func TestTraceConsumerPullAbandonedClosesRootAndEvicts(t *testing.T) {
 	emit, exp := newTestAssembler(t)
 
-	pull := &obs.PullRef{ID: "pull-abandoned", Ref: "ghcr.io/x", Digest: "sha256:x", Started: at(0)}
+	pull := &obs.PullRef{ID: "pull-abandoned", Ref: "ghcr.io/x", Digest: "sha256:x"}
 	emit(obs.Event{Time: at(0), Pull: pull, Kind: obs.KindPullStarted})
 	emit(obs.Event{Time: at(1), Pull: pull, Kind: obs.KindDetail, Detail: &obs.DetailEvent{Text: "pulled 500 MiB"}})
 	emit(obs.Event{Time: at(2), Pull: pull, Kind: obs.KindPullAbandoned})
@@ -720,8 +719,8 @@ func TestTraceConsumerPullAbandonedClosesRootAndEvicts(t *testing.T) {
 func TestTraceConsumerPullSuccessorSurvivesStalePredecessorEvent(t *testing.T) {
 	emit, exp := newTestAssembler(t)
 
-	predecessor := &obs.PullRef{ID: "pull-shared", Ref: "ghcr.io/x", Digest: "sha256:x", Started: at(0)}
-	successor := &obs.PullRef{ID: "pull-shared", Ref: "ghcr.io/x", Digest: "sha256:x", Started: at(1)}
+	predecessor := &obs.PullRef{ID: "pull-shared", Ref: "ghcr.io/x", Digest: "sha256:x"}
+	successor := &obs.PullRef{ID: "pull-shared", Ref: "ghcr.io/x", Digest: "sha256:x"}
 
 	emit(obs.Event{Time: at(0), Pull: predecessor, Kind: obs.KindPullStarted})
 	emit(obs.Event{Time: at(1), Pull: successor, Kind: obs.KindPullStarted}) // supersedes predecessor's entry

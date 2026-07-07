@@ -12,6 +12,23 @@ import (
 	"strings"
 )
 
+// WireProtocolVersion is the runny.v1 wire-contract version, published by the
+// daemon in GetStatusResponse.protocol_version and read by runnyctl's skew
+// check (cmd/runnyctl/skew.go) — one const, both sides, no lockstep bump.
+// Defined here — a stdlib-only leaf both internal/socket and runnyctl can
+// import — rather than in internal/socket, so runnyctl need not pull in
+// internal/socket's much heavier dependency graph (statemachine, cgo/vz) just
+// to read one constant. Bump it when the daemon gains a feature a client must
+// detect before relying on it. Version 1 introduced pause/resume command
+// acknowledgement (SlotStatus.recent_applied_command_ids): a client confirms a
+// pause/resume from the command id only against a daemon advertising >= 1.
+// Version 2 introduced reload-convergence confirmation (boot_id,
+// config_sha256, drain_seq, exit_held): a reload-following client confirms
+// the respawn by boot_id flip + config hash only against a daemon advertising
+// >= 2, and otherwise falls back to daemon_started and warns it cannot
+// verify.
+const WireProtocolVersion uint32 = 2
+
 var coreRE = regexp.MustCompile(`^\d+\.\d+\.\d+`)
 
 // Core returns the leading x.y.z of a version label, or "" if it does not start

@@ -20,6 +20,7 @@ go_library(
         "//internal/logring",
         "//internal/opacl",
         "//internal/statemachine",
+        "//internal/versioncore",
         "//proto/runny/v1:runny",
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//codes",
@@ -46,6 +47,7 @@ go_test(
     srcs = [
         "operator_test.go",
         "peercred_test.go",
+        "registry_test.go",
         "revocation_test.go",
         "socket_test.go",
     ],
@@ -55,6 +57,7 @@ go_test(
         "//internal/home",
         "//internal/logring",
         "//internal/statemachine",
+        "//internal/versioncore",
         "//proto/runny/v1:runny",
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//codes",

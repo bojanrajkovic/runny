@@ -92,7 +92,7 @@ func (c *run) beginStep(ctx context.Context, state State, mut func(*Status)) (co
 			mut(st)
 		}
 	})
-	obs.Emit(ctx, obs.Event{Kind: obs.KindStepEntered, StepInfo: &obs.StepEvent{State: string(state)}})
+	obs.Emit(ctx, obs.Event{Kind: obs.KindStepEntered, StepInfo: &obs.StepEvent{}})
 	sr := cycle.StateRecord{State: string(state), Entered: time.Now()}
 	var done bool
 	finish := func(outcome cycle.Outcome, errStr string) {
@@ -103,7 +103,7 @@ func (c *run) beginStep(ctx context.Context, state State, mut func(*Status)) (co
 		sr.Left, sr.Outcome, sr.Error = time.Now(), outcome, errStr
 		c.rec.States = append(c.rec.States, sr)
 		obs.Emit(ctx, obs.Event{Kind: obs.KindStepLeft, StepInfo: &obs.StepEvent{
-			State: string(state), Outcome: obs.Outcome(outcome), Error: errStr,
+			Outcome: obs.Outcome(outcome), Error: errStr,
 			Duration: sr.Left.Sub(sr.Entered),
 		}})
 	}
@@ -164,13 +164,12 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	cctx, ccancel := context.WithCancelCause(ctx)
 	defer ccancel(nil)
 	cctx = obs.WithCycle(cctx, c.deps.Events, obs.CycleRef{
-		InstancePrefix: c.deps.InstancePrefix,
-		Slot:           c.name,
-		Pool:           c.deps.Pool.Name,
-		Image:          c.deps.Pool.Image,
-		CycleID:        c.rec.CycleID,
-		RunnerName:     c.runnerName,
-		Started:        c.rec.Started,
+		Slot:       c.name,
+		Pool:       c.deps.Pool.Name,
+		Image:      c.deps.Pool.Image,
+		CycleID:    c.rec.CycleID,
+		RunnerName: c.runnerName,
+		Started:    c.rec.Started,
 	})
 	obs.Emit(cctx, obs.Event{Kind: obs.KindCycleStarted})
 	stopWatch := make(chan struct{})
@@ -194,8 +193,8 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 				case CmdDebugKey:
 					// Boot-path states have no usable hardened guest yet
 					// (issue #39): reply and do nothing.
-					if !cmd.Expires.IsZero() && time.Now().After(cmd.Expires) {
-						cmd.reply(DebugKeyReply{Err: errors.New("command expired; nothing was injected")})
+					if cmd.expired() {
+						cmd.reply(DebugKeyReply{Err: errCmdExpired})
 					} else {
 						cmd.reply(DebugKeyReply{Err: errors.New("slot is mid-boot; key injection needs LISTENING, JOB, or DEBUG")})
 					}
@@ -631,12 +630,7 @@ func (c *run) listenAndRunJob(ctx context.Context) (bool, State, error) {
 
 // runnerRegistered reports whether name appears among runners.
 func runnerRegistered(runners []github.Runner, name string) bool {
-	for _, r := range runners {
-		if r.Name == name {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(runners, func(r github.Runner) bool { return r.Name == name })
 }
 
 // maxJobName caps the guest-controlled job name. The name is sliced from the
@@ -649,7 +643,8 @@ const maxJobName = 256
 // trimmed and capped at maxJobName bytes on a valid-UTF-8 boundary (a naive
 // byte slice could split a multibyte rune and write U+FFFD to disk/the wire).
 func jobNameFromMarker(markerLine string) string {
-	name := strings.TrimSpace(markerLine[strings.Index(markerLine, markerJobStarted)+len(markerJobStarted):])
+	_, after, _ := strings.Cut(markerLine, markerJobStarted)
+	name := strings.TrimSpace(after)
 	if len(name) > maxJobName {
 		name = strings.ToValidUTF8(name[:maxJobName], "")
 	}
@@ -792,6 +787,23 @@ func (c *run) watchJob(jctx, cctx context.Context) (bool, error) {
 
 // ---- debug-key injection (issue #39) ---------------------------------------
 
+// rejectStale replies and reports true if cmd is stale: expired in queue, or
+// aimed at a cycle other than this one (the operator's stale-CycleID consent
+// pin, decision 15). Every CmdDebugKey entry point past the boot-path states
+// shares this guard so the two staleness checks and their reply text can't
+// drift apart between freezeForDebug, midJobInject, and debugReArm.
+func (c *run) rejectStale(cmd Command) bool {
+	if cmd.expired() {
+		cmd.reply(DebugKeyReply{Err: errCmdExpired})
+		return true
+	}
+	if cmd.CycleID != "" && cmd.CycleID != c.rec.CycleID {
+		cmd.reply(DebugKeyReply{Err: fmt.Errorf("cycle %s already ended; nothing was injected", cmd.CycleID)})
+		return true
+	}
+	return false
+}
+
 // armedKey records ONE mid-job install attempt and whether it provably landed
 // (grep read-back ok). The `landed` bit is load-bearing: a retry of the same
 // fingerprint after an AMBIGUOUS error must NOT take the exec-free re-arm path
@@ -811,12 +823,7 @@ type debugArm struct {
 }
 
 func (a *debugArm) landed(fp string) bool {
-	for _, k := range a.keys {
-		if k.fingerprint == fp && k.landed {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(a.keys, func(k armedKey) bool { return k.fingerprint == fp && k.landed })
 }
 
 // writeAuditSidecar writes the cycle's InjectedKeys to the operator-access.json
@@ -892,19 +899,29 @@ func (c *run) updateAudit(ctx context.Context, idx int, outcome, errStr string) 
 	obs.Emit(ctx, obs.Event{Kind: obs.KindAuditUpdate, Audit: auditEvent(c.rec.InjectedKeys[idx])})
 }
 
+// appendAudit appends entry to the cycle's audit trail, best-effort rewrites
+// the sidecar (logging on failure — c.rec.InjectedKeys, not the sidecar, is
+// cycle.json's eventual truth), and mirrors the append into the event
+// stream. Shared by every non-write-ahead append; appendPending's
+// write-AHEAD entry has its own stricter contract (a sidecar failure there
+// refuses the injection outright, decision 4).
+func (c *run) appendAudit(ctx context.Context, entry cycle.InjectedKey) {
+	c.rec.InjectedKeys = append(c.rec.InjectedKeys, entry)
+	if err := c.writeAuditSidecar(); err != nil {
+		c.deps.Log.Error("debug: audit rewrite failed", "err", err)
+	}
+	c.emitAuditAppend(ctx)
+}
+
 // auditDisarm appends a "disarmed" entry recording why an armed hold was
 // cancelled without DEBUG entry, and rewrites the sidecar (best-effort).
 func (c *run) auditDisarm(ctx context.Context, cause string, level slog.Level) {
-	c.rec.InjectedKeys = append(c.rec.InjectedKeys, cycle.InjectedKey{
+	c.appendAudit(ctx, cycle.InjectedKey{
 		Injected: time.Now(),
 		Outcome:  "disarmed",
 		Error:    cause,
 		State:    string(StateJob),
 	})
-	if err := c.writeAuditSidecar(); err != nil {
-		c.deps.Log.Error("debug: disarm audit rewrite failed", "err", err)
-	}
-	c.emitAuditAppend(ctx)
 	c.deps.Log.Log(context.Background(), level, "debug hold disarmed", "cause", cause)
 }
 
@@ -973,12 +990,7 @@ func (c *run) freezeForDebug(ctx context.Context, cmd Command,
 	secureSSH := c.deps.Config.Deadlines.SecureSSH.D()
 
 	// 0. Guards.
-	if !cmd.Expires.IsZero() && time.Now().After(cmd.Expires) {
-		cmd.reply(DebugKeyReply{Err: errors.New("command expired; nothing was injected")})
-		return false, "", "", nil
-	}
-	if cmd.CycleID != "" && cmd.CycleID != c.rec.CycleID {
-		cmd.reply(DebugKeyReply{Err: fmt.Errorf("cycle %s already ended; nothing was injected", cmd.CycleID)})
+	if c.rejectStale(cmd) {
 		return false, "", "", nil
 	}
 
@@ -1020,7 +1032,7 @@ func (c *run) freezeForDebug(ctx context.Context, cmd Command,
 		c.updateAudit(ctx, idx, "refused", "job raced the freeze and died with the kill")
 		cmd.reply(DebugKeyReply{Err: errors.New("a job started and was killed by the freeze; nothing was injected")})
 		finishListening(cycle.OutcomeOK, "")
-		return true, "", StateJob, fmt.Errorf("%w", errDebugRacedJob)
+		return true, "", StateJob, errDebugRacedJob
 	} else if !closed {
 		c.updateAudit(ctx, idx, "error", "runner output did not close after kill")
 		cmd.reply(DebugKeyReply{Err: errors.New("the runner did not close after the kill; nothing was injected")})
@@ -1055,27 +1067,20 @@ func (c *run) midJobInject(ctx context.Context, cmd Command) {
 	fp := cmd.Fingerprint
 
 	// 0. Guards.
-	if !cmd.Expires.IsZero() && time.Now().After(cmd.Expires) {
-		cmd.reply(DebugKeyReply{Err: errors.New("command expired; nothing was injected")})
-		return
-	}
-	if cmd.CycleID != "" && cmd.CycleID != c.rec.CycleID {
-		cmd.reply(DebugKeyReply{Err: fmt.Errorf("cycle %s already ended; nothing was injected", cmd.CycleID)})
+	if c.rejectStale(cmd) {
 		return
 	}
 	if cmd.SeenState != StateJob {
 		// A command aimed at a LISTENING slot that raced into JOB: refuse —
 		// converting it into a mid-job injection would write contamination
 		// into a CI job's permanent record without consent (decision 15).
-		c.rec.InjectedKeys = append(c.rec.InjectedKeys, cycle.InjectedKey{
+		c.appendAudit(ctx, cycle.InjectedKey{
 			Fingerprint: fp, Comment: cmd.Comment, Injected: time.Now(), Reason: cmd.Reason,
 			Outcome: "refused", State: string(StateJob),
 			Error:        "operator saw " + string(cmd.SeenState) + ", not JOB",
 			OperatorUID:  cmd.OperatorUID,
 			OperatorUser: cmd.OperatorUser,
 		})
-		_ = c.writeAuditSidecar()
-		c.emitAuditAppend(ctx)
 		cmd.reply(DebugKeyReply{Err: errors.New(
 			"a job started before your request was serviced; nothing was injected — re-run debug to inject into the running job",
 		)})
@@ -1085,13 +1090,11 @@ func (c *run) midJobInject(ctx context.Context, cmd Command) {
 	// 1. RE-ARM (exec-free) ONLY for a PROVEN-LANDED key.
 	if c.arm.landed(fp) {
 		c.arm.hold = cmd.Hold
-		c.rec.InjectedKeys = append(c.rec.InjectedKeys, cycle.InjectedKey{
+		c.appendAudit(ctx, cycle.InjectedKey{
 			Fingerprint: fp, Comment: cmd.Comment, Injected: time.Now(), Reason: cmd.Reason,
 			Outcome: "re-armed", State: string(StateJob),
 			OperatorUID: cmd.OperatorUID, OperatorUser: cmd.OperatorUser,
 		})
-		_ = c.writeAuditSidecar()
-		c.emitAuditAppend(ctx)
 		c.setArmedStatus(c.armedDetail(fp, c.arm.hold))
 		cmd.reply(c.armedReply())
 		return
@@ -1157,12 +1160,10 @@ func (c *run) enterPostJobDebug(ctx context.Context) (State, error) {
 
 	// 1. Verified kill, always. At job end the kill prohibition has expired.
 	if err := c.boundedGuest(ctx, secureSSH, c.guest.StopRunner); err != nil {
-		c.rec.InjectedKeys = append(c.rec.InjectedKeys, cycle.InjectedKey{
+		c.appendAudit(ctx, cycle.InjectedKey{
 			Injected: time.Now(), Outcome: "error", State: string(StateJob),
 			Error: "post-job kill unproven: " + err.Error(),
 		})
-		_ = c.writeAuditSidecar()
-		c.emitAuditAppend(ctx)
 		// The hold is NOT entered — an unproven kill must not hold a
 		// job-eligible guest. Clear the armed status now so DebugHoldArmed can't
 		// linger into teardown.
@@ -1200,7 +1201,7 @@ func (c *run) holdForDebug(ctx context.Context, holdUntil time.Time) (State, err
 			return StateDebug, ctx.Err()
 		case <-hold.C:
 			finish(cycle.OutcomeOK, "")
-			return StateDebug, fmt.Errorf("%w", errDebugExpired)
+			return StateDebug, errDebugExpired
 		case cmd := <-c.cmds:
 			switch cmd.Kind {
 			case CmdRecycle:
@@ -1226,12 +1227,7 @@ func (c *run) holdForDebug(ctx context.Context, holdUntil time.Time) (State, err
 func (c *run) debugReArm(ctx context.Context, cmd Command,
 	hold *time.Timer, secureSSH time.Duration, finish func(cycle.Outcome, string),
 ) (ended bool) {
-	if !cmd.Expires.IsZero() && time.Now().After(cmd.Expires) {
-		cmd.reply(DebugKeyReply{Err: errors.New("command expired; nothing was injected")})
-		return false
-	}
-	if cmd.CycleID != "" && cmd.CycleID != c.rec.CycleID {
-		cmd.reply(DebugKeyReply{Err: fmt.Errorf("cycle %s already ended; nothing was injected", cmd.CycleID)})
+	if c.rejectStale(cmd) {
 		return false
 	}
 	// reset moves the auto-release deadline to now+cmd.Hold and publishes it,
@@ -1248,13 +1244,11 @@ func (c *run) debugReArm(ctx context.Context, cmd Command,
 	// entry this cycle (survives a guest reboot).
 	if c.keyInstalledThisCycle(cmd.Fingerprint) {
 		newUntil := reset()
-		c.rec.InjectedKeys = append(c.rec.InjectedKeys, cycle.InjectedKey{
+		c.appendAudit(ctx, cycle.InjectedKey{
 			Fingerprint: cmd.Fingerprint, Comment: cmd.Comment, Injected: time.Now(), Reason: cmd.Reason,
 			Outcome: "re-armed", State: string(StateDebug),
 			OperatorUID: cmd.OperatorUID, OperatorUser: cmd.OperatorUser,
 		})
-		_ = c.writeAuditSidecar()
-		c.emitAuditAppend(ctx)
 		cmd.reply(DebugKeyReply{User: c.deps.Pool.SSHUser, HostKeys: c.guest.HostKeys(), HoldUntil: newUntil})
 		return false
 	}
@@ -1295,12 +1289,9 @@ func (c *run) debugReArm(ctx context.Context, cmd Command,
 // keyInstalledThisCycle reports whether fp has an ok/armed/re-armed audit
 // entry this cycle — the DEBUG re-arm consults outcomes, not raw membership.
 func (c *run) keyInstalledThisCycle(fp string) bool {
-	for _, k := range c.rec.InjectedKeys {
-		if k.Fingerprint == fp && keyOutcomeLanded(k.Outcome) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(c.rec.InjectedKeys, func(k cycle.InjectedKey) bool {
+		return k.Fingerprint == fp && keyOutcomeLanded(k.Outcome)
+	})
 }
 
 // keyOutcomeLanded reports whether outcome means the key provably reached the
@@ -1317,12 +1308,9 @@ func keyOutcomeLanded(outcome string) bool {
 // len==0 check skips), so false negatives lose recordings and false positives
 // cost one no-op SSH command.
 func anyKeyLanded(rec *cycle.Record) bool {
-	for _, k := range rec.InjectedKeys {
-		if keyOutcomeLanded(k.Outcome) || k.Outcome == "error" {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(rec.InjectedKeys, func(k cycle.InjectedKey) bool {
+		return keyOutcomeLanded(k.Outcome) || k.Outcome == "error"
+	})
 }
 
 // drainForCompletion non-blockingly drains c.proc.Lines after jctx fires: a
@@ -1435,16 +1423,10 @@ func (c *run) teardown(ctx context.Context) bool {
 			// A pull that succeeded but whose artifact never landed must
 			// not report ok — the operator would go looking for a
 			// runner-diag.log that doesn't exist.
-			dir, derr := c.store.Dir(c.rec)
-			if derr != nil {
-				c.deps.Log.Debug("post-mortem dir lookup failed", "err", derr)
-				return derr
-			}
-			if werr := writeFile(dir, "runner-diag.log", diag); werr != nil {
+			if werr := c.store.WriteArtifact(c.rec, "runner-diag.log", diag); werr != nil {
 				c.deps.Log.Debug("post-mortem write failed", "err", werr)
 				return werr
 			}
-			c.rec.Artifacts = append(c.rec.Artifacts, "runner-diag.log")
 			return nil
 		})
 	}
@@ -1463,16 +1445,10 @@ func (c *run) teardown(ctx context.Context) bool {
 			if len(session) == 0 {
 				return nil
 			}
-			dir, derr := c.store.Dir(c.rec)
-			if derr != nil {
-				c.deps.Log.Debug("debug session dir lookup failed", "err", derr)
-				return derr
-			}
-			if werr := writeFile(dir, "debug-session.log", stripTerminalCodes(session)); werr != nil {
+			if werr := c.store.WriteArtifact(c.rec, "debug-session.log", stripTerminalCodes(session)); werr != nil {
 				c.deps.Log.Debug("debug session write failed", "err", werr)
 				return werr
 			}
-			c.rec.Artifacts = append(c.rec.Artifacts, "debug-session.log")
 			return nil
 		})
 	}

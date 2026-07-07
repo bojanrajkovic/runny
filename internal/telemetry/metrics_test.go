@@ -105,7 +105,7 @@ func TestMetricsConsumerCleanCycle(t *testing.T) {
 
 	m.emit(obs.Event{
 		Time: at(1), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "BOOT"},
+		StepInfo: &obs.StepEvent{},
 	})
 	m.emit(obs.Event{
 		Time: at(2), Cycle: testCycle, Step: "BOOT", Kind: obs.KindActionStarted,
@@ -117,12 +117,12 @@ func TestMetricsConsumerCleanCycle(t *testing.T) {
 	})
 	m.emit(obs.Event{
 		Time: at(6), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "BOOT", Outcome: obs.OutcomeOK, Duration: 5 * time.Second},
+		StepInfo: &obs.StepEvent{Outcome: obs.OutcomeOK, Duration: 5 * time.Second},
 	})
 
 	m.emit(obs.Event{
 		Time: at(7), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "JOB"},
+		StepInfo: &obs.StepEvent{},
 	})
 	m.emit(obs.Event{
 		Time: at(8), Cycle: testCycle, Step: "JOB", Kind: obs.KindJobStarted,
@@ -134,7 +134,7 @@ func TestMetricsConsumerCleanCycle(t *testing.T) {
 	})
 	m.emit(obs.Event{
 		Time: at(21), Cycle: testCycle, Step: "JOB", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "JOB", Outcome: obs.OutcomeOK, Duration: 14 * time.Second},
+		StepInfo: &obs.StepEvent{Outcome: obs.OutcomeOK, Duration: 14 * time.Second},
 	})
 
 	m.emit(obs.Event{
@@ -199,11 +199,11 @@ func TestMetricsConsumerFailureCycle(t *testing.T) {
 	m.emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
 	m.emit(obs.Event{
 		Time: at(1), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepEntered,
-		StepInfo: &obs.StepEvent{State: "BOOT"},
+		StepInfo: &obs.StepEvent{},
 	})
 	m.emit(obs.Event{
 		Time: at(4), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "BOOT", Outcome: "deadline", Error: "boot deadline exceeded", Duration: 3 * time.Second},
+		StepInfo: &obs.StepEvent{Outcome: "deadline", Error: "boot deadline exceeded", Duration: 3 * time.Second},
 	})
 	m.emit(obs.Event{
 		Time: at(5), Cycle: testCycle, Kind: obs.KindCycleFinished,
@@ -245,7 +245,7 @@ func TestMetricsConsumerOrphanEvents(t *testing.T) {
 
 	m.emit(obs.Event{
 		Time: at(5), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepLeft,
-		StepInfo: &obs.StepEvent{State: "BOOT", Outcome: obs.OutcomeOK},
+		StepInfo: &obs.StepEvent{Outcome: obs.OutcomeOK},
 	})
 	m.emit(obs.Event{
 		Time: at(6), Cycle: testCycle, Step: "JOB", Kind: obs.KindJobEnded,

@@ -29,13 +29,6 @@ enum SlotPresentation {
         )
     }
 
-    /// The STATE label: name, with runnyctl's paused/wedged treatment —
-    /// "*" suffix while paused, replaced entirely by "WEDGED!" when wedged.
-    static func stateLabel(_ slot: Runny_V1_SlotStatus) -> String {
-        if slot.wedged { return "WEDGED!" }
-        return slot.state.displayName + (slot.paused ? "*" : "")
-    }
-
     /// Human-readable state for the badge and sidebar — the GUI voice, not
     /// the CLI token. Wedged still overrides everything ("Wedged"); paused is
     /// surfaced separately (a chip / the Info toggle), not folded in here.
@@ -52,8 +45,11 @@ enum SlotPresentation {
     /// A doctor check's wire name split into a friendly title and its
     /// optional qualifier — the daemon emits `runner-perm:<target>` and
     /// `image-resolve:<pool>` with the entity after a colon, plain hyphenated
-    /// slugs otherwise. Title comes from a table (acronyms like macOS/SSH
-    /// don't survive naive capitalization); the qualifier renders as a mono
+    /// slugs otherwise. Most slugs humanize fine from the hyphen split alone
+    /// (`disk-headroom` → "Disk headroom"); the table holds only the three
+    /// that don't — an acronym the naive capitalization mangles (macOS), or a
+    /// title that isn't just the slug's words (config-parse → "Config",
+    /// runner-perm → "Runner permission"). The qualifier renders as a mono
     /// tag beside it.
     static func doctorTitle(_ raw: String) -> (title: String, qualifier: String?) {
         let parts = raw.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
@@ -66,15 +62,9 @@ enum SlotPresentation {
     }
 
     private static let doctorTitles: [String: String] = [
-        "platform": "Platform",
-        "config-drift": "Config drift",
         "config-parse": "Config",
-        "runner-namespace": "Runner namespace",
         "macos-guest-cap": "macOS guest cap",
-        "local-network": "Local network",
         "runner-perm": "Runner permission",
-        "image-resolve": "Image resolve",
-        "disk-headroom": "Disk headroom",
     ]
 
     /// Seconds until the next retry while in BACKOFF, nil otherwise or once

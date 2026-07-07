@@ -60,7 +60,7 @@ func TargetVersion(ctx context.Context, h home.Dir) (version string, ok bool) {
 	if h.String() != home.SystemHomeDir {
 		return "", false
 	}
-	return targetVersion(ctx, sysdaemon.DefaultConfig().PlistPath(), ExecRunner)
+	return targetVersion(ctx, sysdaemon.PlistPath(), ExecRunner)
 }
 
 func targetVersion(ctx context.Context, plistPath string, run Runner) (string, bool) {

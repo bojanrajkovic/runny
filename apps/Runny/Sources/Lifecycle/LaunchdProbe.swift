@@ -30,12 +30,11 @@ enum LaunchdProbe {
     static let stdoutByteCap = 64 * 1024
 
     /// Probe one label in the `system/` domain. `.registered` / `.notRegistered` /
-    /// `.indeterminate`; the runner seam is injectable so the result mapping is
-    /// unit-tested without shelling out.
-    static func probe(
-        label: String, runner: CommandRunner = ProcessCommandRunner()
-    ) async -> LaunchdProbeResult {
-        let result = await runner.run(
+    /// `.indeterminate`. Runs directly against the shared `BoundedProcess` runner
+    /// (the reaper/FD/byte-cap discipline shared with `SMAppServiceRegistrar`);
+    /// `classify` is the pure result mapping, unit-tested without shelling out.
+    static func probe(label: String) async -> LaunchdProbeResult {
+        let result = await BoundedProcess.run(
             "/bin/launchctl", ["print", "system/\(label)"], timeout: timeout, stdoutByteCap: stdoutByteCap
         )
         return Self.classify(result: result, label: label)
@@ -56,24 +55,5 @@ enum LaunchdProbe {
             if stderr.lowercased().contains("could not find") { return .notRegistered }
             return .indeterminate
         }
-    }
-}
-
-/// The seam `LaunchdProbe` runs commands through, so the timeout/result mapping is
-/// unit-tested against a fake while the real reaper/FD discipline lives below it.
-protocol CommandRunner: Sendable {
-    /// Run `executable args` under `timeout`, capturing up to `stdoutByteCap` bytes
-    /// of stdout and all of (small) stderr. Never hangs past the bound: a process
-    /// that ignores SIGTERM is SIGKILLed after a grace and reaped off the caller's
-    /// path.
-    func run(_ executable: String, _ args: [String], timeout: Duration, stdoutByteCap: Int) async -> CommandResult
-}
-
-/// The real `CommandRunner`: delegates to the shared `BoundedProcess` runner, so
-/// the reaper/FD/byte-cap discipline lives in one place (shared with
-/// `SMAppServiceRegistrar`) rather than a copy per caller.
-struct ProcessCommandRunner: CommandRunner {
-    func run(_ executable: String, _ args: [String], timeout: Duration, stdoutByteCap: Int) async -> CommandResult {
-        await BoundedProcess.run(executable, args, timeout: timeout, stdoutByteCap: stdoutByteCap)
     }
 }

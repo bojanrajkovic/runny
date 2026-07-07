@@ -29,6 +29,7 @@ import (
 	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/logring"
 	"github.com/bojanrajkovic/runny/internal/statemachine"
+	"github.com/bojanrajkovic/runny/internal/versioncore"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
@@ -243,30 +244,6 @@ func TestLookupUsernameCapsStuckGoroutines(t *testing.T) {
 	}
 	if n := calls.Load(); n != 2 {
 		t.Errorf("lookupID called %d times total, want 2 (slot reused once freed)", n)
-	}
-}
-
-// TestInjectionAbortedReflectsContextState pins the Codex-review fix:
-// InjectDebugKey re-checks ctx after the (up to usernameLookupBound)
-// username lookup, before enqueueing CmdDebugKey — a client that canceled or
-// hit its own deadline during that stall must not have a key installed after
-// being told the request ended. injectionAborted converts ctx.Err() the same
-// way the pre-existing post-enqueue select already does for the identical
-// condition, so the two call sites agree on the error the client sees.
-func TestInjectionAbortedReflectsContextState(t *testing.T) {
-	if err := injectionAborted(t.Context()); err != nil {
-		t.Errorf("live context: got %v, want nil", err)
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	if err := injectionAborted(ctx); status.Code(err) != codes.Canceled {
-		t.Errorf("canceled context: code = %v, want Canceled", status.Code(err))
-	}
-	dctx, dcancel := context.WithTimeout(t.Context(), 0)
-	defer dcancel()
-	<-dctx.Done()
-	if err := injectionAborted(dctx); status.Code(err) != codes.DeadlineExceeded {
-		t.Errorf("expired context: code = %v, want DeadlineExceeded", status.Code(err))
 	}
 }
 
@@ -616,8 +593,8 @@ func TestStatusCarriesConvergenceFingerprint(t *testing.T) {
 	if resp.GetDrainSeq() != 7 || !resp.GetExitHeld() {
 		t.Errorf("drain_seq/exit_held dropped: seq=%d held=%v", resp.GetDrainSeq(), resp.GetExitHeld())
 	}
-	if WireProtocolVersion < 2 || resp.GetProtocolVersion() != WireProtocolVersion {
-		t.Errorf("protocol_version = %d, want %d (>= 2)", resp.GetProtocolVersion(), WireProtocolVersion)
+	if versioncore.WireProtocolVersion < 2 || resp.GetProtocolVersion() != versioncore.WireProtocolVersion {
+		t.Errorf("protocol_version = %d, want %d (>= 2)", resp.GetProtocolVersion(), versioncore.WireProtocolVersion)
 	}
 }
 
@@ -739,8 +716,8 @@ func TestSnapshotCarriesDraining(t *testing.T) {
 // whether to rely on pause/resume command acknowledgement (issue #66).
 func TestSnapshotCarriesProtocolVersion(t *testing.T) {
 	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
-	if got := srv.snapshot().GetProtocolVersion(); got != WireProtocolVersion {
-		t.Errorf("protocol_version = %d, want %d", got, WireProtocolVersion)
+	if got := srv.snapshot().GetProtocolVersion(); got != versioncore.WireProtocolVersion {
+		t.Errorf("protocol_version = %d, want %d", got, versioncore.WireProtocolVersion)
 	}
 }
 

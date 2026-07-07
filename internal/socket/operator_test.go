@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +28,17 @@ const (
 	testGrantee2 = "_www"
 )
 
+// containsOperatorUser/containsOperatorUID are test-only equivalents of the
+// opacl.ContainsUser/ContainsUID helpers production code doesn't need
+// (production searches the operator list by uid alone, inline).
+func containsOperatorUser(ops []opacl.Operator, username string) bool {
+	return slices.ContainsFunc(ops, func(o opacl.Operator) bool { return o.User == username })
+}
+
+func containsOperatorUID(ops []opacl.Operator, uid uint32) bool {
+	return slices.ContainsFunc(ops, func(o opacl.Operator) bool { return o.UID == uid })
+}
+
 func requireGrantees(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{testGrantee1, testGrantee2} {
@@ -38,10 +50,9 @@ func requireGrantees(t *testing.T) {
 
 // newOperatorTestServer builds a *Server rooted at a fresh temp home with a
 // stand-in socket file already present (mirroring the live socket node
-// Grant/Revoke stamp directly). HomeDir deliberately does NOT equal
-// home.SystemHomeDir — tests that need to exercise the gated logic call the
-// unexported grantOperator/revokeOperator directly instead of the RPC
-// wrapper, which is exactly what production code cannot do (by design).
+// Grant/Revoke stamp directly), with IsSystemDaemon set so the RPC methods'
+// requireSystemDaemon gate passes. HomeDir deliberately does NOT equal
+// home.SystemHomeDir — the gate only checks IsSystemDaemon.
 func newOperatorTestServer(t *testing.T) *Server {
 	t.Helper()
 	dir := t.TempDir()
@@ -53,13 +64,14 @@ func newOperatorTestServer(t *testing.T) *Server {
 	if err := os.WriteFile(sock, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{HomeDir: home.Dir(homeDir)}
+	s := &Server{HomeDir: home.Dir(homeDir), IsSystemDaemon: true}
 	s.socketPath = sock
 	return s
 }
 
 func TestGrantOperatorRequiresSystemDaemon(t *testing.T) {
-	s := newOperatorTestServer(t) // HomeDir != home.SystemHomeDir
+	s := newOperatorTestServer(t)
+	s.IsSystemDaemon = false
 	_, err := s.GrantOperator(t.Context(), &runnyv1.GrantOperatorRequest{User: testGrantee1})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("code = %v, want FailedPrecondition", status.Code(err))
@@ -68,6 +80,7 @@ func TestGrantOperatorRequiresSystemDaemon(t *testing.T) {
 
 func TestRevokeOperatorRequiresSystemDaemon(t *testing.T) {
 	s := newOperatorTestServer(t)
+	s.IsSystemDaemon = false
 	_, err := s.RevokeOperator(t.Context(), &runnyv1.RevokeOperatorRequest{User: testGrantee1})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("code = %v, want FailedPrecondition", status.Code(err))
@@ -88,7 +101,7 @@ func TestResolveOperatorAccountByName(t *testing.T) {
 
 func TestGrantOperatorRefusesRoot(t *testing.T) {
 	s := newOperatorTestServer(t)
-	_, err := s.grantOperator(t.Context(), "root")
+	_, err := s.GrantOperator(t.Context(), &runnyv1.GrantOperatorRequest{User: "root"})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("code = %v, want InvalidArgument", status.Code(err))
 	}
@@ -96,7 +109,7 @@ func TestGrantOperatorRefusesRoot(t *testing.T) {
 
 func TestGrantOperatorRefusesUnknownUser(t *testing.T) {
 	s := newOperatorTestServer(t)
-	_, err := s.grantOperator(t.Context(), "no-such-runny-test-user-xyz")
+	_, err := s.GrantOperator(t.Context(), &runnyv1.GrantOperatorRequest{User: "no-such-runny-test-user-xyz"})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("code = %v, want InvalidArgument", status.Code(err))
 	}
@@ -106,7 +119,7 @@ func TestGrantOperatorGrantsAndRecords(t *testing.T) {
 	requireGrantees(t)
 	s := newOperatorTestServer(t)
 	ctx := asOperator(t.Context(), 501)
-	mut, err := s.grantOperator(ctx, testGrantee1)
+	mut, err := s.GrantOperator(ctx, &runnyv1.GrantOperatorRequest{User: testGrantee1})
 	if err != nil {
 		t.Fatalf("grantOperator: %v", err)
 	}
@@ -118,7 +131,7 @@ func TestGrantOperatorGrantsAndRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("opacl.List: %v", err)
 	}
-	if !opacl.ContainsUser(ops, testGrantee1) {
+	if !containsOperatorUser(ops, testGrantee1) {
 		t.Fatalf("granted operator missing from ACL: %+v", ops)
 	}
 
@@ -138,7 +151,7 @@ func TestGrantOperatorGrantsAndRecords(t *testing.T) {
 func TestGrantRecordUnknownPeerCredIsNotRoot(t *testing.T) {
 	requireGrantees(t)
 	s := newOperatorTestServer(t)
-	if _, err := s.grantOperator(t.Context(), testGrantee1); err != nil {
+	if _, err := s.GrantOperator(t.Context(), &runnyv1.GrantOperatorRequest{User: testGrantee1}); err != nil {
 		t.Fatalf("grantOperator: %v", err)
 	}
 	grants, err := s.HomeDir.ReadOperatorGrants()
@@ -160,10 +173,10 @@ func TestGrantOperatorRefusesAlreadyOperator(t *testing.T) {
 	requireGrantees(t)
 	s := newOperatorTestServer(t)
 	ctx := asOperator(t.Context(), 501)
-	if _, err := s.grantOperator(ctx, testGrantee1); err != nil {
+	if _, err := s.GrantOperator(ctx, &runnyv1.GrantOperatorRequest{User: testGrantee1}); err != nil {
 		t.Fatalf("first grant: %v", err)
 	}
-	_, err := s.grantOperator(ctx, testGrantee1)
+	_, err := s.GrantOperator(ctx, &runnyv1.GrantOperatorRequest{User: testGrantee1})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("second grant: code = %v, want FailedPrecondition", status.Code(err))
 	}
@@ -173,10 +186,10 @@ func TestRevokeOperatorRefusesLastOperator(t *testing.T) {
 	requireGrantees(t)
 	s := newOperatorTestServer(t)
 	ctx := asOperator(t.Context(), 501)
-	if _, err := s.grantOperator(ctx, testGrantee1); err != nil {
+	if _, err := s.GrantOperator(ctx, &runnyv1.GrantOperatorRequest{User: testGrantee1}); err != nil {
 		t.Fatalf("grant: %v", err)
 	}
-	_, err := s.revokeOperator(ctx, testGrantee1)
+	_, err := s.RevokeOperator(ctx, &runnyv1.RevokeOperatorRequest{User: testGrantee1})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("code = %v, want FailedPrecondition", status.Code(err))
 	}
@@ -187,10 +200,10 @@ func TestRevokeOperatorRefusesNonOperator(t *testing.T) {
 	s := newOperatorTestServer(t)
 	ctx := asOperator(t.Context(), 501)
 	// Grant one so this isn't ALSO the last-operator case.
-	if _, err := s.grantOperator(ctx, testGrantee1); err != nil {
+	if _, err := s.GrantOperator(ctx, &runnyv1.GrantOperatorRequest{User: testGrantee1}); err != nil {
 		t.Fatalf("grant: %v", err)
 	}
-	_, err := s.revokeOperator(ctx, testGrantee2)
+	_, err := s.RevokeOperator(ctx, &runnyv1.RevokeOperatorRequest{User: testGrantee2})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("code = %v, want FailedPrecondition", status.Code(err))
 	}
@@ -200,13 +213,13 @@ func TestRevokeOperatorRevokesAndRecords(t *testing.T) {
 	requireGrantees(t)
 	s := newOperatorTestServer(t)
 	ctx := asOperator(t.Context(), 501)
-	if _, err := s.grantOperator(ctx, testGrantee1); err != nil {
+	if _, err := s.GrantOperator(ctx, &runnyv1.GrantOperatorRequest{User: testGrantee1}); err != nil {
 		t.Fatalf("grant 1: %v", err)
 	}
-	if _, err := s.grantOperator(ctx, testGrantee2); err != nil {
+	if _, err := s.GrantOperator(ctx, &runnyv1.GrantOperatorRequest{User: testGrantee2}); err != nil {
 		t.Fatalf("grant 2: %v", err)
 	}
-	if _, err := s.revokeOperator(ctx, testGrantee2); err != nil {
+	if _, err := s.RevokeOperator(ctx, &runnyv1.RevokeOperatorRequest{User: testGrantee2}); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 
@@ -214,10 +227,10 @@ func TestRevokeOperatorRevokesAndRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("opacl.List: %v", err)
 	}
-	if opacl.ContainsUser(ops, testGrantee2) {
+	if containsOperatorUser(ops, testGrantee2) {
 		t.Errorf("revoked operator still present: %+v", ops)
 	}
-	if !opacl.ContainsUser(ops, testGrantee1) {
+	if !containsOperatorUser(ops, testGrantee1) {
 		t.Errorf("unrelated operator was removed: %+v", ops)
 	}
 
@@ -241,7 +254,7 @@ func TestRevokeOperatorRevokesAndRecords(t *testing.T) {
 // widening the List-then-mutate race window deterministically instead of
 // hoping real scheduling happens to interleave two goroutines badly.
 func revokePrecheckForTest(ops []opacl.Operator, uid uint32, u *user.User) error {
-	if !opacl.ContainsUID(ops, uid) {
+	if !containsOperatorUID(ops, uid) {
 		return status.Errorf(codes.FailedPrecondition, "%s is not an operator", u.Username)
 	}
 	if len(ops) <= 1 {
@@ -264,10 +277,10 @@ func TestMutateOperatorSerializesConcurrentRevokes(t *testing.T) {
 	requireGrantees(t)
 	s := newOperatorTestServer(t)
 	ctx := asOperator(t.Context(), 501)
-	if _, err := s.grantOperator(ctx, testGrantee1); err != nil {
+	if _, err := s.GrantOperator(ctx, &runnyv1.GrantOperatorRequest{User: testGrantee1}); err != nil {
 		t.Fatalf("grant 1: %v", err)
 	}
-	if _, err := s.grantOperator(ctx, testGrantee2); err != nil {
+	if _, err := s.GrantOperator(ctx, &runnyv1.GrantOperatorRequest{User: testGrantee2}); err != nil {
 		t.Fatalf("grant 2: %v", err)
 	}
 
@@ -307,7 +320,7 @@ func TestListOperatorsJoinsAttribution(t *testing.T) {
 	requireGrantees(t)
 	s := newOperatorTestServer(t)
 	ctx := asOperator(t.Context(), 501)
-	if _, err := s.grantOperator(ctx, testGrantee1); err != nil {
+	if _, err := s.GrantOperator(ctx, &runnyv1.GrantOperatorRequest{User: testGrantee1}); err != nil {
 		t.Fatalf("grant: %v", err)
 	}
 

@@ -139,6 +139,9 @@ struct TimelineTab: View {
         return "\(CycleVerdict(cycle).mark) \(cycle.cycleID) · \(started)"
     }
 
+    // Deliberately still a DateFormatter, not Date.FormatStyle: FormatStyle's
+    // `.numeric` renders a 4-digit year where `.short/.short` renders 2-digit —
+    // don't "finish" this migration, it would change the picker label's format.
     static let started: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .short

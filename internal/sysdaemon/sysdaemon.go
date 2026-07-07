@@ -42,31 +42,17 @@ const (
 	idRangeHi = 400
 )
 
-// Config is everything the install needs. DefaultConfig fills the fixed parts;
-// the caller supplies Operator (the ACL grantee) and RunnydPath.
+// Config is what varies per install: the ACL grantee and the binary path.
+// Everything else (Label, ServiceUser, ServiceGroup, the system home) is fixed
+// and lives in package consts, used directly rather than threaded through here.
 type Config struct {
-	Label        string
-	ServiceUser  string
-	ServiceGroup string
-	HomeDir      string // the system home (home.SystemHomeDir)
-	Operator     string // the human operator account the inheriting ACL grants
-	RunnydPath   string // absolute path the plist execs
-}
-
-// DefaultConfig returns the fixed install parameters; the caller sets Operator
-// and RunnydPath.
-func DefaultConfig() Config {
-	return Config{
-		Label:        Label,
-		ServiceUser:  ServiceUser,
-		ServiceGroup: ServiceGroup,
-		HomeDir:      home.SystemHomeDir,
-	}
+	Operator   string // the human operator account the inheriting ACL grants
+	RunnydPath string // absolute path the plist execs
 }
 
 // PlistPath is where the system LaunchDaemon plist lives.
-func (c Config) PlistPath() string {
-	return filepath.Join("/Library/LaunchDaemons", c.Label+".plist")
+func PlistPath() string {
+	return filepath.Join("/Library/LaunchDaemons", Label+".plist")
 }
 
 // launchDaemonPlist is the typed shape of the system LaunchDaemon plist.
@@ -98,10 +84,10 @@ type launchDaemonPlist struct {
 // TN3179). KeepAlive is load-bearing: wedge escalation and config reload both
 // exit non-zero expecting launchd to cold-start the daemon.
 func Plist(cfg Config) string {
-	logsDir := home.Dir(cfg.HomeDir).LogsDir()
+	logsDir := home.Dir(home.SystemHomeDir).LogsDir()
 	p := launchDaemonPlist{
-		Label:             cfg.Label,
-		UserName:          cfg.ServiceUser,
+		Label:             Label,
+		UserName:          ServiceUser,
 		ProgramArguments:  []string{cfg.RunnydPath},
 		RunAtLoad:         true,
 		KeepAlive:         true,

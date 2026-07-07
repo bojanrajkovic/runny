@@ -9,21 +9,8 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/bojanrajkovic/runny/internal/socket"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
-
-// The CLI's expected protocol must track the daemon's published one — the Swift
-// app can only comment-lock this (no shared const across languages), but the Go
-// CLI can assert it, so a one-sided bump of either constant fails the build
-// rather than silently mis-warning on the exact upgrade window the feature exists
-// to catch.
-func TestExpectedProtocolMatchesDaemon(t *testing.T) {
-	if expectedProtocolVersion != socket.WireProtocolVersion {
-		t.Fatalf("expectedProtocolVersion=%d but socket.WireProtocolVersion=%d — bump both together",
-			expectedProtocolVersion, socket.WireProtocolVersion)
-	}
-}
 
 // The version-skew taxonomy, the Go mirror of the app's SkewVerdictTests. The
 // load-bearing correction is normalization: the daemon publishes a suffixed

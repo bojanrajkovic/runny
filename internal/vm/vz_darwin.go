@@ -136,6 +136,12 @@ func (VZManager) bootLinux(ctx context.Context, bundle tart.Bundle, cfg *tart.Co
 	return finishBoot(ctx, vmc, bundle, opts)
 }
 
+// abandonedStopTimeout bounds the detached best-effort force stop (below) of
+// a machine whose boot blew its deadline. That path has no caller ctx left
+// to bound it, so this is the only thing keeping its wait finite — and the
+// signal that gets a wedged force stop logged rather than silently parked.
+var abandonedStopTimeout = 30 * time.Second
+
 // finishBoot attaches the OS-independent devices (disk, NAT net with a fresh
 // MAC, the guest-agent console port + vsock, optional virtiofs cache
 // share), validates, and starts the guest. The
@@ -260,8 +266,7 @@ type vzMachine struct {
 	done chan struct{}
 }
 
-func (m *vzMachine) MAC() string           { return m.mac }
-func (m *vzMachine) Done() <-chan struct{} { return m.done }
+func (m *vzMachine) MAC() string { return m.mac }
 
 func (m *vzMachine) watchState() {
 	defer close(m.done)
@@ -283,7 +288,7 @@ func (m *vzMachine) WaitIP(ctx bounded.Context) (string, error) {
 		case <-m.done:
 			return "", fmt.Errorf("guest stopped while waiting for IP")
 		case <-t.C:
-			data, err := os.ReadFile(LeasesPath)
+			data, err := os.ReadFile(leasesPath)
 			if err != nil {
 				continue // file appears with the first lease
 			}

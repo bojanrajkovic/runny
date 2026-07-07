@@ -110,9 +110,8 @@ func ErrText(err error) string {
 // attributes, the metrics side's pool label): all of it is known at cycle
 // start, so it rides the ref instead of needing events of its own.
 type CycleRef struct {
-	InstancePrefix string
-	Slot           string
-	Pool           string
+	Slot string
+	Pool string
 	// Image is the pool's configured image ref (intent, from config) — the
 	// resolved digest is learned mid-cycle and travels as an ImageEvent.
 	Image      string
@@ -123,12 +122,12 @@ type CycleRef struct {
 
 // StepEvent is the payload for StepEntered/StepLeft. A state is entered at
 // most once per cycle — the FSM never revisits a state within a cycle (a
-// broken guest means a new cycle, not an in-place retry) — so State alone
-// correlates a StepLeft with its StepEntered. Duration is populated on
-// StepLeft only (the FSM knows the step's Entered/Left from its own
-// StateRecord); zero on StepEntered.
+// broken guest means a new cycle, not an in-place retry) — so Event.Step
+// (the state the FSM entered before emitting) alone correlates a StepLeft
+// with its StepEntered; StepEvent carries no State field of its own.
+// Duration is populated on StepLeft only (the FSM knows the step's
+// Entered/Left from its own StateRecord); zero on StepEntered.
 type StepEvent struct {
-	State    string
 	Outcome  Outcome
 	Error    string
 	Duration time.Duration

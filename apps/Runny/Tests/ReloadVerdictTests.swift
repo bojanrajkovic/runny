@@ -236,28 +236,47 @@ final class JobInFlightSeedTests: XCTestCase {
 }
 
 /// The pending-reload lifecycle: only an accepted reload arms or replaces the
-/// tracked pending. A refusal or transport failure leaves an earlier accepted
-/// reload's tracking intact, so a second reload clicked (and refused) mid-drain
-/// can't cancel the first one's convergence verdict. Pure, so pinned directly.
+/// tracked pending. A refusal must leave an earlier accepted reload's tracking
+/// intact, so a second reload attempt that gets refused mid-drain can't cancel
+/// the first one's convergence verdict. Drives the real `applyReloadResponse`
+/// — `performReload()`'s only reaction to an answered RPC — against canned
+/// responses; the RPC round trip itself needs no live daemon to pin this.
+@MainActor
 final class PendingReloadLifecycleTests: XCTestCase {
-    private func pending(_ boot: String) -> DaemonStore.PendingReload {
-        DaemonStore.PendingReload(
-            acceptingBootID: boot, priorStart: nil, wantSHA: "sha-\(boot)", acceptedAt: Date()
+    private func response(accepted: Bool, bootID: String = "") -> Runny_V1_ReloadResponse {
+        var resp = Runny_V1_ReloadResponse()
+        resp.accepted = accepted
+        resp.acceptingBootID = bootID
+        return resp
+    }
+
+    func testAcceptedArmsThePending() {
+        let store = DaemonStore()
+        store.applyReloadResponse(response(accepted: true, bootID: "boot-A"), priorStart: nil, isUpdate: false)
+        XCTAssertEqual(store.pendingReload?.acceptingBootID, "boot-A")
+    }
+
+    func testAcceptedReplacesAnExistingPending() {
+        let store = DaemonStore()
+        store.applyReloadResponse(response(accepted: true, bootID: "boot-A"), priorStart: nil, isUpdate: false)
+        store.applyReloadResponse(response(accepted: true, bootID: "boot-B"), priorStart: nil, isUpdate: false)
+        XCTAssertEqual(store.pendingReload?.acceptingBootID, "boot-B")
+    }
+
+    func testRefusalKeepsAnExistingAcceptedPendingIntact() {
+        let store = DaemonStore()
+        store.applyReloadResponse(response(accepted: true, bootID: "boot-A"), priorStart: nil, isUpdate: false)
+        store.applyReloadResponse(response(accepted: false), priorStart: nil, isUpdate: false)
+        XCTAssertEqual(
+            store.pendingReload?.acceptingBootID, "boot-A",
+            "a refused reload must not clear an earlier accepted reload's pending tracking"
         )
     }
 
-    func testAcceptedReplacesExistingPending() {
-        let old = pending("A"), new = pending("B")
-        XCTAssertEqual(DaemonStore.pendingAfterAttempt(existing: old, accepted: new), new)
-    }
-
-    func testRefusalKeepsExistingPending() {
-        let old = pending("A")
-        XCTAssertEqual(DaemonStore.pendingAfterAttempt(existing: old, accepted: nil), old)
-    }
-
     func testRefusalWithNoPriorPendingStaysNil() {
-        XCTAssertNil(DaemonStore.pendingAfterAttempt(existing: nil, accepted: nil))
+        let store = DaemonStore()
+        store.applyReloadResponse(response(accepted: false), priorStart: nil, isUpdate: false)
+        XCTAssertNil(store.pendingReload)
     }
 }
 

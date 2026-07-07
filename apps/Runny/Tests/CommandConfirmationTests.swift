@@ -110,22 +110,6 @@ final class CommandConfirmationTests: XCTestCase {
         XCTAssertFalse(DaemonStore.isConfirmed(pending(.recycle, id: "abc"), by: nil))
     }
 
-    func testBannerRetractedOnlyForItsOwnCommand() {
-        // The error banner is a single scalar shared across slots. A confirmation
-        // retracts it only when the banner's provenance matches the confirming
-        // command — never a different command's failure, and never a banner with
-        // no owning command (unreachable, file-not-found: provenance nil).
-        XCTAssertTrue(DaemonStore.bannerBelongs(to: "abc", confirmedID: "abc"))
-        XCTAssertFalse(
-            DaemonStore.bannerBelongs(to: "abc", confirmedID: "xyz"),
-            "a different command's confirmation must not retract this banner"
-        )
-        XCTAssertFalse(
-            DaemonStore.bannerBelongs(to: nil, confirmedID: "abc"),
-            "an ownerless banner is never retracted by a command confirmation"
-        )
-    }
-
     func testRecycleConfirmsOnCycleChangeIgnoringID() {
         // Recycle has no echoed id — the daemon carries none on RecycleRequest —
         // so it confirms purely on the cycle advancing.
@@ -135,6 +119,69 @@ final class CommandConfirmationTests: XCTestCase {
         )
         XCTAssertFalse(
             DaemonStore.isConfirmed(cmd, by: slot(cycleID: "cycle-a"))
+        )
+    }
+}
+
+/// The shared command-error banner's provenance: confirming a command must
+/// retract only the banner that belongs to it — never a different command's
+/// failure, and never a banner with no owning command. Drives the real
+/// `confirmPending()` (via `apply()`, the snapshot entry point every command
+/// confirmation actually goes through) against a seeded `pending` +
+/// `commandError`, so the check at its real call site is what's pinned.
+@MainActor
+final class BannerRetractionTests: XCTestCase {
+    private func snapshot(recentApplied: [String]) -> Runny_V1_GetStatusResponse {
+        var slot = Runny_V1_SlotStatus()
+        slot.slot = "runner-1"
+        slot.recentAppliedCommandIds = recentApplied
+        var snap = Runny_V1_GetStatusResponse()
+        snap.slots = [slot]
+        return snap
+    }
+
+    func testConfirmingItsOwnCommandRetractsTheBanner() {
+        let store = DaemonStore()
+        store.pending["runner-1"] = DaemonStore.PendingCommand(
+            id: "mine", kind: .pause, requestedAt: Date(), cycleID: "cycle-a"
+        )
+        store.setCommandError("pause of runner-1 not confirmed after 10s", id: "mine")
+
+        store.apply(snapshot(recentApplied: ["mine"]))
+
+        XCTAssertNil(store.commandError, "confirming its own command must retract its banner")
+    }
+
+    func testConfirmingOneCommandDoesNotRetractADifferentCommandsBanner() {
+        let store = DaemonStore()
+        store.pending["runner-1"] = DaemonStore.PendingCommand(
+            id: "mine", kind: .pause, requestedAt: Date(), cycleID: "cycle-a"
+        )
+        // The banner on screen belongs to an unrelated command.
+        store.setCommandError("resume of runner-2 not confirmed after 10s", id: "someone-elses")
+
+        store.apply(snapshot(recentApplied: ["mine"]))
+
+        XCTAssertEqual(
+            store.commandError, "resume of runner-2 not confirmed after 10s",
+            "a different command's confirmation must not retract this banner"
+        )
+    }
+
+    func testOwnerlessBannerIsNeverRetracted() {
+        let store = DaemonStore()
+        store.pending["runner-1"] = DaemonStore.PendingCommand(
+            id: "mine", kind: .pause, requestedAt: Date(), cycleID: "cycle-a"
+        )
+        // No provenance (e.g. "daemon unreachable") — set directly, not via
+        // setCommandError, so commandErrorID stays nil.
+        store.commandError = "daemon unreachable — pause not sent"
+
+        store.apply(snapshot(recentApplied: ["mine"]))
+
+        XCTAssertEqual(
+            store.commandError, "daemon unreachable — pause not sent",
+            "an ownerless banner must never be retracted by a command confirmation"
         )
     }
 }

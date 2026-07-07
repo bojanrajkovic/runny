@@ -96,6 +96,13 @@ var errStalled = errors.New("daemon stopped making drain progress (no advance wi
 // both use ReloadRequest / ReloadResponse, so the method is interchangeable.
 type reloadMethod func(context.Context, *runnyv1.ReloadRequest) (*runnyv1.ReloadResponse, error)
 
+// plainReload adapts the daemon's plain Reload RPC to reloadMethod, for the two
+// --wait callers (ReloadCmd, edit-config) that don't need UpgradeReload's
+// config-parse-deferral semantics.
+func (c *ctl) plainReload(ctx context.Context, req *runnyv1.ReloadRequest) (*runnyv1.ReloadResponse, error) {
+	return c.client.Reload(ctx, req)
+}
+
 // reloadWait runs the reload (via method) and follows it to convergence.
 // Success is never "the socket came back": it is a genuinely new process
 // (a changed boot_id) serving the exact config hash the reload returned. The
@@ -196,7 +203,7 @@ func (c *ctl) fold(snap *runnyv1.GetStatusResponse, fs *followState, opts follow
 	fs.jobInFlight = anySlotInState(snap, runnyv1.SlotState_SLOT_STATE_JOB)
 	if seq := snap.GetDrainSeq(); !fs.haveSeq || seq != fs.lastSeq {
 		fs.haveSeq, fs.lastSeq = true, seq
-		resetTimer(fs.stall, opts.stallWindow)
+		fs.stall.Reset(opts.stallWindow)
 	}
 	c.renderFollow(snap, fs.start)
 }
@@ -535,13 +542,11 @@ func respawnVerdict(st *runnyv1.GetStatusResponse, wantSHA string, jobInFlight b
 	}
 }
 
-// anySlotInState reports whether any slot is in one of the given states.
-func anySlotInState(resp *runnyv1.GetStatusResponse, states ...runnyv1.SlotState) bool {
+// anySlotInState reports whether any slot is in the given state.
+func anySlotInState(resp *runnyv1.GetStatusResponse, want runnyv1.SlotState) bool {
 	for _, s := range resp.GetSlots() {
-		for _, want := range states {
-			if s.GetState() == want {
-				return true
-			}
+		if s.GetState() == want {
+			return true
 		}
 	}
 	return false
@@ -571,17 +576,6 @@ func anySlotActive(resp *runnyv1.GetStatusResponse) bool {
 		}
 	}
 	return false
-}
-
-// resetTimer safely re-arms t to d, draining a fired-but-unread tick first.
-func resetTimer(t *time.Timer, d time.Duration) {
-	if !t.Stop() {
-		select {
-		case <-t.C:
-		default:
-		}
-	}
-	t.Reset(d)
 }
 
 // emitReloadWait writes the whole --wait result as ONE JSON document: the

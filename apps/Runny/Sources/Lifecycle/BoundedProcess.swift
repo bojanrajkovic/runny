@@ -51,12 +51,12 @@ enum BoundedProcess {
                 let pid = proc.processIdentifier
                 // Force-kill if SIGTERM was ignored, so the reader's waitUntilExit
                 // returns and the process/FDs are reaped instead of leaking.
-                DispatchQueue.global().asyncAfter(deadline: .now() + seconds(killGrace)) {
+                DispatchQueue.global().asyncAfter(deadline: .now() + killGrace / .seconds(1)) {
                     if proc.isRunning { kill(pid, SIGKILL) }
                 }
                 if gate.claim() { cont.resume(returning: .timedOut) }
             }
-            DispatchQueue.global().asyncAfter(deadline: .now() + seconds(timeout), execute: killer)
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout / .seconds(1), execute: killer)
             // The reader ALWAYS runs to EOF/exit, even after the caller was freed on
             // timeout — so the process is reaped and the FDs closed in every path.
             DispatchQueue.global().async {
@@ -100,11 +100,6 @@ enum BoundedProcess {
             data.append(chunk)
         }
         return data
-    }
-
-    private static func seconds(_ duration: Duration) -> Double {
-        let c = duration.components
-        return Double(c.seconds) + Double(c.attoseconds) / 1e18
     }
 }
 

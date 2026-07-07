@@ -92,6 +92,20 @@ func randomBytes(n int) []byte {
 	return b
 }
 
+func TestShortDigest(t *testing.T) {
+	cases := map[string]string{
+		"sha256:aabbccddeeff00112233": "aabbccddeeff",
+		"sha256:aabbcc":               "aabbcc",       // shorter than 12: returned as-is
+		"aabbccddeeff00112233":        "aabbccddeeff", // no prefix, still truncated
+		"":                            "",
+	}
+	for in, want := range cases {
+		if got := ShortDigest(in); got != want {
+			t.Errorf("ShortDigest(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestParseRef(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -141,8 +155,6 @@ func newFakeRegistry(t *testing.T, config, nvram, disk []byte) *fakeRegistry {
 	l1, l2 := appleLZ4Encode(t, disk[:half], 16*1024), appleLZ4Encode(t, disk[half:], 16*1024)
 
 	m := manifest{
-		SchemaVersion: 2,
-		MediaType:     manifestAccept,
 		Layers: []descriptor{
 			{MediaType: mediaTypeConfig, Digest: add(config), Size: int64(len(config))},
 			{

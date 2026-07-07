@@ -58,16 +58,6 @@ func resolveOperatorAccount(input string) (*user.User, error) {
 	return nil, fmt.Errorf("no such user %q: %w", input, lookupErr)
 }
 
-// resolveOperatorAccountOrStatus wraps a lookup miss as InvalidArgument (a
-// wrong argument, not the caller's transient fault).
-func resolveOperatorAccountOrStatus(input string) (*user.User, error) {
-	u, err := resolveOperatorAccount(input)
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
-	}
-	return u, nil
-}
-
 // operatorIdentity resolves the calling peer's kernel-authenticated uid and
 // best-effort username — the one resolver behind grant attribution,
 // injected-key audit rows, and lifecycle-command log lines. A nil uid means
@@ -84,17 +74,13 @@ func (s *Server) GrantOperator(ctx context.Context, req *runnyv1.GrantOperatorRe
 	if err := s.requireSystemDaemon(); err != nil {
 		return nil, err
 	}
-	return s.grantOperator(ctx, req.GetUser())
-}
-
-func (s *Server) grantOperator(ctx context.Context, userArg string) (*runnyv1.OperatorMutation, error) {
 	return s.mutateOperator(
-		ctx, userArg, "grant",
+		ctx, req.GetUser(), "grant",
 		func(ops []opacl.Operator, uid uint32, u *user.User) error {
 			if u.Username == "root" || u.Uid == "0" {
 				return status.Error(codes.InvalidArgument, "refusing to grant root")
 			}
-			if opacl.ContainsUID(ops, uid) {
+			if hasUID(ops, uid) {
 				return status.Errorf(codes.FailedPrecondition, "%s is already an operator", u.Username)
 			}
 			return nil
@@ -107,14 +93,10 @@ func (s *Server) RevokeOperator(ctx context.Context, req *runnyv1.RevokeOperator
 	if err := s.requireSystemDaemon(); err != nil {
 		return nil, err
 	}
-	return s.revokeOperator(ctx, req.GetUser())
-}
-
-func (s *Server) revokeOperator(ctx context.Context, userArg string) (*runnyv1.OperatorMutation, error) {
 	return s.mutateOperator(
-		ctx, userArg, "revoke",
+		ctx, req.GetUser(), "revoke",
 		func(ops []opacl.Operator, uid uint32, u *user.User) error {
-			if !opacl.ContainsUID(ops, uid) {
+			if !hasUID(ops, uid) {
 				return status.Errorf(codes.FailedPrecondition, "%s is not an operator", u.Username)
 			}
 			if len(ops) <= 1 {
@@ -138,9 +120,11 @@ func (s *Server) mutateOperator(
 	precheck func(ops []opacl.Operator, uid uint32, u *user.User) error,
 	apply func(actx bounded.Context, homeDir, sock, username string) error,
 ) (*runnyv1.OperatorMutation, error) {
-	u, err := resolveOperatorAccountOrStatus(userArg)
+	u, err := resolveOperatorAccount(userArg)
 	if err != nil {
-		return nil, err
+		// InvalidArgument: a lookup miss is a wrong argument, not the
+		// caller's transient fault.
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
 	uid64, err := strconv.ParseUint(u.Uid, 10, 32)
 	if err != nil {
@@ -232,4 +216,11 @@ func latestGrant(grants []home.OperatorGrant, uid uint32) *home.OperatorGrant {
 		}
 	}
 	return latest
+}
+
+// hasUID is the one membership predicate Grant and Revoke share: the two
+// prechecks must agree on "is this account an operator" or an entry can
+// become un-grantable and un-revocable at once.
+func hasUID(ops []opacl.Operator, uid uint32) bool {
+	return slices.ContainsFunc(ops, func(o opacl.Operator) bool { return o.UID == uid })
 }

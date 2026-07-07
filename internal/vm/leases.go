@@ -6,8 +6,8 @@ import (
 	"strings"
 )
 
-// LeasesPath is macOS's DHCP lease database for vmnet guests.
-const LeasesPath = "/var/db/dhcpd_leases"
+// leasesPath is macOS's DHCP lease database for vmnet guests.
+const leasesPath = "/var/db/dhcpd_leases"
 
 // FindIPByMAC scans dhcpd_leases content for an entry whose hw_address
 // matches mac. The leases file strips leading zeros from octets

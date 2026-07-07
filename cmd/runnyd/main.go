@@ -384,108 +384,14 @@ func run() error {
 		s.OnChange(d.observe)
 	}
 
-	// Reload entry point, shared by the Reload RPC and SIGHUP.
-	// Serialized so concurrent callers never run overlapping preflights
-	// (each serialized call still revalidates fresh). It never gates on an
-	// active drain: the imminent respawn loads the on-disk file whether or
-	// not it was validated, so the verdict matters most then. The drain is
-	// daemon-owned, never tied to the caller's context — a runnyctl that
-	// disconnects after acceptance cannot orphan it.
+	// Reload entry point, shared by the Reload RPC, UpgradeReload RPC, and
+	// SIGHUP (below) — see runReload's doc comment for the shared semantics.
+	// requestReload binds the fixed deps (reloadMu, logger, dir, configPath,
+	// d, slots) once, so every call site below passes only what actually
+	// varies per caller — source, reason, and deferToRespawnTarget.
 	var reloadMu sync.Mutex
-	// requestReload is the shared reload entry point for Reload RPC, UpgradeReload
-	// RPC, and SIGHUP. deferToRespawnTarget is the UpgradeReload-only capability:
-	// when true and the running binary's own parser rejects the config, the exit
-	// gate may consult the respawn target's -test-config instead (forward-only
-	// config edits that only the new binary can parse). Plain Reload and SIGHUP
-	// always pass false — the verb is the access boundary; a bool could be forged.
 	requestReload := func(ctx context.Context, source, reason string, deferToRespawnTarget bool) socket.ReloadResult {
-		reloadMu.Lock()
-		defer reloadMu.Unlock()
-		logger.Info("config reload requested", "source", source, "reason", reason)
-		sha, failed, warnings := preflightReload(ctx, dir, configPath)
-		// RPC-gated deferral: on a lone config-parse failure, UpgradeReload may
-		// ask the respawn target whether it accepts the config. If so, clear the
-		// failure and let the drain proceed; if not (stale symlink = target is the
-		// old binary), substitute a synthetic check so the operator knows why.
-		failed = parseDeferralCheck(ctx, configPath, deferralPlistPath(dir), failed, deferToRespawnTarget, execConfigTest)
-		for _, c := range warnings {
-			logger.Warn("reload validation warning (not blocking)", "check", c.Name, "detail", c.Detail)
-		}
-		if len(failed) > 0 {
-			for _, c := range failed {
-				logger.Error("reload validation failed", "check", c.Name, "detail", c.Detail)
-			}
-			logger.Error("config reload refused: the new config failed validation; the running daemon is unchanged",
-				"failed", len(failed), "config_sha256", sha)
-			return socket.ReloadResult{
-				FailedChecks: failed,
-				Warnings:     warnings,
-				Draining:     d.Reason(),
-				ConfigSHA256: sha,
-			}
-		}
-		logger.Info("config reload accepted", "config_sha256", sha)
-		// Operator-paused slots are meaningful only when no drain is active
-		// yet: once a drain (wedge or earlier reload) is running it pauses
-		// every slot as mechanism, so reporting them here would mislabel
-		// drain-paused slots as operator holds and send a log-auditor hunting
-		// for a phantom pause.
-		var pausedSlots []string
-		if d.Reason() == "" {
-			for _, s := range slots {
-				if st := s.Status(); st.Paused && !st.Wedged {
-					pausedSlots = append(pausedSlots, s.Name())
-				}
-			}
-			if len(pausedSlots) > 0 {
-				logger.Warn("operator-paused slots will resume after the respawn (pause is in-memory)",
-					"slots", strings.Join(pausedSlots, ", "))
-			}
-		}
-		drainReason := "config reload (" + source + ")"
-		if reason != "" {
-			drainReason += ": " + reason
-		}
-		// Cause-gate BEFORE Start: d.Start synchronously rechecks convergence and
-		// can spawn tryExit immediately (an already-stable fleet — operator-paused
-		// slots), whose exit gate reads deferConfigParse. Setting it first closes
-		// that race so an idle-fleet UpgradeReload never refuses on its own parse
-		// before the flag lands. The flag only gates the exit gate, which never
-		// runs until draining, so setting it pre-Start is safe; it also covers the
-		// merge case (a wedge drain a later UpgradeReload joins mid-flight).
-		//
-		// System-daemon-only, same as the preflight deferral: a non-system daemon
-		// (deferralPlistPath == "") respawns from a bundle-relative BundleProgram,
-		// not the system plist, so it can't defer. Gating the flag here keeps the
-		// exit gate consistent with the preflight — both refuse a per-user agent's
-		// unparseable config honestly instead of pointing at a respawn target it
-		// doesn't have.
-		if deferToRespawnTarget && deferralPlistPath(dir) != "" {
-			d.SetDeferConfigParse()
-		}
-		startedDrain := d.Start(drainReason, sha)
-		if !startedDrain {
-			// A drain was already active (wedge, or an earlier reload): the
-			// first reason wins on the status surface, but the supplied
-			// reason stays durable in the log — the audit trail never loses
-			// it. Supersede the prior cause's accepted hash with this
-			// freshly-validated file, so the exit gate's "changed during the
-			// drain" comparison is against what was actually vetted (a wedge
-			// records ""; an earlier reload records its own, now stale).
-			d.UpdateAcceptedSHA(sha)
-			logger.Info("reload requested while already draining; supplied reason recorded here",
-				"reason", reason, "draining", d.Reason())
-		}
-		d.recheck() // unblocks a held exit gate when the operator just fixed the file
-		return socket.ReloadResult{
-			Accepted:            true,
-			StartedDrain:        startedDrain,
-			Warnings:            warnings,
-			Draining:            d.Reason(),
-			SlotCount:           len(slots),
-			OperatorPausedSlots: pausedSlots,
-			ConfigSHA256:        sha,
-		}
+		return runReload(ctx, &reloadMu, logger, dir, configPath, d, slots, source, reason, deferToRespawnTarget)
 	}
 	srv.ReloadFn = func(ctx context.Context, reason string) socket.ReloadResult {
 		return requestReload(ctx, "rpc", reason, false)
@@ -495,98 +401,7 @@ func run() error {
 	}
 	srv.DrainFn = d.State
 	srv.PruneFn = func(ctx context.Context, apply bool) socket.PrunePlan {
-		// Build the keep-set from live slot statuses.
-		keepPaths := map[string]bool{}
-		protectTarballs := map[string]bool{}
-		for _, slot := range slots {
-			st := slot.Status()
-			if st.ImageDigest != "" {
-				keepPaths[dir.ImageBundleDir(st.Image, st.ImageDigest)] = true
-			}
-			if st.RunnerVersion != "" {
-				protectTarballs[st.RunnerVersion] = true
-			}
-		}
-		// Protect tarballs whose download is in flight but whose RunnerVersion
-		// has not been published to slot status yet (the tarball ensure
-		// completes before Ensure returns, so there is a window where the
-		// tarball is cached but the slot still shows RunnerVersion="").
-		images.ProtectActiveTarballs(protectTarballs)
-		// Resolve current digest for each configured pool ref.
-		protectRefDirNames := map[string]bool{}
-		configuredRefs := map[string]string{}
-		var skips []socket.PruneSkip
-		ociClient := oci.NewClient()
-		for _, pool := range cfg.Pools {
-			ref, err := oci.ParseRef(pool.Image)
-			if err != nil {
-				// Image ref unparseable — protect the ref dir rather than
-				// letting PlanImageBundlePrune classify it as "removed pool".
-				// Use pool.Image directly: if parsing fails we can't canonicalize.
-				protectRefDirNames[filepath.Base(dir.ImageRefDir(pool.Image))] = true
-				skips = append(skips, socket.PruneSkip{Ref: pool.Image, Reason: "image ref parse failed: " + err.Error()})
-				continue
-			}
-			// Use ref.String() (canonical, tag-free for digest-pinned refs) so
-			// refDirName matches the on-disk path, not pool.Image which may carry
-			// a tag that sanitizeRef fails to strip when a digest is also present.
-			refDirName := filepath.Base(dir.ImageRefDir(ref.String()))
-			displayRef := pool.Image
-			if i := strings.IndexByte(displayRef, '@'); i >= 0 {
-				displayRef = displayRef[:i]
-			}
-			configuredRefs[refDirName] = displayRef
-			rctx, cancel := bounded.WithTimeout(ctx, checkBudget)
-			digest, resolveErr := ociClient.Resolve(rctx, ref)
-			cancel()
-			if resolveErr != nil {
-				protectRefDirNames[refDirName] = true
-				skips = append(skips, socket.PruneSkip{Ref: pool.Image, Reason: resolveErr.Error()})
-				continue
-			}
-			keepPaths[dir.ImageBundleDir(ref.String(), digest)] = true
-		}
-		tarballItems, tarballErr := images.PlanRunnerCachePrune(dir.RunnerCacheDir(), runnerCacheKeep, protectTarballs)
-		bundleItems, bundleErr := images.PlanImageBundlePrune(dir.ImagesDir(), keepPaths, protectRefDirNames, configuredRefs)
-		combined := append(tarballItems, bundleItems...)
-		allItems := make([]socket.PruneItem, len(combined))
-		for i, it := range combined {
-			allItems[i] = socket.PruneItem{Path: it.Path, Bytes: it.Bytes, Kind: it.Kind, Reason: it.Reason, Label: it.Label}
-		}
-		plan := socket.PrunePlan{Items: allItems, Applied: apply, Skips: skips}
-		if tarballErr != nil {
-			plan.Errors = append(plan.Errors, "runner-cache scan: "+tarballErr.Error())
-		}
-		if bundleErr != nil {
-			plan.Errors = append(plan.Errors, "image-bundle scan: "+bundleErr.Error())
-		}
-		if apply {
-			// Re-snapshot live slot state immediately before deleting to
-			// protect artifacts adopted by slots that left BACKOFF during the
-			// potentially-slow plan phase (registry resolves + dir walks).
-			liveKeep := map[string]bool{}
-			liveTarball := map[string]bool{}
-			for _, slot := range slots {
-				st := slot.Status()
-				if st.ImageDigest != "" {
-					liveKeep[dir.ImageBundleDir(st.Image, st.ImageDigest)] = true
-				}
-				if st.RunnerVersion != "" {
-					liveTarball[st.RunnerVersion] = true
-				}
-			}
-			images.ProtectActiveTarballs(liveTarball)
-			plan.ReclaimedBytes, plan.ApplyErr = images.ApplyPrune(combined, func(it images.PlanItem) bool {
-				switch it.Kind {
-				case "image-bundle":
-					return !liveKeep[it.Path]
-				case "runner-tarball":
-					return !liveTarball[strings.TrimSuffix(filepath.Base(it.Path), ".partial")]
-				}
-				return true
-			})
-		}
-		return plan
+		return runPrune(ctx, apply, slots, dir, cfg)
 	}
 	// Deliver drain-progress bumps (slot transitions, exit-gate hold flips) to
 	// watchers immediately, so a follower's stall timer tracks real progress
@@ -671,6 +486,212 @@ func run() error {
 		err = fmt.Errorf("restarting after drain: %s", d.Reason())
 	}
 	return err
+}
+
+// runReload is the shared reload entry point for the Reload RPC, UpgradeReload
+// RPC, and SIGHUP — see run()'s three call sites, which all serialize through
+// the same reloadMu and drainer d. deferToRespawnTarget is the
+// UpgradeReload-only capability: when true and the running binary's own
+// parser rejects the config, the exit gate may consult the respawn target's
+// -test-config instead (forward-only config edits that only the new binary
+// can parse). Plain Reload and SIGHUP always pass false — the verb is the
+// access boundary; a bool could be forged.
+//
+// Serialized so concurrent callers never run overlapping preflights (each
+// serialized call still revalidates fresh). It never gates on an active
+// drain: the imminent respawn loads the on-disk file whether or not it was
+// validated, so the verdict matters most then. The drain is daemon-owned,
+// never tied to the caller's context — a runnyctl that disconnects after
+// acceptance cannot orphan it.
+func runReload(ctx context.Context, reloadMu *sync.Mutex, logger *slog.Logger, dir home.Dir, configPath string, d *drainer, slots []*statemachine.Slot, source, reason string, deferToRespawnTarget bool) socket.ReloadResult {
+	reloadMu.Lock()
+	defer reloadMu.Unlock()
+	logger.Info("config reload requested", "source", source, "reason", reason)
+	sha, failed, warnings := preflightReload(ctx, dir, configPath)
+	// RPC-gated deferral: on a lone config-parse failure, UpgradeReload may
+	// ask the respawn target whether it accepts the config. If so, clear the
+	// failure and let the drain proceed; if not (stale symlink = target is the
+	// old binary), substitute a synthetic check so the operator knows why.
+	failed = parseDeferralCheck(ctx, configPath, deferralPlistPath(dir), failed, deferToRespawnTarget, execConfigTest)
+	for _, c := range warnings {
+		logger.Warn("reload validation warning (not blocking)", "check", c.Name, "detail", c.Detail)
+	}
+	if len(failed) > 0 {
+		for _, c := range failed {
+			logger.Error("reload validation failed", "check", c.Name, "detail", c.Detail)
+		}
+		logger.Error("config reload refused: the new config failed validation; the running daemon is unchanged",
+			"failed", len(failed), "config_sha256", sha)
+		return socket.ReloadResult{
+			FailedChecks: failed,
+			Warnings:     warnings,
+			Draining:     d.Reason(),
+			ConfigSHA256: sha,
+		}
+	}
+	logger.Info("config reload accepted", "config_sha256", sha)
+	// Operator-paused slots are meaningful only when no drain is active
+	// yet: once a drain (wedge or earlier reload) is running it pauses
+	// every slot as mechanism, so reporting them here would mislabel
+	// drain-paused slots as operator holds and send a log-auditor hunting
+	// for a phantom pause.
+	var pausedSlots []string
+	if d.Reason() == "" {
+		for _, s := range slots {
+			if st := s.Status(); st.Paused && !st.Wedged {
+				pausedSlots = append(pausedSlots, s.Name())
+			}
+		}
+		if len(pausedSlots) > 0 {
+			logger.Warn("operator-paused slots will resume after the respawn (pause is in-memory)",
+				"slots", strings.Join(pausedSlots, ", "))
+		}
+	}
+	drainReason := "config reload (" + source + ")"
+	if reason != "" {
+		drainReason += ": " + reason
+	}
+	// Cause-gate BEFORE Start: d.Start synchronously rechecks convergence and
+	// can spawn tryExit immediately (an already-stable fleet — operator-paused
+	// slots), whose exit gate reads deferConfigParse. Setting it first closes
+	// that race so an idle-fleet UpgradeReload never refuses on its own parse
+	// before the flag lands. The flag only gates the exit gate, which never
+	// runs until draining, so setting it pre-Start is safe; it also covers the
+	// merge case (a wedge drain a later UpgradeReload joins mid-flight).
+	//
+	// System-daemon-only, same as the preflight deferral: a non-system daemon
+	// (deferralPlistPath == "") respawns from a bundle-relative BundleProgram,
+	// not the system plist, so it can't defer. Gating the flag here keeps the
+	// exit gate consistent with the preflight — both refuse a per-user agent's
+	// unparseable config honestly instead of pointing at a respawn target it
+	// doesn't have.
+	if deferToRespawnTarget && deferralPlistPath(dir) != "" {
+		d.SetDeferConfigParse()
+	}
+	startedDrain := d.Start(drainReason, sha)
+	if !startedDrain {
+		// A drain was already active (wedge, or an earlier reload): the
+		// first reason wins on the status surface, but the supplied
+		// reason stays durable in the log — the audit trail never loses
+		// it. Supersede the prior cause's accepted hash with this
+		// freshly-validated file, so the exit gate's "changed during the
+		// drain" comparison is against what was actually vetted (a wedge
+		// records ""; an earlier reload records its own, now stale).
+		d.UpdateAcceptedSHA(sha)
+		logger.Info("reload requested while already draining; supplied reason recorded here",
+			"reason", reason, "draining", d.Reason())
+	}
+	d.recheck() // unblocks a held exit gate when the operator just fixed the file
+	return socket.ReloadResult{
+		Accepted:            true,
+		StartedDrain:        startedDrain,
+		Warnings:            warnings,
+		Draining:            d.Reason(),
+		SlotCount:           len(slots),
+		OperatorPausedSlots: pausedSlots,
+		ConfigSHA256:        sha,
+	}
+}
+
+// liveKeepSets snapshots live slot statuses into the image-bundle keep-set
+// (by image+digest) and the runner-tarball keep-set (by RunnerVersion),
+// protecting the latter against concurrent prune via
+// images.ProtectActiveTarballs — including a tarball whose download is in
+// flight but whose RunnerVersion has not been published to slot status yet
+// (the tarball ensure completes before Ensure returns, so there is a window
+// where the tarball is cached but the slot still shows RunnerVersion="").
+// runPrune calls this once for the plan-phase snapshot and, on apply, again
+// immediately before deleting — the two snapshots must use identical
+// protection semantics, which is why this is the one place that builds them.
+func liveKeepSets(slots []*statemachine.Slot, dir home.Dir) (keepPaths, protectTarballs map[string]bool) {
+	keepPaths = map[string]bool{}
+	protectTarballs = map[string]bool{}
+	for _, slot := range slots {
+		st := slot.Status()
+		if st.ImageDigest != "" {
+			keepPaths[dir.ImageBundleDir(st.Image, st.ImageDigest)] = true
+		}
+		if st.RunnerVersion != "" {
+			protectTarballs[st.RunnerVersion] = true
+		}
+	}
+	images.ProtectActiveTarballs(protectTarballs)
+	return keepPaths, protectTarballs
+}
+
+// runPrune computes (and, when apply, executes) the reclaim plan for stale
+// image bundles and runner tarballs: the keep-set built from live slot
+// statuses, per-pool digest resolution against the registry, and — on apply
+// — a final re-snapshot of live slot state immediately before deleting, so an
+// artifact a slot adopted while the (potentially slow) plan phase ran is never
+// reclaimed out from under it.
+func runPrune(ctx context.Context, apply bool, slots []*statemachine.Slot, dir home.Dir, cfg *home.Config) socket.PrunePlan {
+	// Build the keep-set from live slot statuses.
+	keepPaths, protectTarballs := liveKeepSets(slots, dir)
+	// Resolve current digest for each configured pool ref.
+	protectRefDirNames := map[string]bool{}
+	configuredRefs := map[string]string{}
+	var skips []socket.PruneSkip
+	ociClient := oci.NewClient()
+	for _, pool := range cfg.Pools {
+		ref, err := oci.ParseRef(pool.Image)
+		if err != nil {
+			// Image ref unparseable — protect the ref dir rather than
+			// letting PlanImageBundlePrune classify it as "removed pool".
+			// Use pool.Image directly: if parsing fails we can't canonicalize.
+			protectRefDirNames[filepath.Base(dir.ImageRefDir(pool.Image))] = true
+			skips = append(skips, socket.PruneSkip{Ref: pool.Image, Reason: "image ref parse failed: " + err.Error()})
+			continue
+		}
+		// Use ref.String() (canonical, tag-free for digest-pinned refs) so
+		// refDirName matches the on-disk path, not pool.Image which may carry
+		// a tag that sanitizeRef fails to strip when a digest is also present.
+		refDirName := filepath.Base(dir.ImageRefDir(ref.String()))
+		displayRef := pool.Image
+		if i := strings.IndexByte(displayRef, '@'); i >= 0 {
+			displayRef = displayRef[:i]
+		}
+		configuredRefs[refDirName] = displayRef
+		rctx, cancel := bounded.WithTimeout(ctx, checkBudget)
+		digest, resolveErr := ociClient.Resolve(rctx, ref)
+		cancel()
+		if resolveErr != nil {
+			protectRefDirNames[refDirName] = true
+			skips = append(skips, socket.PruneSkip{Ref: pool.Image, Reason: resolveErr.Error()})
+			continue
+		}
+		keepPaths[dir.ImageBundleDir(ref.String(), digest)] = true
+	}
+	tarballItems, tarballErr := images.PlanRunnerCachePrune(dir.RunnerCacheDir(), runnerCacheKeep, protectTarballs)
+	bundleItems, bundleErr := images.PlanImageBundlePrune(dir.ImagesDir(), keepPaths, protectRefDirNames, configuredRefs)
+	combined := append(tarballItems, bundleItems...)
+	allItems := make([]socket.PruneItem, len(combined))
+	for i, it := range combined {
+		allItems[i] = socket.PruneItem{Path: it.Path, Bytes: it.Bytes, Kind: it.Kind, Reason: it.Reason, Label: it.Label}
+	}
+	plan := socket.PrunePlan{Items: allItems, Applied: apply, Skips: skips}
+	if tarballErr != nil {
+		plan.Errors = append(plan.Errors, "runner-cache scan: "+tarballErr.Error())
+	}
+	if bundleErr != nil {
+		plan.Errors = append(plan.Errors, "image-bundle scan: "+bundleErr.Error())
+	}
+	if apply {
+		// Re-snapshot live slot state immediately before deleting to
+		// protect artifacts adopted by slots that left BACKOFF during the
+		// potentially-slow plan phase (registry resolves + dir walks).
+		liveKeep, liveTarball := liveKeepSets(slots, dir)
+		plan.ReclaimedBytes, plan.ApplyErr = images.ApplyPrune(combined, func(it images.PlanItem) bool {
+			switch it.Kind {
+			case "image-bundle":
+				return !liveKeep[it.Path]
+			case "runner-tarball":
+				return !liveTarball[strings.TrimSuffix(filepath.Base(it.Path), ".partial")]
+			}
+			return true
+		})
+	}
+	return plan
 }
 
 // systemHomeOwnershipError fails a botched system-daemon install loudly and
@@ -1015,7 +1036,7 @@ func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*gi
 				if cached {
 					cacheNote = " (cached)"
 				}
-				add(name, true, fmt.Sprintf("%s → %s (%s uncompressed%s)", ref, short(digest), oci.HumanBytes(diskBytes), cacheNote))
+				add(name, true, fmt.Sprintf("%s → sha256:%s (%s uncompressed%s)", ref, oci.ShortDigest(digest), oci.HumanBytes(diskBytes), cacheNote))
 				if !cached && diskBytes > maxImageBytes {
 					maxImageBytes = diskBytes
 				}
@@ -1068,13 +1089,6 @@ func sweepRegistrations(ctx context.Context, log *slog.Logger, gh *github.Client
 	}
 }
 
-func short(digest string) string {
-	if len(digest) > 19 {
-		return digest[:19]
-	}
-	return digest
-}
-
 // checkDiskHeadroom returns the disk-headroom DoctorCheck. It is image-aware:
 // the floor is max(configured image's uncompressed size + 2 GiB, 30 GiB) so
 // the verdict matches the pull guard in internal/oci/oci.go, which refuses a
@@ -1085,10 +1099,7 @@ func short(digest string) string {
 // pool images (0 when none resolved successfully).
 func checkDiskHeadroom(freeBytes uint64, maxImageBytes int64) (bool, string) {
 	const minFloor = 30 << 30 // 30 GiB — the pre-image-awareness floor
-	floor := uint64(maxImageBytes) + oci.PullHeadroom
-	if floor < minFloor {
-		floor = minFloor
-	}
+	floor := max(uint64(maxImageBytes)+oci.PullHeadroom, minFloor)
 	freeGB := freeBytes >> 30 // for display only
 	if freeBytes < floor {
 		floorGB := (floor + (1 << 30) - 1) >> 30 // ceiling for display

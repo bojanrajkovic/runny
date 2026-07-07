@@ -82,17 +82,13 @@ type traceAssembler struct {
 	pulls  map[string]*pullSpans
 }
 
-func (a *traceAssembler) get(e obs.Event) *cycleSpans {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.cycles[cycleKey{e.Cycle.Slot, e.Cycle.CycleID}]
-}
-
 // withCycle looks up e's cycle and runs fn with it locked; a no-op if the
 // cycle isn't tracked (already finished, or a stray event before it
 // started).
 func (a *traceAssembler) withCycle(e obs.Event, fn func(cs *cycleSpans)) {
-	cs := a.get(e)
+	a.mu.Lock()
+	cs := a.cycles[cycleKey{e.Cycle.Slot, e.Cycle.CycleID}]
+	a.mu.Unlock()
 	if cs == nil {
 		return
 	}

@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 )
@@ -170,6 +169,21 @@ func (s Store) Dir(r *Record) (string, error) {
 	return dir, nil
 }
 
+// atomicWrite writes data into dir/name via a tmp-file-then-rename, so a
+// crash mid-write can never leave a torn or half-placed file behind; the tmp
+// file is removed if the rename itself fails.
+func atomicWrite(dir, name string, data []byte) error {
+	tmp := filepath.Join(dir, "."+name+".tmp")
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("writing %s: %w", name, err)
+	}
+	if err := os.Rename(tmp, filepath.Join(dir, name)); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("placing %s: %w", name, err)
+	}
+	return nil
+}
+
 // Write persists cycle.json into the record's artifact dir, atomically: a
 // crash mid-write must not silently erase the cycle from `runnyctl why` —
 // the record is the post-mortem.
@@ -182,13 +196,8 @@ func (s Store) Write(r *Record) error {
 	if err != nil {
 		return fmt.Errorf("marshaling cycle record: %w", err)
 	}
-	tmp := filepath.Join(dir, ".cycle.json.tmp")
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("writing cycle.json: %w", err)
-	}
-	if err := os.Rename(tmp, filepath.Join(dir, "cycle.json")); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("placing cycle.json: %w", err)
+	if err := atomicWrite(dir, "cycle.json", data); err != nil {
+		return err
 	}
 	if abs, err := filepath.Abs(dir); err == nil {
 		dir = abs
@@ -207,13 +216,8 @@ func (s Store) WriteArtifact(r *Record, name string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	tmp := filepath.Join(dir, "."+name+".tmp")
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("writing %s: %w", name, err)
-	}
-	if err := os.Rename(tmp, filepath.Join(dir, name)); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("placing %s: %w", name, err)
+	if err := atomicWrite(dir, name, data); err != nil {
+		return err
 	}
 	if !slices.Contains(r.Artifacts, name) {
 		r.Artifacts = append(r.Artifacts, name)
@@ -230,21 +234,13 @@ func (s Store) WriteArtifact(r *Record, name string, data []byte) error {
 // cycle.json is not written until the cycle ends, so without this it would be
 // synthesized as a phantom orphan-failure on every healthy in-progress cycle.
 func (s Store) Recent(n int, liveCycleID string) ([]*Record, error) {
-	entries, err := os.ReadDir(s.SlotDir)
-	if os.IsNotExist(err) {
+	names, err := s.dirNamesNewestFirst()
+	if err != nil {
+		return nil, err
+	}
+	if names == nil { // SlotDir doesn't exist: no cycles have run yet
 		return nil, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("listing cycles: %w", err)
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if e.IsDir() {
-			names = append(names, e.Name())
-		}
-	}
-	// Directory names sort chronologically by construction.
-	sort.Sort(sort.Reverse(sort.StringSlice(names)))
 	if n > 0 && len(names) > n {
 		names = names[:n]
 	}
@@ -308,15 +304,18 @@ func (s Store) synthesizeOrphan(dir string) *Record {
 	}
 }
 
-// Prune enforces retention: keep at most keepCount cycles and remove
-// anything older than maxAge.
-func (s Store) Prune(keepCount int, maxAge time.Duration, now time.Time) error {
+// dirNamesNewestFirst lists SlotDir's cycle directories (skipping any
+// non-directory entries), newest first. Directory names sort chronologically
+// by construction (Store.Dir's RFC3339-prefixed name), so a plain string sort
+// reversed is the newest-first order. Returns (nil, nil) when SlotDir doesn't
+// exist yet (no cycles have run).
+func (s Store) dirNamesNewestFirst() ([]string, error) {
 	entries, err := os.ReadDir(s.SlotDir)
 	if os.IsNotExist(err) {
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("listing cycles: %w", err)
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
@@ -324,7 +323,18 @@ func (s Store) Prune(keepCount int, maxAge time.Duration, now time.Time) error {
 			names = append(names, e.Name())
 		}
 	}
-	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	slices.Sort(names)
+	slices.Reverse(names)
+	return names, nil
+}
+
+// Prune enforces retention: keep at most keepCount cycles and remove
+// anything older than maxAge.
+func (s Store) Prune(keepCount int, maxAge time.Duration, now time.Time) error {
+	names, err := s.dirNamesNewestFirst()
+	if err != nil {
+		return err
+	}
 	for i, name := range names {
 		tooMany := keepCount > 0 && i >= keepCount
 		tooOld := maxAge > 0 && olderThan(name, now.Add(-maxAge))

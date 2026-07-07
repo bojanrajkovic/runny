@@ -40,12 +40,6 @@ type ensureResult struct {
 	err    error
 }
 
-// subscription is one slot's handle on a shared pull. done is buffered (size 1)
-// and receives exactly one result; Ensure selects on it against the slot ctx.
-type subscription struct {
-	done chan ensureResult
-}
-
 // imagePuller owns the single in-flight pull of one image bundle directory plus
 // the bounded, paced retry of its one deterministic failure (disk headroom),
 // and broadcasts the terminal outcome to every current subscriber. One per
@@ -88,10 +82,10 @@ type imagePuller struct {
 	pollInterval time.Duration
 
 	mu         sync.Mutex
-	subs       map[*subscription]func(string) // sub -> its live-status reporter
-	terminal   *ensureResult                  // set once; nil while pulling
-	stopped    bool                           // terminal reached or last-out; never reused
-	lastDetail string                         // replayed to a late joiner
+	subs       map[chan ensureResult]func(string) // sub -> its live-status reporter
+	terminal   *ensureResult                      // set once; nil while pulling
+	stopped    bool                               // terminal reached or last-out; never reused
+	lastDetail string                             // replayed to a late joiner
 }
 
 var (
@@ -105,7 +99,7 @@ var (
 // puller. ref must be digest-pinned; all subscribers of one dir necessarily
 // resolved the same digest because dir is content-addressed
 // (home.ImageBundleDir embeds the digest).
-func (e *Ensurer) acquireImagePull(dir string, ref oci.Ref, report func(string)) (*subscription, func()) {
+func (e *Ensurer) acquireImagePull(dir string, ref oci.Ref, report func(string)) (chan ensureResult, func()) {
 	proto := &imagePuller{
 		destDir: dir, ref: ref, stall: e.StallBudget, log: e.log(), events: e.Events,
 		holdBudget: defaultDiskHoldBudget, pollInterval: defaultDiskPollInterval,
@@ -119,7 +113,7 @@ func (e *Ensurer) acquireImagePull(dir string, ref oci.Ref, report func(string))
 // subscribes report. proto is consumed only when this is the first subscriber;
 // otherwise the existing puller is reused. Split out so tests can supply a proto
 // with stubbed seams. Lock order pullerRegistryMu -> p.mu.
-func acquirePuller(dir string, report func(string), proto *imagePuller) (*subscription, func()) {
+func acquirePuller(dir string, report func(string), proto *imagePuller) (chan ensureResult, func()) {
 	pullerRegistryMu.Lock()
 	p := pullerRegistry[dir]
 	created := p == nil
@@ -127,16 +121,16 @@ func acquirePuller(dir string, report func(string), proto *imagePuller) (*subscr
 		now := time.Now()
 		pctx, cancel := context.WithCancel(context.Background())
 		pctx = obs.WithPull(pctx, proto.events, obs.PullRef{
-			ID: pullID(dir), Ref: proto.ref.String(), Digest: proto.ref.Digest, Started: now,
+			ID: pullID(dir), Ref: proto.ref.String(), Digest: proto.ref.Digest,
 		})
 		proto.ctx = pctx
 		proto.cancel = cancel
-		proto.subs = map[*subscription]func(string){}
+		proto.subs = map[chan ensureResult]func(string){}
 		proto.startedAt = now
 		p = proto
 		pullerRegistry[dir] = p
 	}
-	sub := &subscription{done: make(chan ensureResult, 1)}
+	sub := make(chan ensureResult, 1)
 	p.mu.Lock()
 	// Registry invariant: a puller present in the registry is live — finish and
 	// unsubscribe both delete it from the registry under pullerRegistryMu in the
@@ -170,7 +164,7 @@ func acquirePuller(dir string, report func(string), proto *imagePuller) (*subscr
 // cancel the lifetime ctx (interrupting any in-flight pull or hold) and delete
 // the registry entry. Lock order is always pullerRegistryMu -> p.mu, matching
 // acquireImagePull and finish, so the three never deadlock.
-func (p *imagePuller) unsubscribe(sub *subscription) {
+func (p *imagePuller) unsubscribe(sub chan ensureResult) {
 	pullerRegistryMu.Lock()
 	p.mu.Lock()
 	delete(p.subs, sub)
@@ -199,7 +193,7 @@ func (p *imagePuller) finish(res ensureResult) {
 	p.terminal = &res
 	p.stopped = true
 	subs := p.subs
-	p.subs = map[*subscription]func(string){}
+	p.subs = map[chan ensureResult]func(string){}
 	if pullerRegistry[p.destDir] == p {
 		delete(pullerRegistry, p.destDir)
 	}
@@ -214,7 +208,7 @@ func (p *imagePuller) finish(res ensureResult) {
 		Outcome: obs.OutcomeOf(res.err), Error: obs.ErrText(res.err), Duration: dur, Bytes: bytes,
 	}})
 	for sub := range subs {
-		sub.done <- res // buffered size 1, never blocks, delivered once
+		sub <- res // buffered size 1, never blocks, delivered once
 	}
 }
 

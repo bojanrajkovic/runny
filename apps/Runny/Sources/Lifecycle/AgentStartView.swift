@@ -1,4 +1,3 @@
-import ServiceManagement
 import SwiftUI
 
 /// The "daemon not running" affordance for the menu bar and main window. Renders:
@@ -33,11 +32,8 @@ struct DaemonStartAffordance: View {
                     text: "runnyd is installed but needs approval in Login Items.",
                     tint: .orange
                 ) {
-                    // Re-gather before opening Login Items: approving fires outside the
-                    // spawn gate, so a foreign owner that appeared since render must
-                    // suppress the CTA rather than direct a competing approval.
                     Button("Approve…") {
-                        Task { if await agent.revalidate(.awaitingApproval) { SMAppService.openSystemSettingsLoginItems() } }
+                        Task { await agent.openLoginItemsIfStillAwaiting() }
                     }
                 }
             case .start:

@@ -64,6 +64,9 @@ var errOperatorRecycle = errors.New("recycled by operator")
 var (
 	// errDebugExpired: a DEBUG hold ran out — benign for backoff.
 	errDebugExpired = errors.New("debug hold expired")
+	// errCmdExpired is the operator-facing reply for a stranded debug command;
+	// one value so the wording can't drift between the states that reject it.
+	errCmdExpired = errors.New("command expired; nothing was injected")
 	// errDebugRacedJob: a job was assigned during the LISTENING freeze and
 	// died with the verified kill — benign, operator-caused.
 	errDebugRacedJob = errors.New("job raced the debug freeze")
@@ -253,6 +256,13 @@ func (c Command) reply(r DebugKeyReply) {
 	case c.Reply <- r:
 	default:
 	}
+}
+
+// expired reports whether a command was dequeued after its deadline — a
+// command stranded in a slot's queue with nobody left to serve it in time.
+// Zero Expires means the command carries no deadline (never expires).
+func (c Command) expired() bool {
+	return !c.Expires.IsZero() && time.Now().After(c.Expires)
 }
 
 // Status is the live snapshot the control surface renders.
@@ -464,8 +474,8 @@ func (s *Slot) handleIdleCommand(cmd Command) {
 	case CmdDebugKey:
 		// No guest exists in BACKOFF. An expired command (the common stranded
 		// case) reads as expired; an unexpired one as the precise reason.
-		if !cmd.Expires.IsZero() && time.Now().After(cmd.Expires) {
-			cmd.reply(DebugKeyReply{Err: errors.New("command expired; nothing was injected")})
+		if cmd.expired() {
+			cmd.reply(DebugKeyReply{Err: errCmdExpired})
 			return
 		}
 		cmd.reply(DebugKeyReply{Err: errors.New("no guest exists in BACKOFF; key injection needs LISTENING, JOB, or DEBUG")})

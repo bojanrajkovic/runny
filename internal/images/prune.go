@@ -58,7 +58,7 @@ func PlanRunnerCachePrune(cacheDir string, keep int, protect map[string]bool) ([
 			}
 			items = append(items, PlanItem{
 				Path:   filepath.Join(cacheDir, name),
-				Bytes:  fileSize(filepath.Join(cacheDir, name)),
+				Bytes:  diskBytes(filepath.Join(cacheDir, name)),
 				Kind:   "runner-tarball",
 				Reason: "dead .partial",
 				Label:  name,
@@ -93,7 +93,7 @@ func PlanRunnerCachePrune(cacheDir string, keep int, protect map[string]bool) ([
 			}
 			items = append(items, PlanItem{
 				Path:   filepath.Join(cacheDir, t.name),
-				Bytes:  fileSize(filepath.Join(cacheDir, t.name)),
+				Bytes:  diskBytes(filepath.Join(cacheDir, t.name)),
 				Kind:   "runner-tarball",
 				Reason: "superseded",
 				Label:  t.name,
@@ -187,19 +187,16 @@ func PlanImageBundlePrune(imagesDir string, keepPaths, protectRefDirNames map[st
 // and a joined error for any failures. For image-bundle items it also attempts
 // to remove the parent ref dir once all its bundles are gone.
 //
-// An optional guard func may be passed; items for which it returns false are
-// skipped. The caller uses this to re-check live slot state immediately before
-// each deletion, collapsing the re-snapshot and apply into a single call.
-func ApplyPrune(items []PlanItem, guard ...func(PlanItem) bool) (int64, error) {
+// guard, if non-nil, is called for each item; items for which it returns
+// false are skipped. The caller uses this to re-check live slot state
+// immediately before each deletion, collapsing the re-snapshot and apply
+// into a single call.
+func ApplyPrune(items []PlanItem, guard func(PlanItem) bool) (int64, error) {
 	var freed int64
 	var errs []error
 	refDirs := map[string]bool{}
-	var g func(PlanItem) bool
-	if len(guard) > 0 {
-		g = guard[0]
-	}
 	for _, item := range items {
-		if g != nil && !g(item) {
+		if guard != nil && !guard(item) {
 			continue
 		}
 		if err := os.RemoveAll(item.Path); err != nil {
@@ -217,23 +214,20 @@ func ApplyPrune(items []PlanItem, guard ...func(PlanItem) bool) (int64, error) {
 	return freed, errors.Join(errs...)
 }
 
-func applyPrune(items []PlanItem) (int64, error) { return ApplyPrune(items) }
-
 // PruneRunnerCache keeps the `keep` newest tarball versions per OS/arch
-// flavor in cacheDir and deletes the rest. See the original doc comment in
-// images.go. This is now a thin wrapper over PlanRunnerCachePrune + applyPrune.
+// flavor in cacheDir and deletes the rest: a thin wrapper over
+// PlanRunnerCachePrune + ApplyPrune, unguarded (no live slot state to
+// re-check — this only runs at cold start).
 func PruneRunnerCache(cacheDir string, keep int) error {
 	items, err := PlanRunnerCachePrune(cacheDir, keep, nil)
 	if err != nil {
 		return err
 	}
-	_, err = applyPrune(items)
+	_, err = ApplyPrune(items, nil)
 	return err
 }
 
 // ---- helpers -----------------------------------------------------------------
-
-func fileSize(path string) int64 { return diskBytes(path) }
 
 func dirSize(path string) int64 {
 	var total int64
@@ -254,9 +248,5 @@ func digestLabel(dirName string) string {
 	if !strings.HasPrefix(digest, "sha256:") {
 		return digest
 	}
-	hex := digest[7:]
-	if len(hex) > 12 {
-		hex = hex[:12]
-	}
-	return "sha256:" + hex
+	return "sha256:" + oci.ShortDigest(digest)
 }

@@ -39,9 +39,9 @@ struct MenuBarView: View {
             }
             // App-update notify: a newer Runny shipped. Keyed on version string so
             // dismissing "v0.7.0" stays quiet until "v0.7.1" arrives as new news.
-            if let update = store.shownUpdate {
+            if let update = store.updateMonitor.shownUpdate {
                 AppUpdateBanner(update: update) {
-                    store.dismissedUpdate = update
+                    store.updateMonitor.dismissedUpdate = update
                 }
             }
             Divider()
@@ -105,16 +105,9 @@ struct MenuBarView: View {
             Button("Open Runny") {
                 activation.openMainWindow(openWindow)
             }
-            // Reload's confirmation dialog lives on the main window (the popover
-            // panel has no reliable presenter), so route through the window.
-            Button(store.reloadInFlight ? "Validating…" : "Reload…") {
-                activation.openMainWindow(openWindow)
-                // Shared gate (explicitUpdate: false — this button's drain dialog is
-                // the consent): an upgrade reload runs the gate (Warn/Error pop up, OK
-                // shows the drain confirm); a plain reload gets the generic confirm.
-                Task { await startGatedReload(store, agent, explicitUpdate: false) }
-            }
-            .disabled(store.reloadInFlight || store.client == nil)
+            // The popover panel has no reliable dialog presenter, so route
+            // through the window first.
+            ReloadButton(title: "Reload…", openWindowFirst: true)
             Spacer()
             DoctorChip()
             Spacer()
@@ -124,23 +117,60 @@ struct MenuBarView: View {
     }
 }
 
-/// One banner vocabulary for drain/error/note across the popover. A nil
-/// dismiss closure renders a non-dismissible banner (the drain state, which
-/// clears itself from snapshots).
-struct StatusBanner: View {
-    let text: String
+/// The Reload button shared by the popover footer and the main window's
+/// daemon card — same gated-reload logic, differing only in whether the main
+/// window needs opening first (the popover routes through it; the main
+/// window is already frontmost).
+struct ReloadButton: View {
+    @Environment(DaemonStore.self) private var store
+    @Environment(AgentController.self) private var agent
+    @Environment(ActivationCoordinator.self) private var activation
+    @Environment(\.openWindow) private var openWindow
+
+    let title: String
+    var openWindowFirst = false
+
+    var body: some View {
+        Button(store.reloadInFlight ? "Validating…" : title) {
+            if openWindowFirst { activation.openMainWindow(openWindow) }
+            // Shared gate (explicitUpdate: false — this button's drain dialog is
+            // the consent): an upgrade reload runs the gate (Warn/Error pop up, OK
+            // shows the drain confirm); a plain reload gets the generic confirm.
+            Task { await startGatedReload(store, agent, explicitUpdate: false) }
+        }
+        .disabled(store.reloadInFlight || store.client == nil)
+    }
+}
+
+/// One banner shell for drain/error/note/app-update across the popover: an
+/// icon, arbitrary content, and an optional dismiss. A nil dismiss closure
+/// renders a non-dismissible banner (the drain state, which clears itself
+/// from snapshots).
+struct StatusBanner<Content: View>: View {
     let systemImage: String
     let tint: Color
     var dismiss: (() -> Void)?
+    let content: Content
+
+    init(
+        systemImage: String, tint: Color, dismiss: (() -> Void)? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.systemImage = systemImage
+        self.tint = tint
+        self.dismiss = dismiss
+        self.content = content()
+    }
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: systemImage)
                 .foregroundStyle(tint)
                 .font(.caption)
-            Text(text)
-                .font(.caption)
-                .foregroundStyle(.primary)
+            // Capped at the shell level (not per content type) so no banner —
+            // text or the app-update's link/command pair — grows the popover
+            // past a few lines.
+            content
                 .lineLimit(3)
             Spacer(minLength: 4)
             if let dismiss {
@@ -157,18 +187,25 @@ struct StatusBanner: View {
     }
 }
 
-/// The app-update notify banner. Distinct from `StatusBanner` because it needs
-/// a clickable release-page link and a copyable brew-upgrade command — the
-/// standard banner's text-only shape can't carry those without restructuring it.
+extension StatusBanner where Content == Text {
+    /// The plain-text convenience most banners use (drain/error/note/skew).
+    init(text: String, systemImage: String, tint: Color, dismiss: (() -> Void)? = nil) {
+        self.init(systemImage: systemImage, tint: tint, dismiss: dismiss) {
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.primary)
+        }
+    }
+}
+
+/// The app-update notify banner: a `StatusBanner` whose content is a clickable
+/// release-page link and a copyable brew-upgrade command, rather than plain text.
 struct AppUpdateBanner: View {
     let update: DaemonStore.AppUpdate
     let dismiss: () -> Void
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Image(systemName: "arrow.down.circle")
-                .foregroundStyle(Color.blue)
-                .font(.caption)
+        StatusBanner(systemImage: "arrow.down.circle", tint: .blue, dismiss: dismiss) {
             VStack(alignment: .leading, spacing: 2) {
                 Link("Runny \(update.version) available", destination: update.url)
                     .font(.caption)
@@ -177,16 +214,7 @@ struct AppUpdateBanner: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
-            Spacer(minLength: 4)
-            Button(action: dismiss) {
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
         }
-        .padding(.horizontal, Metrics.pad)
-        .padding(.vertical, 6)
-        .background(Color.blue.opacity(0.08))
     }
 }
 
@@ -399,10 +427,7 @@ struct RecycleConfirmation: ViewModifier {
     }
 
     private var isPresented: Binding<Bool> {
-        Binding(
-            get: { store.recycleConfirm != nil },
-            set: { if !$0 { store.recycleConfirm = nil } }
-        )
+        Binding(isPresented: { store.recycleConfirm != nil }, clear: { store.recycleConfirm = nil })
     }
 
     private var title: String {

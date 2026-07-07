@@ -65,13 +65,6 @@ enum RunnyHome {
         FileManager.default.fileExists(atPath: socketPath)
     }
 
-    /// The directory the socket-appearance watcher arms on — the resolved home
-    /// (the system dir for a system daemon, else the per-user home). The socket
-    /// lives directly in the home, so this IS `directory`; deriving it from
-    /// `socketPath` would re-stat and risk a string round-trip drifting off the
-    /// one axis everything else resolves on.
-    static var socketDirectory: URL { directory }
-
     /// Creates the PER-USER home if it is absent, owner-only (0700) to match the
     /// daemon. Defaults to `perUserDirectory`, NEVER the resolved `directory`:
     /// the system home is the privileged installer's to create (owned by the

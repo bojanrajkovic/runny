@@ -121,8 +121,10 @@ type Guest interface {
 	// context: the ctx is the proc's LIFETIME — the whole cycle, outliving
 	// PROVISION's deadline, cancelled by operator recycle or daemon shutdown —
 	// not an operation bound; session establishment is bounded internally by
-	// sshx's socket deadlines.
-	StartRunner(ctx context.Context, jit, goos, runnerTarball string) (Proc, error)
+	// sshx's socket deadlines. env is the pool's guest_env, exported into the
+	// guest shell before run.sh launches so the runner and its job steps inherit
+	// it.
+	StartRunner(ctx context.Context, jit, goos, runnerTarball string, env map[string]string) (Proc, error)
 	// PullDiag fetches the tail of the runner's _diag logs (post-mortem).
 	PullDiag(ctx bounded.Context) ([]byte, error)
 	// PullDebugSession fetches the operator's session recording at teardown;

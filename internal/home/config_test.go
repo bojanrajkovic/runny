@@ -149,6 +149,29 @@ func TestLoadConfigScrambleHardening(t *testing.T) {
 	}
 }
 
+func TestLoadConfigGuestEnv(t *testing.T) {
+	c, err := LoadConfig(writeConfig(t, minimalConfig+
+		"    guest_env:\n      HTTPS_PROXY: socks5h://192.168.64.1:1080\n      NO_PROXY: localhost,127.0.0.1\n"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	env := c.Pools[0].GuestEnv
+	if env["HTTPS_PROXY"] != "socks5h://192.168.64.1:1080" {
+		t.Errorf(`GuestEnv["HTTPS_PROXY"] = %q`, env["HTTPS_PROXY"])
+	}
+	if env["NO_PROXY"] != "localhost,127.0.0.1" {
+		t.Errorf(`GuestEnv["NO_PROXY"] = %q`, env["NO_PROXY"])
+	}
+	// A pool without the key leaves it nil — the no-op default.
+	c2, err := LoadConfig(writeConfig(t, minimalConfig))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if c2.Pools[0].GuestEnv != nil {
+		t.Errorf("absent guest_env should be nil, got %v", c2.Pools[0].GuestEnv)
+	}
+}
+
 func TestLoadConfigValidation(t *testing.T) {
 	cases := []struct {
 		name, yaml, wantErr string
@@ -176,6 +199,8 @@ func TestLoadConfigValidation(t *testing.T) {
 		{"otlp metrics interval below floor", minimalConfig + "observability:\n  otlp:\n    endpoint: https://collector.example:4317\n    metrics_interval: 500ms\n", "observability.otlp.metrics_interval"},
 		{"otlp header unset env var", minimalConfig + "observability:\n  otlp:\n    endpoint: https://collector.example:4317\n    headers:\n      authorization: ${env:RUNNY_TEST_UNSET_VAR}\n", `observability.otlp.headers["authorization"]: environment variable RUNNY_TEST_UNSET_VAR is not set`},
 		{"otlp empty header name", minimalConfig + "observability:\n  otlp:\n    endpoint: https://collector.example:4317\n    headers:\n      \"\": v\n", "header name must not be empty"},
+		{"guest_env bad key leading digit", minimalConfig + "    guest_env:\n      \"1BAD\": x\n", `guest_env key "1BAD"`},
+		{"guest_env bad key hyphen", minimalConfig + "    guest_env:\n      NO-PROXY: x\n", `guest_env key "NO-PROXY"`},
 	}
 	for _, tc := range cases {
 		_, err := LoadConfig(writeConfig(t, tc.yaml))

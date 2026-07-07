@@ -254,6 +254,12 @@
         },
         "ram_gb": {
           "type": "integer"
+        },
+        "guest_env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
         }
       },
       "additionalProperties": false,

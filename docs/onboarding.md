@@ -117,6 +117,11 @@ there directly. Every key not shown takes a default; the ones worth knowing:
   is what the cirruslabs images ship).
 - **`cpu_cores` / `ram_gb`** — override the image's baked defaults (cirruslabs
   images ship a conservative 2 cores / 4 GiB).
+- **`guest_env`** — a map of environment variables exported into the guest
+  before the runner launches, so `run.sh` and every job step inherit them (e.g.
+  `HTTPS_PROXY`/`NO_PROXY` to route job traffic through a host-side proxy). Keys
+  must be valid environment-variable names; it is not for secrets (the values
+  land in the guest's process args during provisioning).
 
 The [`config.schema.json`](../tools/configschema/config.schema.json) referenced
 in the modeline gives you autocomplete and inline validation in any

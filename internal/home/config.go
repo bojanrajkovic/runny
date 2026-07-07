@@ -75,6 +75,16 @@ type PoolConfig struct {
 	// boot, not silently clamped. RAMGB is gibibytes.
 	CPUCores uint `yaml:"cpu_cores"`
 	RAMGB    uint `yaml:"ram_gb"`
+	// GuestEnv is a set of environment variables exported into the guest shell
+	// immediately before the runner launches, so run.sh and every job step
+	// inherit them (e.g. HTTPS_PROXY for a pool whose jobs must reach services
+	// through a host-side proxy). Absent means inject nothing — provisioning is
+	// byte-identical to a pool without it. Keys must be POSIX environment-variable
+	// names (guestEnvNameRE), enforced here at load; values are
+	// single-quote-escaped into the provision script and never evaluated, the
+	// same trust-boundary discipline the runner-tarball name gets. It is not for
+	// secrets: the values land in the guest's process args during provisioning.
+	GuestEnv map[string]string `yaml:"guest_env"`
 }
 
 // SSHHardeningMode is the SSH posture applied to a pool's guests once the
@@ -422,6 +432,13 @@ const PoolNamePattern = `^[a-z0-9][a-z0-9-]*$`
 
 var poolNameRE = regexp.MustCompile(PoolNamePattern)
 
+// guestEnvNameRE is the shape a pools[].guest_env key must match: a POSIX
+// environment-variable name. A key is exported verbatim into the guest's shell
+// (guest.guestEnvExports), so a name that isn't a valid identifier would be a
+// broken `export` at best; validate() rejects it here, at load, rather than
+// letting it fail on the guest at provision time.
+var guestEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 // positiveDuration returns a "%s must be positive" error when d<=0, else nil
 // — the shared floor every duration field in this config uses except
 // observability.otlp.metrics_interval, which has its own, higher floor and
@@ -482,6 +499,11 @@ func (c *Config) validate() error {
 			errs = append(errs, fmt.Errorf("%s: target must be an org OR owner/repo, not both", at))
 		case !hasOrg && (p.Target.Owner == "" || p.Target.Repo == ""):
 			errs = append(errs, fmt.Errorf("%s: target needs org, or both owner and repo", at))
+		}
+		for k := range p.GuestEnv {
+			if !guestEnvNameRE.MatchString(k) {
+				errs = append(errs, fmt.Errorf("%s: guest_env key %q is not a valid environment variable name (%s)", at, k, guestEnvNameRE.String()))
+			}
 		}
 	}
 	// Durations: defaults have been applied (zero = take the default), so

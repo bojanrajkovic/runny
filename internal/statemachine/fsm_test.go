@@ -173,7 +173,8 @@ type fakeGuest struct {
 	diagBlock bool // PullDiag blocks until ctx expires (a wedged guest)
 	pulled    bool
 	goos      string
-	runnerTar string // the tarball basename StartRunner was handed
+	runnerTar string            // the tarball basename StartRunner was handed
+	guestEnv  map[string]string // the guest_env StartRunner was handed
 
 	// Debug-key injection seam (issue #39).
 	hostKeys      []string
@@ -197,13 +198,14 @@ type fakeGuest struct {
 	mu sync.Mutex
 }
 
-func (g *fakeGuest) StartRunner(ctx context.Context, jit, goos, runnerTarball string) (Proc, error) {
+func (g *fakeGuest) StartRunner(ctx context.Context, jit, goos, runnerTarball string, env map[string]string) (Proc, error) {
 	if g.startErr != nil {
 		return nil, g.startErr
 	}
 	g.mu.Lock()
 	g.goos = goos
 	g.runnerTar = runnerTarball
+	g.guestEnv = env
 	g.mu.Unlock()
 	return g.proc, nil
 }
@@ -1829,6 +1831,24 @@ func TestRunnerTarballClonedIntoPerSlotMount(t *testing.T) {
 	want := [2]string{filepath.Join(h.dir.RunnerCacheDir(), tarball), filepath.Join(mount, tarball)}
 	if len(calls) != 1 || calls[0] != want {
 		t.Errorf("CloneFile calls = %v, want exactly [{%q %q}]", calls, want[0], want[1])
+	}
+}
+
+// A pool's guest_env is threaded from config through PROVISION into StartRunner,
+// so the runner (and every job step) is launched with it in scope.
+func TestGuestEnvReachesStartRunner(t *testing.T) {
+	h := newHarnessPool(t, nil, func(p *home.PoolConfig) {
+		p.GuestEnv = map[string]string{"HTTPS_PROXY": "socks5h://192.168.64.1:1080"}
+	})
+	h.start(t)
+	h.proc.say(markerListening)
+	h.waitState(t, StateListening)
+
+	h.guest.mu.Lock()
+	got := h.guest.guestEnv
+	h.guest.mu.Unlock()
+	if len(got) != 1 || got["HTTPS_PROXY"] != "socks5h://192.168.64.1:1080" {
+		t.Errorf("StartRunner got guest_env %v, want HTTPS_PROXY set", got)
 	}
 }
 

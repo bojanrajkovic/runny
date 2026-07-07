@@ -200,6 +200,14 @@ var limitsFields = []durationField{
 	{"retention.max_age", func(c *Config) *Duration { return &c.Retention.MaxAge }, 30 * 24 * time.Hour},
 }
 
+// allDurationFields is deadlineFields+limitsFields combined: applyDefaults and
+// validate's positive check treat every row identically (default it, then
+// require positive), so they iterate this one list. Only Warnings' floor
+// check cares about the deadline/limits distinction and iterates
+// deadlineFields directly instead. Built via append into a nil slice so it
+// gets its own backing array, never aliasing either source table's.
+var allDurationFields = append(append([]durationField(nil), deadlineFields...), limitsFields...)
+
 type Limits struct {
 	MaxJobDuration Duration `yaml:"max_job_duration"`
 	// MaxIdle recycles a LISTENING runner to absorb image updates.
@@ -394,10 +402,7 @@ func (c *Config) applyDefaults() {
 			}
 		}
 	}
-	for _, f := range deadlineFields {
-		def(f.get(c), f.def)
-	}
-	for _, f := range limitsFields {
+	for _, f := range allDurationFields {
 		def(f.get(c), f.def)
 	}
 	if c.Retention.CyclesPerSlot == 0 {
@@ -470,16 +475,9 @@ func (c *Config) validate() error {
 	// anything non-positive here was set negative explicitly. A negative
 	// budget would fail every operation instantly — or, before this check,
 	// panicked the stall watcher's ticker.
-	positive := map[string]Duration{}
-	for _, f := range deadlineFields {
-		positive[f.name] = *f.get(c)
-	}
-	for _, f := range limitsFields {
-		positive[f.name] = *f.get(c)
-	}
-	for name, d := range positive {
-		if d <= 0 {
-			errs = append(errs, fmt.Errorf("%s must be positive, got %v", name, d.D()))
+	for _, f := range allDurationFields {
+		if d := *f.get(c); d <= 0 {
+			errs = append(errs, fmt.Errorf("%s must be positive, got %v", f.name, d.D()))
 		}
 	}
 	for i, p := range c.Pools {
@@ -488,8 +486,8 @@ func (c *Config) validate() error {
 		}
 	}
 
-	// Separate from the positive-duration map above: MetricsInterval's floor
-	// is >= 1s, not merely positive, and — unlike every field in that map —
+	// Separate from the positive-duration check above: MetricsInterval's floor
+	// is >= 1s, not merely positive, and — unlike every field checked above —
 	// it's validated only when telemetry is on. Empty endpoint means
 	// telemetry is off; the rest of the block is only meaningful, and only
 	// validated, when it's set.

@@ -422,6 +422,16 @@ const PoolNamePattern = `^[a-z0-9][a-z0-9-]*$`
 
 var poolNameRE = regexp.MustCompile(PoolNamePattern)
 
+// positiveDuration appends a "%s must be positive" error to errs when d<=0 —
+// the shared floor every duration field in this config uses except
+// observability.otlp.metrics_interval, which has its own, higher floor and
+// is checked inline where the rest of OTLP's validation already lives.
+func positiveDuration(errs *[]error, name string, d Duration) {
+	if d <= 0 {
+		*errs = append(*errs, fmt.Errorf("%s must be positive, got %v", name, d.D()))
+	}
+}
+
 func (c *Config) validate() error {
 	var errs []error
 	if len(c.Pools) == 0 {
@@ -476,14 +486,18 @@ func (c *Config) validate() error {
 	// budget would fail every operation instantly — or, before this check,
 	// panicked the stall watcher's ticker.
 	for _, f := range allDurationFields {
-		if d := *f.get(c); d <= 0 {
-			errs = append(errs, fmt.Errorf("%s must be positive, got %v", f.name, d.D()))
-		}
+		positiveDuration(&errs, f.name, *f.get(c))
 	}
 	for i, p := range c.Pools {
-		if p.SSHTimeout <= 0 {
-			errs = append(errs, fmt.Errorf("pools[%d]: ssh_timeout must be positive, got %v", i, p.SSHTimeout.D()))
-		}
+		positiveDuration(&errs, fmt.Sprintf("pools[%d]: ssh_timeout", i), p.SSHTimeout)
+	}
+	// Not a Duration (a cycle count), so it isn't in allDurationFields, but the
+	// same silent-wrong-policy risk applies: Store.Prune's count-based branch
+	// is guarded by `keepCount > 0`, so a negative value doesn't error or
+	// crash there — it quietly disables count-based retention and falls back
+	// to age-only pruning, a materially different policy than configured.
+	if c.Retention.CyclesPerSlot <= 0 {
+		errs = append(errs, fmt.Errorf("retention.cycles_per_slot must be positive, got %d", c.Retention.CyclesPerSlot))
 	}
 
 	// Separate from the positive-duration check above: MetricsInterval's floor

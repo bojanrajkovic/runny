@@ -1032,7 +1032,7 @@ func (c *run) freezeForDebug(ctx context.Context, cmd Command,
 		c.updateAudit(ctx, idx, "refused", "job raced the freeze and died with the kill")
 		cmd.reply(DebugKeyReply{Err: errors.New("a job started and was killed by the freeze; nothing was injected")})
 		finishListening(cycle.OutcomeOK, "")
-		return true, "", StateJob, fmt.Errorf("%w", errDebugRacedJob)
+		return true, "", StateJob, errDebugRacedJob
 	} else if !closed {
 		c.updateAudit(ctx, idx, "error", "runner output did not close after kill")
 		cmd.reply(DebugKeyReply{Err: errors.New("the runner did not close after the kill; nothing was injected")})
@@ -1201,7 +1201,7 @@ func (c *run) holdForDebug(ctx context.Context, holdUntil time.Time) (State, err
 			return StateDebug, ctx.Err()
 		case <-hold.C:
 			finish(cycle.OutcomeOK, "")
-			return StateDebug, fmt.Errorf("%w", errDebugExpired)
+			return StateDebug, errDebugExpired
 		case cmd := <-c.cmds:
 			switch cmd.Kind {
 			case CmdRecycle:

@@ -336,6 +336,12 @@ type Slot struct {
 	cell *statusCell
 }
 
+// cmdBufferSize is Command's non-blocking send buffer: enough to absorb a
+// burst of operator commands without wedging the control surface, small
+// enough that a slot stuck forever (Run never draining it) still bounds
+// memory.
+const cmdBufferSize = 8
+
 func NewSlot(name string, deps Deps) *Slot {
 	if deps.Log == nil {
 		deps.Log = slog.Default()
@@ -344,9 +350,19 @@ func NewSlot(name string, deps Deps) *Slot {
 	return &Slot{
 		name: name,
 		deps: deps,
-		cmds: make(chan Command, 8),
+		cmds: make(chan Command, cmdBufferSize),
 		cell: newStatusCell(name, deps.Pool),
 	}
+}
+
+// NewSlotForTest builds a Slot already reporting status, without running
+// Run() — for tests in other packages (e.g. internal/socket) that need a
+// slot in a specific state, such as LISTENING, without driving a full FSM
+// cycle through the heavy harness in fsm_test.go (package-private, not
+// importable from elsewhere). Not for production use: nothing outside a
+// _test.go file should call this.
+func NewSlotForTest(name string, status Status) *Slot {
+	return &Slot{name: name, cmds: make(chan Command, cmdBufferSize), cell: &statusCell{status: status}}
 }
 
 // Command injects an operator command; non-blocking (drops when the buffer

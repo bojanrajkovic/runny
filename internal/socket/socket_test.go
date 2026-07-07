@@ -288,6 +288,44 @@ func TestInjectDebugKeyValidation(t *testing.T) {
 	}
 }
 
+// TestInjectDebugKeyAbortsOnCanceledContext pins the recheck in
+// InjectDebugKey right after operatorIdentity: a client whose context is
+// already done by the time that resolves must get the ctx-derived error and
+// must NOT have its key enqueued to the slot. Every other InjectDebugKey test
+// uses a live t.Context(), so this recheck had zero coverage — deleting it
+// failed nothing. lookupUsername takes no ctx (it has its own independent
+// timeout), so operatorIdentity itself never observes cancellation; the
+// recheck is the only thing standing between a canceled client and a key
+// landing in the guest after the client was told the request ended.
+func TestInjectDebugKeyAbortsOnCanceledContext(t *testing.T) {
+	slot := statemachine.NewSlotForTest("mac-1", statemachine.Status{State: statemachine.StateListening})
+	srv := newTestServer([]*statemachine.Slot{slot}, nil, nil, nil)
+
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	sshPub, _ := ssh.NewPublicKey(pub)
+	goodKey := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPub))) + " op@host"
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := srv.InjectDebugKey(ctx, &runnyv1.InjectDebugKeyRequest{Slot: "mac-1", PublicKey: goodKey})
+	if status.Code(err) != codes.Canceled {
+		t.Fatalf("code = %v, want Canceled", status.Code(err))
+	}
+
+	// The recheck must short-circuit BEFORE slot.Command() — prove the debug
+	// key was never enqueued by filling the command buffer (cmdBufferSize in
+	// fsm.go, currently 8) from empty and confirming every slot was free (a
+	// leaked command would leave one less).
+	const wantFreeSlots = 8
+	for i := range wantFreeSlots {
+		if !slot.Command(statemachine.Command{Kind: statemachine.CmdRecycle}) {
+			t.Fatalf("command queue had only %d free slots after the aborted injection, want %d (a command leaked in)",
+				i, wantFreeSlots)
+		}
+	}
+}
+
 func TestToLogLine(t *testing.T) {
 	e := logring.Entry{
 		Time:    time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC),

@@ -63,6 +63,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if got := c.Limits.MaxDebugHold.D(); got != 2*time.Hour {
 		t.Errorf("MaxDebugHold = %v, want 2h", got)
 	}
+	if got := c.Retention.MaxAge.D(); got != 30*24*time.Hour {
+		t.Errorf("Retention.MaxAge = %v, want 30d", got)
+	}
 	if p.Target.IsOrg() {
 		t.Error("owner/repo target misread as org")
 	}
@@ -163,6 +166,7 @@ func TestLoadConfigValidation(t *testing.T) {
 		{"bad ssh hardening", strings.Replace(minimalConfig, "count: 2", "count: 2\n    ssh_hardening: maybe", 1), `ssh_hardening must be "off", "rotate", or "scramble"`},
 		{"negative secure_ssh", minimalConfig + "deadlines:\n  secure_ssh: -15s\n", "secure_ssh must be positive"},
 		{"negative max_debug_hold", minimalConfig + "limits:\n  max_debug_hold: -1h\n", "max_debug_hold must be positive"},
+		{"negative retention max_age", minimalConfig + "retention:\n  max_age: -24h\n", "retention.max_age must be positive"},
 		{"malformed otlp endpoint", minimalConfig + "observability:\n  otlp:\n    endpoint: \"://bad\"\n", "observability.otlp.endpoint"},
 		{"bad otlp scheme", minimalConfig + "observability:\n  otlp:\n    endpoint: ftp://collector.example:4317\n", "observability.otlp.endpoint"},
 		{"otlp endpoint missing host", minimalConfig + "observability:\n  otlp:\n    endpoint: https://\n", "observability.otlp.endpoint"},

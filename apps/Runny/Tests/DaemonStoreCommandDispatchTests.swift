@@ -20,7 +20,21 @@ final class DaemonStoreCommandDispatchTests: XCTestCase {
         return s
     }
 
+    /// A snapshot carrying `protocolVersion`, applied before a pause/resume
+    /// dispatch so the confirmable gate (`protocolVersion >=
+    /// ackProtocolVersion`) actually reflects a real daemon handshake, not
+    /// the zero-value default `setClientForTest` alone would leave in place.
+    private func snapshot(protocolVersion: UInt32) -> Runny_V1_GetStatusResponse {
+        var snap = Runny_V1_GetStatusResponse()
+        snap.protocolVersion = protocolVersion
+        return snap
+    }
+
     func testPauseSlotDispatchesToClient() async {
+        // protocolVersion stays at its zero-value default here — the
+        // unconfirmable path (an old daemon that predates ack support):
+        // dispatch still happens, but nothing goes into `pending`. The
+        // confirmable path is covered separately below.
         let store = DaemonStore()
         let fake = FakeRunnyClient()
         store.setClientForTest(fake)
@@ -30,6 +44,7 @@ final class DaemonStoreCommandDispatchTests: XCTestCase {
         let dispatched = await poll { !fake.pauseCalls.isEmpty }
         XCTAssertTrue(dispatched, "pauseSlot must dispatch to the client")
         XCTAssertEqual(fake.pauseCalls.first?.slot, "mac-1")
+        XCTAssertNil(store.pending["mac-1"], "an unconfirmable daemon must not track a pending command")
     }
 
     func testResumeSlotDispatchesToClient() async {
@@ -42,6 +57,34 @@ final class DaemonStoreCommandDispatchTests: XCTestCase {
         let dispatched = await poll { !fake.resumeCalls.isEmpty }
         XCTAssertTrue(dispatched, "resumeSlot must dispatch to the client")
         XCTAssertEqual(fake.resumeCalls.first?.slot, "mac-1")
+        XCTAssertNil(store.pending["mac-1"], "an unconfirmable daemon must not track a pending command")
+    }
+
+    func testPauseSlotTracksPendingConfirmationWhenDaemonSupportsAcks() async {
+        let store = DaemonStore()
+        store.apply(snapshot(protocolVersion: DaemonStore.ackProtocolVersion))
+        let fake = FakeRunnyClient()
+        fake.pauseResult = .success("cmd-1")
+        store.setClientForTest(fake)
+
+        store.pauseSlot(slot("mac-1"))
+
+        let tracked = await poll { store.pending["mac-1"] != nil }
+        XCTAssertTrue(tracked, "a confirmable daemon must track the command until the state echo confirms it")
+        XCTAssertEqual(store.pending["mac-1"]?.kind, .pause)
+    }
+
+    func testResumeSlotTracksPendingConfirmationWhenDaemonSupportsAcks() async {
+        let store = DaemonStore()
+        store.apply(snapshot(protocolVersion: DaemonStore.ackProtocolVersion))
+        let fake = FakeRunnyClient()
+        store.setClientForTest(fake)
+
+        store.resumeSlot(slot("mac-1"))
+
+        let tracked = await poll { store.pending["mac-1"] != nil }
+        XCTAssertTrue(tracked, "a confirmable daemon must track the command until the state echo confirms it")
+        XCTAssertEqual(store.pending["mac-1"]?.kind, .resume)
     }
 
     func testRequestRecycleOfSafeStateDispatchesAtOnceWithoutConsent() async {

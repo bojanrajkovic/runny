@@ -9,14 +9,7 @@ import RunnyV1
 /// RPC and ring subscription open) a bridged AsyncSequence alone would lose.
 struct LogStreamHandle: Sendable {
     let lines: AsyncThrowingStream<Runny_V1_LogLine, Error>
-    private let cancelClosure: @Sendable () -> Void
-
-    init(lines: AsyncThrowingStream<Runny_V1_LogLine, Error>, cancel: @escaping @Sendable () -> Void) {
-        self.lines = lines
-        cancelClosure = cancel
-    }
-
-    func cancel() { cancelClosure() }
+    let cancel: @Sendable () -> Void
 }
 
 /// The RunnyClient surface DaemonStore, LogStreamModel, and CycleHistoryModel

@@ -394,12 +394,6 @@ final class DaemonStore {
         client = c
     }
 
-    /// Builds the client for a connection attempt — a stored closure rather
-    /// than a hardcoded RunnyClient(socketPath:) call, so tests can inject a
-    /// fake and drive the supervision/reload/command logic below without a
-    /// real socket. Production never overrides this.
-    var clientFactory: (String) -> any RunnyServiceClient = { RunnyClient(socketPath: $0) }
-
     private var supervisor: Task<Void, Never>?
     private var sleepTask: Task<Void, Never>?
     private var retryNow = false
@@ -556,7 +550,7 @@ final class DaemonStore {
     private func superviseForever() async {
         var backoff: TimeInterval = 1
         while !Task.isCancelled {
-            let attemptClient = clientFactory(RunnyHome.socketPath)
+            let attemptClient = RunnyClient(socketPath: RunnyHome.socketPath)
             let outcome = await runStream(attemptClient)
             // Identity check: a cancelled supervisor unwinding late must not
             // null out a successor's healthy client (restart() races this).

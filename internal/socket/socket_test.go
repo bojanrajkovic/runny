@@ -314,14 +314,12 @@ func TestInjectDebugKeyAbortsOnCanceledContext(t *testing.T) {
 	}
 
 	// The recheck must short-circuit BEFORE slot.Command() — prove the debug
-	// key was never enqueued by filling the command buffer (cmdBufferSize in
-	// fsm.go, currently 8) from empty and confirming every slot was free (a
-	// leaked command would leave one less).
-	const wantFreeSlots = 8
-	for i := range wantFreeSlots {
+	// key was never enqueued by filling the command buffer from empty and
+	// confirming every slot was free (a leaked command would leave one less).
+	for i := range statemachine.CmdBufferSize {
 		if !slot.Command(statemachine.Command{Kind: statemachine.CmdRecycle}) {
 			t.Fatalf("command queue had only %d free slots after the aborted injection, want %d (a command leaked in)",
-				i, wantFreeSlots)
+				i, statemachine.CmdBufferSize)
 		}
 	}
 }

@@ -336,11 +336,11 @@ type Slot struct {
 	cell *statusCell
 }
 
-// cmdBufferSize is Command's non-blocking send buffer: enough to absorb a
+// CmdBufferSize is Command's non-blocking send buffer: enough to absorb a
 // burst of operator commands without wedging the control surface, small
 // enough that a slot stuck forever (Run never draining it) still bounds
 // memory.
-const cmdBufferSize = 8
+const CmdBufferSize = 8
 
 func NewSlot(name string, deps Deps) *Slot {
 	if deps.Log == nil {
@@ -350,7 +350,7 @@ func NewSlot(name string, deps Deps) *Slot {
 	return &Slot{
 		name: name,
 		deps: deps,
-		cmds: make(chan Command, cmdBufferSize),
+		cmds: make(chan Command, CmdBufferSize),
 		cell: newStatusCell(name, deps.Pool),
 	}
 }
@@ -362,7 +362,7 @@ func NewSlot(name string, deps Deps) *Slot {
 // importable from elsewhere). Not for production use: nothing outside a
 // _test.go file should call this.
 func NewSlotForTest(name string, status Status) *Slot {
-	return &Slot{name: name, cmds: make(chan Command, cmdBufferSize), cell: &statusCell{status: status}}
+	return &Slot{name: name, cmds: make(chan Command, CmdBufferSize), cell: &statusCell{status: status}}
 }
 
 // Command injects an operator command; non-blocking (drops when the buffer

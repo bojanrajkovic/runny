@@ -288,16 +288,17 @@ func TestInjectDebugKeyValidation(t *testing.T) {
 	}
 }
 
-// TestInjectDebugKeyAbortsOnCanceledContext pins the recheck in
-// InjectDebugKey right after operatorIdentity: a client whose context is
-// already done by the time that resolves must get the ctx-derived error and
-// must NOT have its key enqueued to the slot. Every other InjectDebugKey test
-// uses a live t.Context(), so this recheck had zero coverage — deleting it
-// failed nothing. lookupUsername takes no ctx (it has its own independent
-// timeout), so operatorIdentity itself never observes cancellation; the
-// recheck is the only thing standing between a canceled client and a key
-// landing in the guest after the client was told the request ended.
-func TestInjectDebugKeyAbortsOnCanceledContext(t *testing.T) {
+// TestInjectDebugKeyAbortsOnCancelDuringLookupStall pins the recheck in
+// InjectDebugKey right after operatorIdentity: a client that cancels WHILE
+// lookupUsername is genuinely stalled (not just one already dead before the
+// call) must get the ctx-derived error and must NOT have its key enqueued to
+// the slot. Every other InjectDebugKey test uses a live t.Context(), so this
+// recheck had zero coverage — deleting it failed nothing. A peer identity is
+// required (asOperator) so operatorIdentity actually reaches lookupUsername
+// instead of short-circuiting at the peer-cred read — otherwise the test
+// would still pass if the recheck were hoisted above operatorIdentity
+// entirely, leaving the real race (cancellation landing mid-stall) unproven.
+func TestInjectDebugKeyAbortsOnCancelDuringLookupStall(t *testing.T) {
 	slot := statemachine.NewSlotForTest("mac-1", statemachine.Status{State: statemachine.StateListening})
 	srv := newTestServer([]*statemachine.Slot{slot}, nil, nil, nil)
 
@@ -305,10 +306,33 @@ func TestInjectDebugKeyAbortsOnCanceledContext(t *testing.T) {
 	sshPub, _ := ssh.NewPublicKey(pub)
 	goodKey := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPub))) + " op@host"
 
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
+	inLookup := make(chan struct{})
+	release := make(chan struct{})
+	orig := lookupID
+	lookupID = func(string) (*user.User, error) {
+		close(inLookup)
+		<-release // hold lookupUsername stalled until the test says go
+		return &user.User{Username: "op"}, nil
+	}
+	t.Cleanup(func() { lookupID = orig })
 
-	_, err := srv.InjectDebugKey(ctx, &runnyv1.InjectDebugKeyRequest{Slot: "mac-1", PublicKey: goodKey})
+	ctx, cancel := context.WithCancel(asOperator(t.Context(), 501))
+	done := make(chan error, 1)
+	go func() {
+		_, err := srv.InjectDebugKey(ctx, &runnyv1.InjectDebugKeyRequest{Slot: "mac-1", PublicKey: goodKey})
+		done <- err
+	}()
+
+	<-inLookup     // the lookup has genuinely started stalling
+	cancel()       // cancel WHILE it's stuck — the exact race the recheck guards
+	close(release) // let the stalled lookup finish resolving
+
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("InjectDebugKey did not return after the client canceled during the lookup stall")
+	}
 	if status.Code(err) != codes.Canceled {
 		t.Fatalf("code = %v, want Canceled", status.Code(err))
 	}

@@ -1,0 +1,31 @@
+# Informational only — coverage never gates a PR or blocks a merge.
+codecov:
+  require_ci_to_pass: false
+
+coverage:
+  status:
+    project: false
+    patch: false
+
+# Components slice the one combined report by path for display, so the
+# vz-bound internal/vm (~24%, needs a live guest to move) doesn't visually
+# drown the well-covered core (statemachine/sshx/bounded/obs/versioncore).
+component_management:
+  individual_components:
+    - component_id: core
+      name: daemon core
+      paths:
+        - "^internal/(?!vm/).*"
+        - "^cmd/runnyd/.*"
+    - component_id: cli
+      name: runnyctl
+      paths:
+        - "^cmd/runnyctl/.*"
+    - component_id: vm
+      name: vm (needs a live guest)
+      paths:
+        - "^internal/vm/.*"
+    - component_id: app
+      name: Runny.app
+      paths:
+        - "^apps/.*"

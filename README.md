@@ -2,6 +2,8 @@
 
 # runny
 
+[![codecov](https://codecov.io/gh/bojanrajkovic/runny/branch/main/graph/badge.svg)](https://codecov.io/gh/bojanrajkovic/runny)
+
 An observable macOS GitHub Actions runner daemon: ephemeral single-use VMs on
 Apple's Virtualization.framework, fully compatible with
 [tart](https://github.com/cirruslabs/tart)'s bundle and OCI image format — with

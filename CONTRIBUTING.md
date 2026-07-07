@@ -59,7 +59,7 @@ codesign -s - --entitlements tools/sign/runnyd.entitlements --force bazel-bin/cm
 
 ## CI
 
-GitHub Actions gate every PR and push to `main`: `ci.yml` (Linux: build/test/format; macOS: darwin targets + an ad-hoc-signed `runnyd` artifact; zizmor: workflow audit) and `pr-title.yml`. All checks must pass before merge. CI never boots guests — GitHub's macOS runners are VMs themselves, so VM-touching verification happens on a real host.
+GitHub Actions gate every PR and push to `main`: `ci.yml` (Linux: build/test/format; macOS: darwin targets + an ad-hoc-signed `runnyd` artifact; race: `-race` rebuild; zizmor: workflow audit; coverage: combined Go+Swift lcov uploaded to Codecov, informational only per `codecov.yml` — no status check blocks) and `pr-title.yml`. All checks must pass before merge. CI never boots guests — GitHub's macOS runners are VMs themselves, so VM-touching verification happens on a real host.
 
 ### CI security
 

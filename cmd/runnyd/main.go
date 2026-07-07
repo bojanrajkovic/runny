@@ -1030,7 +1030,7 @@ func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*gi
 				if cached {
 					cacheNote = " (cached)"
 				}
-				add(name, true, fmt.Sprintf("%s → %s (%s uncompressed%s)", ref, short(digest), oci.HumanBytes(diskBytes), cacheNote))
+				add(name, true, fmt.Sprintf("%s → %s (%s uncompressed%s)", ref, oci.ShortDigest(digest), oci.HumanBytes(diskBytes), cacheNote))
 				if !cached && diskBytes > maxImageBytes {
 					maxImageBytes = diskBytes
 				}
@@ -1081,13 +1081,6 @@ func sweepRegistrations(ctx context.Context, log *slog.Logger, gh *github.Client
 			}
 		}
 	}
-}
-
-func short(digest string) string {
-	if len(digest) > 19 {
-		return digest[:19]
-	}
-	return digest
 }
 
 // checkDiskHeadroom returns the disk-headroom DoctorCheck. It is image-aware:

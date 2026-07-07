@@ -598,7 +598,7 @@ func (c *ctl) renderCycle(rec *runnyv1.CycleRecord) {
 	ref, _ := splitPin(rec.GetImage())
 	img := ref
 	if d := rec.GetImageDigest(); d != "" {
-		short := "sha256:" + shortDigest(d)
+		short := "sha256:" + oci.ShortDigest(d)
 		if img == "" {
 			img = short
 		} else {
@@ -891,7 +891,7 @@ func imageCell(ref, digest string) string {
 	if digest == "" {
 		return name
 	}
-	return name + "@" + shortDigest(digest)
+	return name + "@" + oci.ShortDigest(digest)
 }
 
 // splitPin separates a configured "@sha256:..." digest pin from an image ref,
@@ -914,13 +914,8 @@ func runnerVersionDisplay(assetName string) string {
 	return assetName
 }
 
-// shortDigest renders a digest (with or without the "sha256:" algorithm
-// prefix) as docker-style 12-hex — the one abbreviation both image views use.
-func shortDigest(digest string) string {
-	return shortHex(strings.TrimPrefix(digest, "sha256:"))
-}
-
-// shortHex is the docker-style 12-hex short form of a digest's hex.
+// shortHex is the docker-style 12-hex short form of a config SHA's hex.
+// Image digests go through oci.ShortDigest, the shared display convention.
 func shortHex(h string) string {
 	if len(h) > 12 {
 		return h[:12]

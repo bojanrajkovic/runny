@@ -26,6 +26,11 @@ final class AppUpdateMonitor {
     private var checkTask: Task<Void, Never>?
     private var checkForUpdatesObserver: NSObjectProtocol?
 
+    /// The update check itself, injectable for tests — same seam shape as
+    /// DaemonStore.clientFactory: defaults to the real AppUpdateChecker call,
+    /// tests substitute a canned result without touching the network.
+    var checkFn: (String) async -> DaemonStore.AppUpdate? = { await AppUpdateChecker.fetch(appVersion: $0) }
+
     /// App-lifetime: registers the "Check for Updates…" observer and starts the
     /// 24h loop once. Idempotent — safe to call on every `DaemonStore.start()`,
     /// including after a `restart()` (this is NOT connection-scoped).
@@ -48,10 +53,12 @@ final class AppUpdateMonitor {
         }
     }
 
-    private func runCheck() async {
+    /// Not private: tests drive a check directly, without waiting out the
+    /// 24h loop or registering the notification observer.
+    func runCheck() async {
         let enabled = UserDefaults.standard.object(forKey: Prefs.checkForAppUpdates) as? Bool ?? true
         guard enabled else { return }
-        if let result = await AppUpdateChecker.fetch(appVersion: DaemonStore.appVersion) {
+        if let result = await checkFn(DaemonStore.appVersion) {
             availableUpdate = result
         }
     }

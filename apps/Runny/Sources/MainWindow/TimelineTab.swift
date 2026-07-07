@@ -23,15 +23,7 @@ struct TimelineTab: View {
         case cycle(String)
     }
 
-    /// The slot is actively running a cycle (not parked in BACKOFF between
-    /// attempts, and not wedged): only then is there a "current cycle" to show.
-    /// A wedged slot keeps a non-empty cycleID and a TEARDOWN state after its
-    /// cycle record is already finished — showing it as a live cycle would tick
-    /// a forever-growing TEARDOWN that duplicates the completed failure record.
-    private var hasCurrent: Bool {
-        !slot.cycleID.isEmpty && slot.state != .backoff
-            && slot.state != .unspecified && !slot.wedged
-    }
+    private var hasCurrent: Bool { TimelinePresentation.hasCurrent(slot) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -75,10 +67,7 @@ struct TimelineTab: View {
     }
 
     private func isValid(_ selection: Selection) -> Bool {
-        switch selection {
-        case .current: hasCurrent
-        case let .cycle(id): model.cycles.contains { $0.cycleID == id }
-        }
+        TimelinePresentation.isValid(selection, hasCurrent: hasCurrent, cycleIDs: model.cycles.map(\.cycleID))
     }
 
     private var picker: some View {
@@ -135,19 +124,8 @@ struct TimelineTab: View {
     }
 
     private func pickerLabel(_ cycle: Runny_V1_CycleRecord) -> String {
-        let started = Self.started.string(from: cycle.started.dateValue)
-        return "\(CycleVerdict(cycle).mark) \(cycle.cycleID) · \(started)"
+        TimelinePresentation.pickerLabel(cycle)
     }
-
-    // Deliberately still a DateFormatter, not Date.FormatStyle: FormatStyle's
-    // `.numeric` renders a 4-digit year where `.short/.short` renders 2-digit —
-    // don't "finish" this migration, it would change the picker label's format.
-    static let started: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .short
-        formatter.timeStyle = .short
-        return formatter
-    }()
 }
 
 /// The in-flight cycle: position in the pipeline with live per-state durations
@@ -157,31 +135,11 @@ struct TimelineTab: View {
 struct CurrentCycleView: View {
     let slot: Runny_V1_SlotStatus
 
-    /// Completed-state durations keyed by SlotState for O(1) lookup per row.
     private var completedDurations: [Runny_V1_SlotState: TimeInterval] {
-        var d: [Runny_V1_SlotState: TimeInterval] = [:]
-        for record in slot.activeCycleStates {
-            let elapsed = record.left.dateValue.timeIntervalSince(record.entered.dateValue)
-            if elapsed >= 0 {
-                d[record.state] = elapsed
-            }
-        }
-        return d
+        TimelinePresentation.completedDurations(for: slot)
     }
 
-    /// The forward path, BACKOFF excluded (it's the between-cycles park, not a
-    /// step). DEBUG only appears once it's armed or active — most cycles never
-    /// take it. Other optional states (e.g. SECURE_SSH when hardening is off)
-    /// simply show as not-yet-reached; the live clock is on the current state.
-    private var path: [Runny_V1_SlotState] {
-        Runny_V1_SlotState.cycleOrder.filter { state in
-            switch state {
-            case .backoff: false
-            case .debug: slot.debugHoldArmed || slot.state == .debug
-            default: true
-            }
-        }
-    }
+    private var path: [Runny_V1_SlotState] { TimelinePresentation.pipelinePath(for: slot) }
 
     var body: some View {
         ScrollView {
@@ -212,9 +170,7 @@ struct CurrentCycleView: View {
     }
 
     private func position(of state: Runny_V1_SlotState, currentIndex: Int) -> PipelineRow.Position {
-        if state.cycleIndex < currentIndex { return .passed }
-        if state.cycleIndex == currentIndex { return .current }
-        return .pending
+        TimelinePresentation.pipelinePosition(of: state, currentIndex: currentIndex)
     }
 }
 

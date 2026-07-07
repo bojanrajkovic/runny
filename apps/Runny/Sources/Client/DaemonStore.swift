@@ -379,8 +379,20 @@ final class DaemonStore {
     }
 
     /// The client of the current healthy stream; log/timeline views borrow
-    /// it. nil while unreachable — actions fail fast instead of hanging.
-    private(set) var client: RunnyClient?
+    /// it. Typed to the RunnyServiceClient seam, not the concrete RunnyClient,
+    /// so tests can substitute a fake here. nil while unreachable — actions
+    /// fail fast instead of hanging.
+    private(set) var client: (any RunnyServiceClient)?
+
+    /// Sets `client` directly, bypassing the connection-establishment flow
+    /// (`start()` → `superviseForever()` → `runStream()`) — for tests that
+    /// exercise command dispatch (pauseSlot, resumeSlot, recycle, runDoctor,
+    /// performReload) without going through `start()`'s home-directory side
+    /// effects (NSWorkspace observer, DispatchSource file watch,
+    /// RunnyHome.ensureDirectory). Not for production use.
+    func setClientForTest(_ c: any RunnyServiceClient) {
+        client = c
+    }
 
     private var supervisor: Task<Void, Never>?
     private var sleepTask: Task<Void, Never>?
@@ -585,7 +597,7 @@ final class DaemonStore {
         sleepTask = nil
     }
 
-    private func runStream(_ attemptClient: RunnyClient) async -> StreamOutcome {
+    private func runStream(_ attemptClient: any RunnyServiceClient) async -> StreamOutcome {
         attemptLastMessage = nil
         let attemptStarted = Date()
         let stream = attemptClient.watchStatus()
@@ -755,7 +767,7 @@ final class DaemonStore {
     /// return an optional advisory note (e.g. pause-during-drain); a non-empty
     /// note surfaces as an info banner, distinct from a failure.
     private func run(_ kind: PendingCommand.Kind, slot: Runny_V1_SlotStatus,
-                     _ operation: @escaping (RunnyClient, String) async throws -> String?)
+                     _ operation: @escaping (any RunnyServiceClient, String) async throws -> String?)
     {
         let clientState = client == nil ? "nil" : "set"
         let conn = String(describing: connection)

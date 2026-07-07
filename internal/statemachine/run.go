@@ -194,7 +194,7 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 					// Boot-path states have no usable hardened guest yet
 					// (issue #39): reply and do nothing.
 					if cmd.expired() {
-						cmd.reply(DebugKeyReply{Err: errors.New("command expired; nothing was injected")})
+						cmd.reply(DebugKeyReply{Err: errCmdExpired})
 					} else {
 						cmd.reply(DebugKeyReply{Err: errors.New("slot is mid-boot; key injection needs LISTENING, JOB, or DEBUG")})
 					}
@@ -794,7 +794,7 @@ func (c *run) watchJob(jctx, cctx context.Context) (bool, error) {
 // drift apart between freezeForDebug, midJobInject, and debugReArm.
 func (c *run) rejectStale(cmd Command) bool {
 	if cmd.expired() {
-		cmd.reply(DebugKeyReply{Err: errors.New("command expired; nothing was injected")})
+		cmd.reply(DebugKeyReply{Err: errCmdExpired})
 		return true
 	}
 	if cmd.CycleID != "" && cmd.CycleID != c.rec.CycleID {

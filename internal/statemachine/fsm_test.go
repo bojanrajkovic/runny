@@ -68,7 +68,6 @@ type fakeMachine struct {
 	ip      string
 	ipErr   error
 	stopErr error
-	done    chan struct{}
 	stopped bool
 	mu      sync.Mutex
 }
@@ -91,10 +90,7 @@ func (m *fakeMachine) Stop(bounded.Context, time.Duration) error {
 	if m.stopErr != nil {
 		return m.stopErr // the guest survives force-stop
 	}
-	if !m.stopped {
-		m.stopped = true
-		close(m.done)
-	}
+	m.stopped = true
 	return nil
 }
 
@@ -518,7 +514,7 @@ func newHarnessPool(t *testing.T, mutate func(*home.Config), mutatePool func(*ho
 
 	proc := newFakeProc()
 	h := &harness{
-		vmF:    &fakeVM{machine: &fakeMachine{mac: "62:25:1b:05:97:bf", ip: "192.168.64.9", done: make(chan struct{})}},
+		vmF:    &fakeVM{machine: &fakeMachine{mac: "62:25:1b:05:97:bf", ip: "192.168.64.9"}},
 		proc:   proc,
 		guest:  &fakeGuest{proc: proc, diag: []byte("diag-tail")},
 		gh:     newFakeGitHub(),

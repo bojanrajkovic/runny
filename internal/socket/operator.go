@@ -80,7 +80,7 @@ func (s *Server) GrantOperator(ctx context.Context, req *runnyv1.GrantOperatorRe
 			if u.Username == "root" || u.Uid == "0" {
 				return status.Error(codes.InvalidArgument, "refusing to grant root")
 			}
-			if slices.ContainsFunc(ops, func(o opacl.Operator) bool { return o.UID == uid }) {
+			if hasUID(ops, uid) {
 				return status.Errorf(codes.FailedPrecondition, "%s is already an operator", u.Username)
 			}
 			return nil
@@ -96,7 +96,7 @@ func (s *Server) RevokeOperator(ctx context.Context, req *runnyv1.RevokeOperator
 	return s.mutateOperator(
 		ctx, req.GetUser(), "revoke",
 		func(ops []opacl.Operator, uid uint32, u *user.User) error {
-			if !slices.ContainsFunc(ops, func(o opacl.Operator) bool { return o.UID == uid }) {
+			if !hasUID(ops, uid) {
 				return status.Errorf(codes.FailedPrecondition, "%s is not an operator", u.Username)
 			}
 			if len(ops) <= 1 {
@@ -216,4 +216,11 @@ func latestGrant(grants []home.OperatorGrant, uid uint32) *home.OperatorGrant {
 		}
 	}
 	return latest
+}
+
+// hasUID is the one membership predicate Grant and Revoke share: the two
+// prechecks must agree on "is this account an operator" or an entry can
+// become un-grantable and un-revocable at once.
+func hasUID(ops []opacl.Operator, uid uint32) bool {
+	return slices.ContainsFunc(ops, func(o opacl.Operator) bool { return o.UID == uid })
 }

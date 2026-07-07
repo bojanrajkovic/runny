@@ -364,6 +364,26 @@ func newStagingInstaller(r *recordedRun, testConfig verdictTester) *Installer {
 	return inst.WithStage(StagePlan{Config: []byte("pools: []\n")})
 }
 
+// stage() must bound the -test-config exec itself: Install runs with
+// context.Background() (installdaemon.go never sets a deadline), so if stage
+// didn't wrap the call, a hung staged binary would block install forever —
+// exactly what commandTimeout exists to prevent for every other privileged
+// step in this file.
+func TestStageBoundsTestConfigCall(t *testing.T) {
+	r := &recordedRun{}
+	var sawDeadline bool
+	inst := newStagingInstaller(r, func(ctx context.Context, _, _ string) (home.Verdict, error) {
+		_, sawDeadline = ctx.Deadline()
+		return home.Verdict{Status: home.VerdictOK}, nil
+	})
+	if err := inst.Install(context.Background()); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if !sawDeadline {
+		t.Error("testConfig must be called with a bounded context, not the caller's undeadlined ctx")
+	}
+}
+
 // A warn-tier verdict must not be silently discarded just because -test-config
 // exits 0 — the fresh-install moment is the one chance the operator has to see
 // it before the daemon comes up on it.
@@ -404,8 +424,15 @@ func TestStageFailsOnBlockingVerdict(t *testing.T) {
 			inst := newStagingInstaller(r, func(context.Context, string, string) (home.Verdict, error) {
 				return verdict, nil
 			})
-			if err := inst.Install(context.Background()); err == nil {
+			err := inst.Install(context.Background())
+			if err == nil {
 				t.Fatal("Install must refuse a blocking verdict")
+			}
+			// The status must appear in the message even when Errors is empty (the
+			// "unrecognized status" case) — otherwise the operator sees no reason
+			// for the refusal.
+			if !strings.Contains(err.Error(), verdict.Status) {
+				t.Errorf("error must name the verdict's status %q, got: %v", verdict.Status, err)
 			}
 			if exactCall(r.calls, "/bin/launchctl", "bootstrap", "system", PlistPath()) {
 				t.Error("must not bootstrap over a staged config that failed validation")

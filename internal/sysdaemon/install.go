@@ -111,6 +111,12 @@ func (i *Installer) Install(ctx context.Context) error {
 	return i.bootstrap(ctx)
 }
 
+// stageTestConfigTimeout bounds the staged `-test-config` exec, mirroring
+// cmd/runnyd/parsegate.go's testConfigTimeout: side-effect-free on the target
+// binary's end (no home, no lock, no network), so 10s is generous headroom —
+// not a tight race, but no install step may block forever either.
+const stageTestConfigTimeout = 10 * time.Second
+
 // stage copies each planned key into the home (chown operator, 0600 — the file
 // inherits the home's _runny-read ACL by creation, exactly as a hand-cp would),
 // writes plan.Config to <home>/config.yaml, then runs
@@ -134,10 +140,15 @@ func (i *Installer) stage(ctx context.Context, plan StagePlan) error {
 	if err := i.writeOwned(ctx, configPath, plan.Config); err != nil {
 		return err
 	}
-	v, err := i.testConfig(ctx, i.cfg.RunnydPath, configPath)
-	if err != nil {
+	fail := func(err error) error {
 		return fmt.Errorf("staged config failed validation (home left in place; fix %s and rerun install-daemon): %w",
 			configPath, err)
+	}
+	cctx, cancel := context.WithTimeout(ctx, stageTestConfigTimeout)
+	defer cancel()
+	v, err := i.testConfig(cctx, i.cfg.RunnydPath, configPath)
+	if err != nil {
+		return fail(err)
 	}
 	for _, w := range v.Warnings {
 		i.log("warning: %s", w.Message)
@@ -145,8 +156,7 @@ func (i *Installer) stage(ctx context.Context, plan StagePlan) error {
 	// Fail closed on anything but ok/warn, matching decideUpgrade and edit-config's
 	// same-contract gates: an unrecognized status must never be treated as ok.
 	if v.Status != home.VerdictOK && v.Status != home.VerdictWarn {
-		return fmt.Errorf("staged config failed validation (home left in place; fix %s and rerun install-daemon): %s",
-			configPath, strings.Join(v.Errors, "; "))
+		return fail(fmt.Errorf("status %q: %s", v.Status, strings.Join(v.Errors, "; ")))
 	}
 	i.log("staged config.yaml and %d key file(s) into %s; validated by %s -test-config",
 		len(plan.Keys), home.SystemHomeDir, i.cfg.RunnydPath)

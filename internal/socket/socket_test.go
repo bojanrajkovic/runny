@@ -29,6 +29,7 @@ import (
 	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/logring"
 	"github.com/bojanrajkovic/runny/internal/statemachine"
+	"github.com/bojanrajkovic/runny/internal/versioncore"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
 
@@ -592,8 +593,8 @@ func TestStatusCarriesConvergenceFingerprint(t *testing.T) {
 	if resp.GetDrainSeq() != 7 || !resp.GetExitHeld() {
 		t.Errorf("drain_seq/exit_held dropped: seq=%d held=%v", resp.GetDrainSeq(), resp.GetExitHeld())
 	}
-	if WireProtocolVersion < 2 || resp.GetProtocolVersion() != WireProtocolVersion {
-		t.Errorf("protocol_version = %d, want %d (>= 2)", resp.GetProtocolVersion(), WireProtocolVersion)
+	if versioncore.WireProtocolVersion < 2 || resp.GetProtocolVersion() != versioncore.WireProtocolVersion {
+		t.Errorf("protocol_version = %d, want %d (>= 2)", resp.GetProtocolVersion(), versioncore.WireProtocolVersion)
 	}
 }
 
@@ -715,8 +716,8 @@ func TestSnapshotCarriesDraining(t *testing.T) {
 // whether to rely on pause/resume command acknowledgement (issue #66).
 func TestSnapshotCarriesProtocolVersion(t *testing.T) {
 	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
-	if got := srv.snapshot().GetProtocolVersion(); got != WireProtocolVersion {
-		t.Errorf("protocol_version = %d, want %d", got, WireProtocolVersion)
+	if got := srv.snapshot().GetProtocolVersion(); got != versioncore.WireProtocolVersion {
+		t.Errorf("protocol_version = %d, want %d", got, versioncore.WireProtocolVersion)
 	}
 }
 

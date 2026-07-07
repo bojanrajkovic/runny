@@ -79,13 +79,6 @@ type DrainState struct {
 	Seq uint64
 }
 
-// WireProtocolVersion is the daemon's wire-contract version, published in
-// GetStatusResponse.protocol_version. Aliases versioncore.WireProtocolVersion
-// (the canonical definition, in a stdlib-only leaf runnyctl can import
-// without dragging in this package's cgo/vz-heavy dependency graph) so
-// existing callers in this package keep the shorter name.
-const WireProtocolVersion = versioncore.WireProtocolVersion
-
 // maxCommandIDLen bounds the optional pause/resume command id the client echoes
 // back for acknowledgement. The app sends a UUID (36 chars); the cap is generous
 // but finite because the daemon appends every applied id to the slot's
@@ -339,7 +332,7 @@ func (s *Server) snapshot() *runnyv1.GetStatusResponse {
 		DaemonStarted:   timestamppb.New(s.Started),
 		Version:         s.Version,
 		Draining:        ds.Reason,
-		ProtocolVersion: WireProtocolVersion,
+		ProtocolVersion: versioncore.WireProtocolVersion,
 		BootId:          s.BootID,
 		ConfigSha256:    s.ConfigSHA256,
 		DrainSeq:        ds.Seq,

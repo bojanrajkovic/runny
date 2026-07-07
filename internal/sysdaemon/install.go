@@ -13,6 +13,7 @@ import (
 	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/launchd"
 	"github.com/bojanrajkovic/runny/internal/opacl"
+	"github.com/bojanrajkovic/runny/internal/testconfig"
 )
 
 // Runner runs a privileged command and returns its combined output. The default
@@ -36,23 +37,31 @@ func execRunner(ctx context.Context, name string, args ...string) (string, error
 	return string(out), nil
 }
 
+// verdictTester is a seam for the `-test-config` exec so tests can fake the
+// parsed verdict without a real runnyd binary. testconfig.RunTestConfig is the
+// production implementation (shared with runnyctl's upgrade and edit-config
+// gates).
+type verdictTester func(ctx context.Context, binPath, configPath string) (home.Verdict, error)
+
 // Installer performs the privileged install/uninstall. Construct with New; tests
-// swap run and writeFile for fakes.
+// swap run, writeFile, and testConfig for fakes.
 type Installer struct {
-	cfg       Config
-	run       Runner
-	writeFile func(path string, data []byte, perm os.FileMode) error
-	log       func(format string, args ...any)
-	plan      *StagePlan // set by WithStage; nil means a bare install (today's crash-loop behavior)
+	cfg        Config
+	run        Runner
+	writeFile  func(path string, data []byte, perm os.FileMode) error
+	log        func(format string, args ...any)
+	plan       *StagePlan // set by WithStage; nil means a bare install (today's crash-loop behavior)
+	testConfig verdictTester
 }
 
 // New builds an Installer that shells out for real and logs progress to stdout.
 func New(cfg Config) *Installer {
 	return &Installer{
-		cfg:       cfg,
-		run:       execRunner,
-		writeFile: os.WriteFile,
-		log:       func(f string, a ...any) { fmt.Printf(f+"\n", a...) },
+		cfg:        cfg,
+		run:        execRunner,
+		writeFile:  os.WriteFile,
+		log:        func(f string, a ...any) { fmt.Printf(f+"\n", a...) },
+		testConfig: testconfig.RunTestConfig,
 	}
 }
 
@@ -102,11 +111,21 @@ func (i *Installer) Install(ctx context.Context) error {
 	return i.bootstrap(ctx)
 }
 
+// stageTestConfigTimeout bounds the staged `-test-config` exec, mirroring
+// cmd/runnyd/parsegate.go's testConfigTimeout: side-effect-free on the target
+// binary's end (no home, no lock, no network), so 10s is generous headroom —
+// not a tight race, but no install step may block forever either.
+const stageTestConfigTimeout = 10 * time.Second
+
 // stage copies each planned key into the home (chown operator, 0600 — the file
 // inherits the home's _runny-read ACL by creation, exactly as a hand-cp would),
 // writes plan.Config to <home>/config.yaml, then runs
-// `runnyd -test-config <home>/config.yaml` and returns its verdict as an error
-// on Error status.
+// `runnyd -test-config <home>/config.yaml` and parses its JSON verdict — the
+// same contract runnyctl's upgrade and edit-config gates use — rather than
+// gating on the exit code alone: a warn-tier config exits 0, and a fresh
+// operator is never given another chance to see those warnings once install
+// has moved on. Warnings are surfaced regardless of status; an error-tier (or
+// otherwise unrecognized) verdict fails the stage, leaving the home in place.
 func (i *Installer) stage(ctx context.Context, plan StagePlan) error {
 	for _, k := range plan.Keys {
 		data, err := os.ReadFile(k.Src)
@@ -121,9 +140,23 @@ func (i *Installer) stage(ctx context.Context, plan StagePlan) error {
 	if err := i.writeOwned(ctx, configPath, plan.Config); err != nil {
 		return err
 	}
-	if _, err := i.run(ctx, i.cfg.RunnydPath, "-test-config", configPath); err != nil {
+	fail := func(err error) error {
 		return fmt.Errorf("staged config failed validation (home left in place; fix %s and rerun install-daemon): %w",
 			configPath, err)
+	}
+	cctx, cancel := context.WithTimeout(ctx, stageTestConfigTimeout)
+	defer cancel()
+	v, err := i.testConfig(cctx, i.cfg.RunnydPath, configPath)
+	if err != nil {
+		return fail(err)
+	}
+	for _, w := range v.Warnings {
+		i.log("warning: %s", w.Message)
+	}
+	// Fail closed on anything but ok/warn, matching decideUpgrade and edit-config's
+	// same-contract gates: an unrecognized status must never be treated as ok.
+	if v.Status != home.VerdictOK && v.Status != home.VerdictWarn {
+		return fail(fmt.Errorf("status %q: %s", v.Status, strings.Join(v.Errors, "; ")))
 	}
 	i.log("staged config.yaml and %d key file(s) into %s; validated by %s -test-config",
 		len(plan.Keys), home.SystemHomeDir, i.cfg.RunnydPath)

@@ -3,6 +3,7 @@ package sysdaemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/user"
 	"slices"
@@ -350,5 +351,92 @@ func TestInstallValidatesInputs(t *testing.T) {
 	badOp.cfg.RunnydPath = "/x/runnyd"
 	if err := badOp.Install(context.Background()); err == nil {
 		t.Error("Install with an unresolvable operator must error before any mutation")
+	}
+}
+
+// newStagingInstaller is newTestInstaller plus the account-creation reads a
+// staged Install needs to reach stage() at all.
+func newStagingInstaller(r *recordedRun, testConfig verdictTester) *Installer {
+	r.readErr = errors.New("eDSRecordNotFound")
+	r.listOut = map[string]string{"PrimaryGroupID": "staff 20\n", "UniqueID": "root 0\n"}
+	inst := newTestInstaller(r, func(string, []byte, os.FileMode) error { return nil })
+	inst.testConfig = testConfig
+	return inst.WithStage(StagePlan{Config: []byte("pools: []\n")})
+}
+
+// stage() must bound the -test-config exec itself: Install runs with
+// context.Background() (installdaemon.go never sets a deadline), so if stage
+// didn't wrap the call, a hung staged binary would block install forever —
+// exactly what commandTimeout exists to prevent for every other privileged
+// step in this file.
+func TestStageBoundsTestConfigCall(t *testing.T) {
+	r := &recordedRun{}
+	var sawDeadline bool
+	inst := newStagingInstaller(r, func(ctx context.Context, _, _ string) (home.Verdict, error) {
+		_, sawDeadline = ctx.Deadline()
+		return home.Verdict{Status: home.VerdictOK}, nil
+	})
+	if err := inst.Install(context.Background()); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if !sawDeadline {
+		t.Error("testConfig must be called with a bounded context, not the caller's undeadlined ctx")
+	}
+}
+
+// A warn-tier verdict must not be silently discarded just because -test-config
+// exits 0 — the fresh-install moment is the one chance the operator has to see
+// it before the daemon comes up on it.
+func TestStageSurfacesWarningsAndProceeds(t *testing.T) {
+	r := &recordedRun{}
+	var logs []string
+	inst := newStagingInstaller(r, func(context.Context, string, string) (home.Verdict, error) {
+		return home.Verdict{Status: home.VerdictWarn, Warnings: []home.Warning{
+			{Kind: home.WarnResourceOvercommit, Message: "cpu oversubscribed"},
+		}}, nil
+	})
+	inst.log = func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+	if err := inst.Install(context.Background()); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if !slices.ContainsFunc(logs, func(l string) bool { return strings.Contains(l, "cpu oversubscribed") }) {
+		t.Errorf("warn-tier verdict's warning was not logged; got %v", logs)
+	}
+	if !exactCall(r.calls, "/bin/launchctl", "bootstrap", "system", PlistPath()) {
+		t.Error("a warn-tier verdict must still let install proceed to bootstrap")
+	}
+}
+
+// An error-tier (or any status this runnyctl/runnyd version doesn't recognize)
+// must still block install and leave the home in place without bootstrapping —
+// exactly what gating on the exit code alone already gave us for errors;
+// parsing the JSON must not regress that, and an unrecognized status must fail
+// closed rather than being treated as an implicit ok (matching decideUpgrade
+// and edit-config's gates on the same contract).
+func TestStageFailsOnBlockingVerdict(t *testing.T) {
+	cases := map[string]home.Verdict{
+		"error tier":          {Status: home.VerdictError, Errors: []string{"pools[0].github.app_id: required"}},
+		"unrecognized status": {Status: "future-status"},
+	}
+	for name, verdict := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := &recordedRun{}
+			inst := newStagingInstaller(r, func(context.Context, string, string) (home.Verdict, error) {
+				return verdict, nil
+			})
+			err := inst.Install(context.Background())
+			if err == nil {
+				t.Fatal("Install must refuse a blocking verdict")
+			}
+			// The status must appear in the message even when Errors is empty (the
+			// "unrecognized status" case) — otherwise the operator sees no reason
+			// for the refusal.
+			if !strings.Contains(err.Error(), verdict.Status) {
+				t.Errorf("error must name the verdict's status %q, got: %v", verdict.Status, err)
+			}
+			if exactCall(r.calls, "/bin/launchctl", "bootstrap", "system", PlistPath()) {
+				t.Error("must not bootstrap over a staged config that failed validation")
+			}
+		})
 	}
 }

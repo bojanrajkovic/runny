@@ -243,6 +243,14 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 			digest, configLayer != nil, nvramLayer != nil, len(diskLayers))
 	}
 
+	// Validate disk layers before downloading anything: an unsupported disk
+	// layer type must be refused up front, not after config.json/nvram.bin
+	// have already been pulled.
+	offsets, sizes, total, err := diskLayerSizes(diskLayers)
+	if err != nil {
+		return "", err
+	}
+
 	// Small layers: straight blob writes.
 	for name, l := range map[string]*descriptor{"config.json": configLayer, "nvram.bin": nvramLayer} {
 		if err := c.pullBlobToFile(ctx, ref, *l, filepath.Join(destDir, name)); err != nil {
@@ -258,10 +266,6 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 	// would silently overwrite its neighbor while every digest still checks
 	// out (digests cover the compressed stream, not the decoded bytes).
 	diskPath := filepath.Join(destDir, "disk.img")
-	offsets, sizes, total, err := diskLayerSizes(diskLayers)
-	if err != nil {
-		return "", err
-	}
 	// Refuse a doomed pull up front: the decompressed image must fit. Hours
 	// of download ending in ENOSPC is the silent-failure shape this daemon
 	// exists to kill (and these images are large — 80GB+ uncompressed).

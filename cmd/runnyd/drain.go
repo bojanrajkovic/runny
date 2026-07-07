@@ -201,7 +201,7 @@ func (d *drainer) observe(st statemachine.Status) {
 
 // recheck re-evaluates convergence, re-issuing pause+recycle to every
 // non-converged slot, and kicks the exit attempt once converged. Called on
-// every status change while draining, from requestReload/SIGHUP, and from
+// every status change while draining, from runReload/SIGHUP, and from
 // the held-gate retry ticker. Bounded and cheap: sends are non-blocking,
 // and a JOB slot always eventually transitions (max_job_duration),
 // producing another status change.

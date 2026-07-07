@@ -9,7 +9,7 @@ import Foundation
 /// unit-tested surface; `probe` is the thin live-only shell over `BoundedProcess`.
 
 /// The verdict `runnyd -test-config` emits — the cross-language contract, mirrored
-/// from the Go `configVerdict`. The JSON is the contract; this Decodable tracks it.
+/// from the Go `home.Verdict` (internal/home/testconfig.go). The JSON is the contract; this Decodable tracks it.
 struct ConfigCompatVerdict: Decodable, Equatable {
     enum Status: String, Decodable {
         case ok

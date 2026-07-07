@@ -569,7 +569,7 @@ func TestTraceConsumerHTTPSpans(t *testing.T) {
 func TestTraceConsumerPullSpans(t *testing.T) {
 	emit, exp := newTestAssembler(t)
 
-	pull := &obs.PullRef{ID: "pull-abc123", Ref: "ghcr.io/x@sha256:d34d", Digest: "sha256:d34d", Started: at(0)}
+	pull := &obs.PullRef{ID: "pull-abc123", Ref: "ghcr.io/x@sha256:d34d", Digest: "sha256:d34d"}
 
 	// The cycle side: ENSURE_IMAGE's wait-for-pull action, carrying the same
 	// pull id the pull side will carry on its root.
@@ -658,7 +658,7 @@ func TestTraceConsumerPullSpans(t *testing.T) {
 func TestTraceConsumerPullFailureStatus(t *testing.T) {
 	emit, exp := newTestAssembler(t)
 
-	pull := &obs.PullRef{ID: "pull-fail", Ref: "ghcr.io/x", Digest: "sha256:x", Started: at(0)}
+	pull := &obs.PullRef{ID: "pull-fail", Ref: "ghcr.io/x", Digest: "sha256:x"}
 	emit(obs.Event{Time: at(0), Pull: pull, Kind: obs.KindPullStarted})
 	emit(obs.Event{Time: at(1), Pull: pull, Kind: obs.KindPullFinished, PullInfo: &obs.PullEvent{
 		Outcome: obs.OutcomeError, Error: "registry 503", Duration: time.Second,
@@ -682,7 +682,7 @@ func TestTraceConsumerPullFailureStatus(t *testing.T) {
 func TestTraceConsumerPullAbandonedClosesRootAndEvicts(t *testing.T) {
 	emit, exp := newTestAssembler(t)
 
-	pull := &obs.PullRef{ID: "pull-abandoned", Ref: "ghcr.io/x", Digest: "sha256:x", Started: at(0)}
+	pull := &obs.PullRef{ID: "pull-abandoned", Ref: "ghcr.io/x", Digest: "sha256:x"}
 	emit(obs.Event{Time: at(0), Pull: pull, Kind: obs.KindPullStarted})
 	emit(obs.Event{Time: at(1), Pull: pull, Kind: obs.KindDetail, Detail: &obs.DetailEvent{Text: "pulled 500 MiB"}})
 	emit(obs.Event{Time: at(2), Pull: pull, Kind: obs.KindPullAbandoned})
@@ -719,8 +719,8 @@ func TestTraceConsumerPullAbandonedClosesRootAndEvicts(t *testing.T) {
 func TestTraceConsumerPullSuccessorSurvivesStalePredecessorEvent(t *testing.T) {
 	emit, exp := newTestAssembler(t)
 
-	predecessor := &obs.PullRef{ID: "pull-shared", Ref: "ghcr.io/x", Digest: "sha256:x", Started: at(0)}
-	successor := &obs.PullRef{ID: "pull-shared", Ref: "ghcr.io/x", Digest: "sha256:x", Started: at(1)}
+	predecessor := &obs.PullRef{ID: "pull-shared", Ref: "ghcr.io/x", Digest: "sha256:x"}
+	successor := &obs.PullRef{ID: "pull-shared", Ref: "ghcr.io/x", Digest: "sha256:x"}
 
 	emit(obs.Event{Time: at(0), Pull: predecessor, Kind: obs.KindPullStarted})
 	emit(obs.Event{Time: at(1), Pull: successor, Kind: obs.KindPullStarted}) // supersedes predecessor's entry

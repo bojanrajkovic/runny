@@ -3,11 +3,10 @@ package obs
 import (
 	"context"
 	"testing"
-	"time"
 )
 
 func testPull() PullRef {
-	return PullRef{ID: "abc123", Ref: "ghcr.io/x@sha256:d34d", Digest: "sha256:d34d", Started: time.Now()}
+	return PullRef{ID: "abc123", Ref: "ghcr.io/x@sha256:d34d", Digest: "sha256:d34d"}
 }
 
 // A pull-scoped event carries Event.Pull, not Event.Cycle — the two scope

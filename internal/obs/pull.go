@@ -12,10 +12,9 @@ import (
 type PullRef struct {
 	// ID is pullID(dir): the correlation handle cycles already carry via
 	// AttrPullID on their wait-for-pull action.
-	ID      string
-	Ref     string
-	Digest  string
-	Started time.Time
+	ID     string
+	Ref    string
+	Digest string
 }
 
 const (

@@ -121,7 +121,7 @@ func acquirePuller(dir string, report func(string), proto *imagePuller) (chan en
 		now := time.Now()
 		pctx, cancel := context.WithCancel(context.Background())
 		pctx = obs.WithPull(pctx, proto.events, obs.PullRef{
-			ID: pullID(dir), Ref: proto.ref.String(), Digest: proto.ref.Digest, Started: now,
+			ID: pullID(dir), Ref: proto.ref.String(), Digest: proto.ref.Digest,
 		})
 		proto.ctx = pctx
 		proto.cancel = cancel

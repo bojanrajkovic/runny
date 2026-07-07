@@ -105,22 +105,40 @@ struct MenuBarView: View {
             Button("Open Runny") {
                 activation.openMainWindow(openWindow)
             }
-            // Reload's confirmation dialog lives on the main window (the popover
-            // panel has no reliable presenter), so route through the window.
-            Button(store.reloadInFlight ? "Validating…" : "Reload…") {
-                activation.openMainWindow(openWindow)
-                // Shared gate (explicitUpdate: false — this button's drain dialog is
-                // the consent): an upgrade reload runs the gate (Warn/Error pop up, OK
-                // shows the drain confirm); a plain reload gets the generic confirm.
-                Task { await startGatedReload(store, agent, explicitUpdate: false) }
-            }
-            .disabled(store.reloadInFlight || store.client == nil)
+            // The popover panel has no reliable dialog presenter, so route
+            // through the window first.
+            ReloadButton(title: "Reload…", openWindowFirst: true)
             Spacer()
             DoctorChip()
             Spacer()
             Button("Quit") { NSApp.terminate(nil) }
         }
         .controlSize(.small)
+    }
+}
+
+/// The Reload button shared by the popover footer and the main window's
+/// daemon card — same gated-reload logic, differing only in whether the main
+/// window needs opening first (the popover routes through it; the main
+/// window is already frontmost).
+struct ReloadButton: View {
+    @Environment(DaemonStore.self) private var store
+    @Environment(AgentController.self) private var agent
+    @Environment(ActivationCoordinator.self) private var activation
+    @Environment(\.openWindow) private var openWindow
+
+    let title: String
+    var openWindowFirst = false
+
+    var body: some View {
+        Button(store.reloadInFlight ? "Validating…" : title) {
+            if openWindowFirst { activation.openMainWindow(openWindow) }
+            // Shared gate (explicitUpdate: false — this button's drain dialog is
+            // the consent): an upgrade reload runs the gate (Warn/Error pop up, OK
+            // shows the drain confirm); a plain reload gets the generic confirm.
+            Task { await startGatedReload(store, agent, explicitUpdate: false) }
+        }
+        .disabled(store.reloadInFlight || store.client == nil)
     }
 }
 

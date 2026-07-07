@@ -124,7 +124,6 @@ extension View {
 /// Compact daemon status: connection, version, uptime, last update.
 struct DaemonCard: View {
     @Environment(DaemonStore.self) private var store
-    @Environment(AgentController.self) private var agent
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -157,13 +156,7 @@ struct DaemonCard: View {
             // app-installed agent is newer than the running daemon.
             DaemonUpdateAffordance()
             HStack {
-                Button(store.reloadInFlight ? "Validating…" : "Reload Config…") {
-                    // Shared gate (explicitUpdate: false — this button's drain dialog is
-                    // the consent): an upgrade reload runs the gate (Warn/Error pop up, OK
-                    // shows the drain confirm); a plain reload gets the generic confirm.
-                    Task { await startGatedReload(store, agent, explicitUpdate: false) }
-                }
-                .disabled(store.reloadInFlight || store.client == nil)
+                ReloadButton(title: "Reload Config…")
                 // Manual re-dial of the same daemon at the fixed ~/.runny.
                 // Disabled while a reload is draining so a re-dial can't tear
                 // down the stream and discard the convergence verdict mid-drain;

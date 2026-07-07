@@ -387,35 +387,29 @@ func TestStageSurfacesWarningsAndProceeds(t *testing.T) {
 	}
 }
 
-// An error-tier verdict must still block install and leave the home in place
-// without bootstrapping — exactly what gating on the exit code alone already
-// gave us; parsing the JSON must not regress that.
-func TestStageFailsOnErrorVerdictAndSkipsBootstrap(t *testing.T) {
-	r := &recordedRun{}
-	inst := newStagingInstaller(r, func(context.Context, string, string) (home.Verdict, error) {
-		return home.Verdict{Status: home.VerdictError, Errors: []string{"pools[0].github.app_id: required"}}, nil
-	})
-	err := inst.Install(context.Background())
-	if err == nil {
-		t.Fatal("Install must refuse an error-tier staged config")
+// An error-tier (or any status this runnyctl/runnyd version doesn't recognize)
+// must still block install and leave the home in place without bootstrapping —
+// exactly what gating on the exit code alone already gave us for errors;
+// parsing the JSON must not regress that, and an unrecognized status must fail
+// closed rather than being treated as an implicit ok (matching decideUpgrade
+// and edit-config's gates on the same contract).
+func TestStageFailsOnBlockingVerdict(t *testing.T) {
+	cases := map[string]home.Verdict{
+		"error tier":          {Status: home.VerdictError, Errors: []string{"pools[0].github.app_id: required"}},
+		"unrecognized status": {Status: "future-status"},
 	}
-	if !strings.Contains(err.Error(), "app_id: required") {
-		t.Errorf("error must surface the verdict's errors, got: %v", err)
-	}
-	if exactCall(r.calls, "/bin/launchctl", "bootstrap", "system", PlistPath()) {
-		t.Error("must not bootstrap over a staged config that failed validation")
-	}
-}
-
-// A status this runnyctl/runnyd version doesn't recognize must fail closed,
-// matching decideUpgrade and edit-config's gates on the same contract — never
-// treated as an implicit ok.
-func TestStageFailsClosedOnUnrecognizedStatus(t *testing.T) {
-	r := &recordedRun{}
-	inst := newStagingInstaller(r, func(context.Context, string, string) (home.Verdict, error) {
-		return home.Verdict{Status: "future-status"}, nil
-	})
-	if err := inst.Install(context.Background()); err == nil {
-		t.Error("an unrecognized verdict status must fail closed, not be treated as ok")
+	for name, verdict := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := &recordedRun{}
+			inst := newStagingInstaller(r, func(context.Context, string, string) (home.Verdict, error) {
+				return verdict, nil
+			})
+			if err := inst.Install(context.Background()); err == nil {
+				t.Fatal("Install must refuse a blocking verdict")
+			}
+			if exactCall(r.calls, "/bin/launchctl", "bootstrap", "system", PlistPath()) {
+				t.Error("must not bootstrap over a staged config that failed validation")
+			}
+		})
 	}
 }

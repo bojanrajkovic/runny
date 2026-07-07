@@ -109,7 +109,7 @@ func (c *ctl) editConfig(ctx context.Context) error {
 	if err := os.Rename(tmpPath, configPath); err != nil {
 		return fmt.Errorf("applying the edited config: %w", err)
 	}
-	fmt.Fprintf(c.out, "config saved (sha256 %.12x)\n", sha256.Sum256(after))
+	fmt.Fprintf(c.out, "config saved (sha256 %s)\n", shortHex(fmt.Sprintf("%x", sha256.Sum256(after))))
 
 	pctx, cancel := context.WithTimeout(ctx, probeCallTimeout)
 	_, statusErr := c.client.GetStatus(pctx, &runnyv1.GetStatusRequest{})

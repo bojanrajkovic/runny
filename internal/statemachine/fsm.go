@@ -359,10 +359,22 @@ func NewSlot(name string, deps Deps) *Slot {
 // Run() — for tests in other packages (e.g. internal/socket) that need a
 // slot in a specific state, such as LISTENING, without driving a full FSM
 // cycle through the heavy harness in fsm_test.go (package-private, not
-// importable from elsewhere). Not for production use: nothing outside a
-// _test.go file should call this.
+// importable from elsewhere). Only Status, Command, Name, and OnChange are
+// safe to call on the result: deps is left at its zero value except Log
+// (defaulted like NewSlot), so Run — or anything else that reaches into
+// deps.Config/deps.Home — panics on a nil dereference instead of doing
+// something benign. Not for production use: nothing outside a _test.go file
+// should call this.
 func NewSlotForTest(name string, status Status) *Slot {
-	return &Slot{name: name, cmds: make(chan Command, CmdBufferSize), cell: &statusCell{status: status}}
+	if status.Slot == "" {
+		status.Slot = name // mirrors newStatusCell's identity seed
+	}
+	return &Slot{
+		name: name,
+		deps: Deps{Log: slog.Default().With("slot", name)},
+		cmds: make(chan Command, CmdBufferSize),
+		cell: &statusCell{status: status},
+	}
 }
 
 // Command injects an operator command; non-blocking (drops when the buffer

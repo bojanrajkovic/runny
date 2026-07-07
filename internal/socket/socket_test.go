@@ -288,6 +288,66 @@ func TestInjectDebugKeyValidation(t *testing.T) {
 	}
 }
 
+// TestInjectDebugKeyAbortsOnCancelDuringLookupStall pins the recheck in
+// InjectDebugKey right after operatorIdentity: a client that cancels WHILE
+// lookupUsername is genuinely stalled (not just one already dead before the
+// call) must get the ctx-derived error and must NOT have its key enqueued to
+// the slot. Every other InjectDebugKey test uses a live t.Context(), so this
+// recheck had zero coverage — deleting it failed nothing. A peer identity is
+// required (asOperator) so operatorIdentity actually reaches lookupUsername
+// instead of short-circuiting at the peer-cred read — otherwise the test
+// would still pass if the recheck were hoisted above operatorIdentity
+// entirely, leaving the real race (cancellation landing mid-stall) unproven.
+func TestInjectDebugKeyAbortsOnCancelDuringLookupStall(t *testing.T) {
+	slot := statemachine.NewSlotForTest("mac-1", statemachine.Status{State: statemachine.StateListening})
+	srv := newTestServer([]*statemachine.Slot{slot}, nil, nil, nil)
+
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	sshPub, _ := ssh.NewPublicKey(pub)
+	goodKey := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPub))) + " op@host"
+
+	inLookup := make(chan struct{})
+	release := make(chan struct{})
+	orig := lookupID
+	lookupID = func(string) (*user.User, error) {
+		close(inLookup)
+		<-release // hold lookupUsername stalled until the test says go
+		return &user.User{Username: "op"}, nil
+	}
+	t.Cleanup(func() { lookupID = orig })
+
+	ctx, cancel := context.WithCancel(asOperator(t.Context(), 501))
+	done := make(chan error, 1)
+	go func() {
+		_, err := srv.InjectDebugKey(ctx, &runnyv1.InjectDebugKeyRequest{Slot: "mac-1", PublicKey: goodKey})
+		done <- err
+	}()
+
+	<-inLookup     // the lookup has genuinely started stalling
+	cancel()       // cancel WHILE it's stuck — the exact race the recheck guards
+	close(release) // let the stalled lookup finish resolving
+
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("InjectDebugKey did not return after the client canceled during the lookup stall")
+	}
+	if status.Code(err) != codes.Canceled {
+		t.Fatalf("code = %v, want Canceled", status.Code(err))
+	}
+
+	// The recheck must short-circuit BEFORE slot.Command() — prove the debug
+	// key was never enqueued by filling the command buffer from empty and
+	// confirming every slot was free (a leaked command would leave one less).
+	for i := range statemachine.CmdBufferSize {
+		if !slot.Command(statemachine.Command{Kind: statemachine.CmdRecycle}) {
+			t.Fatalf("command queue had only %d free slots after the aborted injection, want %d (a command leaked in)",
+				i, statemachine.CmdBufferSize)
+		}
+	}
+}
+
 func TestToLogLine(t *testing.T) {
 	e := logring.Entry{
 		Time:    time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC),

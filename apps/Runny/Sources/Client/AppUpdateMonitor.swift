@@ -5,8 +5,8 @@ import Foundation
 /// every 24h, and on the "Check for Updates…" menu command
 /// (`.runnyCheckForAppUpdates`). Split out of `DaemonStore` because it shares no
 /// state with the connection FSM — only `DaemonStore.appVersion`, a constant, and
-/// `AppUpdateChecker`, already its own type. `DaemonStore` holds one instance and
-/// forwards `shownUpdate`/`dismissedUpdate` so existing call sites are untouched.
+/// `AppUpdateChecker`, already its own type. `DaemonStore` holds one instance;
+/// views reach it directly via `store.updateMonitor`.
 @MainActor
 @Observable
 final class AppUpdateMonitor {

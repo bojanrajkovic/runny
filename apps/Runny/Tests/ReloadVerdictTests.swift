@@ -235,6 +235,51 @@ final class JobInFlightSeedTests: XCTestCase {
     }
 }
 
+/// The pending-reload lifecycle: only an accepted reload arms or replaces the
+/// tracked pending. A refusal must leave an earlier accepted reload's tracking
+/// intact, so a second reload attempt that gets refused mid-drain can't cancel
+/// the first one's convergence verdict. Drives the real `applyReloadResponse`
+/// — `performReload()`'s only reaction to an answered RPC — against canned
+/// responses; the RPC round trip itself needs no live daemon to pin this.
+@MainActor
+final class PendingReloadLifecycleTests: XCTestCase {
+    private func response(accepted: Bool, bootID: String = "") -> Runny_V1_ReloadResponse {
+        var resp = Runny_V1_ReloadResponse()
+        resp.accepted = accepted
+        resp.acceptingBootID = bootID
+        return resp
+    }
+
+    func testAcceptedArmsThePending() {
+        let store = DaemonStore()
+        store.applyReloadResponse(response(accepted: true, bootID: "boot-A"), priorStart: nil, isUpdate: false)
+        XCTAssertEqual(store.pendingReload?.acceptingBootID, "boot-A")
+    }
+
+    func testAcceptedReplacesAnExistingPending() {
+        let store = DaemonStore()
+        store.applyReloadResponse(response(accepted: true, bootID: "boot-A"), priorStart: nil, isUpdate: false)
+        store.applyReloadResponse(response(accepted: true, bootID: "boot-B"), priorStart: nil, isUpdate: false)
+        XCTAssertEqual(store.pendingReload?.acceptingBootID, "boot-B")
+    }
+
+    func testRefusalKeepsAnExistingAcceptedPendingIntact() {
+        let store = DaemonStore()
+        store.applyReloadResponse(response(accepted: true, bootID: "boot-A"), priorStart: nil, isUpdate: false)
+        store.applyReloadResponse(response(accepted: false), priorStart: nil, isUpdate: false)
+        XCTAssertEqual(
+            store.pendingReload?.acceptingBootID, "boot-A",
+            "a refused reload must not clear an earlier accepted reload's pending tracking"
+        )
+    }
+
+    func testRefusalWithNoPriorPendingStaysNil() {
+        let store = DaemonStore()
+        store.applyReloadResponse(response(accepted: false), priorStart: nil, isUpdate: false)
+        XCTAssertNil(store.pendingReload)
+    }
+}
+
 /// A reload that throws is ambiguous — a transport drop or deadline means the
 /// daemon may have accepted it and begun draining — so the banner must not assert
 /// a flat "reload failed". (A definitive gRPC rejection IS a real failure, but

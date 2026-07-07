@@ -134,19 +134,9 @@ final class DaemonStore {
 
     /// The app-update poll (GitHub releases/latest, fail-quiet) lives in its own
     /// type — it shares no state with the connection FSM, only the `appVersion`
-    /// constant below. `shownUpdate`/`dismissedUpdate` forward so existing call
-    /// sites (the popover's `AppUpdateBanner`) are untouched.
-    private let updateMonitor = AppUpdateMonitor()
-
-    /// The banner to show: the latest release minus what was dismissed. A
-    /// dismissed "v0.7.0" stays gone until a "v0.7.1" check arrives.
-    var shownUpdate: AppUpdate? { updateMonitor.shownUpdate }
-    /// The update the operator dismissed — keyed on the version string so a
-    /// re-check of the same release stays quiet, but a newer release is new news.
-    var dismissedUpdate: AppUpdate? {
-        get { updateMonitor.dismissedUpdate }
-        set { updateMonitor.dismissedUpdate = newValue }
-    }
+    /// constant below. Not `private`: `MenuBarView` reads `shownUpdate`/sets
+    /// `dismissedUpdate` on it directly.
+    let updateMonitor = AppUpdateMonitor()
 
     /// The live skew — gated on a healthy connection only. The main-window card
     /// reads this and renders it as an always-on status row, like the draining
@@ -273,8 +263,9 @@ final class DaemonStore {
     /// Set the command banner and record which command it belongs to. The
     /// assignment fires `commandError`'s didSet (clearing the id), then we set
     /// the real provenance — so the final state is `(text, id)` regardless of
-    /// what the id was before.
-    private func setCommandError(_ text: String, id: String?) {
+    /// what the id was before. Not `private`: tests use it to seed a banner's
+    /// provenance without a live command RPC.
+    func setCommandError(_ text: String, id: String?) {
         commandError = text
         commandErrorID = id
     }
@@ -298,7 +289,9 @@ final class DaemonStore {
     /// concurrent nudge from the other surface backs off instead of racing it.
     private var autoApplyTask: Task<Void, Never>?
 
-    private(set) var pending: [String: PendingCommand] = [:]
+    /// Not `private(set)`: tests seed a command directly here to drive
+    /// `confirmPending()`'s real retraction logic without a live command RPC.
+    var pending: [String: PendingCommand] = [:]
     /// Ids a snapshot confirmed in the last confirm→catch window, so a late RPC
     /// error doesn't contradict a confirmation the operator can already see.
     private var recentlyConfirmed = RecentlyConfirmed()
@@ -308,8 +301,10 @@ final class DaemonStore {
     /// across a respawn, boot id does not), the config hash the reload validated
     /// (so the respawn can be confirmed to have loaded that file), and the
     /// pre-reload start time as the protocol-1 fallback discriminator. nil when
-    /// no reload is in flight.
-    private var pendingReload: PendingReload?
+    /// no reload is in flight. Read-only outside this file: only
+    /// `applyReloadResponse`/`noteRespawnIfReady`/etc. set it — the readable half
+    /// of the testable seam `reloadPending` already exposes existence-only for.
+    private(set) var pendingReload: PendingReload?
     /// True while a reload is draining toward its respawn (a pendingReload is
     /// armed) — the window in which a manual Reconnect would tear down the stream
     /// and silently discard the convergence verdict the operator is waiting on.
@@ -646,7 +641,9 @@ final class DaemonStore {
         return "no socket at \(RunnyHome.displaySocketPath) — is runnyd running, or using a different home?"
     }
 
-    private func apply(_ snapshot: Runny_V1_GetStatusResponse) {
+    /// Not `private`: tests drive a snapshot's full apply — including
+    /// `confirmPending()`'s retraction logic — without a live WatchStatus stream.
+    func apply(_ snapshot: Runny_V1_GetStatusResponse) {
         connection = .connected
         slots = snapshot.slots.sorted { $0.slot < $1.slot }
         daemonVersion = snapshot.version
@@ -1138,38 +1135,7 @@ final class DaemonStore {
             do {
                 let resp = try await client.reload(reason: "operator request (Runny)")
                 guard !Task.isCancelled else { return }
-                // Only an accepted reload (re)arms the pending tracking. A refusal
-                // must NOT cancel an earlier accepted reload still draining toward
-                // its respawn — that one keeps its convergence verdict (nil-coalescing
-                // to `pendingReload` below); the refusal only surfaces the failed checks.
-                let accepted = resp.accepted
-                    ? PendingReload(
-                        acceptingBootID: resp.acceptingBootID, priorStart: priorStart,
-                        wantSHA: resp.configSha256, acceptedAt: Date()
-                    )
-                    : nil
-                pendingReload = accepted ?? pendingReload
-                guard resp.accepted else {
-                    commandError = Self.describeRefusal(resp)
-                    return
-                }
-                // An accepted update reload records the attempt — so a respawn that
-                // comes back still older surfaces "update didn't take", while a
-                // cancelled or refused one never does.
-                if isUpdate { daemonUpdateAttempted = true }
-                // Seed from the slots visible at acceptance, so a daemon that
-                // dies before its next snapshot still carries a job-in-flight
-                // warning into the verdict; later old-process snapshots refine it.
-                reloadJobInFlight = Self.anyJobRunning(slots)
-                reloadStallSeq = drainSeq
-                reloadStallSince = Date()
-                var notes = resp.warnings.filter { !$0.ok }.map { "\($0.name): \($0.detail)" }
-                if resp.acceptingBootID.isEmpty {
-                    notes.append("this daemon predates boot-id reporting — confirming the respawn by start time only; a stalled drain can't be detected either (no drain-progress signal before protocol 2)")
-                }
-                if !notes.isEmpty {
-                    commandNote = "reload accepted — " + notes.joined(separator: "; ")
-                }
+                applyReloadResponse(resp, priorStart: priorStart, isUpdate: isUpdate)
                 // The drain itself shows through the live WatchStatus stream; the
                 // respawn is resolved by noteRespawnIfReady on a later snapshot.
             } catch {
@@ -1185,6 +1151,50 @@ final class DaemonStore {
                 // accepted reload's pending is untouched either way.
                 commandError = Self.reloadThrowBanner(error)
             }
+        }
+    }
+
+    /// `performReload()`'s only reaction to an answered RPC: arm/replace the
+    /// pending tracking on acceptance, or leave an earlier accepted reload's
+    /// tracking untouched on refusal (nil-coalescing to `pendingReload`, never
+    /// dropping it) — the failed checks are surfaced either way. An accepted
+    /// reload also seeds the drain/job-in-flight bookkeeping the respawn verdict
+    /// needs. Not `private`: this is the real state transition (not a
+    /// duplicate/pure verdict of it), factored out so the refusal-preserves-an-
+    /// earlier-pending contract runs against a real (if canned) `ReloadResponse`
+    /// without a live daemon — mirrors `trackReloadDrain`/`noteRespawnIfReady`,
+    /// the other instance methods that react to real state rather than compute a
+    /// verdict from parameters.
+    func applyReloadResponse(
+        _ resp: Runny_V1_ReloadResponse, priorStart: Date?, isUpdate: Bool
+    ) {
+        let accepted = resp.accepted
+            ? PendingReload(
+                acceptingBootID: resp.acceptingBootID, priorStart: priorStart,
+                wantSHA: resp.configSha256, acceptedAt: Date()
+            )
+            : nil
+        pendingReload = accepted ?? pendingReload
+        guard resp.accepted else {
+            commandError = Self.describeRefusal(resp)
+            return
+        }
+        // An accepted update reload records the attempt — so a respawn that
+        // comes back still older surfaces "update didn't take", while a
+        // cancelled or refused one never does.
+        if isUpdate { daemonUpdateAttempted = true }
+        // Seed from the slots visible at acceptance, so a daemon that
+        // dies before its next snapshot still carries a job-in-flight
+        // warning into the verdict; later old-process snapshots refine it.
+        reloadJobInFlight = Self.anyJobRunning(slots)
+        reloadStallSeq = drainSeq
+        reloadStallSince = Date()
+        var notes = resp.warnings.filter { !$0.ok }.map { "\($0.name): \($0.detail)" }
+        if resp.acceptingBootID.isEmpty {
+            notes.append("this daemon predates boot-id reporting — confirming the respawn by start time only; a stalled drain can't be detected either (no drain-progress signal before protocol 2)")
+        }
+        if !notes.isEmpty {
+            commandNote = "reload accepted — " + notes.joined(separator: "; ")
         }
     }
 

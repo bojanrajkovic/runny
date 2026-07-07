@@ -39,9 +39,9 @@ struct MenuBarView: View {
             }
             // App-update notify: a newer Runny shipped. Keyed on version string so
             // dismissing "v0.7.0" stays quiet until "v0.7.1" arrives as new news.
-            if let update = store.shownUpdate {
+            if let update = store.updateMonitor.shownUpdate {
                 AppUpdateBanner(update: update) {
-                    store.dismissedUpdate = update
+                    store.updateMonitor.dismissedUpdate = update
                 }
             }
             Divider()

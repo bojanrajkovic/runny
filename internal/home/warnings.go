@@ -102,7 +102,7 @@ func (c *Config) Warnings(host HostResources) []Warning {
 	// reflects guest-op latency, not the much larger limit budgets
 	// (max_job_duration, max_idle).
 	for _, f := range deadlineFields {
-		d := *f.get(&c.Deadlines)
+		d := *f.get(c)
 		if d > 0 && d.D() < deadlineFloor {
 			ws = append(ws, Warning{
 				Kind: WarnDeadlineTooShort,

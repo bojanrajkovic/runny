@@ -16,7 +16,7 @@ import RunnyV1
 @MainActor
 @Observable
 final class LogStreamModel {
-    struct Line: Identifiable {
+    struct Line {
         let id: Int
         let time: Date
         let level: String

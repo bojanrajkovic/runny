@@ -260,6 +260,12 @@
             "type": "string"
           },
           "type": "object"
+        },
+        "guest_setup": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "additionalProperties": false,

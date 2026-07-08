@@ -172,6 +172,27 @@ func TestLoadConfigGuestEnv(t *testing.T) {
 	}
 }
 
+func TestLoadConfigGuestSetup(t *testing.T) {
+	c, err := LoadConfig(writeConfig(t, minimalConfig+
+		"    guest_setup:\n      - defaults write com.apple.dt.Xcode IDEPackageSupportUseBuiltinSCM -bool YES\n      - echo hi\n"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	setup := c.Pools[0].GuestSetup
+	want := []string{"defaults write com.apple.dt.Xcode IDEPackageSupportUseBuiltinSCM -bool YES", "echo hi"}
+	if len(setup) != len(want) || setup[0] != want[0] || setup[1] != want[1] {
+		t.Errorf("GuestSetup = %v, want %v", setup, want)
+	}
+	// A pool without the key leaves it nil — the no-op default.
+	c2, err := LoadConfig(writeConfig(t, minimalConfig))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if c2.Pools[0].GuestSetup != nil {
+		t.Errorf("absent guest_setup should be nil, got %v", c2.Pools[0].GuestSetup)
+	}
+}
+
 func TestLoadConfigValidation(t *testing.T) {
 	cases := []struct {
 		name, yaml, wantErr string
@@ -201,6 +222,8 @@ func TestLoadConfigValidation(t *testing.T) {
 		{"otlp empty header name", minimalConfig + "observability:\n  otlp:\n    endpoint: https://collector.example:4317\n    headers:\n      \"\": v\n", "header name must not be empty"},
 		{"guest_env bad key leading digit", minimalConfig + "    guest_env:\n      \"1BAD\": x\n", `guest_env key "1BAD"`},
 		{"guest_env bad key hyphen", minimalConfig + "    guest_env:\n      NO-PROXY: x\n", `guest_env key "NO-PROXY"`},
+		{"guest_setup empty entry", minimalConfig + "    guest_setup:\n      - \"\"\n", "guest_setup[0] must not be empty"},
+		{"guest_setup whitespace entry", minimalConfig + "    guest_setup:\n      - \"   \"\n", "guest_setup[0] must not be empty"},
 	}
 	for _, tc := range cases {
 		_, err := LoadConfig(writeConfig(t, tc.yaml))

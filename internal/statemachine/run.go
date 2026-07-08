@@ -375,7 +375,7 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 			// covers only the session start — the listening wait below is the
 			// remainder of the step span's own time.
 			err := obs.Action(bc, obs.ActionStartRunner, func(context.Context) error {
-				p, err := c.guest.StartRunner(cctx, jit.EncodedJITConfig, c.deps.Pool.OS, c.rec.RunnerVersion, c.deps.Pool.GuestEnv)
+				p, err := c.guest.StartRunner(cctx, jit.EncodedJITConfig, c.deps.Pool.OS, c.rec.RunnerVersion, c.deps.Pool.GuestEnv, c.deps.Pool.GuestSetup)
 				if err != nil {
 					return err
 				}

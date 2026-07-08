@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/goccy/go-yaml"
@@ -85,6 +86,17 @@ type PoolConfig struct {
 	// same trust-boundary discipline the runner-tarball name gets. It is not for
 	// secrets: the values land in the guest's process args during provisioning.
 	GuestEnv map[string]string `yaml:"guest_env"`
+	// GuestSetup is an ordered list of shell commands run in the guest as
+	// admin (passwordless sudo available), after the guest_env exports and
+	// before the runner launches — for system-level setup guest_env can't
+	// express (e.g. macOS's system proxy, which CFNetwork/Xcode read instead
+	// of *_proxy env vars). Absent means run nothing — provisioning is
+	// byte-identical to a pool without it. Entries are operator-authored,
+	// trusted config, injected verbatim into the provision script; their
+	// content can't be meaningfully validated, so only emptiness is checked
+	// at load. Like guest_env, this is not for secrets: entries are visible in
+	// the guest's process args during provisioning.
+	GuestSetup []string `yaml:"guest_setup"`
 }
 
 // SSHHardeningMode is the SSH posture applied to a pool's guests once the
@@ -503,6 +515,11 @@ func (c *Config) validate() error {
 		for k := range p.GuestEnv {
 			if !guestEnvNameRE.MatchString(k) {
 				errs = append(errs, fmt.Errorf("%s: guest_env key %q is not a valid environment variable name (%s)", at, k, guestEnvNameRE.String()))
+			}
+		}
+		for i, cmd := range p.GuestSetup {
+			if strings.TrimSpace(cmd) == "" {
+				errs = append(errs, fmt.Errorf("%s: guest_setup[%d] must not be empty or whitespace-only", at, i))
 			}
 		}
 	}

@@ -90,7 +90,7 @@ func TestProvisionScriptStagesExactTarball(t *testing.T) {
 		{"darwin", "actions-runner-osx-arm64-2.320.0.tar.gz"},
 		{"linux", "actions-runner-linux-arm64-2.320.0.tar.gz"},
 	} {
-		script, err := provisionScript(tc.goos, tc.name, nil)
+		script, err := provisionScript(tc.goos, tc.name, nil, nil)
 		if err != nil {
 			t.Fatalf("%s: provisionScript(%q): %v", tc.goos, tc.name, err)
 		}
@@ -121,7 +121,7 @@ func TestProvisionScriptRejectsBadName(t *testing.T) {
 		"actions-runner-osx-arm64-2.320.0", // no .tar.gz
 		"foo bar.tar.gz",
 	} {
-		if _, err := provisionScript("darwin", bad, nil); err == nil {
+		if _, err := provisionScript("darwin", bad, nil, nil); err == nil {
 			t.Errorf("provisionScript accepted an unsafe tarball name %q", bad)
 		}
 	}
@@ -154,7 +154,7 @@ func TestProvisionScriptInjectsGuestEnv(t *testing.T) {
 	const tarball = "actions-runner-osx-arm64-2.320.0.tar.gz"
 	script, err := provisionScript("darwin", tarball, map[string]string{
 		"HTTPS_PROXY": "socks5h://192.168.64.1:1080",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("provisionScript: %v", err)
 	}
@@ -172,12 +172,66 @@ func TestProvisionScriptInjectsGuestEnv(t *testing.T) {
 // pure no-op, never a stray blank line or export.
 func TestProvisionScriptNoGuestEnvIsInert(t *testing.T) {
 	const tarball = "actions-runner-osx-arm64-2.320.0.tar.gz"
-	script, err := provisionScript("darwin", tarball, nil)
+	script, err := provisionScript("darwin", tarball, nil, nil)
 	if err != nil {
 		t.Fatalf("provisionScript: %v", err)
 	}
 	if strings.Contains(script, "export ") {
 		t.Errorf("nil guest_env produced an export line:\n%s", script)
+	}
+}
+
+// guestSetupBlock renders newline-joined commands verbatim; nil/empty renders
+// nothing (the no-op that keeps provisioning byte-identical).
+func TestGuestSetupBlock(t *testing.T) {
+	if got := guestSetupBlock(nil); got != "" {
+		t.Errorf("guestSetupBlock(nil) = %q, want empty", got)
+	}
+	if got := guestSetupBlock([]string{}); got != "" {
+		t.Errorf("guestSetupBlock(empty) = %q, want empty", got)
+	}
+	got := guestSetupBlock([]string{"defaults write com.apple.dt.Xcode IDEPackageSupportUseBuiltinSCM -bool YES", "sudo networksetup -setwebproxy Wi-Fi 192.168.64.1 1080"})
+	want := "defaults write com.apple.dt.Xcode IDEPackageSupportUseBuiltinSCM -bool YES\nsudo networksetup -setwebproxy Wi-Fi 192.168.64.1 1080\n"
+	if got != want {
+		t.Errorf("guestSetupBlock = %q, want %q", got, want)
+	}
+}
+
+// A pool's guest_setup runs after the guest_env exports and before the runner
+// launches, so hooks can rely on guest_env already being in scope.
+func TestProvisionScriptInjectsGuestSetupAfterGuestEnv(t *testing.T) {
+	const tarball = "actions-runner-osx-arm64-2.320.0.tar.gz"
+	script, err := provisionScript("darwin", tarball,
+		map[string]string{"HTTPS_PROXY": "socks5h://192.168.64.1:1080"},
+		[]string{"defaults write com.apple.dt.Xcode IDEPackageSupportUseBuiltinSCM -bool YES"})
+	if err != nil {
+		t.Fatalf("provisionScript: %v", err)
+	}
+	envIdx := strings.Index(script, "export HTTPS_PROXY=")
+	setupIdx := strings.Index(script, "defaults write com.apple.dt.Xcode")
+	runIdx := strings.Index(script, "exec ./run.sh")
+	if envIdx < 0 || setupIdx < 0 || runIdx < 0 {
+		t.Fatalf("script missing expected pieces:\n%s", script)
+	}
+	if !(envIdx < setupIdx && setupIdx < runIdx) {
+		t.Errorf("wrong ordering: env=%d setup=%d run=%d, want env < setup < run:\n%s", envIdx, setupIdx, runIdx, script)
+	}
+}
+
+// No guest_setup is byte-for-byte the pre-feature script: the injection must be
+// a pure no-op.
+func TestProvisionScriptNoGuestSetupIsInert(t *testing.T) {
+	const tarball = "actions-runner-osx-arm64-2.320.0.tar.gz"
+	without, err := provisionScript("darwin", tarball, nil, nil)
+	if err != nil {
+		t.Fatalf("provisionScript: %v", err)
+	}
+	withEmpty, err := provisionScript("darwin", tarball, nil, []string{})
+	if err != nil {
+		t.Fatalf("provisionScript: %v", err)
+	}
+	if without != withEmpty {
+		t.Errorf("empty guest_setup changed the script:\nwithout=%q\nwithEmpty=%q", without, withEmpty)
 	}
 }
 

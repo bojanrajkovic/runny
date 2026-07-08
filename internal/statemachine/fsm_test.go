@@ -166,15 +166,16 @@ func (p *fakeProc) exit(code int) {
 }
 
 type fakeGuest struct {
-	proc      *fakeProc
-	startErr  error
-	diag      []byte
-	diagErr   error
-	diagBlock bool // PullDiag blocks until ctx expires (a wedged guest)
-	pulled    bool
-	goos      string
-	runnerTar string            // the tarball basename StartRunner was handed
-	guestEnv  map[string]string // the guest_env StartRunner was handed
+	proc       *fakeProc
+	startErr   error
+	diag       []byte
+	diagErr    error
+	diagBlock  bool // PullDiag blocks until ctx expires (a wedged guest)
+	pulled     bool
+	goos       string
+	runnerTar  string            // the tarball basename StartRunner was handed
+	guestEnv   map[string]string // the guest_env StartRunner was handed
+	guestSetup []string          // the guest_setup StartRunner was handed
 
 	// Debug-key injection seam (issue #39).
 	hostKeys      []string
@@ -198,7 +199,7 @@ type fakeGuest struct {
 	mu sync.Mutex
 }
 
-func (g *fakeGuest) StartRunner(ctx context.Context, jit, goos, runnerTarball string, env map[string]string) (Proc, error) {
+func (g *fakeGuest) StartRunner(ctx context.Context, jit, goos, runnerTarball string, env map[string]string, setup []string) (Proc, error) {
 	if g.startErr != nil {
 		return nil, g.startErr
 	}
@@ -206,6 +207,7 @@ func (g *fakeGuest) StartRunner(ctx context.Context, jit, goos, runnerTarball st
 	g.goos = goos
 	g.runnerTar = runnerTarball
 	g.guestEnv = env
+	g.guestSetup = setup
 	g.mu.Unlock()
 	return g.proc, nil
 }
@@ -1849,6 +1851,24 @@ func TestGuestEnvReachesStartRunner(t *testing.T) {
 	h.guest.mu.Unlock()
 	if len(got) != 1 || got["HTTPS_PROXY"] != "socks5h://192.168.64.1:1080" {
 		t.Errorf("StartRunner got guest_env %v, want HTTPS_PROXY set", got)
+	}
+}
+
+// A pool's guest_setup is threaded from config through PROVISION into
+// StartRunner, so its commands run in the guest before the runner launches.
+func TestGuestSetupReachesStartRunner(t *testing.T) {
+	h := newHarnessPool(t, nil, func(p *home.PoolConfig) {
+		p.GuestSetup = []string{"defaults write com.apple.dt.Xcode IDEPackageSupportUseBuiltinSCM -bool YES"}
+	})
+	h.start(t)
+	h.proc.say(markerListening)
+	h.waitState(t, StateListening)
+
+	h.guest.mu.Lock()
+	got := h.guest.guestSetup
+	h.guest.mu.Unlock()
+	if len(got) != 1 || got[0] != "defaults write com.apple.dt.Xcode IDEPackageSupportUseBuiltinSCM -bool YES" {
+		t.Errorf("StartRunner got guest_setup %v, want the one configured command", got)
 	}
 }
 

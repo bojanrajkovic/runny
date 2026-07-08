@@ -123,8 +123,9 @@ type Guest interface {
 	// not an operation bound; session establishment is bounded internally by
 	// sshx's socket deadlines. env is the pool's guest_env, exported into the
 	// guest shell before run.sh launches so the runner and its job steps inherit
-	// it.
-	StartRunner(ctx context.Context, jit, goos, runnerTarball string, env map[string]string) (Proc, error)
+	// it. setup is the pool's guest_setup, run after the env exports for
+	// system-level configuration env vars can't express.
+	StartRunner(ctx context.Context, jit, goos, runnerTarball string, env map[string]string, setup []string) (Proc, error)
 	// PullDiag fetches the tail of the runner's _diag logs (post-mortem).
 	PullDiag(ctx bounded.Context) ([]byte, error)
 	// PullDebugSession fetches the operator's session recording at teardown;

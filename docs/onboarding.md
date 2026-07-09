@@ -117,6 +117,20 @@ there directly. Every key not shown takes a default; the ones worth knowing:
   is what the cirruslabs images ship).
 - **`cpu_cores` / `ram_gb`** — override the image's baked defaults (cirruslabs
   images ship a conservative 2 cores / 4 GiB).
+- **`guest_env`** — a map of environment variables exported into the guest
+  before the runner launches, so `run.sh` and every job step inherit them (e.g.
+  `HTTPS_PROXY`/`NO_PROXY` to route job traffic through a host-side proxy). Keys
+  must be valid environment-variable names; it is not for secrets (the values
+  land in the guest's process args during provisioning).
+- **`guest_setup`** — an ordered list of shell commands run in the guest as
+  `admin` (passwordless sudo available), after the `guest_env` exports and
+  before the runner launches — for system-level setup env vars can't express
+  (e.g. macOS's system proxy, which CFNetwork/Xcode read instead of `*_proxy`
+  env vars). Entries are operator-authored, trusted config injected verbatim
+  into the provision script; only emptiness is validated at load, since command
+  content can't be meaningfully checked. A failing command aborts PROVISION
+  loudly (the script runs under `set -e`), the same no-silent-failure posture as
+  the rest of provisioning. Like `guest_env`, it is not for secrets.
 
 The [`config.schema.json`](../tools/configschema/config.schema.json) referenced
 in the modeline gives you autocomplete and inline validation in any

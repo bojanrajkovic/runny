@@ -90,7 +90,7 @@ func TestProvisionScriptStagesExactTarball(t *testing.T) {
 		{"darwin", "actions-runner-osx-arm64-2.320.0.tar.gz"},
 		{"linux", "actions-runner-linux-arm64-2.320.0.tar.gz"},
 	} {
-		script, err := provisionScript(tc.goos, tc.name)
+		script, err := provisionScript(tc.goos, tc.name, nil, nil)
 		if err != nil {
 			t.Fatalf("%s: provisionScript(%q): %v", tc.goos, tc.name, err)
 		}
@@ -121,8 +121,130 @@ func TestProvisionScriptRejectsBadName(t *testing.T) {
 		"actions-runner-osx-arm64-2.320.0", // no .tar.gz
 		"foo bar.tar.gz",
 	} {
-		if _, err := provisionScript("darwin", bad); err == nil {
+		if _, err := provisionScript("darwin", bad, nil, nil); err == nil {
 			t.Errorf("provisionScript accepted an unsafe tarball name %q", bad)
+		}
+	}
+}
+
+// guestEnvExports renders sorted, single-quote-escaped `export` lines; nil/empty
+// renders nothing (the no-op that keeps provisioning byte-identical).
+func TestGuestEnvExports(t *testing.T) {
+	if got := guestEnvExports(nil); got != "" {
+		t.Errorf("guestEnvExports(nil) = %q, want empty", got)
+	}
+	if got := guestEnvExports(map[string]string{}); got != "" {
+		t.Errorf("guestEnvExports(empty) = %q, want empty", got)
+	}
+	// Deterministic key order, regardless of map iteration order.
+	got := guestEnvExports(map[string]string{"B_VAR": "2", "A_VAR": "1"})
+	want := "export A_VAR='1'\nexport B_VAR='2'\n"
+	if got != want {
+		t.Errorf("guestEnvExports sorted = %q, want %q", got, want)
+	}
+	// A single quote in the value is POSIX-escaped ('\'') so the value is inert.
+	if got := guestEnvExports(map[string]string{"K": "a'b"}); got != `export K='a'\''b'`+"\n" {
+		t.Errorf("guestEnvExports escaping = %q", got)
+	}
+}
+
+// A pool's guest_env is exported into the guest shell BEFORE the runner launches,
+// so run.sh and every job step inherit it.
+func TestProvisionScriptInjectsGuestEnv(t *testing.T) {
+	const tarball = "actions-runner-osx-arm64-2.320.0.tar.gz"
+	script, err := provisionScript("darwin", tarball, map[string]string{
+		"HTTPS_PROXY": "socks5h://192.168.64.1:1080",
+	}, nil)
+	if err != nil {
+		t.Fatalf("provisionScript: %v", err)
+	}
+	const want = `export HTTPS_PROXY='socks5h://192.168.64.1:1080'`
+	ei, ri := strings.Index(script, want), strings.Index(script, "exec ./run.sh")
+	if ei < 0 {
+		t.Fatalf("script missing exported var:\n%s", script)
+	}
+	if ei > ri {
+		t.Errorf("guest_env exported AFTER the runner launches (%d > %d):\n%s", ei, ri, script)
+	}
+}
+
+// No guest_env is byte-for-byte the pre-feature script: the injection must be a
+// pure no-op, never a stray blank line or export.
+func TestProvisionScriptNoGuestEnvIsInert(t *testing.T) {
+	const tarball = "actions-runner-osx-arm64-2.320.0.tar.gz"
+	script, err := provisionScript("darwin", tarball, nil, nil)
+	if err != nil {
+		t.Fatalf("provisionScript: %v", err)
+	}
+	if strings.Contains(script, "export ") {
+		t.Errorf("nil guest_env produced an export line:\n%s", script)
+	}
+}
+
+// guestSetupBlock renders newline-joined commands verbatim; nil/empty renders
+// nothing (the no-op that keeps provisioning byte-identical).
+func TestGuestSetupBlock(t *testing.T) {
+	if got := guestSetupBlock(nil); got != "" {
+		t.Errorf("guestSetupBlock(nil) = %q, want empty", got)
+	}
+	if got := guestSetupBlock([]string{}); got != "" {
+		t.Errorf("guestSetupBlock(empty) = %q, want empty", got)
+	}
+	got := guestSetupBlock([]string{"defaults write com.apple.dt.Xcode IDEPackageSupportUseBuiltinSCM -bool YES", "sudo networksetup -setwebproxy Wi-Fi 192.168.64.1 1080"})
+	want := "defaults write com.apple.dt.Xcode IDEPackageSupportUseBuiltinSCM -bool YES\nsudo networksetup -setwebproxy Wi-Fi 192.168.64.1 1080\n"
+	if got != want {
+		t.Errorf("guestSetupBlock = %q, want %q", got, want)
+	}
+}
+
+// A pool's guest_setup runs after the guest_env exports and before the runner
+// launches, so hooks can rely on guest_env already being in scope.
+func TestProvisionScriptInjectsGuestSetupAfterGuestEnv(t *testing.T) {
+	const tarball = "actions-runner-osx-arm64-2.320.0.tar.gz"
+	script, err := provisionScript("darwin", tarball,
+		map[string]string{"HTTPS_PROXY": "socks5h://192.168.64.1:1080"},
+		[]string{"defaults write com.apple.dt.Xcode IDEPackageSupportUseBuiltinSCM -bool YES"})
+	if err != nil {
+		t.Fatalf("provisionScript: %v", err)
+	}
+	envIdx := strings.Index(script, "export HTTPS_PROXY=")
+	setupIdx := strings.Index(script, "defaults write com.apple.dt.Xcode")
+	runIdx := strings.Index(script, "exec ./run.sh")
+	if envIdx < 0 || setupIdx < 0 || runIdx < 0 {
+		t.Fatalf("script missing expected pieces:\n%s", script)
+	}
+	if !(envIdx < setupIdx && setupIdx < runIdx) {
+		t.Errorf("wrong ordering: env=%d setup=%d run=%d, want env < setup < run:\n%s", envIdx, setupIdx, runIdx, script)
+	}
+}
+
+// No guest_setup is byte-for-byte the pre-feature script: the injection must be
+// a pure no-op.
+func TestProvisionScriptNoGuestSetupIsInert(t *testing.T) {
+	const tarball = "actions-runner-osx-arm64-2.320.0.tar.gz"
+	without, err := provisionScript("darwin", tarball, nil, nil)
+	if err != nil {
+		t.Fatalf("provisionScript: %v", err)
+	}
+	withEmpty, err := provisionScript("darwin", tarball, nil, []string{})
+	if err != nil {
+		t.Fatalf("provisionScript: %v", err)
+	}
+	if without != withEmpty {
+		t.Errorf("empty guest_setup changed the script:\nwithout=%q\nwithEmpty=%q", without, withEmpty)
+	}
+}
+
+// The runner-launch line is the injection anchor for guest_env; pin it in both
+// scripts so a refactor can't silently move the export block out of the runner's
+// environment (the same pinning discipline the JIT/clock tripwires use).
+func TestProvisionScriptsPinRunMarker(t *testing.T) {
+	for _, s := range []struct{ name, script string }{
+		{"darwin", provisionScriptDarwin},
+		{"linux", provisionScriptLinux},
+	} {
+		if !strings.Contains(s.script, "exec ./run.sh") {
+			t.Errorf("%s provision script missing the exec ./run.sh anchor for guest_env injection", s.name)
 		}
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -373,8 +374,15 @@ exec ./run.sh --jitconfig "$(cat)"
 // blob still ends up in the runner's argv on the guest (the shell expands
 // `$(cat)` before exec) — that is the kill-marker StopRunner greps, unchanged;
 // only the host-visible command string is now secret-free.
-func (g *Guest) StartRunner(ctx context.Context, jit, goos, runnerTarball string) (statemachine.Proc, error) {
-	script, err := provisionScript(goos, runnerTarball)
+//
+// env is the pool's guest_env: variables exported into the shell right before
+// the runner launches, so run.sh and every job step inherit them. They ARE part
+// of the command string (unlike the JIT), so guest_env is not for secrets.
+// setup is the pool's guest_setup: shell commands run after the env exports,
+// for system-level configuration guest_env can't express — same not-for-secrets
+// caveat.
+func (g *Guest) StartRunner(ctx context.Context, jit, goos, runnerTarball string, env map[string]string, setup []string) (statemachine.Proc, error) {
+	script, err := provisionScript(goos, runnerTarball, env, setup)
 	if err != nil {
 		return nil, err
 	}
@@ -387,6 +395,54 @@ func (g *Guest) StartRunner(ctx context.Context, jit, goos, runnerTarball string
 
 const runnerTarballPlaceholder = "__RUNNER_TARBALL__"
 
+// runStartMarker is the line that launches the runner. It is the anchor guest
+// env `export`s and guest_setup commands are injected before, so run.sh
+// inherits them; pinned by TestProvisionScriptsPinRunMarker so a refactor
+// can't silently move it.
+const runStartMarker = "exec ./run.sh"
+
+// guestEnvExports renders a pool's guest_env as shell `export` lines to prepend
+// to the runner launch, so run.sh and every job step it spawns inherit them.
+// Keys are emitted sorted (deterministic script bytes; they are already
+// validated as env-var names at config load). Values are POSIX single-quote
+// escaped — wrapped in '...' with each embedded ' rewritten as '\” — so any
+// value (quotes, spaces, $) is inert in the shell. Empty input renders nothing,
+// keeping provisioning byte-identical for a pool without guest_env.
+func guestEnvExports(env map[string]string) string {
+	if len(env) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		esc := strings.ReplaceAll(env[k], "'", `'\''`)
+		fmt.Fprintf(&b, "export %s='%s'\n", k, esc)
+	}
+	return b.String()
+}
+
+// guestSetupBlock renders a pool's guest_setup as newline-joined shell
+// commands to run after the guest_env exports and before the runner launches.
+// Entries are injected verbatim — they are commands, not identifiers, so
+// (unlike guest_env keys) their content can't be validated beyond the
+// non-empty check already done at config load. Empty input renders nothing,
+// keeping provisioning byte-identical for a pool without guest_setup.
+func guestSetupBlock(cmds []string) string {
+	if len(cmds) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, cmd := range cmds {
+		b.WriteString(cmd)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 // runnerTarballRE constrains the tarball basename the daemon substitutes into
 // the provision script. The name is daemon-resolved (GitHub's asset filename),
 // not client input, but it crosses into a shell command string, so this is a
@@ -398,12 +454,21 @@ var runnerTarballRE = regexp.MustCompile(`^[A-Za-z0-9._-]+\.tar\.gz$`)
 // this cycle resolved. It refuses a name that does not match runnerTarballRE
 // rather than risk staging a glob (silent wrong-version) or interpolating an
 // unexpected string into the command — fail the cycle loudly instead.
-func provisionScript(goos, runnerTarball string) (string, error) {
+func provisionScript(goos, runnerTarball string, env map[string]string, setup []string) (string, error) {
 	if !runnerTarballRE.MatchString(runnerTarball) {
 		return "", fmt.Errorf("refusing to stage runner tarball with an unexpected name %q", runnerTarball)
 	}
 	script := perOS(goos, provisionScriptDarwin, provisionScriptLinux)
-	return strings.ReplaceAll(script, runnerTarballPlaceholder, runnerTarball), nil
+	script = strings.ReplaceAll(script, runnerTarballPlaceholder, runnerTarball)
+	// Prepend the pool's guest_env exports, then its guest_setup commands, to
+	// the runner launch: run.sh and every job step inherit the env, and setup
+	// runs with it already in scope. Empty env/setup is a no-op (block == ""),
+	// leaving the script byte-identical.
+	block := guestEnvExports(env) + guestSetupBlock(setup)
+	if block != "" {
+		script = strings.Replace(script, runStartMarker, block+runStartMarker, 1)
+	}
+	return script, nil
 }
 
 // PullDiag fetches the tail of the runner's diagnostic logs — the

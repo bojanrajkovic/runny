@@ -9,8 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"golang.org/x/sys/unix"
 )
 
 // Dir is the runny home root: every path runnyd touches lives under it. Its
@@ -21,17 +19,8 @@ import (
 // socket and credentials live.
 type Dir string
 
-// SystemHomeDir is the fixed home of a non-root system daemon: its ENTIRE state
-// (config, the App key, logs, images, vms, cycles, and the control socket) lives
-// here, deliberately outside any user home so the service account needs no home
-// directory of its own. The privileged installer creates it owned by the
-// dedicated service account with an inheriting ACL granting the operator account
-// directory write (to land the App key and atomically edit config), artifact
-// reads, and socket access; the socket stays 0600 + that inherited ACL and is
-// never world-accessible (opening it is full daemon control). No flag selects
-// it — its presence (and ownership, for the daemon) does, over the per-user
-// ~/.runny.
-const SystemHomeDir = "/Library/Application Support/runny"
+// SystemHomeDir is declared per platform (home_unix.go / home_windows.go),
+// alongside ownedByCurrentUser, the ownership probe resolveServer keys on.
 
 const socketName = "runnyd.sock"
 
@@ -48,8 +37,7 @@ const socketName = "runnyd.sock"
 func ResolveServer() (Dir, error) { return resolveServer(SystemHomeDir) }
 
 func resolveServer(systemDir string) (Dir, error) {
-	var st unix.Stat_t
-	if err := unix.Stat(systemDir, &st); err == nil && st.Uid == uint32(os.Geteuid()) {
+	if ownedByCurrentUser(systemDir) {
 		return Dir(systemDir), nil
 	}
 	return resolvePerUser()

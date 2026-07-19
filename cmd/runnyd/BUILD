@@ -9,6 +9,8 @@ go_library(
     srcs = [
         "competing.go",
         "drain.go",
+        "fileowner_unix.go",
+        "fileowner_windows.go",
         "hostprobe_darwin.go",
         "hostprobe_other.go",
         "launchcontext.go",

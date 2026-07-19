@@ -9,6 +9,8 @@ go_library(
     srcs = [
         "competing.go",
         "drain.go",
+        "fileowner_unix.go",
+        "fileowner_windows.go",
         "hostprobe_darwin.go",
         "hostprobe_other.go",
         "launchcontext.go",
@@ -16,6 +18,8 @@ go_library(
         "launchcontext_other.go",
         "localnet.go",
         "lock.go",
+        "lock_unix.go",
+        "lock_windows.go",
         "main.go",
         "parsegate.go",
         "platform_darwin.go",
@@ -51,55 +55,70 @@ go_library(
         "//internal/versioncore",
         "//proto/runny/v1:runny",
         "@io_opentelemetry_go_otel//:otel",
-        "@org_golang_x_sys//unix",
     ] + select({
         "@rules_go//go/platform:aix": [
             "//internal/vm",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:android": [
             "//internal/vm",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:darwin": [
             "//internal/vm",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:dragonfly": [
             "//internal/vm",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:freebsd": [
             "//internal/vm",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:illumos": [
             "//internal/vm",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:ios": [
             "//internal/vm",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:js": [
             "//internal/vm",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:linux": [
             "//internal/vm",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:netbsd": [
             "//internal/vm",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:openbsd": [
             "//internal/vm",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:osx": [
             "//internal/vm",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:plan9": [
             "//internal/vm",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:qnx": [
             "//internal/vm",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:solaris": [
             "//internal/vm",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:windows": [
             "//internal/vm",
+            "@org_golang_x_sys//windows",
         ],
         "//conditions:default": [],
     }),
@@ -133,6 +152,7 @@ go_test(
         "installassert_test.go",
         "launchcontext_test.go",
         "localnet_test.go",
+        "lock_test.go",
         "privatekey_test.go",
         "reload_test.go",
         "rotate_test.go",

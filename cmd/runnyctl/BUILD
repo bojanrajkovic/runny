@@ -9,6 +9,8 @@ go_library(
     srcs = [
         "cli.go",
         "editconfig.go",
+        "execssh_unix.go",
+        "execssh_windows.go",
         "follow.go",
         "installdaemon.go",
         "main.go",

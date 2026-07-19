@@ -2,6 +2,13 @@
 
 **Status:** Accepted (2026-06-07, reconfirmed 2026-06-09)
 
+**Amended:** 2026-07-19 — the daemon and CLI now also cross-compile for
+Windows hosts (windows/amd64, guests on Hyper-V rather than
+Virtualization.framework), so "daemon builds are macOS-only" below no longer
+holds; the Go core is portable behind the same platform seams that already
+keep pure-Go packages testable off-macOS. The language decision is unchanged:
+Swift remains the app only, and the app remains macOS-only.
+
 ## Context
 
 runny replaces khoi/sand, a Swift daemon whose failure modes (unbounded SSH via

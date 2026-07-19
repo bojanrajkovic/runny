@@ -4,7 +4,7 @@ go_library(
     name = "images",
     srcs = [
         "disk_darwin.go",
-        "disk_linux.go",
+        "disk_other.go",
         "images.go",
         "prune.go",
         "puller.go",

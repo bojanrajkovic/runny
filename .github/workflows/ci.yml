@@ -43,6 +43,11 @@ jobs:
         run: mise x -- bazel build --config=ci -- //... -//apps/Runny/...
       - name: test
         run: mise x -- bazel test --config=ci -- //... -//apps/Runny/...
+      # Windows hosts are a runner target (Hyper-V-backed guests): keep the
+      # daemon and CLI cross-compiling for windows/amd64. This also covers the
+      # in-graph proto package a plain `GOOS=windows go build` can't resolve.
+      - name: cross-build (windows/amd64)
+        run: mise x -- bazel build --config=ci --platforms=@rules_go//go/toolchain:windows_amd64 //cmd/runnyd //cmd/runnyctl
       - name: format
         run: |
           mise x -- bazel run --config=ci //tools/format

@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "diskfree_darwin.go",
         "diskfree_linux.go",
+        "diskfree_windows.go",
     ],
     cgo = True,
     clinkopts = select({
@@ -24,6 +25,9 @@ go_library(
         ],
         "@rules_go//go/platform:linux": [
             "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
         ],
         "//conditions:default": [],
     }),

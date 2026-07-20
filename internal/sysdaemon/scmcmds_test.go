@@ -6,8 +6,8 @@ import (
 )
 
 func TestWindowsServiceSID(t *testing.T) {
-	if got, want := windowsServiceSID(), `NT SERVICE\runnyd`; got != want {
-		t.Errorf("windowsServiceSID() = %q, want %q", got, want)
+	if got, want := windowsServiceSID, `NT SERVICE\runnyd`; got != want {
+		t.Errorf("windowsServiceSID = %q, want %q", got, want)
 	}
 }
 

@@ -59,22 +59,17 @@ func installDaemon(operatorFlag, configFlag string) error {
 			"— never hand-edit %s and restart.\n", dir.ConfigPath())
 		return nil
 	}
+	runningAs, watchHint := sysdaemon.ServiceUser, fmt.Sprintf("watch %s/launchd.err.log", dir.LogsDir())
 	if runtime.GOOS == "windows" {
-		fmt.Printf("\nrunnyd is installed and started as the %s service. Until a valid config is in\n"+
-			"place it crash-loops (expected — not a hang; check `sc.exe query %s` and watch\n"+
-			"%s\\service.err.log). Next:\n"+
-			"  1. write %s (your account has write access via the ACL)\n"+
-			"  2. place the GitHub App key where its private_key_path points\n"+
-			"  3. runnyctl doctor   — the daemon comes up on its next restart\n",
-			sysdaemon.WindowsServiceName, sysdaemon.WindowsServiceName, dir.LogsDir(), dir.ConfigPath())
-		return nil
+		runningAs = "the " + sysdaemon.WindowsServiceName + " service"
+		watchHint = fmt.Sprintf("check `sc.exe query %s` and watch %s\\service.err.log", sysdaemon.WindowsServiceName, dir.LogsDir())
 	}
 	fmt.Printf("\nrunnyd is installed and started as %s. Until a valid config is in place it\n"+
-		"crash-loops (expected — not a hang; watch %s/launchd.err.log). Next:\n"+
+		"crash-loops (expected — not a hang; %s). Next:\n"+
 		"  1. write %s (your account has write access via the ACL)\n"+
 		"  2. place the GitHub App key where its private_key_path points\n"+
 		"  3. runnyctl doctor   — the daemon comes up on its next restart\n",
-		sysdaemon.ServiceUser, dir.LogsDir(), dir.ConfigPath())
+		runningAs, watchHint, dir.ConfigPath())
 	return nil
 }
 
@@ -151,9 +146,12 @@ func resolveOperator(flagOperator, sudoUser string) (string, error) {
 		op = sudoUser
 	}
 	if op == "" || op == "root" {
-		return "", fmt.Errorf("cannot determine the operator account: pass `--operator <user>`, or run " +
-			"via `sudo runnyctl install-daemon` from your normal login so SUDO_USER is set (the home's " +
-			"ACL grants that account access)")
+		fallback := "run via `sudo runnyctl install-daemon` from your normal login so SUDO_USER is set"
+		if runtime.GOOS == "windows" {
+			fallback = "run `runnyctl install-daemon` from your normal elevated login"
+		}
+		return "", fmt.Errorf("cannot determine the operator account: pass `--operator <user>`, or %s "+
+			"(the home's ACL grants that account access)", fallback)
 	}
 	return op, nil
 }

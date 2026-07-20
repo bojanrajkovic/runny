@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/user"
 	"strconv"
 	"strings"
 	"time"
@@ -67,17 +66,9 @@ func (i *Installer) WithStage(p StagePlan) *Installer {
 // stable across reinstalls — the home's ownership, which ResolveServer keys on,
 // must not drift) and resetting the ACL rather than appending to it.
 func (i *Installer) Install(ctx context.Context) error {
-	if i.cfg.Operator == "" {
-		return fmt.Errorf("operator account is required (it receives the inheriting ACL)")
+	if err := i.cfg.validate(); err != nil {
+		return err
 	}
-	if i.cfg.RunnydPath == "" {
-		return fmt.Errorf("runnyd path is required")
-	}
-	u, err := user.Lookup(i.cfg.Operator)
-	if err != nil {
-		return fmt.Errorf("operator account %q does not resolve to a local user: %w", i.cfg.Operator, err)
-	}
-	i.cfg.Operator = u.Username
 	if err := i.ensureAccount(ctx); err != nil {
 		return err
 	}

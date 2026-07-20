@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/user"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -103,19 +102,11 @@ func (s *scmInstaller) writeOwned(ctx context.Context, path string, data []byte)
 
 // Install ensures the runnyd service exists (before home ownership — see
 // ensureService's doc comment), configures crash/non-crash recovery, prepares
-// the home's ACL, stages a provided config, then starts the service.
+// the home's ACL, stages a provided config, then (re)starts the service.
 func (s *scmInstaller) Install(ctx context.Context) error {
-	if s.cfg.Operator == "" {
-		return fmt.Errorf("operator account is required (it receives the home's grant ACE)")
+	if err := s.cfg.validate(); err != nil {
+		return err
 	}
-	if s.cfg.RunnydPath == "" {
-		return fmt.Errorf("runnyd path is required")
-	}
-	u, err := user.Lookup(s.cfg.Operator)
-	if err != nil {
-		return fmt.Errorf("operator account %q does not resolve to a local user: %w", s.cfg.Operator, err)
-	}
-	s.cfg.Operator = u.Username
 
 	m, err := s.connect()
 	if err != nil {
@@ -145,10 +136,19 @@ func (s *scmInstaller) Install(ctx context.Context) error {
 			return err
 		}
 	}
+	// Stop before start, mirroring darwin's bootstrap (install.go) always
+	// booting out a prior generation before bootstrapping fresh: StartService
+	// rejects an already-running service with ERROR_SERVICE_ALREADY_RUNNING,
+	// and an idempotent reinstall's updated binary path only takes effect on
+	// the next start — a no-op over a running service would silently leave it
+	// on the old binary/config.
+	if err := s.stopIfRunning(ctx, svcHandle); err != nil {
+		return fmt.Errorf("stopping %s before restart: %w", WindowsServiceName, err)
+	}
 	if err := svcHandle.Start(); err != nil {
 		return fmt.Errorf("starting %s: %w", WindowsServiceName, err)
 	}
-	s.log("installed and started %s (runs as %s)", WindowsServiceName, windowsServiceSID())
+	s.log("installed and started %s (runs as %s)", WindowsServiceName, windowsServiceSID)
 	return nil
 }
 
@@ -158,16 +158,16 @@ func (s *scmInstaller) Install(ctx context.Context) error {
 // ensureHome: nothing can reference the service SID in an icacls grant until
 // this returns.
 func (s *scmInstaller) ensureService(m scmMgr) (scmService, error) {
+	cfg := mgr.Config{
+		ServiceStartName: windowsServiceSID,
+		StartType:        mgr.StartAutomatic,
+		SidType:          windows.SERVICE_SID_TYPE_UNRESTRICTED,
+		DisplayName:      windowsDisplayName,
+	}
 	existing, err := m.OpenService(WindowsServiceName)
 	switch {
 	case err == nil:
-		cfg := mgr.Config{
-			ServiceStartName: windowsServiceSID(),
-			StartType:        mgr.StartAutomatic,
-			SidType:          windows.SERVICE_SID_TYPE_UNRESTRICTED,
-			DisplayName:      windowsDisplayName,
-			BinaryPathName:   s.cfg.RunnydPath,
-		}
+		cfg.BinaryPathName = s.cfg.RunnydPath // UpdateConfig has no separate exepath arg, unlike CreateService
 		if err := existing.UpdateConfig(cfg); err != nil {
 			existing.Close()
 			return nil, fmt.Errorf("updating %s: %w", WindowsServiceName, err)
@@ -175,17 +175,11 @@ func (s *scmInstaller) ensureService(m scmMgr) (scmService, error) {
 		s.log("service %s already exists — updated binary path", WindowsServiceName)
 		return existing, nil
 	case errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST):
-		cfg := mgr.Config{
-			ServiceStartName: windowsServiceSID(),
-			StartType:        mgr.StartAutomatic,
-			SidType:          windows.SERVICE_SID_TYPE_UNRESTRICTED,
-			DisplayName:      windowsDisplayName,
-		}
 		created, err := m.CreateService(WindowsServiceName, s.cfg.RunnydPath, cfg)
 		if err != nil {
 			return nil, fmt.Errorf("creating service %s: %w", WindowsServiceName, err)
 		}
-		s.log("created service %s (runs as %s)", WindowsServiceName, windowsServiceSID())
+		s.log("created service %s (runs as %s)", WindowsServiceName, windowsServiceSID)
 		return created, nil
 	default:
 		return nil, fmt.Errorf("opening service %s: %w", WindowsServiceName, err)
@@ -206,7 +200,7 @@ func (s *scmInstaller) ensureHome(ctx context.Context) error {
 		}
 	}
 	s.log("prepared %s (owned by %s, ACL grants %s + %s Modify)",
-		home.SystemHomeDir, windowsServiceSID(), s.cfg.Operator, windowsServiceSID())
+		home.SystemHomeDir, windowsServiceSID, s.cfg.Operator, windowsServiceSID)
 	return nil
 }
 
@@ -245,17 +239,8 @@ func (s *scmInstaller) Uninstall(ctx context.Context) error {
 }
 
 func (s *scmInstaller) stopAndDelete(ctx context.Context, h scmService) error {
-	status, err := h.Query()
-	if err != nil {
-		return fmt.Errorf("querying %s: %w", WindowsServiceName, err)
-	}
-	if status.State != svc.Stopped {
-		if _, err := h.Control(svc.Stop); err != nil && !errors.Is(err, windows.ERROR_SERVICE_NOT_ACTIVE) {
-			return fmt.Errorf("stopping %s: %w", WindowsServiceName, err)
-		}
-		if err := s.waitStopped(ctx, h); err != nil {
-			return err
-		}
+	if err := s.stopIfRunning(ctx, h); err != nil {
+		return err
 	}
 	if err := h.Delete(); err != nil {
 		return fmt.Errorf("deleting %s: %w", WindowsServiceName, err)
@@ -263,9 +248,28 @@ func (s *scmInstaller) stopAndDelete(ctx context.Context, h scmService) error {
 	return nil
 }
 
-// waitStopped bounds the stop poll at commandTimeout (30s, shared with
-// darwin's privileged-command ceiling, install.go) — no install/uninstall step
-// may block forever. Refusing to delete a still-running service also avoids a
+// stopIfRunning stops h if it isn't already, shared by Uninstall's
+// stopAndDelete and Install's restart-on-reinstall.
+func (s *scmInstaller) stopIfRunning(ctx context.Context, h scmService) error {
+	status, err := h.Query()
+	if err != nil {
+		return fmt.Errorf("querying %s: %w", WindowsServiceName, err)
+	}
+	if status.State == svc.Stopped {
+		return nil
+	}
+	return s.waitStopped(ctx, h)
+}
+
+// waitStopped issues Control(Stop) and polls until h reports Stopped, bounded
+// by commandTimeout (30s, shared with darwin's privileged-command ceiling,
+// install.go) — no install/uninstall step may block forever. The stop request
+// is retried every iteration, not just once: a service in a transitional
+// state (StartPending etc.) can reject Control with
+// ERROR_SERVICE_CANNOT_ACCEPT_CTRL instead of ERROR_SERVICE_NOT_ACTIVE, and
+// Query is authoritative regardless, so retrying converges once the service
+// settles rather than failing fast on what is often a momentary rejection.
+// Refusing to delete (or restart) a still-running service also avoids a
 // marked-for-deletion zombie: a deleted-but-still-running SCM service can't be
 // recreated under the same name until the process actually exits.
 func (s *scmInstaller) waitStopped(ctx context.Context, h scmService) error {
@@ -274,6 +278,7 @@ func (s *scmInstaller) waitStopped(ctx context.Context, h scmService) error {
 	t := time.NewTicker(scmPollInterval)
 	defer t.Stop()
 	for {
+		_, _ = h.Control(svc.Stop)
 		status, err := h.Query()
 		if err != nil {
 			return fmt.Errorf("querying %s: %w", WindowsServiceName, err)

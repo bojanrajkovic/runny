@@ -9,6 +9,7 @@ package sysdaemon
 
 import (
 	"fmt"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -49,6 +50,24 @@ const (
 type Config struct {
 	Operator   string // the human operator account the inheriting ACL grants
 	RunnydPath string // absolute path the plist execs
+}
+
+// validate checks Operator/RunnydPath are set and Operator resolves to a
+// local user, canonicalizing it to that user's username — shared by every
+// platform's Install so the rule and its wording can't drift between them.
+func (c *Config) validate() error {
+	if c.Operator == "" {
+		return fmt.Errorf("operator account is required (it receives write access to the system home)")
+	}
+	if c.RunnydPath == "" {
+		return fmt.Errorf("runnyd path is required")
+	}
+	u, err := user.Lookup(c.Operator)
+	if err != nil {
+		return fmt.Errorf("operator account %q does not resolve to a local user: %w", c.Operator, err)
+	}
+	c.Operator = u.Username
+	return nil
 }
 
 // PlistPath is where the system LaunchDaemon plist lives.

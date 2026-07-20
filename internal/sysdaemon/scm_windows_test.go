@@ -21,11 +21,12 @@ import (
 // fakeMgr and orderedRun, so tests can assert cross-seam ordering (service
 // before icacls) without threading two separate call histories together.
 type fakeService struct {
-	name       string
-	status     svc.Status
-	calls      *[]string
-	lastConfig mgr.Config
-	neverStops bool // simulates a service the SCM never actually stops
+	name        string
+	status      svc.Status
+	calls       *[]string
+	lastConfig  mgr.Config
+	neverStops  bool // simulates a service the SCM never actually stops
+	settleAfter int  // Control rejects with ERROR_SERVICE_CANNOT_ACCEPT_CTRL this many times before stopping
 }
 
 func (f *fakeService) UpdateConfig(c mgr.Config) error {
@@ -53,6 +54,10 @@ func (f *fakeService) Control(c svc.Cmd) (svc.Status, error) {
 	*f.calls = append(*f.calls, "stop")
 	if f.neverStops {
 		return f.status, nil
+	}
+	if f.settleAfter > 0 {
+		f.settleAfter--
+		return f.status, windows.ERROR_SERVICE_CANNOT_ACCEPT_CTRL
 	}
 	if f.status.State == svc.Stopped {
 		return f.status, windows.ERROR_SERVICE_NOT_ACTIVE
@@ -87,7 +92,9 @@ func (f *fakeMgr) OpenService(name string) (scmService, error) {
 
 func (f *fakeMgr) CreateService(name, exepath string, c mgr.Config) (scmService, error) {
 	*f.calls = append(*f.calls, "create:"+name)
-	s := &fakeService{name: name, calls: f.calls, lastConfig: c, status: svc.Status{State: svc.Running}}
+	// Stopped, not Running: the real SCM's CreateService does not start the
+	// service — Install's own Start() call does that.
+	s := &fakeService{name: name, calls: f.calls, lastConfig: c, status: svc.Status{State: svc.Stopped}}
 	f.existing = s
 	return s, nil
 }
@@ -190,6 +197,34 @@ func TestScmInstallReinstallUpdatesExistingService(t *testing.T) {
 	}
 }
 
+// Regression test: Install used to call Start() unconditionally, which the
+// real SCM rejects with ERROR_SERVICE_ALREADY_RUNNING for a service the
+// reinstall found already running — silently failing the documented
+// idempotent-reinstall path (and never applying the updated BinaryPathName,
+// since that only takes effect on the next start). Install must stop a
+// running service before starting it again.
+func TestScmInstallReinstallOverRunningServiceStopsBeforeStarting(t *testing.T) {
+	var order []string
+	existing := &fakeService{name: WindowsServiceName, calls: &order, status: svc.Status{State: svc.Running}}
+	m := &fakeMgr{existing: existing, calls: &order}
+	r := &orderedRun{order: &order}
+	inst := newTestScmInstaller(m, r)
+	if err := inst.Install(context.Background()); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	stopIdx := slices.Index(order, "stop")
+	startIdx := slices.Index(order, "start")
+	if stopIdx < 0 {
+		t.Fatal("a running service was never stopped before restart")
+	}
+	if startIdx < 0 {
+		t.Fatal("service was never started")
+	}
+	if stopIdx > startIdx {
+		t.Errorf("service must be stopped (idx %d) BEFORE it is started again (idx %d)", stopIdx, startIdx)
+	}
+}
+
 func TestScmUninstallStopsAndDeletes(t *testing.T) {
 	var order []string
 	existing := &fakeService{name: WindowsServiceName, calls: &order, status: svc.Status{State: svc.Running}}
@@ -228,6 +263,23 @@ func TestScmUninstallRefusesStuckService(t *testing.T) {
 	}
 	if slices.Index(order, "delete") >= 0 {
 		t.Error("must not delete a service that never confirmed it stopped")
+	}
+}
+
+// A service in a transitional state (StartPending etc.) can reject
+// Control(Stop) with ERROR_SERVICE_CANNOT_ACCEPT_CTRL instead of stopping —
+// waitStopped must retry rather than treat that as fatal.
+func TestScmUninstallRetriesThroughTransitionalState(t *testing.T) {
+	var order []string
+	existing := &fakeService{name: WindowsServiceName, calls: &order, status: svc.Status{State: svc.Running}, settleAfter: 1}
+	m := &fakeMgr{existing: existing, calls: &order}
+	r := &orderedRun{order: &order}
+	inst := newTestScmInstaller(m, r)
+	if err := inst.Uninstall(context.Background()); err != nil {
+		t.Fatalf("Uninstall must converge once the transitional state settles: %v", err)
+	}
+	if slices.Index(order, "delete") < 0 {
+		t.Error("service must be deleted once it stops")
 	}
 }
 

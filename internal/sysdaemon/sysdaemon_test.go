@@ -110,6 +110,21 @@ func TestResolveRunnydPath(t *testing.T) {
 	}
 }
 
+// resolveRunnydPath's windows case is tested directly (not through
+// ResolveRunnydPath, which hardcodes runtime.GOOS) so it's covered on every
+// host, not just a windows build. filepath.Dir/Join's separator is baked in at
+// compile time for the HOST's GOOS regardless of the goos argument here, so
+// this uses a forward-slash input — portable across every test host — to
+// isolate what's actually being tested: the "runnyd" vs "runnyd.exe" suffix
+// decision, not path-joining semantics only a real windows build can exercise.
+func TestResolveRunnydPathWindows(t *testing.T) {
+	got := resolveRunnydPath("/opt/runny/runnyctl", "windows")
+	want := "/opt/runny/runnyd.exe"
+	if got != want {
+		t.Errorf("resolveRunnydPath(..., %q) = %q, want %q", "windows", got, want)
+	}
+}
+
 // recordedRun is a fake Runner: it records every command and answers the few
 // reads the installer makes (account existence + the dscl id lists).
 type recordedRun struct {

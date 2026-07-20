@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/user"
 	"strconv"
 	"strings"
 	"time"
@@ -13,7 +12,6 @@ import (
 	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/launchd"
 	"github.com/bojanrajkovic/runny/internal/opacl"
-	"github.com/bojanrajkovic/runny/internal/testconfig"
 )
 
 // Runner runs a privileged command and returns its combined output. The default
@@ -54,17 +52,6 @@ type Installer struct {
 	testConfig verdictTester
 }
 
-// New builds an Installer that shells out for real and logs progress to stdout.
-func New(cfg Config) *Installer {
-	return &Installer{
-		cfg:        cfg,
-		run:        execRunner,
-		writeFile:  os.WriteFile,
-		log:        func(f string, a ...any) { fmt.Printf(f+"\n", a...) },
-		testConfig: testconfig.RunTestConfig,
-	}
-}
-
 // WithStage attaches a StagePlan (config + key files staged from an authored
 // --config): Install runs stage between ensureHome and bootstrap, and
 // bootstraps only once the staged config passes `runnyd -test-config`. A bare
@@ -79,17 +66,9 @@ func (i *Installer) WithStage(p StagePlan) *Installer {
 // stable across reinstalls — the home's ownership, which ResolveServer keys on,
 // must not drift) and resetting the ACL rather than appending to it.
 func (i *Installer) Install(ctx context.Context) error {
-	if i.cfg.Operator == "" {
-		return fmt.Errorf("operator account is required (it receives the inheriting ACL)")
+	if err := i.cfg.validate(); err != nil {
+		return err
 	}
-	if i.cfg.RunnydPath == "" {
-		return fmt.Errorf("runnyd path is required")
-	}
-	u, err := user.Lookup(i.cfg.Operator)
-	if err != nil {
-		return fmt.Errorf("operator account %q does not resolve to a local user: %w", i.cfg.Operator, err)
-	}
-	i.cfg.Operator = u.Username
 	if err := i.ensureAccount(ctx); err != nil {
 		return err
 	}
@@ -101,7 +80,8 @@ func (i *Installer) Install(ctx context.Context) error {
 		// -test-config` leaves the home scaffolded but NOT started — fix the
 		// authored config and rerun install-daemon (idempotent) rather than
 		// crash-looping a daemon we already know will refuse it.
-		if err := i.stage(ctx, *i.plan); err != nil {
+		s := stager{runnydPath: i.cfg.RunnydPath, writeOwned: i.writeOwned, log: i.log, testConfig: i.testConfig}
+		if err := s.stage(ctx, *i.plan); err != nil {
 			return err
 		}
 	}
@@ -109,58 +89,6 @@ func (i *Installer) Install(ctx context.Context) error {
 		return err
 	}
 	return i.bootstrap(ctx)
-}
-
-// stageTestConfigTimeout bounds the staged `-test-config` exec, mirroring
-// cmd/runnyd/parsegate.go's testConfigTimeout: side-effect-free on the target
-// binary's end (no home, no lock, no network), so 10s is generous headroom —
-// not a tight race, but no install step may block forever either.
-const stageTestConfigTimeout = 10 * time.Second
-
-// stage copies each planned key into the home (chown operator, 0600 — the file
-// inherits the home's _runny-read ACL by creation, exactly as a hand-cp would),
-// writes plan.Config to <home>/config.yaml, then runs
-// `runnyd -test-config <home>/config.yaml` and parses its JSON verdict — the
-// same contract runnyctl's upgrade and edit-config gates use — rather than
-// gating on the exit code alone: a warn-tier config exits 0, and a fresh
-// operator is never given another chance to see those warnings once install
-// has moved on. Warnings are surfaced regardless of status; an error-tier (or
-// otherwise unrecognized) verdict fails the stage, leaving the home in place.
-func (i *Installer) stage(ctx context.Context, plan StagePlan) error {
-	for _, k := range plan.Keys {
-		data, err := os.ReadFile(k.Src)
-		if err != nil {
-			return fmt.Errorf("reading %s: %w", k.Src, err)
-		}
-		if err := i.writeOwned(ctx, k.Dst, data); err != nil {
-			return err
-		}
-	}
-	configPath := home.Dir(home.SystemHomeDir).ConfigPath()
-	if err := i.writeOwned(ctx, configPath, plan.Config); err != nil {
-		return err
-	}
-	fail := func(err error) error {
-		return fmt.Errorf("staged config failed validation (home left in place; fix %s and rerun install-daemon): %w",
-			configPath, err)
-	}
-	cctx, cancel := context.WithTimeout(ctx, stageTestConfigTimeout)
-	defer cancel()
-	v, err := i.testConfig(cctx, i.cfg.RunnydPath, configPath)
-	if err != nil {
-		return fail(err)
-	}
-	for _, w := range v.Warnings {
-		i.log("warning: %s", w.Message)
-	}
-	// Fail closed on anything but ok/warn, matching decideUpgrade and edit-config's
-	// same-contract gates: an unrecognized status must never be treated as ok.
-	if v.Status != home.VerdictOK && v.Status != home.VerdictWarn {
-		return fail(fmt.Errorf("status %q: %s", v.Status, strings.Join(v.Errors, "; ")))
-	}
-	i.log("staged config.yaml and %d key file(s) into %s; validated by %s -test-config",
-		len(plan.Keys), home.SystemHomeDir, i.cfg.RunnydPath)
-	return nil
 }
 
 // writeOwned writes data to path (0600) then chowns it to the operator — the

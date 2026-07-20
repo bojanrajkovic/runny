@@ -9,7 +9,9 @@ package sysdaemon
 
 import (
 	"fmt"
+	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -48,6 +50,24 @@ const (
 type Config struct {
 	Operator   string // the human operator account the inheriting ACL grants
 	RunnydPath string // absolute path the plist execs
+}
+
+// validate checks Operator/RunnydPath are set and Operator resolves to a
+// local user, canonicalizing it to that user's username — shared by every
+// platform's Install so the rule and its wording can't drift between them.
+func (c *Config) validate() error {
+	if c.Operator == "" {
+		return fmt.Errorf("operator account is required (it receives write access to the system home)")
+	}
+	if c.RunnydPath == "" {
+		return fmt.Errorf("runnyd path is required")
+	}
+	u, err := user.Lookup(c.Operator)
+	if err != nil {
+		return fmt.Errorf("operator account %q does not resolve to a local user: %w", c.Operator, err)
+	}
+	c.Operator = u.Username
+	return nil
 }
 
 // PlistPath is where the system LaunchDaemon plist lives.
@@ -114,14 +134,26 @@ func serviceACE(serviceUser string) string {
 		"list,search,read,readattr,readextattr,readsecurity," + opacl.ACLInherit
 }
 
-// ResolveRunnydPath returns the runnyd the plist should exec: the sibling of the
-// running runnyctl. It deliberately does NOT resolve symlinks — Homebrew invokes
-// runnyctl via the stable /opt/homebrew/bin symlink, whose sibling runnyd is
-// likewise a stable symlink that survives `brew upgrade`; EvalSymlinks would pin
-// the versioned Cellar path and orphan the plist on the next upgrade. Verified:
-// macOS os.Executable() returns the invocation (symlink) path, not the target.
+// ResolveRunnydPath returns the runnyd the plist/service should exec: the
+// sibling of the running runnyctl. It deliberately does NOT resolve symlinks —
+// Homebrew invokes runnyctl via the stable /opt/homebrew/bin symlink, whose
+// sibling runnyd is likewise a stable symlink that survives `brew upgrade`;
+// EvalSymlinks would pin the versioned Cellar path and orphan the plist on the
+// next upgrade. Verified: macOS os.Executable() returns the invocation
+// (symlink) path, not the target.
 func ResolveRunnydPath(runnyctlExe string) string {
-	return filepath.Join(filepath.Dir(runnyctlExe), "runnyd")
+	return resolveRunnydPath(runnyctlExe, runtime.GOOS)
+}
+
+// resolveRunnydPath is ResolveRunnydPath's GOOS decision as a small pure
+// helper, kept separate so the windows ".exe" case is unit-tested cross-host
+// without a windows build.
+func resolveRunnydPath(runnyctlExe, goos string) string {
+	name := "runnyd"
+	if goos == "windows" {
+		name = "runnyd.exe"
+	}
+	return filepath.Join(filepath.Dir(runnyctlExe), name)
 }
 
 // firstFreeID returns the lowest id in the service range not present in taken.

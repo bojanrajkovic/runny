@@ -149,7 +149,9 @@ their job).
    SIGHUP triggers a validated config reload instead of killing the process
    (ADR-0014). Runner tarballs are ensured inside each cycle's ENSURE_IMAGE —
    deliberately not at startup, where an unbounded download once blocked the
-   socket.
+   socket. Under the Windows Service Control Manager, an SCM Stop/Shutdown
+   command cancels this same root context in place of SIGTERM
+   (`cmd/runnyd/svc_windows.go`) — one shutdown path, not two.
 
 ## Draining: the two restart causes
 
@@ -161,7 +163,9 @@ gate re-parses the on-disk config: if it no longer parses the daemon
 *holds* (drained, still serving status with the hold annotation,
 periodically revalidating) rather than handing launchd a file the respawn
 would refuse; otherwise it exits non-zero (`restarting after drain: …`)
-and launchd KeepAlive cold-starts it. The drain cause is visible as
+and launchd KeepAlive cold-starts it (on Windows, that same non-zero exit
+becomes a service-specific exit code for the SCM's configured recovery
+action to read the same way). The drain cause is visible as
 `GetStatusResponse.draining` (the `DRAINING` banner in runnyctl) and in
 each interrupted cycle's recycle reason.
 

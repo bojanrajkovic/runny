@@ -32,6 +32,16 @@ const windowsServiceSID = `NT SERVICE\` + WindowsServiceName
 // ownership confers no implicit access, unlike POSIX owner bits — and
 // /setowner hands ownership to the service SID, the signal
 // home.ResolveServer keys on.
+//
+// ponytail: /reset and /inheritance:r are separate icacls.exe processes, not
+// one atomic operation — on a reinstall, an already-present local user could
+// theoretically race the interval between them and read a file the
+// permissive ProgramData-inherited ACL /reset just restored. Accepted: this
+// targets a dedicated headless CI/build host (docs/deploy.md), not a shared
+// multi-user workstation, and the race needs an already-present, already-
+// malicious local account with sub-second timing. Not worth an atomic
+// replacement DACL for that threat model; revisit if this ever runs
+// somewhere multi-tenant.
 func icaclsHomeArgs(homeDir, operator string) [][]string {
 	return [][]string{
 		{"icacls", homeDir, "/reset", "/T"},

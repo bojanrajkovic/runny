@@ -41,10 +41,16 @@ func TestIsStopCmd(t *testing.T) {
 func TestServiceHandlerExecute(t *testing.T) {
 	started := make(chan struct{})
 	cancelled := make(chan struct{})
+	finishRun := make(chan struct{})
 	fakeRun := func(ctx context.Context) error {
 		close(started)
 		<-ctx.Done()
 		close(cancelled)
+		// Held open until the test finishes its post-cancel assertions:
+		// returning here makes done ready, and since reqs is unbuffered,
+		// Execute's select could pick done over a still-pending reqs send
+		// and return first, leaving that send blocked forever.
+		<-finishRun
 		return nil
 	}
 	h := &serviceHandler{run: fakeRun}
@@ -91,6 +97,7 @@ func TestServiceHandlerExecute(t *testing.T) {
 	if st := <-statuses; st.State != svc.StopPending || st.CheckPoint != 1 {
 		t.Fatalf("interrogate echo after redundant Shutdown = %+v, want StopPending with CheckPoint still 1", st)
 	}
+	close(finishRun)
 
 	r := <-done
 	if !r.svcSpecific || r.code != 0 {

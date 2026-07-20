@@ -14,6 +14,7 @@ func TestWindowsServiceSID(t *testing.T) {
 func TestIcaclsHomeArgs(t *testing.T) {
 	got := icaclsHomeArgs(`C:\ProgramData\runny`, `CORP\alice`)
 	want := [][]string{
+		{"icacls", `C:\ProgramData\runny`, "/reset", "/T"},
 		{"icacls", `C:\ProgramData\runny`, "/inheritance:r"},
 		{"icacls", `C:\ProgramData\runny`, "/grant", `NT SERVICE\runnyd:(OI)(CI)M`, "/T"},
 		{"icacls", `C:\ProgramData\runny`, "/grant", `CORP\alice:(OI)(CI)M`, "/T"},

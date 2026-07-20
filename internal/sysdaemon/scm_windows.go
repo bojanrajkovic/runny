@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -167,7 +168,12 @@ func (s *scmInstaller) ensureService(m scmMgr) (scmService, error) {
 	existing, err := m.OpenService(WindowsServiceName)
 	switch {
 	case err == nil:
-		cfg.BinaryPathName = s.cfg.RunnydPath // UpdateConfig has no separate exepath arg, unlike CreateService
+		// UpdateConfig has no separate exepath arg the way CreateService does — CreateService
+		// quotes its exepath itself (via syscall.EscapeArg internally); BinaryPathName here
+		// gets no such treatment from UpdateConfig, so an unquoted path containing a space
+		// (e.g. "C:\Program Files\Runny\runnyd.exe") would parse as the classic
+		// unquoted-service-path ambiguity. Escape it the same way CreateService does.
+		cfg.BinaryPathName = syscall.EscapeArg(s.cfg.RunnydPath)
 		if err := existing.UpdateConfig(cfg); err != nil {
 			existing.Close()
 			return nil, fmt.Errorf("updating %s: %w", WindowsServiceName, err)

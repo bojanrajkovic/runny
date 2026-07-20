@@ -197,6 +197,27 @@ func TestScmInstallReinstallUpdatesExistingService(t *testing.T) {
 	}
 }
 
+// Regression test: UpdateConfig (unlike CreateService, which quotes its
+// exepath argument itself) passes BinaryPathName straight through with no
+// escaping — an unquoted path containing a space parses ambiguously (the
+// classic unquoted-service-path issue). A reinstall over an existing service
+// must quote it the same way CreateService already does internally.
+func TestScmInstallQuotesBinaryPathOnUpdate(t *testing.T) {
+	var order []string
+	existing := &fakeService{name: WindowsServiceName, calls: &order, status: svc.Status{State: svc.Stopped}}
+	m := &fakeMgr{existing: existing, calls: &order}
+	r := &orderedRun{order: &order}
+	inst := newTestScmInstaller(m, r)
+	inst.cfg.RunnydPath = `C:\Program Files\Runny\runnyd.exe`
+	if err := inst.Install(context.Background()); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	want := `"C:\Program Files\Runny\runnyd.exe"`
+	if existing.lastConfig.BinaryPathName != want {
+		t.Errorf("BinaryPathName = %q, want %q", existing.lastConfig.BinaryPathName, want)
+	}
+}
+
 // Regression test: Install used to call Start() unconditionally, which the
 // real SCM rejects with ERROR_SERVICE_ALREADY_RUNNING for a service the
 // reinstall found already running — silently failing the documented

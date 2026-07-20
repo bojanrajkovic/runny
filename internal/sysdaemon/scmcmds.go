@@ -17,12 +17,19 @@ const windowsDisplayName = "Runny Daemon"
 const windowsServiceSID = `NT SERVICE\` + WindowsServiceName
 
 // icaclsHomeArgs is the home ACL reset scmInstaller.Install runs, in order:
-// strip inherited ProgramData Users-read (it would leak the GitHub App key),
-// grant the service and operator principals Modify — not Read; Windows
-// ownership confers no implicit access, unlike POSIX owner bits — then hand
-// ownership to the service SID, the signal home.ResolveServer keys on.
+// /reset discards every explicit ACE (darwin's equivalent is ensureHome's
+// "chmod -R -N") — without it, a reinstall under a DIFFERENT --operator would
+// leave the previous operator's Modify grant in place, since /inheritance:r
+// only strips INHERITED entries and /grant only adds, neither removes a
+// stale explicit grant for a principal no longer being installed for. Then
+// /inheritance:r strips the inherited ProgramData Users-read /reset just
+// restored (it would leak the GitHub App key), /grant gives the service and
+// operator principals Modify — not Read; Windows ownership confers no
+// implicit access, unlike POSIX owner bits — and /setowner hands ownership to
+// the service SID, the signal home.ResolveServer keys on.
 func icaclsHomeArgs(homeDir, operator string) [][]string {
 	return [][]string{
+		{"icacls", homeDir, "/reset", "/T"},
 		{"icacls", homeDir, "/inheritance:r"},
 		{"icacls", homeDir, "/grant", windowsServiceSID + ":(OI)(CI)M", "/T"},
 		{"icacls", homeDir, "/grant", operator + ":(OI)(CI)M", "/T"},

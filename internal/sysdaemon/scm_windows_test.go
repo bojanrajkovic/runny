@@ -246,7 +246,13 @@ func TestScmInstallEnablesAutoStartOnRetryAfterPriorFailure(t *testing.T) {
 // (elevated) process would hit access denied — the locked-down ACL only
 // grants Modify to the service SID and --operator. Staging must happen
 // while the home still carries ProgramData's default ACL.
-func TestScmInstallStagesBeforeLockingDownACL(t *testing.T) {
+// The home's ACL is locked down BEFORE anything is written into it — a
+// staged config or key must never sit under ProgramData's default ACL, even
+// momentarily. --operator naming an account other than whoever is running
+// this elevated process is a known, unsupported combination (a plain,
+// immediate AccessDenied from the write below, not a silent gap) — see
+// ensureHome's doc comment.
+func TestScmInstallLocksDownACLBeforeStaging(t *testing.T) {
 	var order []string
 	m := &fakeMgr{calls: &order}
 	r := &orderedRun{order: &order}
@@ -268,8 +274,8 @@ func TestScmInstallStagesBeforeLockingDownACL(t *testing.T) {
 	if icaclsIdx < 0 {
 		t.Fatal("no icacls call was made")
 	}
-	if writeIdx > icaclsIdx {
-		t.Errorf("staging (idx %d) must happen BEFORE the ACL lockdown (idx %d)", writeIdx, icaclsIdx)
+	if icaclsIdx > writeIdx {
+		t.Errorf("the ACL lockdown (idx %d) must happen BEFORE staging (idx %d)", icaclsIdx, writeIdx)
 	}
 }
 

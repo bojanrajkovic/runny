@@ -102,9 +102,9 @@ func (s *scmInstaller) writeOwned(ctx context.Context, path string, data []byte)
 }
 
 // Install ensures the runnyd service exists (before home ownership — see
-// ensureService's doc comment), configures crash/non-crash recovery, creates
-// the home directory, stages a provided config, locks down the home's ACL,
-// enables automatic start, then (re)starts the service.
+// ensureService's doc comment), configures crash/non-crash recovery, prepares
+// the home's ACL, stages a provided config, enables automatic start, then
+// (re)starts the service.
 func (s *scmInstaller) Install(ctx context.Context) error {
 	if err := s.cfg.validate(); err != nil {
 		return err
@@ -129,26 +129,14 @@ func (s *scmInstaller) Install(ctx context.Context) error {
 		return fmt.Errorf("configuring non-crash recovery: %w", err)
 	}
 
-	if err := s.ensureHomeDir(); err != nil {
+	if err := s.ensureHome(ctx); err != nil {
 		return err
 	}
 	if s.plan != nil {
-		// Staged BEFORE the ACL lockdown below: --operator can name a
-		// different account than whoever is running this (elevated)
-		// process, and the locked-down ACL only grants Modify to the
-		// service SID and --operator — not to the executing identity.
-		// Staging first, while the home still carries ProgramData's default
-		// ACL, lets the write through regardless of which elevated identity
-		// is running it, at the cost of the config/key briefly (until
-		// ensureHomeACL runs, a few milliseconds later) sitting under that
-		// default ACL rather than the locked-down one.
 		st := stager{runnydPath: s.cfg.RunnydPath, writeOwned: s.writeOwned, log: s.log, testConfig: s.testConfig}
 		if err := st.stage(ctx, *s.plan); err != nil {
 			return err
 		}
-	}
-	if err := s.ensureHomeACL(ctx); err != nil {
-		return err
 	}
 
 	// ensureService always leaves the service demand-start, whether just
@@ -204,8 +192,8 @@ func (s *scmInstaller) serviceConfig(startType uint32) mgr.Config {
 // Install's final step is the only place StartType ever becomes Automatic,
 // once every validation gate above it has passed. LookupSID("NT
 // SERVICE\runnyd") does not resolve before the service is registered, so
-// this runs BEFORE ensureHomeDir/ensureHomeACL: nothing can reference the
-// service SID in an icacls grant until this returns.
+// this runs BEFORE ensureHome: nothing can reference the service SID in an
+// icacls grant until this returns.
 func (s *scmInstaller) ensureService(m scmMgr) (scmService, error) {
 	cfg := s.serviceConfig(mgr.StartManual)
 	existing, err := m.OpenService(WindowsServiceName)
@@ -229,21 +217,19 @@ func (s *scmInstaller) ensureService(m scmMgr) (scmService, error) {
 	}
 }
 
-// ensureHomeDir creates the system home (+ logs\). Split from ensureHomeACL
-// so Install can stage a provided config between the two — see Install's
-// comment at the staging call site for why.
-func (s *scmInstaller) ensureHomeDir() error {
+// ensureHome creates the system home (+ logs\) and resets its ACL via
+// icacls, before anything is written into it — a staged config or key is
+// always written under the locked-down ACL, never the ProgramData default
+// (inheritance disabled first: its default DACL grants all local Users
+// read, which would leak the GitHub App key). --operator naming an account
+// other than whoever is running this elevated process is consequently
+// unsupported (the write fails with a plain, immediate AccessDenied,
+// matching this project's fail-loud stance rather than a silent gap).
+func (s *scmInstaller) ensureHome(ctx context.Context) error {
 	logs := home.Dir(home.SystemHomeDir).LogsDir()
 	if err := s.mkdirAll(logs, 0o700); err != nil { // creates home too — logs\ nests under it
 		return fmt.Errorf("creating %s: %w", home.SystemHomeDir, err)
 	}
-	return nil
-}
-
-// ensureHomeACL resets the home's ACL via icacls. Inheritance is disabled
-// first because ProgramData's default DACL grants all local Users read,
-// which would leak the GitHub App key.
-func (s *scmInstaller) ensureHomeACL(ctx context.Context) error {
 	for _, args := range icaclsHomeArgs(home.SystemHomeDir, s.cfg.Operator) {
 		if _, err := s.run(ctx, args[0], args[1:]...); err != nil {
 			return err

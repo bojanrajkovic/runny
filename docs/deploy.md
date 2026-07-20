@@ -367,19 +367,28 @@ restart and the ADR-0014 reload depend on.
 ### Windows
 
 `runnyctl install-daemon`/`uninstall-daemon` are the same commands on Windows,
-run from an **elevated** prompt instead of via `sudo`; every flag (`--config`,
-`--operator`) behaves identically. The daemon runs under the Windows Service
-Control Manager as a service named `runnyd` (`sc.exe query runnyd`), using a
-virtual service account (`NT SERVICE\runnyd`) in place of darwin's dedicated
-`_runny` account — nothing to create or reuse, its SID derives deterministically
-from the service name. The home is `C:\ProgramData\runny`, with an ACL granting
-the service account and your operator account Modify (Windows ownership confers
-no implicit access, unlike POSIX owner bits) instead of darwin's inheriting ACL;
-logs land in `C:\ProgramData\runny\logs\service.err.log`. A failed service is
-restarted by the SCM's recovery policy, the same role KeepAlive plays on darwin.
+run from an **elevated** prompt instead of via `sudo`. `--config` behaves the
+same; `--operator` does not — it must name the account running the elevated
+command (or be omitted), since staging writes the config/key using that
+process's own access, and the home's ACL grants only the service account and
+the named operator. A different `--operator` fails immediately with
+`AccessDenied` rather than being silently accepted. The daemon runs under the
+Windows Service Control Manager as a service named `runnyd` (`sc.exe query
+runnyd`), using a virtual service account (`NT SERVICE\runnyd`) in place of
+darwin's dedicated `_runny` account — nothing to create or reuse, its SID
+derives deterministically from the service name. The home is
+`C:\ProgramData\runny`, with an ACL granting the service account and your
+operator account Modify (Windows ownership confers no implicit access, unlike
+POSIX owner bits) instead of darwin's inheriting ACL; logs land in
+`C:\ProgramData\runny\logs\service.err.log`. A failed service is restarted by
+the SCM's recovery policy, the same role KeepAlive plays on darwin.
 `uninstall-daemon` stops the service, deletes it, and removes the home — unlike
 darwin, nothing is kept for reinstall, since the service account has no uid to
 keep stable.
+
+This installs and runs the service, but Windows has no VM backend yet — a
+runner pool configured here cannot provision jobs. Until that lands, this is
+install/uninstall plumbing only.
 
 ## The Runny app and the command-line tool
 

@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/user"
+	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -179,6 +180,9 @@ func TestRecordToProtoCarriesEnding(t *testing.T) {
 // goroutine plumbing delivers a fast local resolution well within its
 // timeout, rather than always falling through to the "" timeout path.
 func TestLookupUsernameResolvesQuickly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Getuid() is always -1 on windows — there's no real uid to resolve, and readPeerUID (peercred_other.go) never produces one there either")
+	}
 	got := lookupUsername(uint32(os.Getuid()))
 	want, err := user.Current()
 	if err != nil {

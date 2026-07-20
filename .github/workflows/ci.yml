@@ -113,9 +113,11 @@ jobs:
       - name: build
         shell: bash
         run: mise x -- bazel --output_base=C:/b build --config=ci -- //... -//apps/Runny/... -//internal/sysdaemon:sysdaemon_test
+      # Bazel's local test sandbox doesn't pass USERPROFILE through by
+      # default on windows (unlike HOME on unix) — os.UserHomeDir needs it.
       - name: test
         shell: bash
-        run: mise x -- bazel --output_base=C:/b test --config=ci -- //... -//apps/Runny/... -//internal/sysdaemon:sysdaemon_test
+        run: mise x -- bazel --output_base=C:/b test --config=ci --test_env=USERPROFILE -- //... -//apps/Runny/... -//internal/sysdaemon:sysdaemon_test
 
   # The race detector, on its own job because the instrumented rebuild runs
   # ~2-10x slower than the default test path (.bazelrc test:race). macOS so

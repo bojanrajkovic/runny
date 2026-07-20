@@ -9,6 +9,12 @@ common:ci --announce_rc
 common:ci --color=yes
 common:ci --lockfile_mode=error
 
+# Windows defaults to RUNFILES_MANIFEST_ONLY (no physical runfiles tree),
+# so a test reading testdata/... via a plain relative path finds nothing.
+# Real symlinks work fine on the windows-2022 CI runner (UAC disabled —
+# the job's admin token already carries SeCreateSymbolicLinkPrivilege).
+build:windows --enable_runfiles
+
 # Race detector. Slow (instrumented rebuild, ~2-10x runtime), so it is a
 # dedicated config / CI job rather than the default test path. Catches the
 # unsynchronized-shared-state bugs the FSM's goroutine-per-slot design is prone

@@ -75,6 +75,45 @@ jobs:
       - name: test
         run: mise x -- bazel test --config=ci //...
 
+  # Runner hosts are a Windows target too; the linux job's cross-build step
+  # only proves the tree compiles for windows/amd64 — this job actually
+  # EXECUTES the test suite on a real Windows host. mise (not bazelisk)
+  # acquires bazel: the aqua backend supports windows/amd64 for our pinned
+  # 9.1.1, so this is one toolchain source (.mise.toml) across every job
+  # rather than a second pinning mechanism for one platform. Excluded:
+  # internal/sysdaemon (macOS LaunchDaemon-only — launchctl/dscl — with no
+  # Windows SCM equivalent yet; its tests assert literal unix paths against a
+  # feature that plainly can't run here).
+  windows:
+    name: build + test (windows)
+    runs-on: windows-2022
+    steps:
+      # Must run before checkout: mangled line endings in checked-out fixtures
+      # are a one-way trip, not something to fix up after.
+      - name: disable line-ending mangling
+        shell: bash
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: C:\b
+          key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel', '.mise.toml') }}
+          restore-keys: bazel-${{ runner.os }}-
+      # --output_base pins a short, fixed output tree: bazel's default
+      # per-workspace-hash path under %USERPROFILE% nests deep enough to hit
+      # MAX_PATH, and a fixed path is what makes the cache above reusable
+      # (same whole-output-root strategy as the linux/macos jobs, not
+      # --disk_cache).
+      - name: build
+        shell: bash
+        run: mise x -- bazel --output_base=C:\b build --config=ci -- //... -//apps/Runny/... -//internal/sysdaemon:sysdaemon_test
+      - name: test
+        shell: bash
+        run: mise x -- bazel --output_base=C:\b test --config=ci -- //... -//apps/Runny/... -//internal/sysdaemon:sysdaemon_test
+
   # The race detector, on its own job because the instrumented rebuild runs
   # ~2-10x slower than the default test path (.bazelrc test:race). macOS so
   # the cgo/vz packages are race-tested too, not just pure-Go — the FSM's

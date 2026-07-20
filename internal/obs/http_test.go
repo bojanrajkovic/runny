@@ -157,6 +157,12 @@ func TestHTTPTransportDurationCoversBodyTransfer(t *testing.T) {
 
 	var events []Event
 	hc := &http.Client{Transport: &HTTPTransport{Base: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		// A real (if tiny) delay before the mock returns headers: with no
+		// delay at all, HeaderDuration measures two time.Now() calls with
+		// nothing but a struct literal between them, and on a CI host with
+		// coarser clock granularity that can legitimately read back as
+		// exactly 0 — not a bug in HeaderDuration, just an unmeasurable gap.
+		time.Sleep(time.Millisecond)
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(&slowReader{data: body, delay: wait})}, nil
 	})}}
 	req, _ := http.NewRequestWithContext(WithHTTPClass(scopedHTTP(&events), HTTPTarballDownload), http.MethodGet, "https://cdn.example/x", nil)

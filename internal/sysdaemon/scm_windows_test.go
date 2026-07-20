@@ -127,6 +127,83 @@ func newTestScmInstaller(m *fakeMgr, r *orderedRun) *scmInstaller {
 	}
 }
 
+func newStagingScmInstaller(m *fakeMgr, r *orderedRun, testConfig verdictTester) *scmInstaller {
+	inst := newTestScmInstaller(m, r)
+	inst.testConfig = testConfig
+	return inst.WithStage(StagePlan{Config: []byte("pools: []\n")})
+}
+
+// Regression test: a freshly created service used to be registered
+// StartAutomatic immediately, before its staged config was validated — a
+// reboot before the operator fixed a bad config would start the daemon
+// against it. A fresh service must stay demand-start until staging succeeds.
+func TestScmInstallEnablesAutoStartAfterValidStaging(t *testing.T) {
+	var order []string
+	m := &fakeMgr{calls: &order}
+	r := &orderedRun{order: &order}
+	inst := newStagingScmInstaller(m, r, func(context.Context, string, string) (home.Verdict, error) {
+		return home.Verdict{Status: home.VerdictOK}, nil
+	})
+	if err := inst.Install(context.Background()); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	created, ok := m.existing.(*fakeService)
+	if !ok {
+		t.Fatal("service was never created")
+	}
+	if created.lastConfig.StartType != mgr.StartAutomatic {
+		t.Errorf("StartType = %v, want StartAutomatic once staging validates", created.lastConfig.StartType)
+	}
+}
+
+func TestScmInstallKeepsFreshServiceDemandStartOnFailedStaging(t *testing.T) {
+	var order []string
+	m := &fakeMgr{calls: &order}
+	r := &orderedRun{order: &order}
+	inst := newStagingScmInstaller(m, r, func(context.Context, string, string) (home.Verdict, error) {
+		return home.Verdict{Status: home.VerdictError, Errors: []string{"bad config"}}, nil
+	})
+	if err := inst.Install(context.Background()); err == nil {
+		t.Fatal("Install must fail on a blocking verdict")
+	}
+	created, ok := m.existing.(*fakeService)
+	if !ok {
+		t.Fatal("service was never created")
+	}
+	if created.lastConfig.StartType != mgr.StartManual {
+		t.Errorf("StartType = %v, want StartManual — a service whose staged config failed validation "+
+			"must not be registered to auto-start on the next reboot", created.lastConfig.StartType)
+	}
+	if slices.Index(order, "start") >= 0 {
+		t.Error("must not start a service whose staged config failed validation")
+	}
+}
+
+// Regression guard for the other direction: reinstalling an EXISTING service
+// must stay automatic even when the NEW staged config fails validation — it
+// was already validated by a prior successful install, and downgrading it
+// here would silently disable auto-start for an install still running fine.
+func TestScmInstallKeepsExistingServiceAutomaticOnFailedStaging(t *testing.T) {
+	var order []string
+	existing := &fakeService{
+		name: WindowsServiceName, calls: &order,
+		status:     svc.Status{State: svc.Running},
+		lastConfig: mgr.Config{StartType: mgr.StartAutomatic},
+	}
+	m := &fakeMgr{existing: existing, calls: &order}
+	r := &orderedRun{order: &order}
+	inst := newStagingScmInstaller(m, r, func(context.Context, string, string) (home.Verdict, error) {
+		return home.Verdict{Status: home.VerdictError, Errors: []string{"bad config"}}, nil
+	})
+	if err := inst.Install(context.Background()); err == nil {
+		t.Fatal("Install must fail on a blocking verdict")
+	}
+	if existing.lastConfig.StartType != mgr.StartAutomatic {
+		t.Errorf("StartType = %v, want StartAutomatic preserved — a bad reinstall config must not disable "+
+			"auto-start on an existing, already-validated service", existing.lastConfig.StartType)
+	}
+}
+
 func TestScmInstallOrdersServiceBeforeHomeACL(t *testing.T) {
 	var order []string
 	m := &fakeMgr{calls: &order}

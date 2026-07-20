@@ -115,7 +115,18 @@ func (s *scmInstaller) Install(ctx context.Context) error {
 	}
 	defer m.Disconnect()
 
-	svcHandle, err := s.ensureService(m)
+	// A freshly created service stays demand-start, not automatic, when a
+	// config is staged: CreateService has to run before ensureHome (the
+	// service SID must resolve for the icacls grant), so it can't simply be
+	// deferred until after validation — but auto-start CAN be, so a staged
+	// config that fails runnyd -test-config never leaves a service
+	// registered to come up on the next boot against it, matching stage's
+	// documented guarantee. Reinstalling an EXISTING service always stays
+	// automatic regardless: it was already validated by a prior successful
+	// install, and downgrading it here on a later config's staging failure
+	// would silently disable auto-start for an install that's still running
+	// fine.
+	fresh, svcHandle, err := s.ensureService(m, s.plan != nil)
 	if err != nil {
 		return err
 	}
@@ -136,6 +147,11 @@ func (s *scmInstaller) Install(ctx context.Context) error {
 		if err := st.stage(ctx, *s.plan); err != nil {
 			return err
 		}
+		if fresh {
+			if err := svcHandle.UpdateConfig(s.serviceConfig(mgr.StartAutomatic)); err != nil {
+				return fmt.Errorf("enabling automatic start for %s: %w", WindowsServiceName, err)
+			}
+		}
 	}
 	// Stop before start, mirroring darwin's bootstrap (install.go) always
 	// booting out a prior generation before bootstrapping fresh: StartService
@@ -153,42 +169,56 @@ func (s *scmInstaller) Install(ctx context.Context) error {
 	return nil
 }
 
+// serviceConfig is the mgr.Config shared by every call site that creates or
+// updates the service (ensureService's two branches, Install's post-staging
+// enable-auto-start), varying only StartType. BinaryPathName is pre-escaped
+// (syscall.EscapeArg, matching what CreateService already does internally
+// for its own separate exepath argument) since UpdateConfig passes it to
+// ChangeServiceConfig with no escaping of its own — an unquoted path
+// containing a space (e.g. "C:\Program Files\Runny\runnyd.exe") would parse
+// as the classic unquoted-service-path ambiguity. CreateService ignores this
+// field (it takes exepath as a separate positional argument instead), so
+// setting it unconditionally is harmless there.
+func (s *scmInstaller) serviceConfig(startType uint32) mgr.Config {
+	return mgr.Config{
+		ServiceStartName: windowsServiceSID,
+		StartType:        startType,
+		SidType:          windows.SERVICE_SID_TYPE_UNRESTRICTED,
+		DisplayName:      windowsDisplayName,
+		BinaryPathName:   syscall.EscapeArg(s.cfg.RunnydPath),
+	}
+}
+
 // ensureService reuses an existing service (idempotent reinstall — updating
 // only its binary path) or creates one. LookupSID("NT SERVICE\runnyd") does
 // not resolve before the service is registered, so this runs BEFORE
 // ensureHome: nothing can reference the service SID in an icacls grant until
-// this returns.
-func (s *scmInstaller) ensureService(m scmMgr) (scmService, error) {
-	cfg := mgr.Config{
-		ServiceStartName: windowsServiceSID,
-		StartType:        mgr.StartAutomatic,
-		SidType:          windows.SERVICE_SID_TYPE_UNRESTRICTED,
-		DisplayName:      windowsDisplayName,
-	}
+// this returns. deferAutoStart holds a freshly created service at demand-start
+// rather than automatic — see Install's doc comment at the call site; it has
+// no effect when reusing an existing service.
+func (s *scmInstaller) ensureService(m scmMgr, deferAutoStart bool) (fresh bool, svc scmService, err error) {
 	existing, err := m.OpenService(WindowsServiceName)
 	switch {
 	case err == nil:
-		// UpdateConfig has no separate exepath arg the way CreateService does — CreateService
-		// quotes its exepath itself (via syscall.EscapeArg internally); BinaryPathName here
-		// gets no such treatment from UpdateConfig, so an unquoted path containing a space
-		// (e.g. "C:\Program Files\Runny\runnyd.exe") would parse as the classic
-		// unquoted-service-path ambiguity. Escape it the same way CreateService does.
-		cfg.BinaryPathName = syscall.EscapeArg(s.cfg.RunnydPath)
-		if err := existing.UpdateConfig(cfg); err != nil {
+		if err := existing.UpdateConfig(s.serviceConfig(mgr.StartAutomatic)); err != nil {
 			existing.Close()
-			return nil, fmt.Errorf("updating %s: %w", WindowsServiceName, err)
+			return false, nil, fmt.Errorf("updating %s: %w", WindowsServiceName, err)
 		}
 		s.log("service %s already exists — updated binary path", WindowsServiceName)
-		return existing, nil
+		return false, existing, nil
 	case errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST):
-		created, err := m.CreateService(WindowsServiceName, s.cfg.RunnydPath, cfg)
+		startType := uint32(mgr.StartAutomatic)
+		if deferAutoStart {
+			startType = mgr.StartManual
+		}
+		created, err := m.CreateService(WindowsServiceName, s.cfg.RunnydPath, s.serviceConfig(startType))
 		if err != nil {
-			return nil, fmt.Errorf("creating service %s: %w", WindowsServiceName, err)
+			return false, nil, fmt.Errorf("creating service %s: %w", WindowsServiceName, err)
 		}
 		s.log("created service %s (runs as %s)", WindowsServiceName, windowsServiceSID)
-		return created, nil
+		return true, created, nil
 	default:
-		return nil, fmt.Errorf("opening service %s: %w", WindowsServiceName, err)
+		return false, nil, fmt.Errorf("opening service %s: %w", WindowsServiceName, err)
 	}
 }
 

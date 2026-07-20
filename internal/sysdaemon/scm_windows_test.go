@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -183,12 +184,21 @@ func TestScmInstallKeepsFreshServiceDemandStartOnFailedStaging(t *testing.T) {
 // must stay automatic even when the NEW staged config fails validation — it
 // was already validated by a prior successful install, and downgrading it
 // here would silently disable auto-start for an install still running fine.
-func TestScmInstallKeepsExistingServiceAutomaticOnFailedStaging(t *testing.T) {
+// Regression test for the retry case Codex found in the previous fix:
+// ensureService's update branch used to unconditionally set StartAutomatic
+// before staging validated, so a reinstall (or a retry over a service a
+// prior failed attempt left demand-start) whose NEW config also fails
+// validation would leave the service registered to auto-start against a
+// config that never actually passed runnyd -test-config. The service must
+// stay (or become) demand-start through any failed staging attempt,
+// existing or freshly created — ensureService always sets StartManual now;
+// only a successful stage() reaching the end of Install re-enables it.
+func TestScmInstallKeepsExistingServiceDemandStartOnFailedStaging(t *testing.T) {
 	var order []string
 	existing := &fakeService{
 		name: WindowsServiceName, calls: &order,
 		status:     svc.Status{State: svc.Running},
-		lastConfig: mgr.Config{StartType: mgr.StartAutomatic},
+		lastConfig: mgr.Config{StartType: mgr.StartAutomatic}, // left behind by a prior successful install
 	}
 	m := &fakeMgr{existing: existing, calls: &order}
 	r := &orderedRun{order: &order}
@@ -198,9 +208,68 @@ func TestScmInstallKeepsExistingServiceAutomaticOnFailedStaging(t *testing.T) {
 	if err := inst.Install(context.Background()); err == nil {
 		t.Fatal("Install must fail on a blocking verdict")
 	}
+	if existing.lastConfig.StartType != mgr.StartManual {
+		t.Errorf("StartType = %v, want StartManual — a service must not stay (or become) auto-start when its "+
+			"newly staged config failed validation, even if it was already Automatic before this run",
+			existing.lastConfig.StartType)
+	}
+	if slices.Index(order, "start") >= 0 {
+		t.Error("must not start a service whose staged config failed validation")
+	}
+}
+
+// Closes the loop on the above: a retry whose config now validates must
+// re-enable auto-start on a service a prior failed attempt left demand-start.
+func TestScmInstallEnablesAutoStartOnRetryAfterPriorFailure(t *testing.T) {
+	var order []string
+	existing := &fakeService{
+		name: WindowsServiceName, calls: &order,
+		status:     svc.Status{State: svc.Stopped},
+		lastConfig: mgr.Config{StartType: mgr.StartManual}, // left behind by a prior failed attempt
+	}
+	m := &fakeMgr{existing: existing, calls: &order}
+	r := &orderedRun{order: &order}
+	inst := newStagingScmInstaller(m, r, func(context.Context, string, string) (home.Verdict, error) {
+		return home.Verdict{Status: home.VerdictOK}, nil
+	})
+	if err := inst.Install(context.Background()); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
 	if existing.lastConfig.StartType != mgr.StartAutomatic {
-		t.Errorf("StartType = %v, want StartAutomatic preserved — a bad reinstall config must not disable "+
-			"auto-start on an existing, already-validated service", existing.lastConfig.StartType)
+		t.Errorf("StartType = %v, want StartAutomatic — a retry whose config now validates must enable auto-start",
+			existing.lastConfig.StartType)
+	}
+}
+
+// Regression test: staging used to run AFTER the ACL lockdown, so
+// --operator naming a different account than whoever is running this
+// (elevated) process would hit access denied — the locked-down ACL only
+// grants Modify to the service SID and --operator. Staging must happen
+// while the home still carries ProgramData's default ACL.
+func TestScmInstallStagesBeforeLockingDownACL(t *testing.T) {
+	var order []string
+	m := &fakeMgr{calls: &order}
+	r := &orderedRun{order: &order}
+	inst := newStagingScmInstaller(m, r, func(context.Context, string, string) (home.Verdict, error) {
+		return home.Verdict{Status: home.VerdictOK}, nil
+	})
+	inst.writeFile = func(path string, data []byte, perm os.FileMode) error {
+		order = append(order, "write:"+path)
+		return nil
+	}
+	if err := inst.Install(context.Background()); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	writeIdx := slices.IndexFunc(order, func(s string) bool { return strings.HasPrefix(s, "write:") })
+	icaclsIdx := slices.Index(order, "run:icacls")
+	if writeIdx < 0 {
+		t.Fatal("config was never staged")
+	}
+	if icaclsIdx < 0 {
+		t.Fatal("no icacls call was made")
+	}
+	if writeIdx > icaclsIdx {
+		t.Errorf("staging (idx %d) must happen BEFORE the ACL lockdown (idx %d)", writeIdx, icaclsIdx)
 	}
 }
 

@@ -102,8 +102,9 @@ func (s *scmInstaller) writeOwned(ctx context.Context, path string, data []byte)
 }
 
 // Install ensures the runnyd service exists (before home ownership — see
-// ensureService's doc comment), configures crash/non-crash recovery, prepares
-// the home's ACL, stages a provided config, then (re)starts the service.
+// ensureService's doc comment), configures crash/non-crash recovery, creates
+// the home directory, stages a provided config, locks down the home's ACL,
+// enables automatic start, then (re)starts the service.
 func (s *scmInstaller) Install(ctx context.Context) error {
 	if err := s.cfg.validate(); err != nil {
 		return err
@@ -115,18 +116,7 @@ func (s *scmInstaller) Install(ctx context.Context) error {
 	}
 	defer m.Disconnect()
 
-	// A freshly created service stays demand-start, not automatic, when a
-	// config is staged: CreateService has to run before ensureHome (the
-	// service SID must resolve for the icacls grant), so it can't simply be
-	// deferred until after validation — but auto-start CAN be, so a staged
-	// config that fails runnyd -test-config never leaves a service
-	// registered to come up on the next boot against it, matching stage's
-	// documented guarantee. Reinstalling an EXISTING service always stays
-	// automatic regardless: it was already validated by a prior successful
-	// install, and downgrading it here on a later config's staging failure
-	// would silently disable auto-start for an install that's still running
-	// fine.
-	fresh, svcHandle, err := s.ensureService(m, s.plan != nil)
+	svcHandle, err := s.ensureService(m)
 	if err != nil {
 		return err
 	}
@@ -139,19 +129,39 @@ func (s *scmInstaller) Install(ctx context.Context) error {
 		return fmt.Errorf("configuring non-crash recovery: %w", err)
 	}
 
-	if err := s.ensureHome(ctx); err != nil {
+	if err := s.ensureHomeDir(); err != nil {
 		return err
 	}
 	if s.plan != nil {
+		// Staged BEFORE the ACL lockdown below: --operator can name a
+		// different account than whoever is running this (elevated)
+		// process, and the locked-down ACL only grants Modify to the
+		// service SID and --operator — not to the executing identity.
+		// Staging first, while the home still carries ProgramData's default
+		// ACL, lets the write through regardless of which elevated identity
+		// is running it, at the cost of the config/key briefly (until
+		// ensureHomeACL runs, a few milliseconds later) sitting under that
+		// default ACL rather than the locked-down one.
 		st := stager{runnydPath: s.cfg.RunnydPath, writeOwned: s.writeOwned, log: s.log, testConfig: s.testConfig}
 		if err := st.stage(ctx, *s.plan); err != nil {
 			return err
 		}
-		if fresh {
-			if err := svcHandle.UpdateConfig(s.serviceConfig(mgr.StartAutomatic)); err != nil {
-				return fmt.Errorf("enabling automatic start for %s: %w", WindowsServiceName, err)
-			}
-		}
+	}
+	if err := s.ensureHomeACL(ctx); err != nil {
+		return err
+	}
+
+	// ensureService always leaves the service demand-start, whether just
+	// created or already existing — this is the ONE place StartType ever
+	// becomes Automatic, reached only once every gate above (staging, if
+	// any) has already succeeded. A config that fails runnyd -test-config
+	// therefore never leaves a service registered to come up on the next
+	// boot against it, on a fresh install OR a retry over a service a prior
+	// failed attempt left behind — the single rule replaces tracking
+	// "freshly created vs. reused vs. left demand-start by an earlier
+	// failure" as separate cases.
+	if err := svcHandle.UpdateConfig(s.serviceConfig(mgr.StartAutomatic)); err != nil {
+		return fmt.Errorf("enabling automatic start for %s: %w", WindowsServiceName, err)
 	}
 	// Stop before start, mirroring darwin's bootstrap (install.go) always
 	// booting out a prior generation before bootstrapping fresh: StartService
@@ -170,7 +180,7 @@ func (s *scmInstaller) Install(ctx context.Context) error {
 }
 
 // serviceConfig is the mgr.Config shared by every call site that creates or
-// updates the service (ensureService's two branches, Install's post-staging
+// updates the service (ensureService's two branches, Install's final
 // enable-auto-start), varying only StartType. BinaryPathName is pre-escaped
 // (syscall.EscapeArg, matching what CreateService already does internally
 // for its own separate exepath argument) since UpdateConfig passes it to
@@ -190,46 +200,50 @@ func (s *scmInstaller) serviceConfig(startType uint32) mgr.Config {
 }
 
 // ensureService reuses an existing service (idempotent reinstall — updating
-// only its binary path) or creates one. LookupSID("NT SERVICE\runnyd") does
-// not resolve before the service is registered, so this runs BEFORE
-// ensureHome: nothing can reference the service SID in an icacls grant until
-// this returns. deferAutoStart holds a freshly created service at demand-start
-// rather than automatic — see Install's doc comment at the call site; it has
-// no effect when reusing an existing service.
-func (s *scmInstaller) ensureService(m scmMgr, deferAutoStart bool) (fresh bool, svc scmService, err error) {
+// only its binary path) or creates one, always leaving it demand-start —
+// Install's final step is the only place StartType ever becomes Automatic,
+// once every validation gate above it has passed. LookupSID("NT
+// SERVICE\runnyd") does not resolve before the service is registered, so
+// this runs BEFORE ensureHomeDir/ensureHomeACL: nothing can reference the
+// service SID in an icacls grant until this returns.
+func (s *scmInstaller) ensureService(m scmMgr) (scmService, error) {
+	cfg := s.serviceConfig(mgr.StartManual)
 	existing, err := m.OpenService(WindowsServiceName)
 	switch {
 	case err == nil:
-		if err := existing.UpdateConfig(s.serviceConfig(mgr.StartAutomatic)); err != nil {
+		if err := existing.UpdateConfig(cfg); err != nil {
 			existing.Close()
-			return false, nil, fmt.Errorf("updating %s: %w", WindowsServiceName, err)
+			return nil, fmt.Errorf("updating %s: %w", WindowsServiceName, err)
 		}
 		s.log("service %s already exists — updated binary path", WindowsServiceName)
-		return false, existing, nil
+		return existing, nil
 	case errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST):
-		startType := uint32(mgr.StartAutomatic)
-		if deferAutoStart {
-			startType = mgr.StartManual
-		}
-		created, err := m.CreateService(WindowsServiceName, s.cfg.RunnydPath, s.serviceConfig(startType))
+		created, err := m.CreateService(WindowsServiceName, s.cfg.RunnydPath, cfg)
 		if err != nil {
-			return false, nil, fmt.Errorf("creating service %s: %w", WindowsServiceName, err)
+			return nil, fmt.Errorf("creating service %s: %w", WindowsServiceName, err)
 		}
 		s.log("created service %s (runs as %s)", WindowsServiceName, windowsServiceSID)
-		return true, created, nil
+		return created, nil
 	default:
-		return false, nil, fmt.Errorf("opening service %s: %w", WindowsServiceName, err)
+		return nil, fmt.Errorf("opening service %s: %w", WindowsServiceName, err)
 	}
 }
 
-// ensureHome creates the system home (+ logs\) and resets its ACL via icacls.
-// Inheritance is disabled first because ProgramData's default DACL grants all
-// local Users read, which would leak the GitHub App key.
-func (s *scmInstaller) ensureHome(ctx context.Context) error {
+// ensureHomeDir creates the system home (+ logs\). Split from ensureHomeACL
+// so Install can stage a provided config between the two — see Install's
+// comment at the staging call site for why.
+func (s *scmInstaller) ensureHomeDir() error {
 	logs := home.Dir(home.SystemHomeDir).LogsDir()
 	if err := s.mkdirAll(logs, 0o700); err != nil { // creates home too — logs\ nests under it
 		return fmt.Errorf("creating %s: %w", home.SystemHomeDir, err)
 	}
+	return nil
+}
+
+// ensureHomeACL resets the home's ACL via icacls. Inheritance is disabled
+// first because ProgramData's default DACL grants all local Users read,
+// which would leak the GitHub App key.
+func (s *scmInstaller) ensureHomeACL(ctx context.Context) error {
 	for _, args := range icaclsHomeArgs(home.SystemHomeDir, s.cfg.Operator) {
 		if _, err := s.run(ctx, args[0], args[1:]...); err != nil {
 			return err

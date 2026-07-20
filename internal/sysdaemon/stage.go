@@ -2,11 +2,14 @@ package sysdaemon
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/bojanrajkovic/runny/internal/home"
 )
@@ -150,4 +153,68 @@ func hashedBasename(base, src string) string {
 	stem := strings.TrimSuffix(base, ext)
 	sum := sha256.Sum256([]byte(src))
 	return fmt.Sprintf("%s-%x%s", stem, sum[:4], ext)
+}
+
+// stageTestConfigTimeout bounds the staged `-test-config` exec, mirroring
+// cmd/runnyd/parsegate.go's testConfigTimeout: side-effect-free on the target
+// binary's end (no home, no lock, no network), so 10s is generous headroom —
+// not a tight race, but no install step may block forever either.
+const stageTestConfigTimeout = 10 * time.Second
+
+// stager runs the stage flow shared by every platform installer: copy each
+// planned key into the home, write the resolved config, then validate via
+// `runnyd -test-config` before Install bootstraps/starts anything. writeOwned
+// is the one platform-specific piece — darwin writes 0600 then chowns (the file
+// inherits the home's ACL by creation, exactly as a hand-cp would); Windows
+// writes 0600 and does NOT chown, relying instead on the home's own inherited
+// grant ACE (see scm_windows.go).
+type stager struct {
+	runnydPath string
+	writeOwned func(ctx context.Context, path string, data []byte) error
+	log        func(format string, args ...any)
+	testConfig verdictTester
+}
+
+// stage writes plan's keys and config.yaml into the home via writeOwned, then
+// runs `runnyd -test-config <home>/config.yaml` and parses its JSON verdict —
+// the same contract runnyctl's upgrade and edit-config gates use — rather than
+// gating on the exit code alone: a warn-tier config exits 0, and a fresh
+// operator is never given another chance to see those warnings once install
+// has moved on. Warnings are surfaced regardless of status; an error-tier (or
+// otherwise unrecognized) verdict fails the stage, leaving the home in place.
+func (s *stager) stage(ctx context.Context, plan StagePlan) error {
+	for _, k := range plan.Keys {
+		data, err := os.ReadFile(k.Src)
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", k.Src, err)
+		}
+		if err := s.writeOwned(ctx, k.Dst, data); err != nil {
+			return err
+		}
+	}
+	configPath := home.Dir(home.SystemHomeDir).ConfigPath()
+	if err := s.writeOwned(ctx, configPath, plan.Config); err != nil {
+		return err
+	}
+	fail := func(err error) error {
+		return fmt.Errorf("staged config failed validation (home left in place; fix %s and rerun install-daemon): %w",
+			configPath, err)
+	}
+	cctx, cancel := context.WithTimeout(ctx, stageTestConfigTimeout)
+	defer cancel()
+	v, err := s.testConfig(cctx, s.runnydPath, configPath)
+	if err != nil {
+		return fail(err)
+	}
+	for _, w := range v.Warnings {
+		s.log("warning: %s", w.Message)
+	}
+	// Fail closed on anything but ok/warn, matching decideUpgrade and edit-config's
+	// same-contract gates: an unrecognized status must never be treated as ok.
+	if v.Status != home.VerdictOK && v.Status != home.VerdictWarn {
+		return fail(fmt.Errorf("status %q: %s", v.Status, strings.Join(v.Errors, "; ")))
+	}
+	s.log("staged config.yaml and %d key file(s) into %s; validated by %s -test-config",
+		len(plan.Keys), home.SystemHomeDir, s.runnydPath)
+	return nil
 }

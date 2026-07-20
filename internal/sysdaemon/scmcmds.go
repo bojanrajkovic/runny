@@ -23,14 +23,19 @@ const windowsServiceSID = `NT SERVICE\` + WindowsServiceName
 // only strips INHERITED entries and /grant only adds, neither removes a
 // stale explicit grant for a principal no longer being installed for. Then
 // /inheritance:r strips the inherited ProgramData Users-read /reset just
-// restored (it would leak the GitHub App key), /grant gives the service and
-// operator principals Modify — not Read; Windows ownership confers no
-// implicit access, unlike POSIX owner bits — and /setowner hands ownership to
-// the service SID, the signal home.ResolveServer keys on.
+// restored (it would leak the GitHub App key) — /T is load-bearing here too:
+// ensureHome creates logs\ before this runs, and a non-recursive
+// /inheritance:r only strips the home ROOT's inherited entries, leaving
+// logs\ (and, on a reinstall, any other pre-existing subdirectory) with the
+// inherited world-read ACE the whole sequence exists to remove. /grant then
+// gives the service and operator principals Modify — not Read; Windows
+// ownership confers no implicit access, unlike POSIX owner bits — and
+// /setowner hands ownership to the service SID, the signal
+// home.ResolveServer keys on.
 func icaclsHomeArgs(homeDir, operator string) [][]string {
 	return [][]string{
 		{"icacls", homeDir, "/reset", "/T"},
-		{"icacls", homeDir, "/inheritance:r"},
+		{"icacls", homeDir, "/inheritance:r", "/T"},
 		{"icacls", homeDir, "/grant", windowsServiceSID + ":(OI)(CI)M", "/T"},
 		{"icacls", homeDir, "/grant", operator + ":(OI)(CI)M", "/T"},
 		{"icacls", homeDir, "/setowner", windowsServiceSID, "/T"},

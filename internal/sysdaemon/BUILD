@@ -4,6 +4,7 @@ go_library(
     name = "sysdaemon",
     srcs = [
         "install.go",
+        "scmcmds.go",
         "stage.go",
         "sysdaemon.go",
     ],
@@ -21,6 +22,7 @@ go_library(
 go_test(
     name = "sysdaemon_test",
     srcs = [
+        "scmcmds_test.go",
         "stage_test.go",
         "sysdaemon_test.go",
     ],

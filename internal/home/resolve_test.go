@@ -30,7 +30,7 @@ func TestResolveServerFallsBackWhenSystemDirAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(string(got), "/.runny") {
+	if !strings.HasSuffix(filepath.ToSlash(string(got)), "/.runny") {
 		t.Errorf("resolveServer(absent) = %q, want a per-user ~/.runny", got)
 	}
 }
@@ -48,7 +48,7 @@ func TestResolveServerFallsBackWhenSystemDirNotOwned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(string(got), "/.runny") {
+	if !strings.HasSuffix(filepath.ToSlash(string(got)), "/.runny") {
 		t.Errorf("resolveServer(not-owned) = %q, want per-user fallback", got)
 	}
 }
@@ -72,7 +72,7 @@ func TestResolveClientFallsBackWhenSystemDirAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(string(got), "/.runny") {
+	if !strings.HasSuffix(filepath.ToSlash(string(got)), "/.runny") {
 		t.Errorf("resolveClient(absent) = %q, want per-user ~/.runny", got)
 	}
 }

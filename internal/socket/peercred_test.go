@@ -55,7 +55,7 @@ func TestPeerCredsCarriesUIDOverRealSocket(t *testing.T) {
 	t.Cleanup(g.Stop)
 
 	conn, err := grpc.NewClient(
-		"unix://"+sock,
+		"unix:"+sock,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {

@@ -89,7 +89,13 @@ func run() error {
 		return err
 	}
 	socketPath := dir.SocketPath()
-	conn, err := grpc.NewClient("unix://"+socketPath,
+	// unix: (single colon, opaque — not unix://, a scheme+authority form that
+	// only happens to work on unix because the leading "/" in an absolute
+	// unix path completes it to "unix:///abs/path"). A windows socketPath
+	// starts with a drive letter, not "/", so "unix://"+path leaves grpc's
+	// target parser trying to read "C:\Users\...\runnyd.sock" as a
+	// host:port authority — "too many colons in address".
+	conn, err := grpc.NewClient("unix:"+socketPath,
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return err

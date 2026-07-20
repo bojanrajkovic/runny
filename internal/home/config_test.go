@@ -3,10 +3,21 @@ package home
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+// userHomeEnvVar is the env var os.UserHomeDir reads to resolve the home
+// dir — HOME everywhere but Windows, which reads USERPROFILE and ignores
+// HOME entirely.
+var userHomeEnvVar = func() string {
+	if runtime.GOOS == "windows" {
+		return "USERPROFILE"
+	}
+	return "HOME"
+}()
 
 const minimalConfig = `
 pools:
@@ -313,25 +324,27 @@ func TestLoadConfigBadDuration(t *testing.T) {
 }
 
 func TestPaths(t *testing.T) {
-	d := Dir("/h/.runny")
-	if got := d.VMDir("mac-1"); got != "/h/.runny/vms/mac-1" {
-		t.Errorf("VMDir = %q", got)
+	d := Dir(filepath.Join("h", ".runny"))
+	if got, want := d.VMDir("mac-1"), filepath.Join(string(d), "vms", "mac-1"); got != want {
+		t.Errorf("VMDir = %q, want %q", got, want)
 	}
-	if got := d.ImageBundleDir("ghcr.io/cirruslabs/macos-tahoe-xcode:26.3", "sha256:abc"); got != "/h/.runny/images/ghcr.io_cirruslabs_macos-tahoe-xcode/sha256-abc" {
-		t.Errorf("ImageBundleDir = %q", got)
+	if got, want := d.ImageBundleDir("ghcr.io/cirruslabs/macos-tahoe-xcode:26.3", "sha256:abc"),
+		filepath.Join(string(d), "images", "ghcr.io_cirruslabs_macos-tahoe-xcode", "sha256-abc"); got != want {
+		t.Errorf("ImageBundleDir = %q, want %q", got, want)
 	}
 }
 
 // The home is fixed at ~/.runny derived from $HOME: a set RUNNY_HOME must be
 // ignored (the inverse of the removed override), not honored.
 func TestResolveIgnoresEnvAndIsHomeRooted(t *testing.T) {
-	t.Setenv("HOME", "/tmp/fakehome")
+	fakeHome := filepath.Join(t.TempDir(), "fakehome")
+	t.Setenv(userHomeEnvVar, fakeHome)
 	t.Setenv("RUNNY_HOME", "/custom")
 	d, err := resolvePerUser()
 	if err != nil {
 		t.Fatalf("resolvePerUser() error = %v", err)
 	}
-	if got, want := d.String(), filepath.Join("/tmp/fakehome", ".runny"); got != want {
+	if got, want := d.String(), filepath.Join(fakeHome, ".runny"); got != want {
 		t.Errorf("resolvePerUser() = %q, want %q — RUNNY_HOME must be ignored, the home derived from $HOME", got, want)
 	}
 }
@@ -343,7 +356,7 @@ func TestResolveIgnoresEnvAndIsHomeRooted(t *testing.T) {
 func TestResolveRejectsDegenerateHome(t *testing.T) {
 	for _, h := range []string{"/", "//", "///", "relative/home", "."} {
 		t.Run(h, func(t *testing.T) {
-			t.Setenv("HOME", h)
+			t.Setenv(userHomeEnvVar, h)
 			if _, err := resolvePerUser(); err == nil {
 				t.Fatalf("resolvePerUser() with $HOME=%q must error, not derive a wrong home", h)
 			}

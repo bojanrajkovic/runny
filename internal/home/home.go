@@ -61,15 +61,22 @@ func resolveClient(systemDir string) (Dir, error) {
 // rejects an implausible $HOME — anything not an absolute path below root —
 // rather than deriving a wrong home: launchd can hand a per-user agent a
 // degenerate $HOME, and with no override to correct a bad derivation, that must
-// fail loudly. The check is structural: filepath.Join Cleans, so "/", "//", and
-// "///" all collapse to "/.runny", and a relative $HOME yields a relative home —
-// IsAbs plus a non-root Clean rejects the whole class.
+// fail loudly. The check is content-based, not spelling-based: strip the
+// volume name (empty on unix, "C:" or a UNC prefix on windows) and reject if
+// nothing but separators remains — that holds for every platform's spelling
+// of "just the root" without needing to know it. A literal Clean(h) == "/"
+// (or even Dir(Clean(h)) == Clean(h)) check doesn't reliably hold: windows'
+// IsAbs/Clean treat a bare "//" and "///" inconsistently with each other, so
+// pattern-matching the cleaned *string* is chasing edge cases the platform
+// itself doesn't handle uniformly — the volume-stripped content check sidesteps
+// that entirely.
 func resolvePerUser() (Dir, error) {
 	h, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolving home dir: %w", err)
 	}
-	if !filepath.IsAbs(h) || filepath.Clean(h) == "/" {
+	rest := strings.TrimLeft(h[len(filepath.VolumeName(h)):], `/\`)
+	if !filepath.IsAbs(h) || rest == "" {
 		return "", fmt.Errorf("resolving home dir: implausible $HOME %q", h)
 	}
 	return Dir(filepath.Join(h, ".runny")), nil

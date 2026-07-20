@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -57,6 +58,9 @@ func TestCheckCompetingRegistrationPerUserHomeSkips(t *testing.T) {
 }
 
 func TestCheckCompetingRegistrationSystemHomeRegistered(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("checkCompetingRegistration is entirely macOS-launchd-specific (gui/ domains); fileOwnerUID's windows stub always errors, so this probe path can't be exercised here")
+	}
 	orig := launchdRunner
 	defer func() { launchdRunner = orig }()
 	var probed string

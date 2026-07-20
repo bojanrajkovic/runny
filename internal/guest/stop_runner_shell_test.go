@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -11,6 +12,9 @@ import (
 // a temp PATH that stubs pgrep/pkill/sleep, proving the three exit paths:
 // exit 0 (listener dead), exit 1 (survived SIGKILL), exit 2 (pgrep tool failure).
 func TestStopRunnerShellLogic(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stopRunnerScript only ever runs inside a macOS guest; /bin/sh doesn't exist on the windows host running this test")
+	}
 	noop := "#!/bin/sh\nexit 0\n"
 	tests := []struct {
 		name     string

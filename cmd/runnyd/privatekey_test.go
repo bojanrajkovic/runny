@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -24,6 +25,9 @@ func writeKey(t *testing.T, perm os.FileMode) string {
 }
 
 func TestCheckPrivateKeyPerms(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("group/world permission bits don't exist on NTFS — Stat().Mode().Perm() collapses to 0666/0444 regardless of chmod, so this unix-only check can't be exercised here")
+	}
 	tight := writeKey(t, 0o600)
 	loose := writeKey(t, 0o644)
 

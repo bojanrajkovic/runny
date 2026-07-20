@@ -3,6 +3,7 @@ package images
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 )
@@ -337,6 +338,9 @@ func TestApplyPruneGuard(t *testing.T) {
 // TestPlanImageBundlePruneUnreadableRefDir: a ref dir that cannot be read
 // (permissions error) must surface an error rather than silently skipping.
 func TestPlanImageBundlePruneUnreadableRefDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 0o000 doesn't restrict directory listing on NTFS — this unix permission-denial path can't be exercised here")
+	}
 	if os.Getuid() == 0 {
 		t.Skip("root bypasses permission checks")
 	}

@@ -136,14 +136,15 @@ func TestPlanStageFromFileResolvesAndPreflights(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := planStageFromFile(configPath, "/Library/Application Support/runny", currentUsername(t))
+	systemHomeDir := "/Library/Application Support/runny"
+	plan, err := planStageFromFile(configPath, systemHomeDir, currentUsername(t))
 	if err != nil {
 		t.Fatalf("planStageFromFile: %v", err)
 	}
 	if len(plan.Keys) != 1 || plan.Keys[0].Src != keyPath {
 		t.Fatalf("plan.Keys = %+v", plan.Keys)
 	}
-	if !strings.Contains(string(plan.Config), "/Library/Application Support/runny/runner-app.pem") {
+	if want := filepath.Join(systemHomeDir, "runner-app.pem"); !strings.Contains(string(plan.Config), want) {
 		t.Errorf("config not rewritten to the in-home dest: %s", plan.Config)
 	}
 }

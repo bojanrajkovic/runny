@@ -14,7 +14,7 @@ import (
 func New(cfg Config) *scmInstaller {
 	return &scmInstaller{
 		cfg:        cfg,
-		ops:        realOps{},
+		connect:    connectSCM,
 		run:        execRunner,
 		writeFile:  os.WriteFile,
 		mkdirAll:   os.MkdirAll,

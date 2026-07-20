@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -24,6 +25,7 @@ type fakeService struct {
 	status     svc.Status
 	calls      *[]string
 	lastConfig mgr.Config
+	neverStops bool // simulates a service the SCM never actually stops
 }
 
 func (f *fakeService) UpdateConfig(c mgr.Config) error {
@@ -49,6 +51,9 @@ func (f *fakeService) Start(args ...string) error {
 
 func (f *fakeService) Control(c svc.Cmd) (svc.Status, error) {
 	*f.calls = append(*f.calls, "stop")
+	if f.neverStops {
+		return f.status, nil
+	}
 	if f.status.State == svc.Stopped {
 		return f.status, windows.ERROR_SERVICE_NOT_ACTIVE
 	}
@@ -64,28 +69,6 @@ func (f *fakeService) Delete() error {
 }
 
 func (f *fakeService) Close() error { return nil }
-
-// stuckService reports Running from every Query and Control call, simulating
-// a service the SCM never actually stops — the case waitStopped's ceiling
-// exists for.
-type stuckService struct{ calls *[]string }
-
-func (s *stuckService) UpdateConfig(mgr.Config) error                         { return nil }
-func (s *stuckService) SetRecoveryActions([]mgr.RecoveryAction, uint32) error { return nil }
-func (s *stuckService) SetRecoveryActionsOnNonCrashFailures(bool) error       { return nil }
-func (s *stuckService) Start(...string) error                                 { return nil }
-func (s *stuckService) Query() (svc.Status, error)                            { return svc.Status{State: svc.Running}, nil }
-
-func (s *stuckService) Control(svc.Cmd) (svc.Status, error) {
-	*s.calls = append(*s.calls, "stop")
-	return svc.Status{State: svc.Running}, nil
-}
-
-func (s *stuckService) Delete() error {
-	*s.calls = append(*s.calls, "delete")
-	return nil
-}
-func (s *stuckService) Close() error { return nil }
 
 // fakeMgr is a scmMgr double: existing non-nil makes OpenService succeed (the
 // idempotent-reinstall / uninstall-existing path); nil makes it report
@@ -111,10 +94,6 @@ func (f *fakeMgr) CreateService(name, exepath string, c mgr.Config) (scmService,
 
 func (f *fakeMgr) Disconnect() error { return nil }
 
-type fakeOps struct{ m *fakeMgr }
-
-func (o fakeOps) Connect() (scmMgr, error) { return o.m, nil }
-
 // orderedRun is a fake Runner that records raw icacls calls (for exactCall
 // assertions) AND appends into the same shared order log the SCM fakes use,
 // so a test can assert ordering across both seams.
@@ -132,22 +111,13 @@ func (r *orderedRun) run(_ context.Context, name string, args ...string) (string
 func newTestScmInstaller(m *fakeMgr, r *orderedRun) *scmInstaller {
 	return &scmInstaller{
 		cfg:       Config{Operator: testOperator, RunnydPath: `C:\runny\runnyd.exe`},
-		ops:       fakeOps{m: m},
+		connect:   func() (scmMgr, error) { return m, nil },
 		run:       r.run,
 		writeFile: func(string, []byte, os.FileMode) error { return nil },
 		mkdirAll:  func(string, os.FileMode) error { return nil },
 		removeAll: func(string) error { return nil },
 		log:       func(string, ...any) {},
 	}
-}
-
-func indexOfString(s []string, want string) int {
-	for i, v := range s {
-		if v == want {
-			return i
-		}
-	}
-	return -1
 }
 
 func TestScmInstallOrdersServiceBeforeHomeACL(t *testing.T) {
@@ -158,8 +128,8 @@ func TestScmInstallOrdersServiceBeforeHomeACL(t *testing.T) {
 	if err := inst.Install(context.Background()); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	createIdx := indexOfString(order, "create:"+WindowsServiceName)
-	firstIcaclsIdx := indexOfString(order, "run:icacls")
+	createIdx := slices.Index(order, "create:"+WindowsServiceName)
+	firstIcaclsIdx := slices.Index(order, "run:icacls")
 	if createIdx < 0 {
 		t.Fatal("service was never created")
 	}
@@ -180,10 +150,10 @@ func TestScmInstallConfiguresRecovery(t *testing.T) {
 	if err := inst.Install(context.Background()); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	if indexOfString(order, "recovery") < 0 {
+	if slices.Index(order, "recovery") < 0 {
 		t.Error("SetRecoveryActions was never called")
 	}
-	if indexOfString(order, "nonCrashRecovery:true") < 0 {
+	if slices.Index(order, "nonCrashRecovery:true") < 0 {
 		t.Error("SetRecoveryActionsOnNonCrashFailures(true) was never called")
 	}
 }
@@ -212,10 +182,10 @@ func TestScmInstallReinstallUpdatesExistingService(t *testing.T) {
 	if err := inst.Install(context.Background()); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	if indexOfString(order, "create:"+WindowsServiceName) >= 0 {
+	if slices.Index(order, "create:"+WindowsServiceName) >= 0 {
 		t.Error("an existing service must not be recreated")
 	}
-	if indexOfString(order, "update:"+WindowsServiceName) < 0 {
+	if slices.Index(order, "update:"+WindowsServiceName) < 0 {
 		t.Error("an existing service's config must be updated (idempotent reinstall)")
 	}
 }
@@ -231,10 +201,10 @@ func TestScmUninstallStopsAndDeletes(t *testing.T) {
 	if err := inst.Uninstall(context.Background()); err != nil {
 		t.Fatalf("Uninstall: %v", err)
 	}
-	if indexOfString(order, "stop") < 0 {
+	if slices.Index(order, "stop") < 0 {
 		t.Error("a running service must be stopped")
 	}
-	if indexOfString(order, "delete") < 0 {
+	if slices.Index(order, "delete") < 0 {
 		t.Error("the service must be deleted after it stops")
 	}
 	if removedPath != home.SystemHomeDir {
@@ -244,7 +214,7 @@ func TestScmUninstallStopsAndDeletes(t *testing.T) {
 
 func TestScmUninstallRefusesStuckService(t *testing.T) {
 	var order []string
-	stuck := &stuckService{calls: &order}
+	stuck := &fakeService{name: WindowsServiceName, calls: &order, status: svc.Status{State: svc.Running}, neverStops: true}
 	m := &fakeMgr{existing: stuck, calls: &order}
 	r := &orderedRun{order: &order}
 	inst := newTestScmInstaller(m, r)
@@ -256,7 +226,7 @@ func TestScmUninstallRefusesStuckService(t *testing.T) {
 	if err := inst.Uninstall(ctx); err == nil {
 		t.Fatal("Uninstall must refuse a service that never reports Stopped")
 	}
-	if indexOfString(order, "delete") >= 0 {
+	if slices.Index(order, "delete") >= 0 {
 		t.Error("must not delete a service that never confirmed it stopped")
 	}
 }

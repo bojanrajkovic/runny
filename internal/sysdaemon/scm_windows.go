@@ -42,11 +42,6 @@ type scmMgr interface {
 	Disconnect() error
 }
 
-// scmOps is the connection seam over golang.org/x/sys/windows/svc/mgr.
-type scmOps interface {
-	Connect() (scmMgr, error)
-}
-
 type realMgr struct{ m *mgr.Mgr }
 
 func (r realMgr) OpenService(name string) (scmService, error) {
@@ -67,9 +62,8 @@ func (r realMgr) CreateService(name, exepath string, c mgr.Config) (scmService, 
 
 func (r realMgr) Disconnect() error { return r.m.Disconnect() }
 
-type realOps struct{}
-
-func (realOps) Connect() (scmMgr, error) {
+// connectSCM is the production connect seam over golang.org/x/sys/windows/svc/mgr.
+func connectSCM() (scmMgr, error) {
 	m, err := mgr.Connect()
 	if err != nil {
 		return nil, err
@@ -79,12 +73,12 @@ func (realOps) Connect() (scmMgr, error) {
 
 // scmInstaller is the Windows sibling of Installer: same method-set contract
 // (WithStage, Install, Uninstall) so cmd/runnyctl/installdaemon.go compiles
-// unchanged, but service lifecycle goes through the typed mgr seam (ops)
+// unchanged, but service lifecycle goes through the typed mgr seam (connect)
 // instead of Runner text commands — icacls is the one exception, staying on
 // run, the same seam darwin uses for chmod/dscl.
 type scmInstaller struct {
 	cfg        Config
-	ops        scmOps
+	connect    func() (scmMgr, error) // connectSCM in New, faked in tests
 	run        Runner
 	writeFile  func(path string, data []byte, perm os.FileMode) error
 	mkdirAll   func(path string, perm os.FileMode) error // ensureHome; os.MkdirAll in New, faked in tests
@@ -123,7 +117,7 @@ func (s *scmInstaller) Install(ctx context.Context) error {
 	}
 	s.cfg.Operator = u.Username
 
-	m, err := s.ops.Connect()
+	m, err := s.connect()
 	if err != nil {
 		return fmt.Errorf("connecting to the service control manager: %w", err)
 	}
@@ -224,7 +218,7 @@ func (s *scmInstaller) ensureHome(ctx context.Context) error {
 // skips the stop/delete steps, matching darwin's tolerant bootout: the home is
 // still removed either way, so a repeated or partial uninstall is a no-op.
 func (s *scmInstaller) Uninstall(ctx context.Context) error {
-	m, err := s.ops.Connect()
+	m, err := s.connect()
 	if err != nil {
 		return fmt.Errorf("connecting to the service control manager: %w", err)
 	}

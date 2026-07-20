@@ -20,14 +20,17 @@ import (
 // (the --operator flag, else the human who ran sudo via SUDO_USER). Both
 // arguments arrive already parsed by kong (see InstallDaemonCmd).
 func installDaemon(operatorFlag, configFlag string) error {
-	if err := requireDarwinRoot("install-daemon"); err != nil {
+	if err := requireInstallPrivilege("install-daemon"); err != nil {
 		return err
 	}
-	operator, err := resolveOperator(operatorFlag, os.Getenv("SUDO_USER"))
+	operator, err := resolveOperator(operatorFlag, operatorFallback())
 	if err != nil {
 		return err
 	}
-	if err := checkNoPerUserAgent(operator); err != nil {
+	if err := refuseSystemOperator(operator); err != nil {
+		return err
+	}
+	if err := preflightPerUserAgent(operator); err != nil {
 		return err
 	}
 	runnyd, err := resolveRunnyd()
@@ -54,6 +57,16 @@ func installDaemon(operatorFlag, configFlag string) error {
 		fmt.Printf("\nrunnyd is installed, started, and running on the staged config (validated by\n"+
 			"runnyd -test-config before start). Change it later with `runnyctl edit-config`\n"+
 			"— never hand-edit %s and restart.\n", dir.ConfigPath())
+		return nil
+	}
+	if runtime.GOOS == "windows" {
+		fmt.Printf("\nrunnyd is installed and started as the %s service. Until a valid config is in\n"+
+			"place it crash-loops (expected — not a hang; check `sc.exe query %s` and watch\n"+
+			"%s\\service.err.log). Next:\n"+
+			"  1. write %s (your account has write access via the ACL)\n"+
+			"  2. place the GitHub App key where its private_key_path points\n"+
+			"  3. runnyctl doctor   — the daemon comes up on its next restart\n",
+			sysdaemon.WindowsServiceName, sysdaemon.WindowsServiceName, dir.LogsDir(), dir.ConfigPath())
 		return nil
 	}
 	fmt.Printf("\nrunnyd is installed and started as %s. Until a valid config is in place it\n"+
@@ -102,7 +115,7 @@ func planStageFromFile(configPath, homeDir, operator string) (sysdaemon.StagePla
 // and the home (config, key, artifacts) intact — see sysdaemon.Installer.Uninstall.
 // It takes no arguments; kong rejects any before this runs (see UninstallDaemonCmd).
 func uninstallDaemon() error {
-	if err := requireDarwinRoot("uninstall-daemon"); err != nil {
+	if err := requireInstallPrivilege("uninstall-daemon"); err != nil {
 		return err
 	}
 	return sysdaemon.New(sysdaemon.Config{}).Uninstall(context.Background())
@@ -124,16 +137,6 @@ func resolveRunnyd() (string, error) {
 	return runnyd, nil
 }
 
-func requireDarwinRoot(name string) error {
-	if runtime.GOOS != "darwin" {
-		return fmt.Errorf("%s installs a macOS system LaunchDaemon; it is macOS-only", name)
-	}
-	if os.Geteuid() != 0 {
-		return fmt.Errorf("%s must run as root: re-run with `sudo runnyctl %s`", name, name)
-	}
-	return nil
-}
-
 // resolveOperator selects the operator account from the explicit --operator flag
 // or $SUDO_USER. The explicit flag wins: a root invocation without sudo (e.g. CI,
 // or `su root`) leaves SUDO_USER unset, so the operator can only travel by flag
@@ -153,27 +156,6 @@ func resolveOperator(flagOperator, sudoUser string) (string, error) {
 			"ACL grants that account access)")
 	}
 	return op, nil
-}
-
-// checkNoPerUserAgent refuses install-daemon when the operator already has a
-// per-user runnyd LaunchAgent registered: installing the system daemon over it
-// would strand the per-user daemon orphaned behind it (clients resolve the system
-// home, but the per-user agent keeps running and contends for the same VMs). The
-// operator is validated authoritatively by Install (via user.Lookup), so a lookup
-// miss here just skips the probe — Install then produces the canonical operator
-// error rather than a duplicate. install-daemon runs as root, so probing the
-// operator's gui/ domain is unrestricted.
-func checkNoPerUserAgent(operator string) error {
-	u, err := user.Lookup(operator)
-	if err != nil {
-		return nil
-	}
-	target := fmt.Sprintf("gui/%s/%s", u.Uid, sysdaemon.Label)
-	refuse, warning := perUserAgentGuard(operator, target, launchd.Probe(context.Background(), launchd.ExecRunner, target))
-	if warning != "" {
-		fmt.Fprintln(os.Stderr, "warning:", warning)
-	}
-	return refuse
 }
 
 // perUserAgentGuard is the pure guard decision over the operator and the probe

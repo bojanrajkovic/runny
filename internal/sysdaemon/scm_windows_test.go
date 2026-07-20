@@ -74,7 +74,7 @@ func (s *stuckService) UpdateConfig(mgr.Config) error                         { 
 func (s *stuckService) SetRecoveryActions([]mgr.RecoveryAction, uint32) error { return nil }
 func (s *stuckService) SetRecoveryActionsOnNonCrashFailures(bool) error       { return nil }
 func (s *stuckService) Start(...string) error                                 { return nil }
-func (s *stuckService) Query() (svc.Status, error) { return svc.Status{State: svc.Running}, nil }
+func (s *stuckService) Query() (svc.Status, error)                            { return svc.Status{State: svc.Running}, nil }
 
 func (s *stuckService) Control(svc.Cmd) (svc.Status, error) {
 	*s.calls = append(*s.calls, "stop")

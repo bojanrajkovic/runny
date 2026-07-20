@@ -13,6 +13,8 @@ go_library(
         "execssh_windows.go",
         "follow.go",
         "installdaemon.go",
+        "installdaemon_unix.go",
+        "installdaemon_windows.go",
         "main.go",
         "operator.go",
         "skew.go",
@@ -40,7 +42,12 @@ go_library(
         "@org_golang_google_protobuf//proto",
         "@org_golang_google_protobuf//types/known/durationpb",
         "@org_golang_x_term//:term",
-    ],
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 codesign_binary(
@@ -60,6 +67,7 @@ go_test(
     srcs = [
         "follow_test.go",
         "installdaemon_test.go",
+        "installdaemon_windows_test.go",
         "main_test.go",
         "operator_test.go",
         "skew_test.go",

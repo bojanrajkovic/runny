@@ -13,7 +13,6 @@ import (
 	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/launchd"
 	"github.com/bojanrajkovic/runny/internal/opacl"
-	"github.com/bojanrajkovic/runny/internal/testconfig"
 )
 
 // Runner runs a privileged command and returns its combined output. The default
@@ -52,17 +51,6 @@ type Installer struct {
 	log        func(format string, args ...any)
 	plan       *StagePlan // set by WithStage; nil means a bare install (today's crash-loop behavior)
 	testConfig verdictTester
-}
-
-// New builds an Installer that shells out for real and logs progress to stdout.
-func New(cfg Config) *Installer {
-	return &Installer{
-		cfg:        cfg,
-		run:        execRunner,
-		writeFile:  os.WriteFile,
-		log:        func(f string, a ...any) { fmt.Printf(f+"\n", a...) },
-		testConfig: testconfig.RunTestConfig,
-	}
 }
 
 // WithStage attaches a StagePlan (config + key files staged from an authored

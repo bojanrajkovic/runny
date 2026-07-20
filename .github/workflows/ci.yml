@@ -99,20 +99,23 @@ jobs:
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: C:\b
+          path: C:/b
           key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel', '.mise.toml') }}
           restore-keys: bazel-${{ runner.os }}-
       # --output_base pins a short, fixed output tree: bazel's default
       # per-workspace-hash path under %USERPROFILE% nests deep enough to hit
       # MAX_PATH, and a fixed path is what makes the cache above reusable
       # (same whole-output-root strategy as the linux/macos jobs, not
-      # --disk_cache).
+      # --disk_cache). Forward slashes, not C:\b: these run steps are bash
+      # (Git Bash), which strips the backslash from an unquoted \b before
+      # bazel ever sees it — Bazel accepts forward-slash paths on Windows
+      # natively, so this sidesteps the escaping problem entirely.
       - name: build
         shell: bash
-        run: mise x -- bazel --output_base=C:\b build --config=ci -- //... -//apps/Runny/... -//internal/sysdaemon:sysdaemon_test
+        run: mise x -- bazel --output_base=C:/b build --config=ci -- //... -//apps/Runny/... -//internal/sysdaemon:sysdaemon_test
       - name: test
         shell: bash
-        run: mise x -- bazel --output_base=C:\b test --config=ci -- //... -//apps/Runny/... -//internal/sysdaemon:sysdaemon_test
+        run: mise x -- bazel --output_base=C:/b test --config=ci -- //... -//apps/Runny/... -//internal/sysdaemon:sysdaemon_test
 
   # The race detector, on its own job because the instrumented rebuild runs
   # ~2-10x slower than the default test path (.bazelrc test:race). macOS so

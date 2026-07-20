@@ -18,6 +18,7 @@ const (
 	launchForeground launchContext = iota // real parent (shell / sshd child) — auto-allowed via the exemption
 	launchLaunchd                         // started by launchd (agent or daemon) — auto-allowed
 	launchOrphaned                        // reparented to launchd after self-daemonizing — silently denied
+	launchService                         // started by the Windows SCM — no vmnet meaning (windows-only), only logSinkFor cares
 )
 
 // orphanedDenyDetail explains the self-daemonized state wherever it surfaces —
@@ -56,7 +57,10 @@ func classifyLaunchContext(ppid int, xpcServiceName string) launchContext {
 // live — today a foregrounded daemon prints nothing. A launchd-started or
 // orphaned runnyd writes to the file only: launchd captures its own
 // stdout/stderr separately (duplicating there would double-log), and an orphan
-// has no terminal to tee to.
+// has no terminal to tee to. Same reasoning for launchService: the SCM's
+// redirected service.out/err.log is that platform's StandardOut/ErrorPath
+// equivalent, already capturing console output — tee-ing the full structured
+// log into it too would double-write an otherwise-uncapped file forever.
 func logSinkFor(lc launchContext, file, console io.Writer) io.Writer {
 	if lc == launchForeground {
 		return io.MultiWriter(file, console)

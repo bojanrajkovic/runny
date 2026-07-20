@@ -53,13 +53,18 @@ var version = "dev"
 const macOSGuestCap = 2
 
 func main() {
-	if err := run(); err != nil {
+	if err := runEntry(); err != nil {
 		fmt.Fprintln(os.Stderr, "runnyd:", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+// run is the daemon body. parent is the root context's parent: off Windows
+// (svc_other.go) it's always context.Background(), a no-op passthrough; under
+// the Windows SCM (svc_windows.go) it's a context the service handler owns,
+// so SCM Stop/Shutdown cancels it exactly like SIGTERM already cancels the
+// signal.NotifyContext derived from it below — one shutdown path, not two.
+func run(parent context.Context) error {
 	configFlag := flag.String("config", "", "config path (default <home>/config.yaml)")
 	checkOnly := flag.Bool("doctor", false, "run validation checks and exit")
 	showVersion := flag.Bool("version", false, "print the daemon version and exit")
@@ -189,7 +194,7 @@ func run() error {
 		return runDoctor(doctor) // read-only: runs fine alongside a live daemon
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	// Loud, early signal for the one launch context macOS silently denies: a

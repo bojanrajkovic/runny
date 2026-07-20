@@ -16,6 +16,7 @@ go_library(
         "launchcontext.go",
         "launchcontext_darwin.go",
         "launchcontext_other.go",
+        "launchcontext_windows.go",
         "localnet.go",
         "lock.go",
         "lock_unix.go",
@@ -26,6 +27,8 @@ go_library(
         "platform_other.go",
         "privatekey.go",
         "rotate.go",
+        "svc_other.go",
+        "svc_windows.go",
         "testconfig.go",
         "upgrade.go",
     ],
@@ -119,6 +122,7 @@ go_library(
         "@rules_go//go/platform:windows": [
             "//internal/vm",
             "@org_golang_x_sys//windows",
+            "@org_golang_x_sys//windows/svc",
         ],
         "//conditions:default": [],
     }),
@@ -156,6 +160,7 @@ go_test(
         "privatekey_test.go",
         "reload_test.go",
         "rotate_test.go",
+        "svc_windows_test.go",
         "testconfig_test.go",
         "upgrade_test.go",
     ],
@@ -167,5 +172,10 @@ go_test(
         "//internal/statemachine",
         "//internal/sysdaemon",
         "//proto/runny/v1:runny",
-    ],
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows/svc",
+        ],
+        "//conditions:default": [],
+    }),
 )

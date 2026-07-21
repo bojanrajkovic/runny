@@ -9,11 +9,11 @@ import (
 	"syscall"
 
 	"github.com/Microsoft/go-winio/vhd"
-	"github.com/bojanrajkovic/runny/internal/winhcs/internal/memory"
+	"github.com/bojanrajkovic/runny/internal/winhcs/memory"
 	"github.com/pkg/errors"
 	"golang.org/x/sys/windows"
 
-	"github.com/bojanrajkovic/runny/internal/winhcs/internal/security"
+	"github.com/bojanrajkovic/runny/internal/winhcs/security"
 )
 
 const (

@@ -7,7 +7,7 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/bojanrajkovic/runny/internal/winhcs/internal/log"
+	"github.com/bojanrajkovic/runny/internal/winhcs/log"
 )
 
 var (

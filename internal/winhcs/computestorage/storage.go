@@ -4,7 +4,7 @@
 package computestorage
 
 import (
-	hcsschema "github.com/bojanrajkovic/runny/internal/winhcs/internal/hcs/schema2"
+	hcsschema "github.com/bojanrajkovic/runny/internal/winhcs/hcs/schema2"
 )
 
 //go:generate go run github.com/Microsoft/go-winio/tools/mkwinsyscall -output zsyscall_windows.go storage.go

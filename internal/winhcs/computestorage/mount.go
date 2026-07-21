@@ -5,8 +5,8 @@ package computestorage
 import (
 	"context"
 
-	"github.com/bojanrajkovic/runny/internal/winhcs/internal/interop"
-	"github.com/bojanrajkovic/runny/internal/winhcs/internal/oc"
+	"github.com/bojanrajkovic/runny/internal/winhcs/interop"
+	"github.com/bojanrajkovic/runny/internal/winhcs/oc"
 	"github.com/pkg/errors"
 	"golang.org/x/sys/windows"
 )

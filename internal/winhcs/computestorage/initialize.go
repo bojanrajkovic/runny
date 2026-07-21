@@ -6,7 +6,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/bojanrajkovic/runny/internal/winhcs/internal/oc"
+	"github.com/bojanrajkovic/runny/internal/winhcs/oc"
 	"github.com/pkg/errors"
 	"go.opencensus.io/trace"
 )

@@ -2,7 +2,7 @@
   "unsafeptr": {
     "description": "Two verbatim-upstream unsafe.Pointer conversions in vendored github.com/Microsoft/hcsshim code -- see internal/winhcs/README.md for the vendoring contract. Scoped to this one file and analyzer only: the rest of internal/winhcs/, including its hand-authored/modified files, still gets full nogo coverage.",
     "exclude_files": {
-      "internal/winhcs/internal/security/grantvmgroupaccess\\.go": "byte-identical upstream SID/ACL syscall code; not this repo's static-analysis responsibility"
+      "internal/winhcs/security/grantvmgroupaccess\\.go": "byte-identical upstream SID/ACL syscall code; not this repo's static-analysis responsibility"
     }
   }
 }

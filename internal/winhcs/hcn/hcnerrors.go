@@ -8,10 +8,10 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/bojanrajkovic/runny/internal/winhcs/internal/hcs"
-	"github.com/bojanrajkovic/runny/internal/winhcs/internal/hcserror"
-	"github.com/bojanrajkovic/runny/internal/winhcs/internal/interop"
-	"github.com/bojanrajkovic/runny/internal/winhcs/internal/log"
+	"github.com/bojanrajkovic/runny/internal/winhcs/hcs"
+	"github.com/bojanrajkovic/runny/internal/winhcs/hcserror"
+	"github.com/bojanrajkovic/runny/internal/winhcs/interop"
+	"github.com/bojanrajkovic/runny/internal/winhcs/log"
 )
 
 var (

@@ -1,6 +1,7 @@
 package oc
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -19,9 +20,11 @@ import (
 // only the error classes the vendored hcs package actually produces.
 func toStatusCode(err error) int {
 	switch {
+	case isAny(err, context.Canceled):
+		return trace.StatusCodeCancelled
 	case isAny(err, os.ErrInvalid):
 		return trace.StatusCodeInvalidArgument
-	case isAny(err, os.ErrDeadlineExceeded):
+	case isAny(err, os.ErrDeadlineExceeded, context.DeadlineExceeded):
 		return trace.StatusCodeDeadlineExceeded
 	case isAny(err, os.ErrNotExist):
 		return trace.StatusCodeNotFound

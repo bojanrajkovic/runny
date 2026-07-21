@@ -83,30 +83,67 @@ func (e *Entry) args() []any {
 	return args
 }
 
-func (e *Entry) Trace(args ...any) { e.logger.Debug(fmt.Sprint(args...), e.args()...) }
+// levelTrace sits below slog.LevelDebug, matching logrus's TraceLevel being
+// strictly more verbose than DebugLevel -- so enabling Debug doesn't also
+// turn on Trace, and vice versa.
+const levelTrace = slog.LevelDebug - 4
 
-func (e *Entry) Debug(args ...any) { e.logger.Debug(fmt.Sprint(args...), e.args()...) }
+// enabled reports whether level would actually be emitted. Every level
+// method below checks this BEFORE building its message/fields, so a
+// disabled level pays none of that cost -- matching logrus's
+// IsLevelEnabled short-circuit, which this shim otherwise lacked.
+func (e *Entry) enabled(level slog.Level) bool {
+	return e.logger.Enabled(context.Background(), level)
+}
+
+// log emits msg at level with the entry's accumulated fields. Callers must
+// have already checked enabled(level).
+func (e *Entry) log(level slog.Level, msg string) {
+	e.logger.Log(context.Background(), level, msg, e.args()...)
+}
+
+func (e *Entry) Trace(args ...any) {
+	if e.enabled(levelTrace) {
+		e.log(levelTrace, fmt.Sprint(args...))
+	}
+}
+
+func (e *Entry) Debug(args ...any) {
+	if e.enabled(slog.LevelDebug) {
+		e.log(slog.LevelDebug, fmt.Sprint(args...))
+	}
+}
 
 func (e *Entry) Debugf(format string, args ...any) {
-	e.logger.Debug(fmt.Sprintf(format, args...), e.args()...)
+	if e.enabled(slog.LevelDebug) {
+		e.log(slog.LevelDebug, fmt.Sprintf(format, args...))
+	}
 }
 
-func (e *Entry) Info(args ...any) { e.logger.Info(fmt.Sprint(args...), e.args()...) }
-
-func (e *Entry) Infof(format string, args ...any) {
-	e.logger.Info(fmt.Sprintf(format, args...), e.args()...)
+func (e *Entry) Info(args ...any) {
+	if e.enabled(slog.LevelInfo) {
+		e.log(slog.LevelInfo, fmt.Sprint(args...))
+	}
 }
 
-func (e *Entry) Warn(args ...any) { e.logger.Warn(fmt.Sprint(args...), e.args()...) }
-
-func (e *Entry) Warnf(format string, args ...any) {
-	e.logger.Warn(fmt.Sprintf(format, args...), e.args()...)
+func (e *Entry) Warn(args ...any) {
+	if e.enabled(slog.LevelWarn) {
+		e.log(slog.LevelWarn, fmt.Sprint(args...))
+	}
 }
+
 func (e *Entry) Warning(args ...any) { e.Warn(args...) }
-func (e *Entry) Error(args ...any)   { e.logger.Error(fmt.Sprint(args...), e.args()...) }
+
+func (e *Entry) Error(args ...any) {
+	if e.enabled(slog.LevelError) {
+		e.log(slog.LevelError, fmt.Sprint(args...))
+	}
+}
 
 func (e *Entry) Errorf(format string, args ...any) {
-	e.logger.Error(fmt.Sprintf(format, args...), e.args()...)
+	if e.enabled(slog.LevelError) {
+		e.log(slog.LevelError, fmt.Sprintf(format, args...))
+	}
 }
 
 // Package-level convenience wrappers over L, mirroring logrus's

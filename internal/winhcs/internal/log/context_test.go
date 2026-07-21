@@ -75,6 +75,38 @@ func TestEntryLevels(t *testing.T) {
 	}
 }
 
+func TestTraceIsBelowDebug(t *testing.T) {
+	var buf bytes.Buffer
+	h := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	e := newEntry(slog.New(h))
+
+	e.Trace("should not appear")
+	if buf.Len() != 0 {
+		t.Fatalf("Trace emitted at a Debug-level handler: %s", buf.String())
+	}
+
+	e.Debug("should appear")
+	if buf.Len() == 0 {
+		t.Fatal("Debug did not emit at a Debug-level handler")
+	}
+}
+
+func TestDisabledLevelEmitsNothing(t *testing.T) {
+	var buf bytes.Buffer
+	h := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+	e := newEntry(slog.New(h))
+
+	e.Debugf("disabled at Warn level")
+	if buf.Len() != 0 {
+		t.Fatalf("Debugf emitted at a Warn-level handler: %s", buf.String())
+	}
+
+	e.Warn("should appear")
+	if buf.Len() == 0 {
+		t.Fatal("Warn did not emit at a Warn-level handler")
+	}
+}
+
 func TestGAndUpdateContext(t *testing.T) {
 	ctx := context.Background()
 	if G(ctx) != L {

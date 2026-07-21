@@ -1,6 +1,7 @@
 package oc
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -17,8 +18,10 @@ func TestToStatusCode(t *testing.T) {
 		err  error
 		want int
 	}{
+		{"canceled", context.Canceled, trace.StatusCodeCancelled},
 		{"invalid argument", os.ErrInvalid, trace.StatusCodeInvalidArgument},
 		{"deadline exceeded", os.ErrDeadlineExceeded, trace.StatusCodeDeadlineExceeded},
+		{"context deadline exceeded", context.DeadlineExceeded, trace.StatusCodeDeadlineExceeded},
 		{"not exist", os.ErrNotExist, trace.StatusCodeNotFound},
 		{"exist", os.ErrExist, trace.StatusCodeAlreadyExists},
 		{"permission", os.ErrPermission, trace.StatusCodePermissionDenied},

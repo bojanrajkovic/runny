@@ -4,10 +4,13 @@ Vendored slice of [`github.com/Microsoft/hcsshim`](https://github.com/Microsoft/
 (MIT, see `LICENSE`) covering the HCS boot-path core and HNS endpoint
 management -- the two APIs the Hyper-V VM backend (`internal/vm/hcs_windows.go`,
 issue #308) needs to create/start/shut down/terminate a compute system and
-attach it to a network endpoint. hcsshim's boot API lives under `internal/`,
-which Go's import-visibility rule makes unimportable from outside the
-hcsshim module, so this is a copy with rewritten import paths, not a normal
-module dependency.
+attach it to a network endpoint. Vendored rather than taken as a normal
+module dependency for two reasons: most of this code lives under hcsshim's
+`internal/`, which Go's import-visibility rule makes unimportable from
+outside the hcsshim module; and taking hcsshim as an ordinary dependency
+pulls in logrus, containerd/errdefs, and a gRPC/protobuf stack this backend
+has no other use for. This is a copy with rewritten import paths, trimmed
+to what the boot path and endpoint management actually need.
 
 **Origin:** `github.com/Microsoft/hcsshim` tag `v0.14.1`, commit
 `fb5aa2e9478c8f5dcaba00601cc7c7d10e1320cd`.
@@ -19,15 +22,13 @@ upstream fixes should apply as a straight re-vendor.
 
 ## Vendored packages
 
-Boot-path core: `internal/hcs` (+ `schema1`, `schema2`), `internal/vmcompute`,
-`internal/interop`, `internal/cow`, `internal/timeout`, `internal/queue`,
-`internal/protocol/guestrequest`, `internal/winapi`, `internal/security`,
-`internal/memory`, `internal/jobobject`, `internal/hcserror`, `osversion`,
-`computestorage`, `internal/log`, `internal/oc`.
-
-HNS endpoint/network management (folded in for #308's explicit
-`hcn.CreateEndpoint`/`GetNetworkByName` needs -- see "hcn slice" below):
-`hcn`.
+The package tree under this directory (`bazel query //internal/winhcs/...`,
+or just `ls`) is the source of truth for what's vendored -- don't duplicate
+it here, it drifts the moment a package is added or dropped. The one
+exception worth calling out explicitly is `hcn`: it was folded in
+separately from the rest, for #308's endpoint create/query needs (see
+modification 5 below for exactly which of its files, and why not all of
+them).
 
 ## Local modifications
 
@@ -35,7 +36,9 @@ HNS endpoint/network management (folded in for #308's explicit
    error-to-span-status mapper with a ~20-line local one using
    `go.opencensus.io/trace`'s own `StatusCode*` constants (the same code
    space gRPC uses) instead of grpc's `codes.Code`. Same status semantics
-   for the error classes the vendored `hcs` package actually produces; drops
+   for the error classes the vendored `hcs` package actually produces
+   (including `context.Canceled`/`context.DeadlineExceeded`, which
+   `bounded.Context` deadlines and cancellations surface as); drops
    `containerd/errdefs`, `google.golang.org/grpc`, and the `genproto`/
    `protobuf` subtree those pull in.
 2. **`internal/oc/exporter.go`** -- deleted. It's a logrus-flavored
@@ -46,14 +49,19 @@ HNS endpoint/network management (folded in for #308's explicit
    `Entry.WithField`/`WithFields`/`WithError` + the level methods the
    vendored tree calls) so every consumer needed only an import-identifier
    rename (`logrus.Fields` -> `log.Fields`, `logrus.WithFields` ->
-   `log.WithFields`), no logic edits. `hook.go` (logrus `Hook` /
-   span-annotation glue) and `nopformatter.go` (a `logrus.Formatter` stub)
-   were dropped rather than ported: once `oc/exporter.go` is gone, nothing
-   in this vendored slice calls either. `format.go`'s protobuf-`Any`
-   pretty-printer went with them for the same reason (its only caller was
-   `hook.go`); its two remaining live call sites (`internal/log/scrub.go`)
-   used it purely to marshal plain Go structs/maps, not protobuf messages,
-   so they now call `encoding/json.Marshal` directly.
+   `log.WithFields`), no logic edits. Each level method checks
+   `slog.Logger.Enabled` before building its message/fields, matching
+   logrus's `IsLevelEnabled` short-circuit; `Trace` sits at a distinct level
+   below `Debug` (`slog.LevelDebug - 4`), matching logrus's own ordering, so
+   enabling Debug logging doesn't also turn on Trace-level noise. `Infof`
+   and `Warnf` aren't ported -- nothing in the vendored tree calls them.
+   `hook.go` (logrus `Hook` / span-annotation glue) and `nopformatter.go` (a
+   `logrus.Formatter` stub) were dropped rather than ported: once
+   `oc/exporter.go` is gone, nothing in this vendored slice calls either.
+   `format.go`'s protobuf-`Any` pretty-printer went with them for the same
+   reason (its only caller was `hook.go`); its two remaining live call sites
+   (`internal/log/scrub.go`) used it purely to marshal plain Go structs/maps,
+   not protobuf messages, so they now call `encoding/json.Marshal` directly.
 4. **`internal/hcs/schema2/properties.go`** -- dropped the `Metrics
    *v1.Metrics` field (upstream: `LCOWMetrics`, sourced from
    `github.com/containerd/cgroups/v3/cgroup1/stats`). Nothing in this
@@ -87,9 +95,10 @@ and `google.golang.org/genproto` do not appear anywhere in
 
 ## Module deps this PR adds
 
-`go.opencensus.io`, `github.com/pkg/errors`. (`github.com/Microsoft/go-winio`
-was already a runny dependency; its `vhd` subpackage is used by the
-differencing-disk clone work, issue #306.)
+See `go.mod` for what this PR actually added -- it's the authority here, not
+this doc. (`github.com/Microsoft/go-winio` was already a runny dependency
+before this PR; its `vhd` subpackage is used by the differencing-disk clone
+work, issue #306.)
 
 **Deliberately not added here:** `go.opentelemetry.io/otel/bridge/opencensus`.
 Nothing in this PR imports it -- the bridge is registered at runnyd init on
@@ -110,11 +119,18 @@ usable from Bazel at all -- moot now that modification 4 above removes the
 dependency entirely, but worth knowing if a future PR re-introduces
 `cgroup1/stats`.
 
-`tools/lint/nogo_config.json` excludes `internal/winhcs/` from all `nogo`
-analyzers (the `_base.exclude_files` pattern) -- this tree is upstream code
-kept byte-identical outside the modifications above, so its two pre-existing
-`unsafeptr` findings in `internal/security/grantvmgroupaccess.go` are not
-this repo's static-analysis responsibility.
+`tools/lint/nogo_config.json` excludes exactly one file
+(`internal/security/grantvmgroupaccess.go`) from exactly one analyzer
+(`unsafeptr`, two pre-existing findings in byte-identical upstream code) --
+scoped that narrowly on purpose, so the rest of `internal/winhcs/`,
+including the hand-authored/modified files below, still gets full nogo
+coverage.
+
+`.gitattributes` marks `internal/winhcs/**` `linguist-generated=true` (with
+the modified files below re-marked `false`) so `bazel run //tools/format`
+leaves the untouched vendored tree's formatting alone -- upstream fixes
+should apply as a clean re-vendor, not fight with gofumpt's opinions on
+code this repo doesn't own.
 
 ## Tests
 

@@ -37,12 +37,14 @@ const (
 	copyBufferSize = 4 * 1024 * 1024
 )
 
-// backend is the subset of go-winio/vhd's calls Convert needs, seamed so
-// tests can exercise Convert's control flow (success and every cleanup
-// path) without a live elevated session or real disk allocation — same
-// shape as internal/sysdaemon's scmMgr/scmService seam over the SCM.
+// backend is the subset of go-winio/vhd's calls Convert and
+// CreateDifferencing need, seamed so tests can exercise their control flow
+// (success and every cleanup path) without a live elevated session or real
+// disk allocation — same shape as internal/sysdaemon's scmMgr/scmService
+// seam over the SCM.
 type backend interface {
 	createFixed(path string, maximumSize uint64) (syscall.Handle, error)
+	createDifferencing(child, parent string) error
 	attach(handle syscall.Handle) error
 	physicalPath(handle syscall.Handle) (string, error)
 	detach(handle syscall.Handle) error
@@ -70,6 +72,20 @@ func (winioBackend) createFixed(path string, maximumSize uint64) (syscall.Handle
 	return vhd.CreateVirtualDisk(path, vhd.VirtualDiskAccessNone, vhd.CreateVirtualDiskFlagFullPhysicalAllocation, params)
 }
 
+// createDifferencing delegates to go-winio's own CreateDiffVhd rather than
+// re-assembling CreateVirtualDiskParameters by hand (unlike createFixed,
+// which needs FullPhysicalAllocation — a flag CreateDiffVhd doesn't expose).
+// blockSizeInMB=0 asks CreateVirtualDisk for its native differencing
+// default: verified empirically (both via New-VHD -Differencing and this
+// exact call) at 2 MiB, independent of the parent's own block size — forcing
+// createFixed's 32 MiB fixed-disk constant onto a differencing child isn't
+// how Hyper-V itself sizes one. The result is confirmed NOT NTFS-sparse
+// (fsutil sparse queryflag), matching the constraint CreateDifferencing's
+// doc comment asserts.
+func (winioBackend) createDifferencing(child, parent string) error {
+	return vhd.CreateDiffVhd(child, parent, 0)
+}
+
 func (winioBackend) attach(handle syscall.Handle) error {
 	return vhd.AttachVirtualDisk(handle, vhd.AttachVirtualDiskFlagNone, &vhd.AttachVirtualDiskParameters{Version: 2})
 }
@@ -84,6 +100,24 @@ func (winioBackend) detach(handle syscall.Handle) error {
 
 func (winioBackend) closeHandle(handle syscall.Handle) error {
 	return syscall.CloseHandle(handle)
+}
+
+// CreateDifferencing creates a differencing VHDX at child whose parent is
+// parent — the per-slot ephemeral-disk clone for the windows host path, the
+// APFS-clonefile analog: near-instant regardless of parent size, since a
+// fresh differencing child carries no payload blocks of its own, only a
+// live block-level dependency on parent (see internal/images/prune.go's
+// parent-reference check, which exists because of that dependency). A
+// single bounded syscall, no polling. child must NOT end up NTFS-sparse —
+// Hyper-V rejects sparse VHDX files — and it doesn't: go-winio's
+// CreateDiffVhd sets no sparse flag, confirmed empirically (see
+// internal/vhdx/CLAUDE.md).
+func CreateDifferencing(child, parent string) error {
+	return createDifferencing(child, parent, winioBackend{})
+}
+
+func createDifferencing(child, parent string, b backend) error {
+	return b.createDifferencing(child, parent)
 }
 
 // Convert produces a FIXED VHDX at dst from the raw disk image at src, via

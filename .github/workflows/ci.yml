@@ -53,7 +53,7 @@ jobs:
       # cross-compiling a windows go_test needs a windows test-execution
       # toolchain this runner doesn't have, even just to build the binary.
       - name: cross-build (windows/amd64)
-        run: mise x -- bazel build --config=ci --platforms=@rules_go//go/toolchain:windows_amd64 -- //cmd/runnyd //cmd/runnyctl //internal/winhcs/... -//internal/winhcs/internal/log:log_test -//internal/winhcs/internal/oc:oc_test
+        run: mise x -- bazel build --config=ci --platforms=@rules_go//go/toolchain:windows_amd64 -- //cmd/runnyd //cmd/runnyctl //internal/winhcs/... -//internal/winhcs/log:log_test -//internal/winhcs/oc:oc_test
       - name: format
         run: |
           mise x -- bazel run --config=ci //tools/format

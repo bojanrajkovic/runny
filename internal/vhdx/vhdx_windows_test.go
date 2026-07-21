@@ -29,6 +29,11 @@ type fakeBackend struct {
 
 func (f *fakeBackend) createFixed(path string, maximumSize uint64) (syscall.Handle, error) {
 	f.calls = append(f.calls, "createFixed")
+	// The real CreateVirtualDisk creates a file object at path whether or
+	// not the call ultimately errors (allocation can fail partway
+	// through, after the file already exists) — match that so tests can
+	// verify convert's cleanup against a real file.
+	_ = os.WriteFile(path, []byte("stub"), 0o600)
 	if f.createErr != nil {
 		// The real CreateVirtualDisk leaves its handle out-param at zero
 		// on failure; match that so a caller that (mis)uses the handle on
@@ -111,7 +116,7 @@ func TestConvert_Success(t *testing.T) {
 func TestConvert_CreateFails_RemovesDst(t *testing.T) {
 	dir := t.TempDir()
 	src := writeTempFile(t, dir, "src.img", validSourceContent(t))
-	dst := writeTempFile(t, dir, "dst.vhdx", []byte("partial")) // stand-in for whatever CreateVirtualDisk left behind
+	dst := filepath.Join(dir, "dst.vhdx") // must not exist yet -- convert refuses if it does
 
 	b := &fakeBackend{createErr: errors.New("boom")}
 	err := convert(src, dst, b)
@@ -130,7 +135,7 @@ func TestConvert_CreateFails_RemovesDst(t *testing.T) {
 func TestConvert_AttachFails_CleansUp(t *testing.T) {
 	dir := t.TempDir()
 	src := writeTempFile(t, dir, "src.img", validSourceContent(t))
-	dst := writeTempFile(t, dir, "dst.vhdx", []byte("partial")) // stand-in for what createFixed would have produced
+	dst := filepath.Join(dir, "dst.vhdx")
 
 	b := &fakeBackend{attachErr: errors.New("boom")}
 	err := convert(src, dst, b)
@@ -149,7 +154,7 @@ func TestConvert_AttachFails_CleansUp(t *testing.T) {
 func TestConvert_PhysicalPathFails_CleansUp(t *testing.T) {
 	dir := t.TempDir()
 	src := writeTempFile(t, dir, "src.img", validSourceContent(t))
-	dst := writeTempFile(t, dir, "dst.vhdx", []byte("partial"))
+	dst := filepath.Join(dir, "dst.vhdx")
 
 	b := &fakeBackend{physPathErr: errors.New("boom")}
 	err := convert(src, dst, b)
@@ -168,7 +173,7 @@ func TestConvert_PhysicalPathFails_CleansUp(t *testing.T) {
 func TestConvert_CopyFails_DetachesAndCleansUp(t *testing.T) {
 	dir := t.TempDir()
 	src := writeTempFile(t, dir, "src.img", validSourceContent(t))
-	dst := writeTempFile(t, dir, "dst.vhdx", []byte("partial"))
+	dst := filepath.Join(dir, "dst.vhdx")
 
 	b := &fakeBackend{physPath: filepath.Join(dir, "no-such-directory", "fake-device")} // copyPayload's OpenFile fails: parent dir doesn't exist
 	err := convert(src, dst, b)
@@ -184,6 +189,36 @@ func TestConvert_CopyFails_DetachesAndCleansUp(t *testing.T) {
 	}
 }
 
+// TestConvert_DestinationAlreadyExists is the regression test for the bug
+// where a createFixed failure unconditionally removed dst, which would
+// delete a caller's unrelated pre-existing file if dst happened to already
+// exist. convert now refuses up front instead, so the existing file must
+// survive untouched and the backend must never be touched.
+func TestConvert_DestinationAlreadyExists(t *testing.T) {
+	dir := t.TempDir()
+	src := writeTempFile(t, dir, "src.img", validSourceContent(t))
+	dst := writeTempFile(t, dir, "dst.vhdx", []byte("unrelated pre-existing file"))
+
+	b := &fakeBackend{}
+	err := convert(src, dst, b)
+	if err == nil {
+		t.Fatal("convert(existing dst): want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("convert error = %q, want it to mention dst already existing", err)
+	}
+	if len(b.calls) != 0 {
+		t.Errorf("calls = %v, want none (rejected before touching the backend)", b.calls)
+	}
+	got, readErr := os.ReadFile(dst)
+	if readErr != nil {
+		t.Fatalf("dst %s was removed, want the pre-existing file preserved: %v", dst, readErr)
+	}
+	if string(got) != "unrelated pre-existing file" {
+		t.Errorf("dst content = %q, want the original pre-existing content untouched", got)
+	}
+}
+
 // TestConvert_DetachFails_PreservesCompletedFile is the regression test for
 // the bug where a fully-successful conversion got deleted just because the
 // trailing detach failed — the payload is valid at that point, so dst must
@@ -192,7 +227,7 @@ func TestConvert_DetachFails_PreservesCompletedFile(t *testing.T) {
 	dir := t.TempDir()
 	content := validSourceContent(t)
 	src := writeTempFile(t, dir, "src.img", content)
-	dst := writeTempFile(t, dir, "dst.vhdx", []byte("this is the completed VHDX"))
+	dst := filepath.Join(dir, "dst.vhdx")
 	device := writeTempFile(t, dir, "fake-device", nil)
 
 	b := &fakeBackend{physPath: device, detachErr: errors.New("boom")}
@@ -214,7 +249,7 @@ func TestConvert_DetachFails_PreservesCompletedFile(t *testing.T) {
 func TestConvert_DetachAndCloseBothFail_ErrorsJoined(t *testing.T) {
 	dir := t.TempDir()
 	src := writeTempFile(t, dir, "src.img", validSourceContent(t))
-	dst := writeTempFile(t, dir, "dst.vhdx", nil)
+	dst := filepath.Join(dir, "dst.vhdx")
 	device := writeTempFile(t, dir, "fake-device", nil)
 
 	b := &fakeBackend{physPath: device, detachErr: errors.New("detach boom"), closeErr: errors.New("close boom")}

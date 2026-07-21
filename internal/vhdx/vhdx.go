@@ -91,7 +91,9 @@ func (winioBackend) closeHandle(handle syscall.Handle) error {
 // writer: CreateVirtualDisk+FullPhysicalAllocation is spec-perfect by
 // construction, and SourcePath can't ingest a raw file directly, so this
 // function only asks the API to allocate a correctly-shaped fixed
-// container and does the payload copy itself. src must be at least
+// container and does the payload copy itself. dst must not already exist
+// (Convert refuses rather than risk deleting a caller's unrelated file on
+// a later failure — see convert's dst-exists check). src must be at least
 // minSourceSize bytes (CreateVirtualDisk's own undocumented floor) and a
 // multiple of the logical sector size (512). dst is removed if the payload
 // was never fully written; a failure after a complete write (e.g. the
@@ -102,6 +104,15 @@ func Convert(src, dst string) error {
 }
 
 func convert(src, dst string, b backend) (err error) {
+	// Refusing here, before createFixed ever runs, means anything found at
+	// dst on a later failure path was necessarily created by THIS call —
+	// os.Remove(dst) below can never delete a file Convert didn't create.
+	if _, statErr := os.Stat(dst); statErr == nil {
+		return fmt.Errorf("destination %s already exists", dst)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("checking destination %s: %w", dst, statErr)
+	}
+
 	fi, statErr := os.Stat(src)
 	if statErr != nil {
 		return fmt.Errorf("stat source %s: %w", src, statErr)

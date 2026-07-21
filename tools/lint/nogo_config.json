@@ -1,8 +1,8 @@
 {
-  "_base": {
-    "description": "Base config all analyzers inherit, even unspecified ones.",
+  "unsafeptr": {
+    "description": "Two verbatim-upstream unsafe.Pointer conversions in vendored github.com/Microsoft/hcsshim code -- see internal/winhcs/README.md for the vendoring contract. Scoped to this one file and analyzer only: the rest of internal/winhcs/, including its hand-authored/modified files, still gets full nogo coverage.",
     "exclude_files": {
-      "internal/winhcs/": "vendored third-party code (github.com/Microsoft/hcsshim, MIT) -- kept byte-identical to upstream except the four documented local modifications; not this repo's static-analysis responsibility"
+      "internal/winhcs/internal/security/grantvmgroupaccess\\.go": "byte-identical upstream SID/ACL syscall code; not this repo's static-analysis responsibility"
     }
   }
 }

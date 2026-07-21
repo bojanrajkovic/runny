@@ -2,6 +2,7 @@ package vhdx
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -62,5 +63,30 @@ func TestRead_RealFixture(t *testing.T) {
 		if e.State != StateFullyPresent {
 			t.Errorf("entries[%d].State = %d, want StateFullyPresent", i, e.State)
 		}
+	}
+}
+
+// TestParentLocator_RealFixture resolves testdata/differencing-min.vhdx's
+// parent -- a real differencing VHDX produced by New-VHD -Differencing on
+// real Windows hardware, parented to testdata/fixed-min.vhdx itself (see
+// internal/vhdx/CLAUDE.md for how to regenerate it). Exercises the real
+// byte layout Hyper-V writes, not just the synthetic fixtures in
+// parentlocator_test.go.
+func TestParentLocator_RealFixture(t *testing.T) {
+	const path = "testdata/differencing-min.vhdx"
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	if strings.HasPrefix(string(raw), "version https://git-lfs") {
+		t.Skip("testdata/differencing-min.vhdx is an unresolved git-lfs pointer -- run `git lfs pull` (git-lfs is mise-managed in this repo)")
+	}
+
+	got, err := ParentLocator(path)
+	if err != nil {
+		t.Fatalf("ParentLocator(%s): %v", path, err)
+	}
+	if want := filepath.Join("testdata", "fixed-min.vhdx"); got != want {
+		t.Errorf("ParentLocator(%s) = %q, want %q", path, got, want)
 	}
 }

@@ -10,6 +10,7 @@
 package hcsschema
 
 type GuestConnection struct {
+
 	//  Use Vsock rather than Hyper-V sockets to communicate with the guest service.
 	UseVsock bool `json:"UseVsock,omitempty"`
 

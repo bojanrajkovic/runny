@@ -9,11 +9,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-type (
-	g            = guid.GUID
-	FsHandle     uintptr
-	StreamHandle uintptr
-)
+type g = guid.GUID
+type FsHandle uintptr
+type StreamHandle uintptr
 
 type CimFsFileMetadata struct {
 	Attributes uint32

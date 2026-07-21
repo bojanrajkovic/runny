@@ -10,6 +10,7 @@
 package hcsschema
 
 type RestoreState struct {
+
 	//  The path to the save state file to restore the system from.
 	SaveStateFilePath string `json:"SaveStateFilePath,omitempty"`
 

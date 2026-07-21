@@ -10,6 +10,7 @@
 package hcsschema
 
 type SaveOptions struct {
+
 	//  The type of save operation to be performed.
 	SaveType string `json:"SaveType,omitempty"`
 

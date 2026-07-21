@@ -66,13 +66,11 @@ import (
 
 type _guid = guid.GUID
 
-type (
-	hcnNetwork      syscall.Handle
-	hcnEndpoint     syscall.Handle
-	hcnNamespace    syscall.Handle
-	hcnLoadBalancer syscall.Handle
-	hcnRoute        syscall.Handle
-)
+type hcnNetwork syscall.Handle
+type hcnEndpoint syscall.Handle
+type hcnNamespace syscall.Handle
+type hcnLoadBalancer syscall.Handle
+type hcnRoute syscall.Handle
 
 // SchemaVersion for HCN Objects/Queries.
 type SchemaVersion = Version // hcnglobals.go

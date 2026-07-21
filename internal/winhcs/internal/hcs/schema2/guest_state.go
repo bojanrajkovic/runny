@@ -10,6 +10,7 @@
 package hcsschema
 
 type GuestState struct {
+
 	//  The path to an existing file uses for persistent guest state storage.  An empty string indicates the system should initialize new transient, in-memory guest state.
 	GuestStateFilePath string `json:"GuestStateFilePath,omitempty"`
 

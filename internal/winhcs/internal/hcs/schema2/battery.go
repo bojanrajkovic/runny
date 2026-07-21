@@ -9,4 +9,5 @@
 
 package hcsschema
 
-type Battery struct{}
+type Battery struct {
+}

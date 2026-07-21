@@ -10,6 +10,7 @@
 package hcsschema
 
 type Scsi struct {
+
 	//  Map of attachments, where the key is the integer LUN number on the controller.
 	Attachments map[string]Attachment `json:"Attachments,omitempty"`
 }

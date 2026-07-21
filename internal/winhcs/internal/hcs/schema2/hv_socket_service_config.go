@@ -10,6 +10,7 @@
 package hcsschema
 
 type HvSocketServiceConfig struct {
+
 	//  SDDL string that HvSocket will check before allowing a host process to bind  to this specific service.  If not specified, defaults to the system DefaultBindSecurityDescriptor, defined in  HvSocketSystemWpConfig in V1.
 	BindSecurityDescriptor string `json:"BindSecurityDescriptor,omitempty"`
 

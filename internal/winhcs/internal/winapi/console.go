@@ -13,13 +13,13 @@ const PSEUDOCONSOLE_INHERIT_CURSOR = 0x1
 // CreatePseudoConsole creates a windows pseudo console.
 func CreatePseudoConsole(size windows.Coord, hInput windows.Handle, hOutput windows.Handle, dwFlags uint32, hpcon *windows.Handle) error {
 	// We need this wrapper as the function takes a COORD struct and not a pointer to one, so we need to cast to something beforehand.
-	return createPseudoConsole(*(*uint32)(unsafe.Pointer(&size)), hInput, hOutput, 0, hpcon)
+	return createPseudoConsole(*((*uint32)(unsafe.Pointer(&size))), hInput, hOutput, 0, hpcon)
 }
 
 // ResizePseudoConsole resizes the internal buffers of the pseudo console to the width and height specified in `size`.
 func ResizePseudoConsole(hpcon windows.Handle, size windows.Coord) error {
 	// We need this wrapper as the function takes a COORD struct and not a pointer to one, so we need to cast to something beforehand.
-	return resizePseudoConsole(hpcon, *(*uint32)(unsafe.Pointer(&size)))
+	return resizePseudoConsole(hpcon, *((*uint32)(unsafe.Pointer(&size))))
 }
 
 // HRESULT WINAPI CreatePseudoConsole(

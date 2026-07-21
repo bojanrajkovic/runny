@@ -43,10 +43,8 @@ func update(ctx context.Context, s *trace.Span) (context.Context, *trace.Span) {
 	return ctx, s
 }
 
-var (
-	WithServerSpanKind = trace.WithSpanKind(trace.SpanKindServer)
-	WithClientSpanKind = trace.WithSpanKind(trace.SpanKindClient)
-)
+var WithServerSpanKind = trace.WithSpanKind(trace.SpanKindServer)
+var WithClientSpanKind = trace.WithSpanKind(trace.SpanKindClient)
 
 func spanKindToString(sk int) string {
 	switch sk {

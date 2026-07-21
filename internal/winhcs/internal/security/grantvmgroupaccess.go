@@ -108,7 +108,7 @@ func GrantVmGroupAccessWithMask(name string, access accessMask) error { //nolint
 		return fmt.Errorf("%s GetSecurityInfo %s: %w", gvmga, name, err)
 	}
 	defer func() {
-		_, _ = syscall.LocalFree(syscall.Handle(unsafe.Pointer(sd)))
+		_, _ = syscall.LocalFree((syscall.Handle)(unsafe.Pointer(sd)))
 	}()
 
 	// Generate a new DACL which is the current DACL with the required ACEs added.
@@ -118,7 +118,7 @@ func GrantVmGroupAccessWithMask(name string, access accessMask) error { //nolint
 		return err // Already wrapped
 	}
 	defer func() {
-		_, _ = syscall.LocalFree(syscall.Handle(unsafe.Pointer(newDACL)))
+		_, _ = syscall.LocalFree((syscall.Handle)(unsafe.Pointer(newDACL)))
 	}()
 
 	// And finally use SetSecurityInfo to apply the updated DACL.

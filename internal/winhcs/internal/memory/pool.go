@@ -69,10 +69,8 @@ type PoolAllocator struct {
 	pools [memoryClassNumber]*memoryPool
 }
 
-var (
-	_ MappedRegion = &region{}
-	_ Allocator    = &PoolAllocator{}
-)
+var _ MappedRegion = &region{}
+var _ Allocator = &PoolAllocator{}
 
 func (r *region) Offset() uint64 {
 	return r.offset

@@ -215,8 +215,7 @@ func (process *Process) waitBackground() {
 	defer span.End()
 	span.AddAttributes(
 		trace.StringAttribute("cid", process.SystemID()),
-		trace.Int64Attribute("pid", int64(process.processID)),
-	)
+		trace.Int64Attribute("pid", int64(process.processID)))
 
 	var (
 		err            error
@@ -335,8 +334,7 @@ func (process *Process) StdioLegacy() (_ io.WriteCloser, _ io.ReadCloser, _ io.R
 	defer func() { oc.SetSpanStatus(span, err) }()
 	span.AddAttributes(
 		trace.StringAttribute("cid", process.SystemID()),
-		trace.Int64Attribute("pid", int64(process.processID)),
-	)
+		trace.Int64Attribute("pid", int64(process.processID)))
 
 	process.handleLock.RLock()
 	defer process.handleLock.RUnlock()
@@ -385,8 +383,7 @@ func (process *Process) CloseStdin(ctx context.Context) (err error) {
 	defer func() { oc.SetSpanStatus(span, err) }()
 	span.AddAttributes(
 		trace.StringAttribute("cid", process.SystemID()),
-		trace.Int64Attribute("pid", int64(process.processID)),
-	)
+		trace.Int64Attribute("pid", int64(process.processID)))
 
 	process.handleLock.RLock()
 	defer process.handleLock.RUnlock()
@@ -395,7 +392,7 @@ func (process *Process) CloseStdin(ctx context.Context) (err error) {
 		return makeProcessError(process, operation, ErrAlreadyClosed, nil)
 	}
 
-	// HcsModifyProcess request to close stdin will fail if the process has already exited
+	//HcsModifyProcess request to close stdin will fail if the process has already exited
 	if !process.stopped() {
 		modifyRequest := hcsschema.ProcessModifyRequest{
 			Operation: guestrequest.CloseProcessHandle,
@@ -432,8 +429,7 @@ func (process *Process) CloseStdout(ctx context.Context) (err error) {
 	defer func() { oc.SetSpanStatus(span, err) }()
 	span.AddAttributes(
 		trace.StringAttribute("cid", process.SystemID()),
-		trace.Int64Attribute("pid", int64(process.processID)),
-	)
+		trace.Int64Attribute("pid", int64(process.processID)))
 
 	process.handleLock.Lock()
 	defer process.handleLock.Unlock()
@@ -457,8 +453,7 @@ func (process *Process) CloseStderr(ctx context.Context) (err error) {
 	defer func() { oc.SetSpanStatus(span, err) }()
 	span.AddAttributes(
 		trace.StringAttribute("cid", process.SystemID()),
-		trace.Int64Attribute("pid", int64(process.processID)),
-	)
+		trace.Int64Attribute("pid", int64(process.processID)))
 
 	process.handleLock.Lock()
 	defer process.handleLock.Unlock()
@@ -485,8 +480,7 @@ func (process *Process) Close() (err error) {
 	defer func() { oc.SetSpanStatus(span, err) }()
 	span.AddAttributes(
 		trace.StringAttribute("cid", process.SystemID()),
-		trace.Int64Attribute("pid", int64(process.processID)),
-	)
+		trace.Int64Attribute("pid", int64(process.processID)))
 
 	process.handleLock.Lock()
 	defer process.handleLock.Unlock()

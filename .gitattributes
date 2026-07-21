@@ -1,1 +1,25 @@
 internal/vhdx/testdata/*.vhdx filter=lfs diff=lfs merge=lfs -text
+
+# internal/winhcs is vendored github.com/Microsoft/hcsshim, kept
+# byte-identical to upstream except the modifications internal/winhcs/README.md
+# documents -- linguist-generated keeps `bazel run //tools/format` (which
+# honors this attribute) from reformatting it and drifting away from
+# upstream's own formatting. The hand-authored/modified files are re-marked
+# false below so they still get formatted normally.
+internal/winhcs/** linguist-generated=true
+internal/winhcs/README.md linguist-generated=false
+internal/winhcs/internal/log/context.go linguist-generated=false
+internal/winhcs/internal/log/context_test.go linguist-generated=false
+internal/winhcs/internal/log/scrub.go linguist-generated=false
+internal/winhcs/internal/oc/errors.go linguist-generated=false
+internal/winhcs/internal/oc/errors_test.go linguist-generated=false
+internal/winhcs/internal/hcs/schema2/properties.go linguist-generated=false
+internal/winhcs/hcn/hcnendpoint.go linguist-generated=false
+internal/winhcs/hcn/hcnsupport.go linguist-generated=false
+internal/winhcs/hcn/hcnerrors.go linguist-generated=false
+internal/winhcs/hcn/hcnglobals.go linguist-generated=false
+internal/winhcs/hcn/hcnnetwork.go linguist-generated=false
+internal/winhcs/internal/hcs/system.go linguist-generated=false
+internal/winhcs/internal/hcs/callback.go linguist-generated=false
+internal/winhcs/internal/vmcompute/vmcompute.go linguist-generated=false
+internal/winhcs/internal/jobobject/iocp.go linguist-generated=false

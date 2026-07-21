@@ -10,6 +10,7 @@
 package hcsschema
 
 type ContainerCredentialGuardState struct {
+
 	//  Authentication cookie for calls to a Container Credential Guard instance.
 	Cookie string `json:"Cookie,omitempty"`
 

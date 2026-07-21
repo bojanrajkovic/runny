@@ -9,4 +9,5 @@
 
 package hcsschema
 
-type Keyboard struct{}
+type Keyboard struct {
+}

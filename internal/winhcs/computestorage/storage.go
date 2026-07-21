@@ -22,10 +22,8 @@ import (
 //sys hcsAttachOverlayFilter(volumePath string, layerData string) (hr error) = computestorage.HcsAttachOverlayFilter?
 //sys hcsDetachOverlayFilter(volumePath string, layerData string) (hr error) = computestorage.HcsDetachOverlayFilter?
 
-type (
-	Version = hcsschema.Version
-	Layer   = hcsschema.Layer
-)
+type Version = hcsschema.Version
+type Layer = hcsschema.Layer
 
 // LayerData is the data used to describe parent layer information.
 type LayerData struct {

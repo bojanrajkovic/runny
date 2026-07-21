@@ -10,6 +10,7 @@
 package hcsschema
 
 type Storage struct {
+
 	//  List of layers that describe the parent hierarchy for a container's  storage. These layers combined together, presented as a disposable  and/or committable working storage, are used by the container to  record all changes done to the parent layers.
 	Layers []Layer `json:"Layers,omitempty"`
 

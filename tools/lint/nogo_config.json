@@ -1,0 +1,8 @@
+{
+  "_base": {
+    "description": "Base config all analyzers inherit, even unspecified ones.",
+    "exclude_files": {
+      "internal/winhcs/": "vendored third-party code (github.com/Microsoft/hcsshim, MIT) -- kept byte-identical to upstream except the four documented local modifications; not this repo's static-analysis responsibility"
+    }
+  }
+}

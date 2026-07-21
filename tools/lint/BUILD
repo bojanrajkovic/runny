@@ -6,6 +6,7 @@ package(default_visibility = ["//visibility:public"])
 
 nogo(
     name = "nogo",
+    config = "nogo_config.json",
     visibility = ["//visibility:public"],
     deps = TOOLS_NOGO,
 )

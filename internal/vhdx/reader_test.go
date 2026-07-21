@@ -179,6 +179,18 @@ func TestReadBAT_ZeroVirtualDiskSize(t *testing.T) {
 	}
 }
 
+func TestRead_ZeroBlockSize(t *testing.T) {
+	// buildFixture writes blockSize straight into the File Parameters
+	// item's BlockSize field -- this crafts a VHDX carrying the exact
+	// value that would divide-by-zero in ChunkRatio if Read let it
+	// through, proving the parse-time rejection actually fires on real
+	// (if malformed) VHDX bytes, not just via a direct function call.
+	buf := buildFixture(t, 0, 4*1024*1024, []uint64{10, 11, 12, 13})
+	if _, err := Read(bytes.NewReader(buf)); err == nil {
+		t.Fatal("Read with BlockSize=0: want error, got nil")
+	}
+}
+
 func TestRead_CorruptRegionTableChecksum(t *testing.T) {
 	buf := buildFixture(t, 1024*1024, 4*1024*1024, []uint64{10, 11, 12, 13})
 	// Flip a byte inside the primary region table's entries, after the

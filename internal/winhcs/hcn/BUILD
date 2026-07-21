@@ -17,10 +17,10 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = select({
         "@rules_go//go/platform:windows": [
-            "//internal/winhcs/internal/hcs",
-            "//internal/winhcs/internal/hcserror",
-            "//internal/winhcs/internal/interop",
-            "//internal/winhcs/internal/log",
+            "//internal/winhcs/hcs",
+            "//internal/winhcs/hcserror",
+            "//internal/winhcs/interop",
+            "//internal/winhcs/log",
             "@com_github_microsoft_go_winio//pkg/guid",
             "@com_github_pkg_errors//:errors",
             "@org_golang_x_sys//windows",

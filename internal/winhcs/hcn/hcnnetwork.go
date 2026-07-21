@@ -7,8 +7,8 @@ import (
 	"errors"
 
 	"github.com/Microsoft/go-winio/pkg/guid"
-	"github.com/bojanrajkovic/runny/internal/winhcs/internal/interop"
-	"github.com/bojanrajkovic/runny/internal/winhcs/internal/log"
+	"github.com/bojanrajkovic/runny/internal/winhcs/interop"
+	"github.com/bojanrajkovic/runny/internal/winhcs/log"
 )
 
 // Route is associated with a subnet.

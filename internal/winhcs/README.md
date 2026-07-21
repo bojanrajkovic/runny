@@ -16,9 +16,23 @@ to what the boot path and endpoint management actually need.
 `fb5aa2e9478c8f5dcaba00601cc7c7d10e1320cd`.
 
 Every file below is byte-identical to upstream except for import-path
-rewrites (`github.com/Microsoft/hcsshim/` -> `github.com/bojanrajkovic/runny/internal/winhcs/`)
-and the modifications listed here. No other divergence is allowed --
+rewrites and the modifications listed here. No other divergence is allowed --
 upstream fixes should apply as a straight re-vendor.
+
+**Import-path rewrite, including the flattened layout:** upstream
+`github.com/Microsoft/hcsshim/internal/X` becomes
+`github.com/bojanrajkovic/runny/internal/winhcs/X` -- one `internal/`, not
+two. Upstream nests its boot-path packages a second `internal/` deep
+specifically to hide them from *hcsshim's own* external consumers; that
+restriction has no purpose once the tree lives under our own top-level
+`internal/winhcs/`, and keeping it would actively break things here -- Go's
+import-visibility rule would then block `internal/vm/hcs_windows.go` (outside
+the `internal/winhcs` tree) from importing `hcs`/`hcs/schema2`/`vmcompute` at
+all, since only code rooted at the parent of an `internal/` segment may
+import through it. Collapsing the second `internal/` is a pure path change --
+zero logic divergence -- but it must be repeated on every re-vendor, the same
+as the import-path rewrite itself. `hcn`, `computestorage`, and `osversion`
+were never nested this way upstream, so they're unaffected.
 
 ## Vendored packages
 

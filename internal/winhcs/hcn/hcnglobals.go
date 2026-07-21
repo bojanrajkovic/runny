@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/bojanrajkovic/runny/internal/winhcs/internal/hcserror"
-	"github.com/bojanrajkovic/runny/internal/winhcs/internal/interop"
-	"github.com/bojanrajkovic/runny/internal/winhcs/internal/log"
+	"github.com/bojanrajkovic/runny/internal/winhcs/hcserror"
+	"github.com/bojanrajkovic/runny/internal/winhcs/interop"
+	"github.com/bojanrajkovic/runny/internal/winhcs/log"
 )
 
 // Globals are all global properties of the HCN Service.

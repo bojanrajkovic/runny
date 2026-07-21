@@ -5,7 +5,7 @@ package computestorage
 import (
 	"context"
 
-	"github.com/bojanrajkovic/runny/internal/winhcs/internal/oc"
+	"github.com/bojanrajkovic/runny/internal/winhcs/oc"
 	"github.com/pkg/errors"
 	"go.opencensus.io/trace"
 )

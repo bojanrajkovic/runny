@@ -6,8 +6,8 @@ import (
 	"context"
 	"encoding/json"
 
-	hcsschema "github.com/bojanrajkovic/runny/internal/winhcs/internal/hcs/schema2"
-	"github.com/bojanrajkovic/runny/internal/winhcs/internal/oc"
+	hcsschema "github.com/bojanrajkovic/runny/internal/winhcs/hcs/schema2"
+	"github.com/bojanrajkovic/runny/internal/winhcs/oc"
 	"github.com/pkg/errors"
 	"go.opencensus.io/trace"
 )

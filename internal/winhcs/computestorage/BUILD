@@ -19,14 +19,14 @@ go_library(
     importpath = "github.com/bojanrajkovic/runny/internal/winhcs/computestorage",
     visibility = ["//:__subpackages__"],
     deps = [
-        "//internal/winhcs/internal/hcs/schema2",
+        "//internal/winhcs/hcs/schema2",
     ] + select({
         "@rules_go//go/platform:windows": [
-            "//internal/winhcs/internal/interop",
-            "//internal/winhcs/internal/memory",
-            "//internal/winhcs/internal/oc",
-            "//internal/winhcs/internal/security",
+            "//internal/winhcs/interop",
+            "//internal/winhcs/memory",
+            "//internal/winhcs/oc",
             "//internal/winhcs/osversion",
+            "//internal/winhcs/security",
             "@com_github_microsoft_go_winio//vhd",
             "@com_github_pkg_errors//:errors",
             "@io_opencensus_go//trace",

@@ -294,6 +294,28 @@ func TestConvert_TooSmallSource(t *testing.T) {
 	}
 }
 
+// TestCopyPayload_SizeMismatch is the regression test for the bug where a
+// successful io.CopyBuffer (EOF reached) was treated as success regardless
+// of how many bytes that turned out to be -- a source that shrinks between
+// convert's stat and this copy would otherwise silently produce a VHDX
+// with an incomplete payload. copyPayload is exercised directly here
+// rather than through convert(), since reproducing an actual TOCTOU race
+// isn't practical in a synchronous test; this proves the byte-count check
+// itself, given a mismatched expectedSize.
+func TestCopyPayload_SizeMismatch(t *testing.T) {
+	dir := t.TempDir()
+	src := writeTempFile(t, dir, "src.img", []byte("hello, disk"))
+	device := writeTempFile(t, dir, "fake-device", nil)
+
+	err := copyPayload(src, device, int64(len("hello, disk"))+1)
+	if err == nil {
+		t.Fatal("copyPayload with a mismatched expected size: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "copied") || !strings.Contains(err.Error(), "want") {
+		t.Errorf("copyPayload error = %q, want it to name both the actual and expected byte counts", err)
+	}
+}
+
 func TestConvert_UnalignedSource(t *testing.T) {
 	dir := t.TempDir()
 	src := writeTempFile(t, dir, "src.img", make([]byte, minSourceSize+1)) // one byte past a sector boundary

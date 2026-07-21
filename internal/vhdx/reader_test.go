@@ -6,6 +6,7 @@ import (
 	"errors"
 	"hash/crc32"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/Microsoft/go-winio/pkg/guid"
@@ -211,6 +212,43 @@ func TestRead_MetadataItemLengthExceedsRegion(t *testing.T) {
 	binary.LittleEndian.PutUint32(buf[metadataRegionOffset+32+20:], 0xFFFFFFFF)
 	if _, err := Read(bytes.NewReader(buf)); err == nil {
 		t.Fatal("Read with an out-of-bounds metadata item length: want error, got nil")
+	}
+}
+
+// TestRead_MetadataItemLengthExceedsSpecMax is the regression test for the
+// bug where a metadata item length was only bounded against
+// MetadataRegionLength -- a value read from the same untrusted file, so a
+// crafted VHDX could inflate both together and defeat that bound alone.
+// This inflates the declared metadata region length too (and recomputes
+// the region-table checksum, since buildFixture's original one no longer
+// matches), so the item length here passes the region-length-relative
+// check and can only be caught by the independent [MS-VHDX] §2.6.1.2
+// 1 MiB ceiling.
+func TestRead_MetadataItemLengthExceedsSpecMax(t *testing.T) {
+	buf := buildFixture(t, 1024*1024, 4*1024*1024, []uint64{10, 11, 12, 13})
+	const (
+		metadataRegionOffset = 2 * 1024 * 1024
+		inflatedRegionLength = 2 * 1024 * 1024
+		oversizedItemLength  = maxMetadataItemLength + (1024 * 1024) // 2 MiB: > spec max, but < inflatedRegionLength
+	)
+
+	// Region table entry 1 (Metadata) is at regionTable1Offset+16+32; its
+	// Length field is the 4 bytes at +24 within that entry.
+	const metadataRegionEntryOffset = regionTable1Offset + 16 + 32
+	binary.LittleEndian.PutUint32(buf[metadataRegionEntryOffset+24:], inflatedRegionLength)
+	rt := buf[regionTable1Offset : regionTable1Offset+regionTableSize]
+	binary.LittleEndian.PutUint32(rt[4:8], 0) // zero before recomputing, §2.2.3.1
+	binary.LittleEndian.PutUint32(rt[4:8], crc32.Checksum(rt, castagnoliTable))
+
+	// File Parameters item's Length field, metadataRegionOffset+32+20.
+	binary.LittleEndian.PutUint32(buf[metadataRegionOffset+32+20:], oversizedItemLength)
+
+	_, err := Read(bytes.NewReader(buf))
+	if err == nil {
+		t.Fatal("Read with a metadata item length over the spec max (but under the region length): want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "spec maximum") {
+		t.Errorf("Read error = %q, want it to name the spec maximum", err)
 	}
 }
 

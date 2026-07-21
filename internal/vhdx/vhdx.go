@@ -158,7 +158,7 @@ func convert(src, dst string, b backend) (err error) {
 		return fmt.Errorf("resolving physical path for %s: %w", dst, pathErr)
 	}
 
-	if copyErr := copyPayload(src, physPath); copyErr != nil {
+	if copyErr := copyPayload(src, physPath, fi.Size()); copyErr != nil {
 		return fmt.Errorf("copying payload into %s: %w", dst, copyErr)
 	}
 	written = true
@@ -167,8 +167,14 @@ func convert(src, dst string, b backend) (err error) {
 
 // copyPayload streams src's bytes into the attached VHDX's block device.
 // convert validates src's size is a multiple of the logical sector size
-// before calling this, so every write lands sector-aligned.
-func copyPayload(src, devicePath string) error {
+// before calling this, so every write lands sector-aligned. expectedSize
+// is the size convert saw when it stat'd src; io.CopyBuffer alone would
+// report success at whatever byte count src happens to reach EOF at, so a
+// source that shrinks between that stat and this copy (or any other
+// short read) would otherwise convert "successfully" into a VHDX with a
+// valid prefix and a stale/zero tail — checking the count catches that
+// instead of silently reporting success over an incomplete disk.
+func copyPayload(src, devicePath string, expectedSize int64) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("opening source %s: %w", src, err)
@@ -180,9 +186,14 @@ func copyPayload(src, devicePath string) error {
 		return fmt.Errorf("opening device %s: %w", devicePath, err)
 	}
 	buf := make([]byte, copyBufferSize)
-	if _, err := io.CopyBuffer(out, in, buf); err != nil {
+	n, err := io.CopyBuffer(out, in, buf)
+	if err != nil {
 		out.Close()
 		return fmt.Errorf("writing payload: %w", err)
+	}
+	if n != expectedSize {
+		out.Close()
+		return fmt.Errorf("copied %d bytes, want %d (source changed size during conversion)", n, expectedSize)
 	}
 	return out.Close()
 }

@@ -60,6 +60,10 @@ const (
 	regionTable1Offset = 192 * 1024
 	regionTable2Offset = 256 * 1024
 	regionTableSize    = 64 * 1024
+
+	// maxMetadataItemLength is [MS-VHDX] §2.6.1.2's stated maximum for a
+	// metadata table entry's Length field.
+	maxMetadataItemLength = 1024 * 1024
 )
 
 // regionTableChecksumValid reports whether rt's stored CRC32C checksum
@@ -198,6 +202,15 @@ func readMetadata(r io.ReaderAt, info *Info) error {
 		itemLength := binary.LittleEndian.Uint32(entries[off+20 : off+24])
 		if itemLength == 0 {
 			continue
+		}
+		// itemLength MUST be <= 1 MiB per [MS-VHDX] §2.6.1.2 -- checked as
+		// an absolute spec ceiling, not just against MetadataRegionLength:
+		// that field is itself read from the (equally untrusted) region
+		// table entry, so a crafted file could inflate both together and
+		// defeat a region-length-relative bound alone.
+		if itemLength > maxMetadataItemLength {
+			return fmt.Errorf("vhdx: metadata item %d length %d exceeds the spec maximum of %d",
+				i, itemLength, maxMetadataItemLength)
 		}
 		// itemOffset/itemLength come straight from file bytes; bound them
 		// against the region's own declared size before allocating, so a

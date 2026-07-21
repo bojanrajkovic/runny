@@ -178,8 +178,9 @@ func PlanImageBundlePrune(imagesDir string, keepPaths, protectRefDirNames map[st
 			if keepPaths[bundlePath] {
 				continue
 			}
+			label := displayRef + " @ " + digestLabel(name)
 			if referenced[bundlePath] {
-				excluded = append(excluded, displayRef+" @ "+digestLabel(name)+": still referenced by a live guest disk's differencing parent")
+				excluded = append(excluded, label+": still referenced by a live guest disk's differencing parent")
 				continue
 			}
 			items = append(items, PlanItem{
@@ -187,7 +188,7 @@ func PlanImageBundlePrune(imagesDir string, keepPaths, protectRefDirNames map[st
 				Bytes:  dirSize(bundlePath),
 				Kind:   "image-bundle",
 				Reason: reason,
-				Label:  displayRef + " @ " + digestLabel(name),
+				Label:  label,
 			})
 		}
 	}
@@ -203,9 +204,13 @@ func PlanImageBundlePrune(imagesDir string, keepPaths, protectRefDirNames map[st
 // erroring), and an error only when a file that IS expected to resolve
 // can't be — which ReferencedBundleDirs treats as fatal to the whole scan
 // rather than silently treating an unreadable dependency record as safe to
-// ignore. The returned set is keyed by the parent's containing bundle
-// directory (filepath.Dir of parentOf's resolved path), matching keepPaths'
-// and PlanImageBundlePrune's own bundle-dir-path convention.
+// ignore. A slot directory disappearing between the top-level listing and
+// its own scan (ordinary destroy-and-recycle teardown racing this call) is
+// NOT treated as unreadable — a torn-down slot has nothing left to
+// reference, so that slot is skipped rather than aborting the whole scan.
+// The returned set is keyed by the parent's containing bundle directory
+// (filepath.Dir of parentOf's resolved path), matching keepPaths' and
+// PlanImageBundlePrune's own bundle-dir-path convention.
 func ReferencedBundleDirs(vmsDir string, parentOf func(childPath string) (parentPath string, ok bool, err error)) (map[string]bool, error) {
 	slotDirs, err := os.ReadDir(vmsDir)
 	if err != nil {
@@ -223,6 +228,14 @@ func ReferencedBundleDirs(vmsDir string, parentOf func(childPath string) (parent
 		slotPath := filepath.Join(vmsDir, slotDir.Name())
 		files, err := os.ReadDir(slotPath)
 		if err != nil {
+			// A slot torn down (destroy-and-recycle) between the vmsDir
+			// listing above and this call is an expected race, not an
+			// unreadable dependency record -- same treatment as vmsDir
+			// itself not existing, just one level down. A slot that's gone
+			// has nothing left to reference.
+			if os.IsNotExist(err) {
+				continue
+			}
 			return nil, err
 		}
 		for _, f := range files {

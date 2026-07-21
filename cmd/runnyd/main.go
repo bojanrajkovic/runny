@@ -630,11 +630,16 @@ func liveKeepSets(slots []*statemachine.Slot, dir home.Dir) (keepPaths, protectT
 // tag): vhdx.ParentLocator itself builds everywhere, and on darwin every
 // file it's asked about (config.json, disk.img, nvram.bin -- clonefile
 // copies, not VHDX) correctly comes back ErrNotAVHDX, which this treats the
-// same as "not a differencing disk" -- not applicable, not an error.
+// same as "not a differencing disk" -- not applicable, not an error. A file
+// that vanished between ReferencedBundleDirs' directory listing and this
+// call's os.Open (ordinary destroy-and-recycle teardown racing the scan,
+// the same class of race ReferencedBundleDirs already tolerates at the slot
+// level) gets the same treatment: a file that's gone has nothing left to
+// reference, not an unreadable dependency record.
 func diskParentOf(path string) (string, bool, error) {
 	parent, err := vhdx.ParentLocator(path)
 	switch {
-	case errors.Is(err, vhdx.ErrNotAVHDX), errors.Is(err, vhdx.ErrNotDifferencing):
+	case errors.Is(err, vhdx.ErrNotAVHDX), errors.Is(err, vhdx.ErrNotDifferencing), errors.Is(err, os.ErrNotExist):
 		return "", false, nil
 	case err != nil:
 		return "", false, err
@@ -697,7 +702,11 @@ func runPrune(ctx context.Context, apply bool, slots []*statemachine.Slot, dir h
 	var excluded []string
 	var bundleErr error
 	if refErr != nil {
-		bundleErr = fmt.Errorf("scanning live guest disks for differencing-parent references: %w", refErr)
+		// Terse on purpose: this and PlanImageBundlePrune's own scan errors
+		// both fold into bundleErr under the same "image-bundle scan: "
+		// prefix below, so this prefix only needs to disambiguate WHICH
+		// sub-scan failed, not restate the whole feature.
+		bundleErr = fmt.Errorf("differencing-parent scan: %w", refErr)
 	} else {
 		bundleItems, excluded, bundleErr = images.PlanImageBundlePrune(dir.ImagesDir(), keepPaths, protectRefDirNames, configuredRefs, referenced)
 	}
@@ -720,17 +729,29 @@ func runPrune(ctx context.Context, apply bool, slots []*statemachine.Slot, dir h
 	if apply {
 		// Re-snapshot live slot state immediately before deleting to
 		// protect artifacts adopted by slots that left BACKOFF during the
-		// potentially-slow plan phase (registry resolves + dir walks).
+		// potentially-slow plan phase (registry resolves + dir walks) --
+		// including a differencing parent a slot cloned against during that
+		// same window, the same class of race liveKeepSets already guards
+		// for keepPaths/protectTarballs. A re-scan failure fails closed: an
+		// image-bundle item can't be confirmed unreferenced, so none are
+		// deleted this round rather than trusting the stale plan-phase set.
 		liveKeep, liveTarball := liveKeepSets(slots, dir)
+		freshReferenced, freshRefErr := images.ReferencedBundleDirs(dir.VMsDir(), diskParentOf)
 		plan.ReclaimedBytes, plan.ApplyErr = images.ApplyPrune(combined, func(it images.PlanItem) bool {
 			switch it.Kind {
 			case "image-bundle":
-				return !liveKeep[it.Path]
+				if freshRefErr != nil {
+					return false
+				}
+				return !liveKeep[it.Path] && !freshReferenced[it.Path]
 			case "runner-tarball":
 				return !liveTarball[strings.TrimSuffix(filepath.Base(it.Path), ".partial")]
 			}
 			return true
 		})
+		if freshRefErr != nil {
+			plan.ApplyErr = errors.Join(plan.ApplyErr, fmt.Errorf("re-checking differencing-parent references before apply: %w", freshRefErr))
+		}
 	}
 	return plan
 }

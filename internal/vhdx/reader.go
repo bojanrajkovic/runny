@@ -129,6 +129,18 @@ func Read(r io.ReaderAt) (Info, error) {
 
 	fileID := make([]byte, 8)
 	if _, err := r.ReadAt(fileID, 0); err != nil {
+		// A file too short to even hold an 8-byte signature is exactly as
+		// much "not a VHDX" as one whose signature simply doesn't match --
+		// treat the two the same way, rather than routing a short read
+		// through the generic error path below. This matters beyond Read's
+		// own callers: ParentLocator's production wiring (diskParentOf in
+		// cmd/runnyd) depends on ErrNotAVHDX to classify a non-VHDX file as
+		// "not applicable, skip" rather than "unreadable dependency record,
+		// block the whole prune scan" -- a real file this short would
+		// otherwise silently disable image-bundle pruning system-wide.
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return info, ErrNotAVHDX
+		}
 		return info, fmt.Errorf("reading file identifier: %w", err)
 	}
 	if string(fileID) != "vhdxfile" {

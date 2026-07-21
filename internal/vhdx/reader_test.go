@@ -291,3 +291,15 @@ func TestRead_NotAVHDX(t *testing.T) {
 		t.Fatalf("Read(garbage) = %v, want ErrNotAVHDX", err)
 	}
 }
+
+// TestRead_TooShortForSignature: a file too short to even hold the 8-byte
+// file-identifier signature must classify as ErrNotAVHDX (a read error, not
+// a mismatched signature) -- callers like vhdx.ParentLocator's production
+// wiring depend on this sentinel to treat a non-VHDX file as "not
+// applicable" rather than a hard, prune-blocking error.
+func TestRead_TooShortForSignature(t *testing.T) {
+	_, err := Read(bytes.NewReader(make([]byte, 3)))
+	if !errors.Is(err, ErrNotAVHDX) {
+		t.Fatalf("Read(3-byte file) = %v, want ErrNotAVHDX", err)
+	}
+}

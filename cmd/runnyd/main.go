@@ -39,6 +39,7 @@ import (
 	"github.com/bojanrajkovic/runny/internal/tart"
 	"github.com/bojanrajkovic/runny/internal/telemetry"
 	"github.com/bojanrajkovic/runny/internal/versioncore"
+	"github.com/bojanrajkovic/runny/internal/vhdx"
 )
 
 // otlpShutdownDeadline bounds provider flush at daemon exit: a dead
@@ -624,6 +625,23 @@ func liveKeepSets(slots []*statemachine.Slot, dir home.Dir) (keepPaths, protectT
 	return keepPaths, protectTarballs
 }
 
+// diskParentOf wires vhdx.ParentLocator into images.ReferencedBundleDirs'
+// parentOf seam. It's cross-platform and unconditional (no windows build
+// tag): vhdx.ParentLocator itself builds everywhere, and on darwin every
+// file it's asked about (config.json, disk.img, nvram.bin -- clonefile
+// copies, not VHDX) correctly comes back ErrNotAVHDX, which this treats the
+// same as "not a differencing disk" -- not applicable, not an error.
+func diskParentOf(path string) (string, bool, error) {
+	parent, err := vhdx.ParentLocator(path)
+	switch {
+	case errors.Is(err, vhdx.ErrNotAVHDX), errors.Is(err, vhdx.ErrNotDifferencing):
+		return "", false, nil
+	case err != nil:
+		return "", false, err
+	}
+	return parent, true, nil
+}
+
 // runPrune computes (and, when apply, executes) the reclaim plan for stale
 // image bundles and runner tarballs: the keep-set built from live slot
 // statuses, per-pool digest resolution against the registry, and — on apply
@@ -668,7 +686,25 @@ func runPrune(ctx context.Context, apply bool, slots []*statemachine.Slot, dir h
 		keepPaths[dir.ImageBundleDir(ref.String(), digest)] = true
 	}
 	tarballItems, tarballErr := images.PlanRunnerCachePrune(dir.RunnerCacheDir(), runnerCacheKeep, protectTarballs)
-	bundleItems, bundleErr := images.PlanImageBundlePrune(dir.ImagesDir(), keepPaths, protectRefDirNames, configuredRefs)
+
+	// A live guest disk's differencing-parent reference is source-of-truth
+	// at prune time (no runny-side bookkeeping of parent digests) -- an
+	// unreadable one blocks the whole image-bundle plan rather than being
+	// treated as safe to ignore, so referenced/refErr gates whether
+	// PlanImageBundlePrune runs at all this round.
+	referenced, refErr := images.ReferencedBundleDirs(dir.VMsDir(), diskParentOf)
+	var bundleItems []images.PlanItem
+	var excluded []string
+	var bundleErr error
+	if refErr != nil {
+		bundleErr = fmt.Errorf("scanning live guest disks for differencing-parent references: %w", refErr)
+	} else {
+		bundleItems, excluded, bundleErr = images.PlanImageBundlePrune(dir.ImagesDir(), keepPaths, protectRefDirNames, configuredRefs, referenced)
+	}
+	for _, reason := range excluded {
+		skips = append(skips, socket.PruneSkip{Reason: reason})
+	}
+
 	combined := append(tarballItems, bundleItems...)
 	allItems := make([]socket.PruneItem, len(combined))
 	for i, it := range combined {

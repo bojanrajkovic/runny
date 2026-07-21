@@ -2,6 +2,7 @@ package images
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -109,17 +110,24 @@ func PlanRunnerCachePrune(cacheDir string, keep int, protect map[string]bool) ([
 // the set of ref dir basenames to leave entirely intact (resolve failed for
 // that ref — fail safe). configuredRefs maps sanitized-ref-dir-basename to the
 // original image ref string (for label and reason classification); a ref dir
-// not in configuredRefs gets reason "removed pool".
-func PlanImageBundlePrune(imagesDir string, keepPaths, protectRefDirNames map[string]bool, configuredRefs map[string]string) ([]PlanItem, error) {
+// not in configuredRefs gets reason "removed pool". referenced is the set of
+// bundle dir paths a live guest disk still depends on as a differencing
+// parent (see ReferencedBundleDirs) — nil on platforms with no such
+// dependency (darwin's clonefile copies are independent). The second return
+// value is one human-readable line per bundle excluded for that reason —
+// "no silent skips": a referenced bundle never enters items (ApplyPrune
+// would delete anything there), but its exclusion is still visible.
+func PlanImageBundlePrune(imagesDir string, keepPaths, protectRefDirNames map[string]bool, configuredRefs map[string]string, referenced map[string]bool) ([]PlanItem, []string, error) {
 	refEntries, err := os.ReadDir(imagesDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
 
 	var items []PlanItem
+	var excluded []string
 	var scanErrs []error
 	for _, refEntry := range refEntries {
 		if !refEntry.IsDir() {
@@ -170,6 +178,10 @@ func PlanImageBundlePrune(imagesDir string, keepPaths, protectRefDirNames map[st
 			if keepPaths[bundlePath] {
 				continue
 			}
+			if referenced[bundlePath] {
+				excluded = append(excluded, displayRef+" @ "+digestLabel(name)+": still referenced by a live guest disk's differencing parent")
+				continue
+			}
 			items = append(items, PlanItem{
 				Path:   bundlePath,
 				Bytes:  dirSize(bundlePath),
@@ -179,7 +191,56 @@ func PlanImageBundlePrune(imagesDir string, keepPaths, protectRefDirNames map[st
 			})
 		}
 	}
-	return items, errors.Join(scanErrs...)
+	return items, excluded, errors.Join(scanErrs...)
+}
+
+// ReferencedBundleDirs walks vmsDir's immediate slot directories (one level
+// deep — it does not recurse into a slot's runner/ mount) and calls parentOf
+// on every regular file directly inside each. parentOf returns ok=false for
+// a file that isn't a differencing disk (or isn't a VHDX at all — e.g.
+// darwin's clonefile-cloned disk.img/config.json/nvram.bin, which parentOf's
+// production wiring correctly reports as not-applicable rather than
+// erroring), and an error only when a file that IS expected to resolve
+// can't be — which ReferencedBundleDirs treats as fatal to the whole scan
+// rather than silently treating an unreadable dependency record as safe to
+// ignore. The returned set is keyed by the parent's containing bundle
+// directory (filepath.Dir of parentOf's resolved path), matching keepPaths'
+// and PlanImageBundlePrune's own bundle-dir-path convention.
+func ReferencedBundleDirs(vmsDir string, parentOf func(childPath string) (parentPath string, ok bool, err error)) (map[string]bool, error) {
+	slotDirs, err := os.ReadDir(vmsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	referenced := map[string]bool{}
+	for _, slotDir := range slotDirs {
+		if !slotDir.IsDir() {
+			continue
+		}
+		slotPath := filepath.Join(vmsDir, slotDir.Name())
+		files, err := os.ReadDir(slotPath)
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range files {
+			if f.IsDir() {
+				continue
+			}
+			childPath := filepath.Join(slotPath, f.Name())
+			parentPath, ok, err := parentOf(childPath)
+			if err != nil {
+				return nil, fmt.Errorf("resolving parent for %s: %w", childPath, err)
+			}
+			if !ok {
+				continue
+			}
+			referenced[filepath.Dir(parentPath)] = true
+		}
+	}
+	return referenced, nil
 }
 
 // ApplyPrune deletes every path in the plan. Best-effort: one failure does not

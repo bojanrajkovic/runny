@@ -56,6 +56,7 @@ go_library(
         "//internal/telemetry",
         "//internal/testconfig",
         "//internal/versioncore",
+        "//internal/vhdx",
         "//proto/runny/v1:runny",
         "@io_opentelemetry_go_otel//:otel",
     ] + select({

@@ -18,13 +18,19 @@ import (
 type fakeBackend struct {
 	calls []string
 
-	createErr   error
-	attachErr   error
-	physPathErr error
-	detachErr   error
-	closeErr    error
+	createErr             error
+	createDifferencingErr error
+	attachErr             error
+	physPathErr           error
+	detachErr             error
+	closeErr              error
 
 	physPath string // the file convert's copyPayload writes into, standing in for \\.\PhysicalDriveN
+}
+
+func (f *fakeBackend) createDifferencing(child, parent string) error {
+	f.calls = append(f.calls, "createDifferencing")
+	return f.createDifferencingErr
 }
 
 func (f *fakeBackend) createFixed(path string, maximumSize uint64) (syscall.Handle, error) {
@@ -82,6 +88,24 @@ func validSourceContent(t *testing.T) []byte {
 		buf[i] = byte(i)
 	}
 	return buf
+}
+
+func TestCreateDifferencing_Success(t *testing.T) {
+	b := &fakeBackend{}
+	if err := createDifferencing("child.vhdx", "parent.vhdx", b); err != nil {
+		t.Fatalf("createDifferencing: %v", err)
+	}
+	if want := []string{"createDifferencing"}; !slices.Equal(b.calls, want) {
+		t.Errorf("calls = %v, want %v", b.calls, want)
+	}
+}
+
+func TestCreateDifferencing_BackendError(t *testing.T) {
+	wantErr := errors.New("create differencing failed")
+	b := &fakeBackend{createDifferencingErr: wantErr}
+	if err := createDifferencing("child.vhdx", "parent.vhdx", b); !errors.Is(err, wantErr) {
+		t.Errorf("createDifferencing error = %v, want %v", err, wantErr)
+	}
 }
 
 func TestConvert_Success(t *testing.T) {

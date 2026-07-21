@@ -1,10 +1,12 @@
 package images
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -63,7 +65,7 @@ func TestPlanImageBundlePruneSuperseded(t *testing.T) {
 
 	keepPaths := map[string]bool{newBundle: true}
 	configuredRefs := map[string]string{ref: "ghcr.io/foo/bar:latest"}
-	items, err := PlanImageBundlePrune(imagesDir, keepPaths, nil, configuredRefs)
+	items, _, err := PlanImageBundlePrune(imagesDir, keepPaths, nil, configuredRefs, nil)
 	if err != nil {
 		t.Fatalf("PlanImageBundlePrune: %v", err)
 	}
@@ -93,7 +95,7 @@ func TestPlanImageBundlePruneKeptDigestsAreExcluded(t *testing.T) {
 
 	keepPaths := map[string]bool{keepBundle: true}
 	configuredRefs := map[string]string{ref: "ghcr.io/foo/bar:latest"}
-	items, err := PlanImageBundlePrune(imagesDir, keepPaths, nil, configuredRefs)
+	items, _, err := PlanImageBundlePrune(imagesDir, keepPaths, nil, configuredRefs, nil)
 	if err != nil {
 		t.Fatalf("PlanImageBundlePrune: %v", err)
 	}
@@ -116,7 +118,7 @@ func TestPlanImageBundlePruneRemovedPool(t *testing.T) {
 	}
 
 	// No entry in configuredRefs → "removed pool"
-	items, err := PlanImageBundlePrune(imagesDir, nil, nil, nil)
+	items, _, err := PlanImageBundlePrune(imagesDir, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("PlanImageBundlePrune: %v", err)
 	}
@@ -139,13 +141,114 @@ func TestPlanImageBundlePruneProtectRefDir(t *testing.T) {
 	}
 
 	protectRefDirNames := map[string]bool{ref: true}
-	items, err := PlanImageBundlePrune(imagesDir, nil, protectRefDirNames, nil)
+	items, _, err := PlanImageBundlePrune(imagesDir, nil, protectRefDirNames, nil, nil)
 	if err != nil {
 		t.Fatalf("PlanImageBundlePrune: %v", err)
 	}
 	if len(items) != 0 {
 		t.Errorf("expected 0 items (ref dir protected); got %d: %v", len(items), items)
 	}
+}
+
+// TestPlanImageBundlePruneReferencedIsExcluded: a bundle a live guest disk's
+// differencing parent still points to must not appear in items, even though
+// it isn't in keepPaths -- and its exclusion must be visible in the second
+// return value ("no silent skips" -- issue #306 Part 3's locked decision).
+func TestPlanImageBundlePruneReferencedIsExcluded(t *testing.T) {
+	imagesDir := t.TempDir()
+	ref := "ghcr.io_foo_bar"
+	bundle := filepath.Join(imagesDir, ref, "sha256-11223344")
+	if err := os.MkdirAll(bundle, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	configuredRefs := map[string]string{ref: "ghcr.io/foo/bar:latest"}
+	referenced := map[string]bool{bundle: true}
+	items, excluded, err := PlanImageBundlePrune(imagesDir, nil, nil, configuredRefs, referenced)
+	if err != nil {
+		t.Fatalf("PlanImageBundlePrune: %v", err)
+	}
+	if len(items) != 0 {
+		t.Errorf("expected 0 items (bundle referenced by a live guest disk); got %d: %v", len(items), items)
+	}
+	if len(excluded) != 1 {
+		t.Fatalf("expected 1 excluded reason, got %d: %v", len(excluded), excluded)
+	}
+}
+
+// TestReferencedBundleDirs walks a synthetic vms/ tree and maps each
+// resolvable child disk to its parent's containing bundle directory,
+// skipping files parentOf reports as not applicable and stopping loudly on
+// the first error parentOf reports.
+func TestReferencedBundleDirs(t *testing.T) {
+	t.Run("maps resolved parents to their bundle dir", func(t *testing.T) {
+		vmsDir := t.TempDir()
+		slotDir := filepath.Join(vmsDir, "web-1")
+		if err := os.MkdirAll(filepath.Join(slotDir, "runner"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		diskPath := filepath.Join(slotDir, "disk.vhdx")
+		if err := os.WriteFile(diskPath, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		parentPath := "/images/ghcr.io_foo_bar/sha256-abc/disk.vhdx"
+
+		var recursedIntoRunner bool
+		parentOf := func(path string) (string, bool, error) {
+			if filepath.Dir(path) == filepath.Join(slotDir, "runner") {
+				recursedIntoRunner = true
+			}
+			if path != diskPath {
+				return "", false, nil
+			}
+			return parentPath, true, nil
+		}
+
+		referenced, err := ReferencedBundleDirs(vmsDir, parentOf)
+		if err != nil {
+			t.Fatalf("ReferencedBundleDirs: %v", err)
+		}
+		want := map[string]bool{"/images/ghcr.io_foo_bar/sha256-abc": true}
+		if len(referenced) != len(want) || !referenced[filepath.Dir(parentPath)] {
+			t.Errorf("ReferencedBundleDirs = %v, want %v", referenced, want)
+		}
+		if recursedIntoRunner {
+			t.Error("ReferencedBundleDirs recursed into a slot's runner/ subdir; it must only scan the slot dir's own files")
+		}
+	})
+
+	t.Run("propagates a parentOf error loudly", func(t *testing.T) {
+		vmsDir := t.TempDir()
+		slotDir := filepath.Join(vmsDir, "web-1")
+		if err := os.MkdirAll(slotDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(slotDir, "disk.vhdx"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		wantErr := "parent locator unreadable"
+		parentOf := func(path string) (string, bool, error) {
+			return "", false, errors.New(wantErr)
+		}
+
+		if _, err := ReferencedBundleDirs(vmsDir, parentOf); err == nil || !strings.Contains(err.Error(), wantErr) {
+			t.Errorf("ReferencedBundleDirs error = %v, want it to contain %q", err, wantErr)
+		}
+	})
+
+	t.Run("missing vms dir returns nil, not an error", func(t *testing.T) {
+		referenced, err := ReferencedBundleDirs(filepath.Join(t.TempDir(), "nonexistent"), func(string) (string, bool, error) {
+			t.Fatal("parentOf should not be called")
+			return "", false, nil
+		})
+		if err != nil {
+			t.Fatalf("ReferencedBundleDirs: %v", err)
+		}
+		if referenced != nil {
+			t.Errorf("referenced = %v, want nil", referenced)
+		}
+	})
 }
 
 // TestPlanRunnerCachePrunePartialIsReaped: an idle .partial temp is planned.
@@ -257,7 +360,7 @@ func TestPlanImageBundlePruneOrphanedPartialIsPlanned(t *testing.T) {
 	}
 
 	configuredRefs := map[string]string{ref: "ghcr.io/foo/bar:latest"}
-	items, err := PlanImageBundlePrune(imagesDir, nil, nil, configuredRefs)
+	items, _, err := PlanImageBundlePrune(imagesDir, nil, nil, configuredRefs, nil)
 	if err != nil {
 		t.Fatalf("PlanImageBundlePrune: %v", err)
 	}
@@ -354,7 +457,7 @@ func TestPlanImageBundlePruneUnreadableRefDir(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Chmod(refDir, 0o755) })
 
-	_, err := PlanImageBundlePrune(imagesDir, nil, nil, map[string]string{"ghcr.io_foo_bar": "ghcr.io/foo/bar"})
+	_, _, err := PlanImageBundlePrune(imagesDir, nil, nil, map[string]string{"ghcr.io_foo_bar": "ghcr.io/foo/bar"}, nil)
 	if err == nil {
 		t.Fatal("expected error for unreadable ref dir, got nil")
 	}

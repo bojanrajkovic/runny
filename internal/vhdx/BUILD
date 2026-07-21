@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "vhdx",
     srcs = [
+        "parentlocator.go",
         "reader.go",
         "vhdx.go",
     ],
@@ -21,6 +22,7 @@ go_library(
 go_test(
     name = "vhdx_test",
     srcs = [
+        "parentlocator_test.go",
         "reader_test.go",
         "testdata_test.go",
         "vhdx_windows_test.go",

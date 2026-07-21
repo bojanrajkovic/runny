@@ -44,6 +44,7 @@ var (
 	itemVirtualDiskID      = mustGUID("BECA12AB-B2E6-4523-93EF-C309E000C746")
 	itemLogicalSectorSize  = mustGUID("8141BF1D-A96F-4709-BA47-F233A8FAAB5F")
 	itemPhysicalSectorSize = mustGUID("CDA348C7-445D-4471-9CC9-E9885251C556")
+	itemParentLocator      = mustGUID("A8D35F2D-B30B-454D-ABF7-D3D84834AB0C")
 )
 
 // guidAt reads the 16-byte Windows-mixed-endian GUID at b[off:off+16].
@@ -108,6 +109,16 @@ type Info struct {
 	BATRegionOffset      uint64
 	MetadataRegionOffset uint64
 	MetadataRegionLength uint32
+
+	// parentLocatorOffset/Length locate the Parent Locator metadata item
+	// (§2.6.2.6) relative to MetadataRegionOffset, when present. Zero when
+	// absent — always the case for a non-differencing disk (HasParent
+	// false), and ParentLocator treats HasParent-true-but-absent as a
+	// malformed file rather than trusting a zero value silently. Unexported:
+	// this is ParentLocator's own lookup, not a structural fact any other
+	// caller of Read needs.
+	parentLocatorOffset uint32
+	parentLocatorLength uint32
 }
 
 // Read parses the region table and metadata table of the VHDX in r,
@@ -118,6 +129,18 @@ func Read(r io.ReaderAt) (Info, error) {
 
 	fileID := make([]byte, 8)
 	if _, err := r.ReadAt(fileID, 0); err != nil {
+		// A file too short to even hold an 8-byte signature is exactly as
+		// much "not a VHDX" as one whose signature simply doesn't match --
+		// treat the two the same way, rather than routing a short read
+		// through the generic error path below. This matters beyond Read's
+		// own callers: ParentLocator's production wiring (diskParentOf in
+		// cmd/runnyd) depends on ErrNotAVHDX to classify a non-VHDX file as
+		// "not applicable, skip" rather than "unreadable dependency record,
+		// block the whole prune scan" -- a real file this short would
+		// otherwise silently disable image-bundle pruning system-wide.
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return info, ErrNotAVHDX
+		}
 		return info, fmt.Errorf("reading file identifier: %w", err)
 	}
 	if string(fileID) != "vhdxfile" {
@@ -259,6 +282,13 @@ func readMetadata(r io.ReaderAt, info *Info) error {
 				return errors.New("vhdx: Physical Sector Size item too short")
 			}
 			info.PhysicalSectorSize = binary.LittleEndian.Uint32(data[0:4])
+		case itemParentLocator:
+			// Not read here -- ParentLocator re-reads at (offset, length)
+			// once it already knows the caller wants a differencing disk's
+			// parent path, avoiding an allocation+copy for every Read call
+			// that doesn't need it.
+			info.parentLocatorOffset = itemOffset
+			info.parentLocatorLength = itemLength
 		}
 	}
 	if !sawFileParameters {

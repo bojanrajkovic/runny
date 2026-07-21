@@ -108,8 +108,10 @@ type PruneItem struct {
 	Label  string
 }
 
-// PruneSkip records a configured image ref that was left intact because its
-// registry digest could not be resolved.
+// PruneSkip records something the planner left intact and why: either a
+// configured image ref whose registry digest could not be resolved (Ref
+// set), or an image bundle left in place because a live guest disk's
+// differencing parent still references it (Ref empty, Reason only).
 type PruneSkip struct {
 	Ref    string
 	Reason string

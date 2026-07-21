@@ -3,7 +3,6 @@ package vhdx
 import (
 	"encoding/binary"
 	"errors"
-	"hash/crc32"
 	"os"
 	"path/filepath"
 	"testing"
@@ -55,82 +54,16 @@ func buildParentLocatorItem(locatorType guid.GUID, kv map[string]string) []byte 
 	return append(append(header, entries...), strings...)
 }
 
-// buildDifferencingFixture builds a minimal in-memory VHDX (region table +
-// metadata table with File Parameters HasParent=1, Virtual Disk Size,
-// sector sizes, and -- unless locatorItem is nil -- a Parent Locator item)
-// around the byte layout reader_test.go's buildFixture uses. Self-contained
-// rather than sharing buildFixture: that helper's signature is exercised by
-// #304's already-stable BAT-focused tests, and this fixture's needs
-// (variable metadata item count, no real BAT contents) diverge enough that
-// threading them through a shared signature isn't worth the shared risk.
+// buildDifferencingFixture builds a minimal in-memory differencing VHDX
+// (HasParent=1, and -- unless locatorItem is nil -- a Parent Locator item)
+// via buildFixture's shared region/metadata-table construction (reader_test.go).
 func buildDifferencingFixture(t *testing.T, locatorItem []byte) []byte {
 	t.Helper()
-
-	const (
-		metadataRegionOffset = 2 * 1024 * 1024
-		metadataRegionLength = 128 * 1024
-		batRegionOffset      = 3 * 1024 * 1024
-		batRegionLength      = 1024 * 1024
-		itemDataBase         = 64 * 1024
-	)
-
-	buf := make([]byte, batRegionOffset+batRegionLength)
-	copy(buf[0:8], "vhdxfile")
-
-	rt := buf[regionTable1Offset : regionTable1Offset+regionTableSize]
-	copy(rt[0:4], "regi")
-	binary.LittleEndian.PutUint32(rt[8:12], 2)
-	writeRegionEntry := func(idx int, g guid.GUID, fileOffset uint64, length uint32) {
-		off := 16 + idx*32
-		raw := g.ToWindowsArray()
-		copy(rt[off:off+16], raw[:])
-		binary.LittleEndian.PutUint64(rt[off+16:off+24], fileOffset)
-		binary.LittleEndian.PutUint32(rt[off+24:off+28], length)
-	}
-	writeRegionEntry(0, regionBAT, batRegionOffset, batRegionLength)
-	writeRegionEntry(1, regionMetadata, metadataRegionOffset, metadataRegionLength)
-	binary.LittleEndian.PutUint32(rt[4:8], crc32.Checksum(rt, castagnoliTable))
-
-	mt := buf[metadataRegionOffset : metadataRegionOffset+metadataRegionLength]
-	copy(mt[0:8], "metadata")
-
-	items := []struct {
-		g      guid.GUID
-		offset uint32
-		length uint32
-	}{
-		{itemFileParameters, itemDataBase, 8},
-		{itemVirtualDiskSize, itemDataBase + 8, 8},
-		{itemLogicalSectorSize, itemDataBase + 16, 4},
-		{itemPhysicalSectorSize, itemDataBase + 20, 4},
-	}
-	locatorOffset := itemDataBase + 24
+	ex := fixtureExtra{hasParent: true}
 	if locatorItem != nil {
-		items = append(items, struct {
-			g      guid.GUID
-			offset uint32
-			length uint32
-		}{itemParentLocator, uint32(locatorOffset), uint32(len(locatorItem))})
+		ex.items = []metaItem{{itemParentLocator, locatorItem}}
 	}
-	binary.LittleEndian.PutUint16(mt[10:12], uint16(len(items)))
-	for i, it := range items {
-		off := uint32(32 + i*32)
-		raw := it.g.ToWindowsArray()
-		copy(mt[off:off+16], raw[:])
-		binary.LittleEndian.PutUint32(mt[off+16:off+20], it.offset)
-		binary.LittleEndian.PutUint32(mt[off+20:off+24], it.length)
-	}
-
-	binary.LittleEndian.PutUint32(mt[itemDataBase:itemDataBase+4], 2*1024*1024) // BlockSize
-	binary.LittleEndian.PutUint32(mt[itemDataBase+4:itemDataBase+8], 0x2)       // HasParent=1
-	binary.LittleEndian.PutUint64(mt[itemDataBase+8:itemDataBase+16], 3*1024*1024)
-	binary.LittleEndian.PutUint32(mt[itemDataBase+16:itemDataBase+20], 512)
-	binary.LittleEndian.PutUint32(mt[itemDataBase+20:itemDataBase+24], 512)
-	if locatorItem != nil {
-		copy(mt[locatorOffset:locatorOffset+len(locatorItem)], locatorItem)
-	}
-
-	return buf
+	return buildFixture(t, 2*1024*1024, 3*1024*1024, []uint64{0}, ex)
 }
 
 func writeFixtureFile(t *testing.T, dir, name string, data []byte) string {

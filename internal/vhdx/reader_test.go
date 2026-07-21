@@ -51,8 +51,30 @@ func TestChunkRatioAndPayloadBlockCount(t *testing.T) {
 // hand-verifiable list. This is a TEST fixture builder, not a VHDX writer:
 // no log or secondary region-table copy is produced, since Read doesn't
 // need either to parse a fixture whose primary copy is already valid.
-func buildFixture(t *testing.T, blockSize, virtualDiskSize uint64, batOffsets []uint64) []byte {
+// metaItem is an extra metadata-table item buildFixture writes beyond its
+// four always-present ones -- currently only used to add a Parent Locator
+// item for differencing-disk fixtures (see parentlocator_test.go).
+type metaItem struct {
+	g    guid.GUID
+	data []byte
+}
+
+// fixtureExtra is buildFixture's optional trailing argument: extra metadata
+// items to write, and whether File Parameters' HasParent bit should be set.
+// Kept separate from items (rather than deriving HasParent from "items is
+// non-empty") because a malformed-fixture test wants HasParent=1 with no
+// Parent Locator item actually present.
+type fixtureExtra struct {
+	hasParent bool
+	items     []metaItem
+}
+
+func buildFixture(t *testing.T, blockSize, virtualDiskSize uint64, batOffsets []uint64, extra ...fixtureExtra) []byte {
 	t.Helper()
+	var ex fixtureExtra
+	if len(extra) > 0 {
+		ex = extra[0]
+	}
 
 	const (
 		metadataRegionOffset = 2 * 1024 * 1024
@@ -82,10 +104,10 @@ func buildFixture(t *testing.T, blockSize, virtualDiskSize uint64, batOffsets []
 	// with a zero/wrong checksum would be rejected as corrupt.
 	binary.LittleEndian.PutUint32(rt[4:8], crc32.Checksum(rt, castagnoliTable))
 
-	// Metadata table @ metadataRegionOffset: header (32B) + 4 entries (32B each).
+	// Metadata table @ metadataRegionOffset: header (32B) + 4+len(ex.items) entries (32B each).
 	mt := buf[metadataRegionOffset : metadataRegionOffset+metadataRegionLength]
 	copy(mt[0:8], "metadata")
-	binary.LittleEndian.PutUint16(mt[10:12], 4)
+	binary.LittleEndian.PutUint16(mt[10:12], uint16(4+len(ex.items)))
 	writeItemEntry := func(idx int, g guid.GUID, itemOffset, itemLength uint32) {
 		off := uint32(32 + idx*32)
 		raw := g.ToWindowsArray()
@@ -98,8 +120,19 @@ func buildFixture(t *testing.T, blockSize, virtualDiskSize uint64, batOffsets []
 	writeItemEntry(2, itemLogicalSectorSize, itemDataBase+16, 4)
 	writeItemEntry(3, itemPhysicalSectorSize, itemDataBase+20, 4)
 
+	extraOffset := uint32(itemDataBase + 24)
+	for i, it := range ex.items {
+		writeItemEntry(4+i, it.g, extraOffset, uint32(len(it.data)))
+		copy(mt[extraOffset:extraOffset+uint32(len(it.data))], it.data)
+		extraOffset += uint32(len(it.data))
+	}
+
 	binary.LittleEndian.PutUint32(mt[itemDataBase:itemDataBase+4], uint32(blockSize))
-	binary.LittleEndian.PutUint32(mt[itemDataBase+4:itemDataBase+8], 0x1) // LeaveBlockAllocated=1, HasParent=0
+	flags := uint32(0x1) // LeaveBlockAllocated=1, HasParent=0 -- matches every pre-existing caller
+	if ex.hasParent {
+		flags = 0x2 // LeaveBlockAllocated=0, HasParent=1 -- matches real Hyper-V differencing output
+	}
+	binary.LittleEndian.PutUint32(mt[itemDataBase+4:itemDataBase+8], flags)
 	binary.LittleEndian.PutUint64(mt[itemDataBase+8:itemDataBase+16], virtualDiskSize)
 	binary.LittleEndian.PutUint32(mt[itemDataBase+16:itemDataBase+20], 512)
 	binary.LittleEndian.PutUint32(mt[itemDataBase+20:itemDataBase+24], 512)

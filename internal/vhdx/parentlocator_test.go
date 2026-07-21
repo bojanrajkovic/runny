@@ -192,7 +192,7 @@ func TestParentLocator_FallsThroughStaleCandidate(t *testing.T) {
 	dir := t.TempDir()
 	writeFixtureFile(t, dir, "real.vhdx", []byte("real"))
 	item := buildParentLocatorItem(locatorTypeVHDX, map[string]string{
-		"relative_path": `.\gone.vhdx`,                    // stale: does not exist
+		"relative_path": `.\gone.vhdx`,                   // stale: does not exist
 		"volume_path":   filepath.Join(dir, "real.vhdx"), // exists
 	})
 	child := writeFixtureFile(t, dir, "child.vhdx", buildDifferencingFixture(t, item))

@@ -555,8 +555,8 @@ func TestDiskGuardReturnsTypedError(t *testing.T) {
 	if dh.ImageBytes < exabyte {
 		t.Errorf("ImageBytes = %d, want >= %d", dh.ImageBytes, int64(exabyte))
 	}
-	if dh.NeedBytes() != uint64(dh.ImageBytes)+PullHeadroom {
-		t.Errorf("NeedBytes() = %d, want ImageBytes+PullHeadroom = %d", dh.NeedBytes(), uint64(dh.ImageBytes)+PullHeadroom)
+	if dh.NeedBytes() != uint64(dh.ImageBytes)+RequiredHeadroom(dh.ImageBytes) {
+		t.Errorf("NeedBytes() = %d, want ImageBytes+RequiredHeadroom = %d", dh.NeedBytes(), uint64(dh.ImageBytes)+RequiredHeadroom(dh.ImageBytes))
 	}
 }
 
@@ -569,8 +569,8 @@ func TestDiskHeadroomErrorSurvivesWrapping(t *testing.T) {
 	if !errors.As(wrapped, &dh) {
 		t.Fatalf("errors.As did not recover *DiskHeadroomError through %%w wrapping")
 	}
-	if dh.NeedBytes() != uint64(100<<30)+PullHeadroom {
-		t.Errorf("NeedBytes() = %d after unwrap, want %d", dh.NeedBytes(), uint64(100<<30)+PullHeadroom)
+	if dh.NeedBytes() != uint64(100<<30)+RequiredHeadroom(100<<30) {
+		t.Errorf("NeedBytes() = %d after unwrap, want %d", dh.NeedBytes(), uint64(100<<30)+RequiredHeadroom(100<<30))
 	}
 }
 

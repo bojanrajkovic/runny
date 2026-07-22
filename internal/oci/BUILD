@@ -4,6 +4,8 @@ go_library(
     name = "oci",
     srcs = [
         "applelz4.go",
+        "headroom_other.go",
+        "headroom_windows.go",
         "oci.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/oci",

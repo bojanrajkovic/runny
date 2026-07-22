@@ -31,17 +31,20 @@ import (
 	"github.com/bojanrajkovic/runny/internal/tart"
 )
 
-// PullHeadroom is the free-space buffer required above the image's uncompressed
-// size before a pull is allowed to start. The doctor's disk-headroom check uses
-// the same value so its verdict predicts the pull guard.
-const PullHeadroom = 2 << 30 // 2 GiB
+// FixedPullHeadroom is the flat free-space buffer required above the image's
+// uncompressed size before a pull is allowed to start, on platforms where
+// nothing else needs extra room once the pull lands. RequiredHeadroom is the
+// platform-aware total (see headroom_windows.go/headroom_other.go); the
+// doctor's disk-headroom check calls the same function so its verdict
+// predicts the pull guard.
+const FixedPullHeadroom = 2 << 30 // 2 GiB
 
 // DiskHeadroomError is returned by a pull refused at the pre-flight disk guard:
-// the uncompressed image plus PullHeadroom does not fit in the destination
-// filesystem. It is the one DETERMINISTIC pull failure — it fails identically
-// for every concurrent slot until host disk state changes — so a caller can
-// errors.As it, poll for headroom against NeedBytes, and re-attempt only once
-// there is room, instead of re-running a guaranteed-doomed pull.
+// the uncompressed image plus RequiredHeadroom(ImageBytes) does not fit in the
+// destination filesystem. It is the one DETERMINISTIC pull failure — it fails
+// identically for every concurrent slot until host disk state changes — so a
+// caller can errors.As it, poll for headroom against NeedBytes, and re-attempt
+// only once there is room, instead of re-running a guaranteed-doomed pull.
 type DiskHeadroomError struct {
 	Ref        string
 	ImageBytes int64 // uncompressed image size (what the message reports)
@@ -54,10 +57,11 @@ func (e *DiskHeadroomError) Error() string {
 }
 
 // NeedBytes is the free-space threshold the pull requires: the uncompressed
-// image plus PullHeadroom. A headroom poll must compare available space against
-// this, not ImageBytes alone (the guard enforces the same sum).
+// image plus RequiredHeadroom(ImageBytes). A headroom poll must compare
+// available space against this, not ImageBytes alone (the guard enforces the
+// same sum).
 func (e *DiskHeadroomError) NeedBytes() uint64 {
-	return uint64(e.ImageBytes) + PullHeadroom
+	return uint64(e.ImageBytes) + RequiredHeadroom(e.ImageBytes)
 }
 
 const (
@@ -273,7 +277,7 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 	if err != nil {
 		return "", fmt.Errorf("checking free space before pull: %w", err)
 	}
-	if uint64(total)+PullHeadroom > free {
+	if uint64(total)+RequiredHeadroom(total) > free {
 		return "", &DiskHeadroomError{Ref: ref.String(), ImageBytes: total, FreeBytes: int64(free)}
 	}
 	if err := truncateFile(diskPath, total); err != nil {

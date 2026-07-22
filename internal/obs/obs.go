@@ -54,7 +54,8 @@ const (
 	// SECURE_SSH.
 	ActionRotate = "rotate" // key mint + install + sshd flip + keyed reconnect
 	// PROVISION.
-	ActionStartRunner = "start-runner" // stage tarball + exec run.sh (one guest exec)
+	ActionStartRunner       = "start-runner"        // stage tarball + exec run.sh (one guest exec)
+	ActionPushRunnerTarball = "push-runner-tarball" // stream tarball to the guest (no live share device; windows)
 	// ENSURE_IMAGE.
 	ActionResolve       = "resolve"        // registry manifest round-trip → digest
 	ActionTarballEnsure = "tarball-ensure" // runner-tarball resolve + download (or cache hit)

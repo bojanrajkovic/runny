@@ -64,15 +64,17 @@ func (f *fakeImages) Ensure(ctx context.Context, report func(string), onDigestRe
 }
 
 type fakeMachine struct {
-	mac     string
-	ip      string
-	ipErr   error
-	stopErr error
-	stopped bool
-	mu      sync.Mutex
+	mac       string
+	ip        string
+	ipErr     error
+	stopErr   error
+	stopped   bool
+	needsPush bool
+	mu        sync.Mutex
 }
 
-func (m *fakeMachine) MAC() string { return m.mac }
+func (m *fakeMachine) MAC() string           { return m.mac }
+func (m *fakeMachine) NeedsRunnerPush() bool { return m.needsPush }
 func (m *fakeMachine) WaitIP(ctx bounded.Context) (string, error) {
 	if m.ipErr != nil {
 		return "", m.ipErr
@@ -176,6 +178,9 @@ type fakeGuest struct {
 	runnerTar  string            // the tarball basename StartRunner was handed
 	guestEnv   map[string]string // the guest_env StartRunner was handed
 	guestSetup []string          // the guest_setup StartRunner was handed
+	pushErr    error             // PushRunnerTarball returns this
+	pushedPath string            // the localPath PushRunnerTarball was handed
+	pushCalls  int
 
 	// Debug-key injection seam (issue #39).
 	hostKeys      []string
@@ -197,6 +202,14 @@ type fakeGuest struct {
 	sessionPulled bool
 
 	mu sync.Mutex
+}
+
+func (g *fakeGuest) PushRunnerTarball(ctx bounded.Context, localPath string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.pushCalls++
+	g.pushedPath = localPath
+	return g.pushErr
 }
 
 func (g *fakeGuest) StartRunner(ctx context.Context, jit, goos, runnerTarball string, env map[string]string, setup []string) (Proc, error) {
@@ -1833,6 +1846,44 @@ func TestRunnerTarballClonedIntoPerSlotMount(t *testing.T) {
 	want := [2]string{filepath.Join(h.dir.RunnerCacheDir(), tarball), filepath.Join(mount, tarball)}
 	if len(calls) != 1 || calls[0] != want {
 		t.Errorf("CloneFile calls = %v, want exactly [{%q %q}]", calls, want[0], want[1])
+	}
+}
+
+// A boot backend with no live share device (windows; NeedsRunnerPush) never
+// got the tarball into the guest at BOOT -- PROVISION must push it itself,
+// over the same guest session StartRunner reuses next.
+func TestProvisionPushesTarballWhenMachineNeedsPush(t *testing.T) {
+	h := newHarness(t, nil)
+	h.vmF.machine.needsPush = true
+	h.start(t)
+	h.proc.say(markerListening)
+	h.waitState(t, StateListening)
+
+	const tarball = "actions-runner-osx-arm64-2.320.0.tar.gz" // fakeImages' RunnerVersion
+	want := filepath.Join(h.dir.SlotRunnerMountDir("runner-1"), tarball)
+
+	h.guest.mu.Lock()
+	calls, got := h.guest.pushCalls, h.guest.pushedPath
+	h.guest.mu.Unlock()
+	if calls != 1 || got != want {
+		t.Errorf("PushRunnerTarball calls=%d path=%q, want exactly one call with %q", calls, got, want)
+	}
+}
+
+// A boot backend with a live share device (darwin; the harness default) never
+// needs PROVISION to push anything -- BOOT's own virtiofs attach already made
+// the tarball visible to the guest.
+func TestProvisionSkipsPushWhenMachineHasLiveShare(t *testing.T) {
+	h := newHarness(t, nil)
+	h.start(t)
+	h.proc.say(markerListening)
+	h.waitState(t, StateListening)
+
+	h.guest.mu.Lock()
+	calls := h.guest.pushCalls
+	h.guest.mu.Unlock()
+	if calls != 0 {
+		t.Errorf("PushRunnerTarball calls=%d, want 0 (fakeMachine.needsPush defaults false)", calls)
 	}
 }
 

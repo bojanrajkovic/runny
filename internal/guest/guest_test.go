@@ -5,7 +5,10 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -54,6 +57,7 @@ func TestProvisionScriptsReportProvisionClock(t *testing.T) {
 	}{
 		{"darwin", provisionScriptDarwin},
 		{"linux", provisionScriptLinux},
+		{"linux (windows host)", provisionScriptLinuxPushed},
 	} {
 		if !strings.Contains(s.script, `echo "runny: provision-clock $(date -u +%Y-%m-%dT%H:%M:%SZ)"`) {
 			t.Errorf("%s provision script must report the guest clock (runny: provision-clock ...)", s.name)
@@ -72,6 +76,7 @@ func TestProvisionScriptsKeepJITOutOfCommand(t *testing.T) {
 	}{
 		{"darwin", provisionScriptDarwin},
 		{"linux", provisionScriptLinux},
+		{"linux (windows host)", provisionScriptLinuxPushed},
 	} {
 		if !strings.Contains(s.script, `--jitconfig "$(cat)"`) {
 			t.Errorf("%s provision script must read the JIT from stdin via $(cat)", s.name)
@@ -106,6 +111,54 @@ func TestProvisionScriptStagesExactTarball(t *testing.T) {
 		if !strings.Contains(script, `--jitconfig "$(cat)"`) {
 			t.Errorf("%s: script must still read the JIT from stdin", tc.goos)
 		}
+	}
+}
+
+// On a windows host, a linux guest's provision script must skip the virtiofs
+// mount entirely (schema 2.1 has no working live share device for a stock
+// Linux guest) and read the tarball from where PushRunnerTarball stages it
+// instead. hostGOOS is the swappable indirection over runtime.GOOS (mirroring
+// images.go's prepareBundleDiskFn) that lets this run on any host.
+func TestProvisionScriptLinuxSkipsMountOnWindowsHost(t *testing.T) {
+	orig := hostGOOS
+	t.Cleanup(func() { hostGOOS = orig })
+
+	const tarball = "actions-runner-linux-amd64-2.320.0.tar.gz"
+
+	hostGOOS = "windows"
+	script, err := provisionScript("linux", tarball, nil, nil)
+	if err != nil {
+		t.Fatalf("provisionScript: %v", err)
+	}
+	if strings.Contains(script, "mount") {
+		t.Errorf("windows-host linux script must not attempt any mount:\n%s", script)
+	}
+	if !strings.Contains(script, `CACHE="$HOME/`+runnerPushCacheDir+`"`) {
+		t.Errorf("windows-host linux script must read from $HOME/%s, got:\n%s", runnerPushCacheDir, script)
+	}
+	if !strings.Contains(script, `TARBALL="$CACHE/`+tarball+`"`) {
+		t.Errorf("windows-host linux script must still stage the exact tarball %q:\n%s", tarball, script)
+	}
+
+	hostGOOS = "darwin"
+	script, err = provisionScript("linux", tarball, nil, nil)
+	if err != nil {
+		t.Fatalf("provisionScript: %v", err)
+	}
+	if !strings.Contains(script, "mount -t virtiofs") {
+		t.Errorf("darwin-host linux script must still mount virtiofs, got:\n%s", script)
+	}
+
+	// The darwin GUEST script is untouched by the HOST switch either way.
+	hostGOOS = "windows"
+	const darwinTarball = "actions-runner-osx-arm64-2.320.0.tar.gz"
+	darwinScript, err := provisionScript("darwin", darwinTarball, nil, nil)
+	if err != nil {
+		t.Fatalf("provisionScript: %v", err)
+	}
+	want := strings.ReplaceAll(provisionScriptDarwin, runnerTarballPlaceholder, darwinTarball)
+	if darwinScript != want {
+		t.Errorf("darwin guest script must be unaffected by hostGOOS, got:\n%s\nwant:\n%s", darwinScript, want)
 	}
 }
 
@@ -272,6 +325,9 @@ type rotateServer struct {
 	stopCalls         int
 	debugInstalls     int
 	lastInstallScript string
+	failPush          bool // the push exec exits 1 (e.g. mkdir denied)
+	lastPushCmd       string
+	lastPushBody      []byte // stdin the push exec received
 }
 
 func (s *rotateServer) lastScript(t *testing.T) string {
@@ -394,6 +450,21 @@ func (s *rotateServer) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 			s.mu.Unlock()
 			if killUnproven {
 				fmt.Fprintln(ch.Stderr(), "runny: runner still alive after SIGKILL")
+				exit(1)
+			} else {
+				exit(0)
+			}
+		case strings.Contains(payload.Cmd, runnerPushCacheDir):
+			// PushRunnerTarball: read back whatever the exec's stdin carries,
+			// the same way a real `cat > path` would consume it.
+			body, _ := io.ReadAll(ch)
+			s.mu.Lock()
+			s.lastPushCmd = payload.Cmd
+			s.lastPushBody = body
+			fail := s.failPush
+			s.mu.Unlock()
+			if fail {
+				fmt.Fprintln(ch.Stderr(), "mkdir: permission denied")
 				exit(1)
 			} else {
 				exit(0)
@@ -855,6 +926,79 @@ func TestStopRunnerPatternIsSelfExcluding(t *testing.T) {
 	}
 	if strings.Contains(stopRunnerScript, `'--jitconfig'`) {
 		t.Error("stop script must not contain the literal --jitconfig (it would self-match)")
+	}
+}
+
+// PushRunnerTarball streams the local file's exact bytes to the guest over
+// the same `cat >`-style exec pattern StartRunner already uses for the JIT
+// config, landing at $HOME/runny-cache/<basename>.
+func TestPushRunnerTarball(t *testing.T) {
+	srv := newRotateServer(t)
+	d := testDialer()
+	g, err := d.WaitFor(testCtx(t), srv.addr, "linux")
+	if err != nil {
+		t.Fatalf("WaitFor: %v", err)
+	}
+
+	const want = "not a real tarball, just spike bytes"
+	local := filepath.Join(t.TempDir(), "actions-runner-linux-amd64-2.320.0.tar.gz")
+	if err := os.WriteFile(local, []byte(want), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := g.(*Guest).PushRunnerTarball(testCtx(t), local); err != nil {
+		t.Fatalf("PushRunnerTarball: %v", err)
+	}
+
+	srv.mu.Lock()
+	cmd, body := srv.lastPushCmd, string(srv.lastPushBody)
+	srv.mu.Unlock()
+	if body != want {
+		t.Errorf("guest received body %q, want %q", body, want)
+	}
+	if !strings.Contains(cmd, `$HOME/`+runnerPushCacheDir+`/actions-runner-linux-amd64-2.320.0.tar.gz`) {
+		t.Errorf("push command %q must target $HOME/%s/<basename>", cmd, runnerPushCacheDir)
+	}
+	if !strings.Contains(cmd, "mkdir -p") {
+		t.Errorf("push command %q must create the cache dir first", cmd)
+	}
+}
+
+// A failed push (mkdir denied, say) is a loud error, not swallowed.
+func TestPushRunnerTarballFailureSurfaces(t *testing.T) {
+	srv := newRotateServer(t)
+	srv.failPush = true
+	d := testDialer()
+	g, err := d.WaitFor(testCtx(t), srv.addr, "linux")
+	if err != nil {
+		t.Fatalf("WaitFor: %v", err)
+	}
+
+	local := filepath.Join(t.TempDir(), "actions-runner-linux-amd64-2.320.0.tar.gz")
+	if err := os.WriteFile(local, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.(*Guest).PushRunnerTarball(testCtx(t), local); err == nil {
+		t.Fatal("PushRunnerTarball must fail when the guest exec exits nonzero")
+	}
+}
+
+// PushRunnerTarball refuses a tarball basename that doesn't match the same
+// trust-boundary charset provisionScript enforces — it crosses into a shell
+// command string here too.
+func TestPushRunnerTarballRejectsBadName(t *testing.T) {
+	srv := newRotateServer(t)
+	d := testDialer()
+	g, err := d.WaitFor(testCtx(t), srv.addr, "linux")
+	if err != nil {
+		t.Fatalf("WaitFor: %v", err)
+	}
+	local := filepath.Join(t.TempDir(), "actions-runner$(whoami).tar.gz")
+	if err := os.WriteFile(local, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.(*Guest).PushRunnerTarball(testCtx(t), local); err == nil {
+		t.Fatal("PushRunnerTarball must refuse a tarball name with shell metacharacters")
 	}
 }
 

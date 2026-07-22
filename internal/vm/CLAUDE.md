@@ -40,3 +40,15 @@ ADR-0026 for the Hyper-V backend's decisions and why; this doc is sharp edges on
   guest; it never lets VZ boot an amd64 kernel). `Bundle.LoadConfig` itself stays a
   portable shape check with no host-arch opinion, so it parses identically on any
   CI runner regardless of that runner's own `GOARCH`.
+- **`hcsMachine.Boot` never attaches a share device for `RunnerShareDir` — it's
+  silently a no-op.** Schema 2.1's only Linux-guest-capable share device,
+  `Plan9`, is hardware-validated to be rejected outright on a bare (non-LCOW)
+  compute system (issue #319): it's paired with LCOW's own guest-side GCS
+  bridge protocol, not a device the guest kernel discovers on its own the way
+  SCSI/NetworkAdapters are — confirmed by isolating that a generic `Modify`
+  (a benign memory-size update) succeeds fine on the same bare compute system,
+  so `Plan9` specifically is what's rejected, not hot-modify in general.
+  `NeedsRunnerPush() bool` (true on `hcsMachine`, false on `vzMachine`) is how
+  the state machine knows to push the runner tarball over SSH instead
+  (`internal/guest.Guest.PushRunnerTarball`) — don't "fix" `Boot` to attach a
+  `Plan9` device without re-reading this note first.

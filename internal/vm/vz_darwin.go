@@ -276,6 +276,11 @@ type vzMachine struct {
 
 func (m *vzMachine) MAC() string { return m.mac }
 
+// NeedsRunnerPush is always false here: Boot already attached RunnerShareDir
+// as a live read-only virtiofs device (see finishBoot), so the tarball is
+// already visible to the guest by the time PROVISION runs.
+func (m *vzMachine) NeedsRunnerPush() bool { return false }
+
 func (m *vzMachine) watchState() {
 	defer close(m.done)
 	for state := range m.vm.StateChangedNotify() {

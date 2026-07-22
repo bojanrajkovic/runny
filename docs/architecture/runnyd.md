@@ -118,7 +118,7 @@ race-free without a careful never-touch rule.
 | `internal/oci` | tart-format image pull: registry auth, manifest, Apple-LZ4 disk assembly; declared sizes enforced on every blob and decode |
 | `internal/winhcs` | vendored HCS/HNS binding (trimmed `Microsoft/hcsshim`, windows-only) — the boot-path core and endpoint management `internal/vm`'s Hyper-V backend drives |
 | `internal/sshx` | the only constructor of SSH clients (deadline recipe) |
-| `internal/guest` | what to *do* over SSH: stage runner from the per-slot virtiofs share, run.sh, diag pull |
+| `internal/guest` | what to *do* over SSH: stage runner from the per-slot virtiofs share (darwin) or an SSH-pushed copy (windows), run.sh, diag pull |
 | `internal/github` | App JWT → installation token → JIT config; list/delete for reconcile |
 | `internal/vm` | guest boot + IP resolution: Virtualization.framework + dhcpd-lease parsing (darwin), bare HCS compute systems + host neighbor-table polling (windows, ADR-0026) |
 | `internal/statemachine` | the FSM; depends only on the seams above |
@@ -217,7 +217,9 @@ from `-doctor`, which runs the full network suite for operational diagnosis.
 `internal/home` is the authority. Shape: `config.yaml`, `runnyd.sock` (0600),
 `logs/runnyd.log`, `images/<ref>/<digest>/` (immutable cache),
 `vms/<slot>/` (ephemeral, swept) — including `vms/<slot>/runner/`, the cycle's
-own per-slot virtiofs mount holding its single cloned runner tarball —
+own per-slot directory holding its single cloned runner tarball (mounted
+read-only into the guest as virtiofs on darwin; SSH-pushed from this same
+directory into the guest on windows) —
 `cache/actions-runner/` (the runner-tarball download store, cold-start pruned;
 never mounted into a guest),
 `cycles/<slot>/<started>-<id>/cycle.json` (+ post-mortem artifacts on

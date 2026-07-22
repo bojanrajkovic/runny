@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -298,6 +299,8 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 				RunnerShareDir: c.runnerMount, // the slot's OWN mount, not the shared store
 				CPUCount:       c.deps.Pool.CPUCores,
 				MemorySize:     uint64(c.deps.Pool.RAMGB) << 30, // GiB → bytes; 0 keeps the image's
+				SSHUser:        c.deps.Pool.SSHUser,
+				SSHPassword:    c.deps.Pool.SSHPassword,
 			})
 			if err != nil {
 				return err
@@ -370,6 +373,19 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	}
 	if ok {
 		ok = c.enter(cctx, StateProvision, cfg.Deadlines.Provision.D(), func(bc bounded.Context) error {
+			// A boot backend with no live share device (windows; see
+			// vm.Machine.NeedsRunnerPush) never got the tarball into the guest
+			// at BOOT — push it now, over the same SSH session StartRunner
+			// reuses next. Gated the same way BOOT's own share attach is: only
+			// when this cycle actually resolved a tarball.
+			if c.runnerMount != "" && c.machine.NeedsRunnerPush() {
+				local := filepath.Join(c.runnerMount, c.rec.RunnerVersion)
+				if err := obs.Action(bc, obs.ActionPushRunnerTarball, func(context.Context) error {
+					return c.guest.PushRunnerTarball(bc, local)
+				}); err != nil {
+					return err
+				}
+			}
 			// The proc must outlive this state's deadline: start it under the
 			// cycle ctx, but bound the wait-for-listening here. The action
 			// covers only the session start — the listening wait below is the

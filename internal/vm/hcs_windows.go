@@ -213,6 +213,21 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 		return nil, fmt.Errorf("Start: %w", ctx.Err())
 	}
 
+	// Mandatory, not best-effort: without this, eth0 never comes up on this
+	// backend's validated image at all (see fixupNetwork's doc comment,
+	// issue #319), so WaitIP could never succeed regardless. An empty
+	// SSHUser means the caller never went through config defaulting
+	// (home/config.go always defaults it to "admin") -- fail loudly here
+	// rather than let WaitIP time out with a far less diagnosable error.
+	if opts.SSHUser == "" {
+		abandonComputeSystem(system, ep)
+		return nil, fmt.Errorf("windows backend requires SSHUser/SSHPassword to apply the mandatory network fixup (issue #319); got empty SSHUser")
+	}
+	if err := fixupNetwork(ctx, systemID, opts.SSHUser, opts.SSHPassword); err != nil {
+		abandonComputeSystem(system, ep)
+		return nil, fmt.Errorf("network fixup: %w", err)
+	}
+
 	return &hcsMachine{system: system, endpoint: ep, mac: ep.MacAddress}, nil
 }
 
@@ -364,6 +379,17 @@ type hcsMachine struct {
 }
 
 func (m *hcsMachine) MAC() string { return m.mac }
+
+// NeedsRunnerPush is always true here: schema 2.1's only Linux-guest-capable
+// share device is Plan9, and hot-adding a Plan9 share to a bare (non-LCOW)
+// compute system is rejected by HCS outright -- confirmed against real
+// hardware (issue #319): a generic Modify (a benign memory-size update)
+// succeeds fine on the same bare compute system, so Modify itself isn't the
+// problem -- Plan9 specifically is paired with LCOW's own guest-side GCS
+// bridge control protocol, not a device the guest kernel discovers on its
+// own the way SCSI/NetworkAdapters are. Boot never attaches anything for
+// RunnerShareDir, so PROVISION must push the tarball itself.
+func (m *hcsMachine) NeedsRunnerPush() bool { return true }
 
 // WaitIP polls the host IP neighbor table for a Permanent entry matching
 // this machine's MAC. HNS pre-commits the MAC->IP binding at endpoint

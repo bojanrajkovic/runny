@@ -126,6 +126,11 @@ type Guest interface {
 	// it. setup is the pool's guest_setup, run after the env exports for
 	// system-level configuration env vars can't express.
 	StartRunner(ctx context.Context, jit, goos, runnerTarball string, env map[string]string, setup []string) (Proc, error)
+	// PushRunnerTarball streams the local runner tarball at localPath to the
+	// guest's own runner-cache location, for a boot backend that couldn't
+	// attach RunnerShareDir as a live share (see vm.Machine.NeedsRunnerPush).
+	// Called before StartRunner, over the same already-hardened SSH session.
+	PushRunnerTarball(ctx bounded.Context, localPath string) error
 	// PullDiag fetches the tail of the runner's _diag logs (post-mortem).
 	PullDiag(ctx bounded.Context) ([]byte, error)
 	// PullDebugSession fetches the operator's session recording at teardown;

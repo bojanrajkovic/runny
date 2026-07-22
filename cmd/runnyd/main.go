@@ -293,10 +293,7 @@ func run(parent context.Context) error {
 				Events:        events,
 				Log:           logger,
 			},
-			Clone: func(src tart.Bundle, dst string) error {
-				_, err := tart.Clone(src, tart.Bundle(dst))
-				return err
-			},
+			Clone:     cloner(),
 			CloneFile: clonefile.Clone,
 			RemoveAll: os.RemoveAll,
 			GitHub:    gh,
@@ -1020,10 +1017,24 @@ func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*gi
 			checks = append(checks, socket.DoctorCheck{Name: name, OK: ok, Detail: detail})
 		}
 
-		if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+		switch {
+		case runtime.GOOS == "darwin" && runtime.GOARCH == "arm64":
 			add("platform", true, "darwin/arm64")
-		} else {
-			add("platform", false, fmt.Sprintf("%s/%s — VMs require darwin/arm64", runtime.GOOS, runtime.GOARCH))
+		case runtime.GOOS == "windows":
+			// Hyper-V doesn't cross-emulate architectures either (hcs_windows.go's
+			// own Boot gate), so any windows/GOARCH this binary actually runs as
+			// is the one it can boot guests for — not hardcoded to amd64.
+			add("platform", true, fmt.Sprintf("windows/%s", runtime.GOARCH))
+		default:
+			add("platform", false, fmt.Sprintf("%s/%s — VMs require darwin/arm64 or windows", runtime.GOOS, runtime.GOARCH))
+		}
+		// The bare GOOS/GOARCH check above can't see HCSManager.Boot's real
+		// preconditions (osversion/hcn are windows-only packages, unreachable
+		// from this portable file) — vmPreflight is the platform hook that
+		// can, mirroring darwin's own separate "local-network" probe below.
+		if runtime.GOOS == "windows" {
+			ok, detail := vmPreflight()
+			add("hyperv-preflight", ok, detail)
 		}
 
 		// Config drift: behavior comes from the config loaded at startup
@@ -1161,7 +1172,7 @@ func sweepRegistrations(ctx context.Context, log *slog.Logger, gh *github.Client
 // pool images (0 when none resolved successfully).
 func checkDiskHeadroom(freeBytes uint64, maxImageBytes int64) (bool, string) {
 	const minFloor = 30 << 30 // 30 GiB — the pre-image-awareness floor
-	floor := max(uint64(maxImageBytes)+oci.PullHeadroom, minFloor)
+	floor := max(uint64(maxImageBytes)+oci.RequiredHeadroom(maxImageBytes), minFloor)
 	freeGB := freeBytes >> 30 // for display only
 	if freeBytes < floor {
 		floorGB := (floor + (1 << 30) - 1) >> 30 // ceiling for display

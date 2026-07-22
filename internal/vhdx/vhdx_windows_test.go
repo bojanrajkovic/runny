@@ -26,6 +26,12 @@ type fakeBackend struct {
 	closeErr              error
 
 	physPath string // the file convert's copyPayload writes into, standing in for \\.\PhysicalDriveN
+
+	// onPhysicalPath, if set, runs inside physicalPath -- the one backend
+	// call convert makes strictly between creating the temp file and
+	// finishing the payload copy, letting a test observe filesystem state
+	// mid-conversion.
+	onPhysicalPath func()
 }
 
 func (f *fakeBackend) createDifferencing(child, parent string) error {
@@ -56,6 +62,9 @@ func (f *fakeBackend) attach(handle syscall.Handle) error {
 
 func (f *fakeBackend) physicalPath(handle syscall.Handle) (string, error) {
 	f.calls = append(f.calls, "physicalPath")
+	if f.onPhysicalPath != nil {
+		f.onPhysicalPath()
+	}
 	return f.physPath, f.physPathErr
 }
 
@@ -128,6 +137,64 @@ func TestConvert_Success(t *testing.T) {
 		t.Errorf("calls = %v, want %v", b.calls, wantCalls)
 	}
 
+	got, err := os.ReadFile(device)
+	if err != nil {
+		t.Fatalf("reading fake device: %v", err)
+	}
+	if !slices.Equal(got, content) {
+		t.Error("device content does not match source content")
+	}
+}
+
+// TestConvert_DstDoesNotExistMidConversion is the regression test for the
+// race Convert's temp-file-then-rename design exists to close: a concurrent
+// reader (internal/tart.CloneVHDX, internal/tart.Bundle.Verify) must never
+// observe dst as present-but-incomplete. createFixed's
+// CreateVirtualDiskFlagFullPhysicalAllocation allocates the destination's
+// full size up front, so without the rename, dst would already exist (at
+// full size) at this checkpoint even though the payload copy hasn't run yet.
+func TestConvert_DstDoesNotExistMidConversion(t *testing.T) {
+	dir := t.TempDir()
+	src := writeTempFile(t, dir, "src.img", validSourceContent(t))
+	dst := filepath.Join(dir, "dst.vhdx")
+	device := writeTempFile(t, dir, "fake-device", nil)
+
+	b := &fakeBackend{physPath: device}
+	b.onPhysicalPath = func() {
+		if _, err := os.Stat(dst); !os.IsNotExist(err) {
+			t.Errorf("dst %s exists mid-conversion (before the payload copy even ran), want absent until rename", dst)
+		}
+		if _, err := os.Stat(dst + ".converting"); err != nil {
+			t.Errorf("temp file missing mid-conversion: %v", err)
+		}
+	}
+	if err := convert(src, dst, b); err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	if _, err := os.Stat(dst); err != nil {
+		t.Errorf("dst %s missing after a successful convert: %v", dst, err)
+	}
+	if _, err := os.Stat(dst + ".converting"); !os.IsNotExist(err) {
+		t.Errorf("temp file %s.converting still present after a successful convert, want renamed away", dst)
+	}
+}
+
+// TestConvert_ClearsStaleTempFile is the regression test for a prior
+// aborted Convert leaving dst+".converting" behind: the next Convert must
+// clear it rather than failing createFixed with EEXIST against its own
+// leftover.
+func TestConvert_ClearsStaleTempFile(t *testing.T) {
+	dir := t.TempDir()
+	content := validSourceContent(t)
+	src := writeTempFile(t, dir, "src.img", content)
+	dst := filepath.Join(dir, "dst.vhdx")
+	device := writeTempFile(t, dir, "fake-device", nil)
+	writeTempFile(t, dir, "dst.vhdx.converting", []byte("stale leftover from an aborted convert"))
+
+	b := &fakeBackend{physPath: device}
+	if err := convert(src, dst, b); err != nil {
+		t.Fatalf("convert: %v", err)
+	}
 	got, err := os.ReadFile(device)
 	if err != nil {
 		t.Fatalf("reading fake device: %v", err)

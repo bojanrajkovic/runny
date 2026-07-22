@@ -129,74 +129,115 @@ func createDifferencing(child, parent string, b backend) error {
 // (Convert refuses rather than risk deleting a caller's unrelated file on
 // a later failure — see convert's dst-exists check). src must be at least
 // minSourceSize bytes (CreateVirtualDisk's own undocumented floor) and a
-// multiple of the logical sector size (512). dst is removed if the payload
-// was never fully written; a failure after a complete write (e.g. the
-// trailing detach) is still returned as an error but leaves dst in place,
-// since the VHDX itself is valid at that point.
+// multiple of the logical sector size (512).
+//
+// Convert builds the whole disk at a temp path next to dst and renames it
+// into place only once the payload is fully written, then — dst's mere
+// existence must be a reliable completeness signal for callers (internal/
+// tart.CloneVHDX checks it before differencing-cloning; internal/tart.
+// Bundle.Verify treats it as "conversion complete"), and createFixed's
+// CreateVirtualDiskFlagFullPhysicalAllocation allocates the full file size
+// up front, well before the payload copy finishes — so without the rename, a
+// concurrent Stat mid-conversion would see a complete-looking but
+// not-yet-written file. dst is never touched until that final rename; the
+// temp file is removed if the payload was never fully written.
 func Convert(src, dst string) error {
 	return convert(src, dst, winioBackend{})
 }
 
-func convert(src, dst string, b backend) (err error) {
-	// Refusing here, before createFixed ever runs, means anything found at
-	// dst on a later failure path was necessarily created by THIS call —
-	// os.Remove(dst) below can never delete a file Convert didn't create.
+func convert(src, dst string, b backend) error {
+	// Refusing here, before anything is created, means a caller can trust
+	// dst's post-Convert existence unconditionally — Convert never
+	// overwrites or races a file already at dst.
 	if _, statErr := os.Stat(dst); statErr == nil {
 		return fmt.Errorf("destination %s already exists", dst)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return fmt.Errorf("checking destination %s: %w", dst, statErr)
 	}
 
+	tmp := dst + ".converting"
+	written, convErr := convertToTemp(src, tmp, b)
+	if !written {
+		// The payload itself never completed; convertToTemp already cleaned
+		// up tmp, so there's nothing to rename.
+		return convErr
+	}
+	// The payload is valid the moment written is true, even if convErr
+	// carries a trailing detach/close-only failure — preserve the pre-
+	// existing guarantee that a fully-written disk survives a cleanup-only
+	// error, by renaming regardless and joining any rename error with it.
+	// This can't reopen the race Convert exists to close: convertToTemp has
+	// already fully returned (its own defer, including detach/close, ran
+	// before this point), so dst only ever appears once the payload — and
+	// every cleanup attempt on it — is finished, never mid-copy.
+	if err := os.Rename(tmp, dst); err != nil {
+		return errors.Join(convErr, fmt.Errorf("finalizing %s: %w", dst, err))
+	}
+	return convErr
+}
+
+// convertToTemp does the actual CreateVirtualDisk+attach+copy+detach+close
+// sequence into tmp, reporting whether the payload copy itself completed
+// (written) independent of any trailing cleanup error in err — convert
+// decides whether to rename tmp into place based on written, not on
+// whether err is nil. Split out from convert so the handle is fully
+// detached and closed (this function's own defer) before convert ever
+// touches tmp again — a VHDX still attached to this process can't be
+// reliably renamed.
+func convertToTemp(src, tmp string, b backend) (written bool, err error) {
 	fi, statErr := os.Stat(src)
 	if statErr != nil {
-		return fmt.Errorf("stat source %s: %w", src, statErr)
+		return false, fmt.Errorf("stat source %s: %w", src, statErr)
 	}
 	if fi.Size() < minSourceSize {
-		return fmt.Errorf("source %s is %d bytes, below CreateVirtualDisk's %d-byte minimum", src, fi.Size(), minSourceSize)
+		return false, fmt.Errorf("source %s is %d bytes, below CreateVirtualDisk's %d-byte minimum", src, fi.Size(), minSourceSize)
 	}
 	if fi.Size()%logicalSectorSize != 0 {
-		return fmt.Errorf("source %s is %d bytes, not a multiple of the %d-byte sector size", src, fi.Size(), logicalSectorSize)
+		return false, fmt.Errorf("source %s is %d bytes, not a multiple of the %d-byte sector size", src, fi.Size(), logicalSectorSize)
+	}
+	// A prior aborted Convert may have left a stale temp file; clear it so
+	// createFixed doesn't fail EEXIST against our own leftover.
+	if rmErr := os.Remove(tmp); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+		return false, fmt.Errorf("clearing stale %s: %w", tmp, rmErr)
 	}
 
-	handle, createErr := b.createFixed(dst, uint64(fi.Size()))
+	handle, createErr := b.createFixed(tmp, uint64(fi.Size()))
 	if createErr != nil {
-		os.Remove(dst) // best-effort: CreateVirtualDisk may have left a partial file
-		return fmt.Errorf("creating fixed VHDX %s: %w", dst, createErr)
+		os.Remove(tmp) // best-effort: CreateVirtualDisk may have left a partial file
+		return false, fmt.Errorf("creating fixed VHDX %s: %w", tmp, createErr)
 	}
 
-	written := false
 	attached := false
 	defer func() {
 		var cleanupErr error
 		if attached {
 			if derr := b.detach(handle); derr != nil {
-				cleanupErr = fmt.Errorf("detaching %s: %w", dst, derr)
+				cleanupErr = fmt.Errorf("detaching %s: %w", tmp, derr)
 			}
 		}
 		if cerr := b.closeHandle(handle); cerr != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("closing VHDX handle: %w", cerr))
 		}
 		if !written {
-			os.Remove(dst) // best-effort: no half-made VHDX left behind
+			os.Remove(tmp) // best-effort: no half-made VHDX left behind
 		}
 		err = errors.Join(err, cleanupErr)
 	}()
 
 	if attachErr := b.attach(handle); attachErr != nil {
-		return fmt.Errorf("attaching %s: %w", dst, attachErr)
+		return false, fmt.Errorf("attaching %s: %w", tmp, attachErr)
 	}
 	attached = true
 
 	physPath, pathErr := b.physicalPath(handle)
 	if pathErr != nil {
-		return fmt.Errorf("resolving physical path for %s: %w", dst, pathErr)
+		return false, fmt.Errorf("resolving physical path for %s: %w", tmp, pathErr)
 	}
 
 	if copyErr := copyPayload(src, physPath, fi.Size()); copyErr != nil {
-		return fmt.Errorf("copying payload into %s: %w", dst, copyErr)
+		return false, fmt.Errorf("copying payload into %s: %w", tmp, copyErr)
 	}
-	written = true
-	return nil
+	return true, nil
 }
 
 // copyPayload streams src's bytes into the attached VHDX's block device.

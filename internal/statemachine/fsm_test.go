@@ -178,6 +178,7 @@ type fakeGuest struct {
 	runnerTar  string            // the tarball basename StartRunner was handed
 	guestEnv   map[string]string // the guest_env StartRunner was handed
 	guestSetup []string          // the guest_setup StartRunner was handed
+	needsPush  bool              // the needsPush StartRunner was handed
 	pushErr    error             // PushRunnerTarball returns this
 	pushedPath string            // the localPath PushRunnerTarball was handed
 	pushCalls  int
@@ -212,7 +213,7 @@ func (g *fakeGuest) PushRunnerTarball(ctx bounded.Context, localPath string) err
 	return g.pushErr
 }
 
-func (g *fakeGuest) StartRunner(ctx context.Context, jit, goos, runnerTarball string, env map[string]string, setup []string) (Proc, error) {
+func (g *fakeGuest) StartRunner(ctx context.Context, jit, goos, runnerTarball string, env map[string]string, setup []string, needsPush bool) (Proc, error) {
 	if g.startErr != nil {
 		return nil, g.startErr
 	}
@@ -221,6 +222,7 @@ func (g *fakeGuest) StartRunner(ctx context.Context, jit, goos, runnerTarball st
 	g.runnerTar = runnerTarball
 	g.guestEnv = env
 	g.guestSetup = setup
+	g.needsPush = needsPush
 	g.mu.Unlock()
 	return g.proc, nil
 }
@@ -1863,10 +1865,16 @@ func TestProvisionPushesTarballWhenMachineNeedsPush(t *testing.T) {
 	want := filepath.Join(h.dir.SlotRunnerMountDir("runner-1"), tarball)
 
 	h.guest.mu.Lock()
-	calls, got := h.guest.pushCalls, h.guest.pushedPath
+	calls, got, needsPush := h.guest.pushCalls, h.guest.pushedPath, h.guest.needsPush
 	h.guest.mu.Unlock()
 	if calls != 1 || got != want {
 		t.Errorf("PushRunnerTarball calls=%d path=%q, want exactly one call with %q", calls, got, want)
+	}
+	// StartRunner must get the SAME needsPush value that gated the push above --
+	// the two must never disagree (the dual-source-of-truth bug this threading
+	// replaced: provisionScript used to independently guess from hostGOOS).
+	if !needsPush {
+		t.Error("StartRunner got needsPush=false, want true (must match the machine's own NeedsRunnerPush())")
 	}
 }
 
@@ -1880,10 +1888,13 @@ func TestProvisionSkipsPushWhenMachineHasLiveShare(t *testing.T) {
 	h.waitState(t, StateListening)
 
 	h.guest.mu.Lock()
-	calls := h.guest.pushCalls
+	calls, needsPush := h.guest.pushCalls, h.guest.needsPush
 	h.guest.mu.Unlock()
 	if calls != 0 {
 		t.Errorf("PushRunnerTarball calls=%d, want 0 (fakeMachine.needsPush defaults false)", calls)
+	}
+	if needsPush {
+		t.Error("StartRunner got needsPush=true, want false (fakeMachine.needsPush defaults false)")
 	}
 }
 

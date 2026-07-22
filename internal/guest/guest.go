@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -351,39 +350,18 @@ tar -xzf "$TARBALL"
 exec ./run.sh --jitconfig "$(cat)"
 `
 
-// linux: explicit virtiofs mount; installdependencies.sh covers images
-// missing libicu et al (idempotent, tolerated offline when deps exist).
-const provisionScriptLinux = `set -e
-# Same clock tripwire as the darwin script.
+// linuxProvisionPrelude is the clock tripwire shared by every linux variant
+// (same reasoning as the darwin script's own copy).
+const linuxProvisionPrelude = `set -e
 echo "runny: provision-clock $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-CACHE=/mnt/runny-cache
-sudo mkdir -p "$CACHE"
-mountpoint -q "$CACHE" || sudo mount -t virtiofs runny-cache "$CACHE"
-TARBALL="$CACHE/__RUNNER_TARBALL__"
-if [ ! -f "$TARBALL" ]; then echo "runny: runner tarball __RUNNER_TARBALL__ not in cache share $CACHE" >&2; exit 78; fi
-RUNNER_DIR="$HOME/runny-runner"
-rm -rf "$RUNNER_DIR" && mkdir -p "$RUNNER_DIR" && cd "$RUNNER_DIR"
-tar -xzf "$TARBALL"
-sudo ./bin/installdependencies.sh >/dev/null 2>&1 || true
-exec ./run.sh --jitconfig "$(cat)"
 `
 
-// runnerPushCacheDir is where PushRunnerTarball stages the tarball, relative
-// to $HOME, when the boot backend has no live share device (windows host —
-// see hcs_windows.go's NeedsRunnerPush doc comment for why). Under $HOME
-// rather than /mnt like the virtiofs CACHE convention above: the push runs
-// over the already-established SSH session as the same non-root user that
-// owns its own home dir, so no sudo is needed to create it.
-// provisionScriptLinuxPushed's CACHE line below must match this value.
-const runnerPushCacheDir = "runny-cache"
-
-// windows: no virtiofs-equivalent share device works from a bare compute
-// system -- PushRunnerTarball stages the tarball at $HOME/runny-cache before
-// this script runs, so there is no mount step here.
-const provisionScriptLinuxPushed = `set -e
-echo "runny: provision-clock $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-CACHE="$HOME/runny-cache"
-TARBALL="$CACHE/__RUNNER_TARBALL__"
+// linuxProvisionBody is shared by every linux variant once CACHE is set:
+// stage the exact tarball, extract it, and exec run.sh. Only how CACHE gets
+// populated differs between variants (linuxCacheMount / linuxCachePushed
+// below) — kept as the one thing that varies so the two variants can't drift
+// out of sync on everything else, the way their error-message wording once did.
+const linuxProvisionBody = `TARBALL="$CACHE/__RUNNER_TARBALL__"
 if [ ! -f "$TARBALL" ]; then echo "runny: runner tarball __RUNNER_TARBALL__ not in cache $CACHE" >&2; exit 78; fi
 RUNNER_DIR="$HOME/runny-runner"
 rm -rf "$RUNNER_DIR" && mkdir -p "$RUNNER_DIR" && cd "$RUNNER_DIR"
@@ -391,6 +369,38 @@ tar -xzf "$TARBALL"
 sudo ./bin/installdependencies.sh >/dev/null 2>&1 || true
 exec ./run.sh --jitconfig "$(cat)"
 `
+
+// linuxCacheMount: explicit virtiofs mount; installdependencies.sh (in
+// linuxProvisionBody) covers images missing libicu et al (idempotent,
+// tolerated offline when deps exist).
+const linuxCacheMount = `CACHE=/mnt/runny-cache
+sudo mkdir -p "$CACHE"
+mountpoint -q "$CACHE" || sudo mount -t virtiofs runny-cache "$CACHE"
+`
+
+// provisionScriptLinux: the live-share variant (darwin's virtiofs-equivalent
+// on the guest side).
+const provisionScriptLinux = linuxProvisionPrelude + linuxCacheMount + linuxProvisionBody
+
+// runnerPushCacheDir is where PushRunnerTarball stages the tarball, relative
+// to $HOME, when the boot backend has no live share device (windows host —
+// see hcs_windows.go's NeedsRunnerPush doc comment for why). Under $HOME
+// rather than /mnt like linuxCacheMount's CACHE: the push runs over the
+// already-established SSH session as the same non-root user that owns its
+// own home dir, so no sudo is needed to create it. linuxCachePushed derives
+// its CACHE line from this constant rather than restating it, so the two
+// can't drift the way they briefly could when both were separate literals.
+const runnerPushCacheDir = "runny-cache"
+
+// linuxCachePushed: no virtiofs-equivalent share device works from a bare
+// compute system -- PushRunnerTarball stages the tarball at $HOME/runny-cache
+// before this script runs, so there is no mount step here.
+const linuxCachePushed = `CACHE="$HOME/` + runnerPushCacheDir + `"
+`
+
+// provisionScriptLinuxPushed: the pushed-cache variant (windows, see
+// hcsMachine.NeedsRunnerPush).
+const provisionScriptLinuxPushed = linuxProvisionPrelude + linuxCachePushed + linuxProvisionBody
 
 // PushRunnerTarball streams localPath's content to
 // $HOME/runny-cache/<basename> on the guest via `cat >`, over the same
@@ -439,8 +449,8 @@ func (g *Guest) PushRunnerTarball(ctx bounded.Context, localPath string) error {
 // setup is the pool's guest_setup: shell commands run after the env exports,
 // for system-level configuration guest_env can't express — same not-for-secrets
 // caveat.
-func (g *Guest) StartRunner(ctx context.Context, jit, goos, runnerTarball string, env map[string]string, setup []string) (statemachine.Proc, error) {
-	script, err := provisionScript(goos, runnerTarball, env, setup)
+func (g *Guest) StartRunner(ctx context.Context, jit, goos, runnerTarball string, env map[string]string, setup []string, needsPush bool) (statemachine.Proc, error) {
+	script, err := provisionScript(goos, runnerTarball, env, setup, needsPush)
 	if err != nil {
 		return nil, err
 	}
@@ -501,12 +511,6 @@ func guestSetupBlock(cmds []string) string {
 	return b.String()
 }
 
-// hostGOOS is runtime.GOOS, indirected so a test can exercise the windows
-// branch below on any host — the same swappable-var pattern
-// images.go's prepareBundleDiskFn already established for this exact class of
-// gap (platform-conditional logic that only really runs on one platform).
-var hostGOOS = runtime.GOOS
-
 // runnerTarballRE constrains the tarball basename the daemon substitutes into
 // the provision script. The name is daemon-resolved (GitHub's asset filename),
 // not client input, but it crosses into a shell command string, so this is a
@@ -518,18 +522,16 @@ var runnerTarballRE = regexp.MustCompile(`^[A-Za-z0-9._-]+\.tar\.gz$`)
 // this cycle resolved. It refuses a name that does not match runnerTarballRE
 // rather than risk staging a glob (silent wrong-version) or interpolating an
 // unexpected string into the command — fail the cycle loudly instead.
-func provisionScript(goos, runnerTarball string, env map[string]string, setup []string) (string, error) {
+func provisionScript(goos, runnerTarball string, env map[string]string, setup []string, needsPush bool) (string, error) {
 	if !runnerTarballRE.MatchString(runnerTarball) {
 		return "", fmt.Errorf("refusing to stage runner tarball with an unexpected name %q", runnerTarball)
 	}
-	// linuxScript forks on the HOST platform, not the guest one: this process
-	// compiles into whichever runnyd binary is actually running, so
-	// runtime.GOOS reliably reflects which VM backend booted the guest (the
-	// same reasoning vm.go's checkHostArch already relies on). windows hosts
-	// have no working live share device for a Linux guest — the tarball is
-	// pushed to $HOME/runny-cache before this script runs instead.
+	// needsPush is the caller's vm.Machine.NeedsRunnerPush() value (true on
+	// windows, see hcs_windows.go's doc comment): the same signal that gated
+	// whether PushRunnerTarball ran before this script, so the tarball's
+	// actual location and the script that looks for it can never disagree.
 	linuxScript := provisionScriptLinux
-	if hostGOOS == "windows" {
+	if needsPush {
 		linuxScript = provisionScriptLinuxPushed
 	}
 	script := perOS(goos, provisionScriptDarwin, linuxScript)

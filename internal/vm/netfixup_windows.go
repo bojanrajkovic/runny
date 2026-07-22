@@ -5,6 +5,7 @@ package vm
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"strings"
 	"time"
@@ -67,9 +68,9 @@ func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) er
 	if err != nil {
 		return fmt.Errorf("dialing console: %w", err)
 	}
-	defer conn.Close()
 
 	if err := consoleLogin(ctx, conn, sshUser, sshPassword); err != nil {
+		conn.Close()
 		return fmt.Errorf("console login: %w", err)
 	}
 
@@ -81,11 +82,31 @@ func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) er
 	const cmd = `printf 'network:\n  version: 2\n  ethernets:\n    eth0:\n      match:\n        driver: hv_netvsc\n      dhcp4: true\n' | sudo tee /etc/netplan/60-runny-hv-netvsc-fix.yaml >/dev/null && sudo netplan apply && sleep 5 && ip -4 -o addr show eth0`
 	out, err := consoleRun(ctx, conn, cmd, 20*time.Second, func(s string) bool { return strings.Contains(s, "inet ") })
 	if err != nil {
+		conn.Close()
 		return fmt.Errorf("applying network fixup: %w", err)
 	}
 	if !strings.Contains(out, "inet ") {
+		conn.Close()
 		return fmt.Errorf("network fixup did not bring up eth0 with an address; console output: %q", out)
 	}
+
+	// Best-effort: log the console session out so the authenticated shell
+	// doesn't linger for the guest's whole active lifetime, off this
+	// function's own critical path -- fixupNetwork itself has already
+	// succeeded by this point, and the caller (WaitIP) shouldn't wait on a
+	// cleanup step whose own value is unconfirmed (see below). Backgrounded
+	// rather than run synchronously-then-deferred: the write still runs
+	// before Close, in the same goroutine, so it gets the same fair chance
+	// to reach the guest either way -- it just no longer costs the caller
+	// any of its own time to wait for it. Whether Hyper-V's own pipe-close
+	// would also have dropped the session is unconfirmed; this doesn't
+	// depend on that either way.
+	go func() {
+		defer conn.Close()
+		if err := consoleWrite(ctx, conn, "exit\r\n"); err != nil {
+			slog.Warn("network fixup: logging out the console session failed; it may remain authenticated", "system_id", systemID, "err", err)
+		}
+	}()
 	return nil
 }
 

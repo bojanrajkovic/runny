@@ -16,7 +16,7 @@ func TestIcaclsHomeArgs(t *testing.T) {
 	want := [][]string{
 		{"icacls", `C:\ProgramData\runny`, "/setowner", `CORP\alice`, "/T"},
 		{"icacls", `C:\ProgramData\runny`, "/inheritance:d", "/T"},
-		{"icacls", `C:\ProgramData\runny`, "/remove:g", `BUILTIN\Users`, "/T"},
+		{"icacls", `C:\ProgramData\runny`, "/remove:g", `*S-1-5-32-545`, "/T"},
 		{"icacls", `C:\ProgramData\runny`, "/grant", `NT SERVICE\runnyd:(OI)(CI)M`, "/T"},
 		{"icacls", `C:\ProgramData\runny`, "/grant", `CORP\alice:(OI)(CI)M`, "/T"},
 		{"icacls", `C:\ProgramData\runny`, "/setowner", `NT SERVICE\runnyd`, "/T"},

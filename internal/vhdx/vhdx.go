@@ -7,9 +7,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/Microsoft/go-winio/vhd"
+
+	"github.com/bojanrajkovic/runny/internal/winhcs/security"
 )
 
 // Fixed internal constants, not exposed as Convert parameters since nothing
@@ -45,6 +49,7 @@ const (
 type backend interface {
 	createFixed(path string, maximumSize uint64) (syscall.Handle, error)
 	createDifferencing(child, parent string) error
+	grantVmGroupAccess(path string, readWrite bool) error
 	attach(handle syscall.Handle) error
 	physicalPath(handle syscall.Handle) (string, error)
 	detach(handle syscall.Handle) error
@@ -86,6 +91,30 @@ func (winioBackend) createDifferencing(child, parent string) error {
 	return vhd.CreateDiffVhd(child, parent, 0)
 }
 
+// grantVmGroupAccess grants the well-known "NT VIRTUAL MACHINE\Virtual
+// Machines" group (SID S-1-5-83-0) access to path's DACL — the step Hyper-V's
+// own tooling (New-VM, Add-VMHardDiskDrive) applies automatically and a bare
+// HCS compute system never gets for free. Without it, Start fails with "The
+// chain of virtual hard disks is inaccessible. The process has not been
+// granted access rights to the parent virtual hard disk for the
+// differencing disk." — confirmed against real hardware, issue #319.
+//
+// readWrite distinguishes the parent from the child of a differencing pair:
+// read-only is correct for the parent (the shared, immutable base a child
+// only ever reads from), but the SAME read-only grant on the child — what
+// hcsshim's own internal/computestorage helper applies to both base and diff
+// VHD, for its own container-base-layer use case — reproduced the identical
+// generic "Access is denied" on real hardware once the child was actually
+// attached as a running VM's writable boot disk: it's the disk every guest
+// write lands on. Full Control (matching Microsoft's own documented manual
+// fix-up for a Hyper-V VM's disk files) was the only thing that fixed it.
+func (winioBackend) grantVmGroupAccess(path string, readWrite bool) error {
+	if readWrite {
+		return security.GrantVmGroupAccessWithMask(path, security.AccessMaskAll)
+	}
+	return security.GrantVmGroupAccess(path)
+}
+
 func (winioBackend) attach(handle syscall.Handle) error {
 	return vhd.AttachVirtualDisk(handle, vhd.AttachVirtualDiskFlagNone, &vhd.AttachVirtualDiskParameters{Version: 2})
 }
@@ -111,13 +140,24 @@ func (winioBackend) closeHandle(handle syscall.Handle) error {
 // single bounded syscall, no polling. child must NOT end up NTFS-sparse —
 // Hyper-V rejects sparse VHDX files — and it doesn't: go-winio's
 // CreateDiffVhd sets no sparse flag, confirmed empirically (see
-// internal/vhdx/CLAUDE.md).
+// internal/vhdx/CLAUDE.md). Also grants the VM group access to both parent
+// (read) and child (read-write) — without it, a bare compute system's Start
+// fails once it tries to actually attach the chain.
 func CreateDifferencing(child, parent string) error {
 	return createDifferencing(child, parent, winioBackend{})
 }
 
 func createDifferencing(child, parent string, b backend) error {
-	return b.createDifferencing(child, parent)
+	if err := b.createDifferencing(child, parent); err != nil {
+		return err
+	}
+	if err := b.grantVmGroupAccess(parent, false); err != nil {
+		return fmt.Errorf("granting VM group read access to parent %s: %w", parent, err)
+	}
+	if err := b.grantVmGroupAccess(child, true); err != nil {
+		return fmt.Errorf("granting VM group read-write access to child %s: %w", child, err)
+	}
+	return nil
 }
 
 // Convert produces a FIXED VHDX at dst from the raw disk image at src, via
@@ -145,6 +185,17 @@ func Convert(src, dst string) error {
 	return convert(src, dst, winioBackend{})
 }
 
+// convertingTempPath is dst's in-progress conversion path. The marker goes
+// before the extension, not after: CreateVirtualDisk selects its provider by
+// file extension, and a path ending in ".converting" instead of ".vhdx"
+// fails with "A virtual disk support provider for the specified file was not
+// found" — confirmed against real hardware, issue #319. fakeBackend never
+// calls the real Win32 API, so this was untestable until then.
+func convertingTempPath(dst string) string {
+	ext := filepath.Ext(dst)
+	return strings.TrimSuffix(dst, ext) + ".converting" + ext
+}
+
 func convert(src, dst string, b backend) error {
 	// Refusing here, before anything is created, means a caller can trust
 	// dst's post-Convert existence unconditionally — Convert never
@@ -155,7 +206,7 @@ func convert(src, dst string, b backend) error {
 		return fmt.Errorf("checking destination %s: %w", dst, statErr)
 	}
 
-	tmp := dst + ".converting"
+	tmp := convertingTempPath(dst)
 	written, convErr := convertToTemp(src, tmp, b)
 	if !written {
 		// The payload itself never completed; convertToTemp already cleaned

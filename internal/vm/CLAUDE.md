@@ -22,13 +22,19 @@ ADR-0026 for the Hyper-V backend's decisions and why; this doc is sharp edges on
   Microsoft Learn's `MIB_IPNET_ROW2`/`SOCKADDR_INET` pages (cited inline), not
   reconstructed from memory. If Microsoft ever adds fields to either struct,
   re-verify against the current docs before touching offsets.
-- **No console-interaction networking fallback exists, on purpose.** The
-  validated guest image (`ghcr.io/cirruslabs/ubuntu-runner-amd64`) self-configures
-  eth0 via cloud-init's own dynamically-generated netplan — confirmed end-to-end
-  (`Boot`→`WaitIP`→TCP:22 reachable) with zero console interaction. If a future
-  image needs a live DHCP fixup, `WaitIP` will simply time out; that's the signal
-  to build one, not something pre-built speculatively here (see ADR-0026's
-  rejected alternatives).
+- **A console-interaction networking fallback exists, and is load-bearing for
+  the currently-validated image.** The validated guest image
+  (`ghcr.io/cirruslabs/ubuntu-runner-amd64`) does NOT self-configure `eth0` on
+  this backend: its baked netplan matches interface names `en*`, which
+  hv_netvsc's always-`eth0` naming never satisfies, so `eth0` sits down and
+  DHCP never even starts without help — confirmed on real hardware from a
+  from-scratch differencing-disk boot with zero prior state, and again on a
+  plain classic Hyper-V VM. `hcsMachine.WaitIP` (`hcs_windows.go`) gives the
+  guest a bounded grace period to prove it can self-configure, then falls back
+  once to `fixupNetwork` (`netfixup_windows.go`): dial the HCS console pipe,
+  log in, and apply a netplan drop-in matching by driver instead of by
+  interface name. See ADR-0026's amendment for why the original "no fallback"
+  decision was reversed rather than merely revisited.
 - **`Boot` never calls `vhdx.CreateDifferencing` itself.** The slot's
   differencing-child VHDX is already there at `bundle.VHDXPath()` by the time
   `HCSManager.Boot` runs — `internal/tart.CloneVHDX` creates it during the FSM's
@@ -40,3 +46,15 @@ ADR-0026 for the Hyper-V backend's decisions and why; this doc is sharp edges on
   guest; it never lets VZ boot an amd64 kernel). `Bundle.LoadConfig` itself stays a
   portable shape check with no host-arch opinion, so it parses identically on any
   CI runner regardless of that runner's own `GOARCH`.
+- **`hcsMachine.Boot` never attaches a share device for `RunnerShareDir` — it's
+  silently a no-op.** Schema 2.1's only Linux-guest-capable share device,
+  `Plan9`, is hardware-validated to be rejected outright on a bare (non-LCOW)
+  compute system (issue #319): it's paired with LCOW's own guest-side GCS
+  bridge protocol, not a device the guest kernel discovers on its own the way
+  SCSI/NetworkAdapters are — confirmed by isolating that a generic `Modify`
+  (a benign memory-size update) succeeds fine on the same bare compute system,
+  so `Plan9` specifically is what's rejected, not hot-modify in general.
+  `NeedsRunnerPush() bool` (true on `hcsMachine`, false on `vzMachine`) is how
+  the state machine knows to push the runner tarball over SSH instead
+  (`internal/guest.Guest.PushRunnerTarball`) — don't "fix" `Boot` to attach a
+  `Plan9` device without re-reading this note first.

@@ -18,12 +18,14 @@ import (
 type fakeBackend struct {
 	calls []string
 
-	createErr             error
-	createDifferencingErr error
-	attachErr             error
-	physPathErr           error
-	detachErr             error
-	closeErr              error
+	createErr                  error
+	createDifferencingErr      error
+	grantVmGroupAccessReadErr  error // returned when grantVmGroupAccess is called with readWrite=false (the parent)
+	grantVmGroupAccessWriteErr error // returned when grantVmGroupAccess is called with readWrite=true (the child)
+	attachErr                  error
+	physPathErr                error
+	detachErr                  error
+	closeErr                   error
 
 	physPath string // the file convert's copyPayload writes into, standing in for \\.\PhysicalDriveN
 
@@ -37,6 +39,15 @@ type fakeBackend struct {
 func (f *fakeBackend) createDifferencing(child, parent string) error {
 	f.calls = append(f.calls, "createDifferencing")
 	return f.createDifferencingErr
+}
+
+func (f *fakeBackend) grantVmGroupAccess(path string, readWrite bool) error {
+	if readWrite {
+		f.calls = append(f.calls, "grantVmGroupAccessReadWrite:"+path)
+		return f.grantVmGroupAccessWriteErr
+	}
+	f.calls = append(f.calls, "grantVmGroupAccessRead:"+path)
+	return f.grantVmGroupAccessReadErr
 }
 
 func (f *fakeBackend) createFixed(path string, maximumSize uint64) (syscall.Handle, error) {
@@ -99,12 +110,21 @@ func validSourceContent(t *testing.T) []byte {
 	return buf
 }
 
+// createDifferencing must grant VM group access to BOTH parent and child
+// after creating the diff VHD -- regression guard for issue #319, where a
+// bare compute system's Start failed with "The process has not been granted
+// access rights to the parent virtual hard disk for the differencing disk."
+// because nothing ever granted it. The parent gets read only (it's the
+// shared, immutable base); the child gets read-write -- a read-only grant on
+// the child reproduced the identical "Access is denied" against real
+// hardware, since the child is the disk every guest write actually lands on.
 func TestCreateDifferencing_Success(t *testing.T) {
 	b := &fakeBackend{}
 	if err := createDifferencing("child.vhdx", "parent.vhdx", b); err != nil {
 		t.Fatalf("createDifferencing: %v", err)
 	}
-	if want := []string{"createDifferencing"}; !slices.Equal(b.calls, want) {
+	want := []string{"createDifferencing", "grantVmGroupAccessRead:parent.vhdx", "grantVmGroupAccessReadWrite:child.vhdx"}
+	if !slices.Equal(b.calls, want) {
 		t.Errorf("calls = %v, want %v", b.calls, want)
 	}
 }
@@ -114,6 +134,59 @@ func TestCreateDifferencing_BackendError(t *testing.T) {
 	b := &fakeBackend{createDifferencingErr: wantErr}
 	if err := createDifferencing("child.vhdx", "parent.vhdx", b); !errors.Is(err, wantErr) {
 		t.Errorf("createDifferencing error = %v, want %v", err, wantErr)
+	}
+	// The grant calls must never run once creation itself failed.
+	if want := []string{"createDifferencing"}; !slices.Equal(b.calls, want) {
+		t.Errorf("calls = %v, want %v", b.calls, want)
+	}
+}
+
+// A grant failure on the parent must surface loudly and must not attempt the
+// child grant afterward — the failure is about permissions, not sequencing,
+// and a caller needs to know exactly which grant failed.
+func TestCreateDifferencing_GrantParentFails(t *testing.T) {
+	wantErr := errors.New("access denied")
+	b := &fakeBackend{grantVmGroupAccessReadErr: wantErr}
+	err := createDifferencing("child.vhdx", "parent.vhdx", b)
+	if !errors.Is(err, wantErr) {
+		t.Errorf("createDifferencing error = %v, want wrapping %v", err, wantErr)
+	}
+	want := []string{"createDifferencing", "grantVmGroupAccessRead:parent.vhdx"}
+	if !slices.Equal(b.calls, want) {
+		t.Errorf("calls = %v, want %v (child grant must not run after the parent grant failed)", b.calls, want)
+	}
+}
+
+// A grant failure on the child must surface loudly too -- it's the more
+// consequential of the two grants (issue #319's real failure was here, not
+// on the parent), so it needs its own explicit regression guard rather than
+// only being reachable as a side effect of the parent-fails test.
+func TestCreateDifferencing_GrantChildFails(t *testing.T) {
+	wantErr := errors.New("access denied")
+	b := &fakeBackend{grantVmGroupAccessWriteErr: wantErr}
+	err := createDifferencing("child.vhdx", "parent.vhdx", b)
+	if !errors.Is(err, wantErr) {
+		t.Errorf("createDifferencing error = %v, want wrapping %v", err, wantErr)
+	}
+	want := []string{"createDifferencing", "grantVmGroupAccessRead:parent.vhdx", "grantVmGroupAccessReadWrite:child.vhdx"}
+	if !slices.Equal(b.calls, want) {
+		t.Errorf("calls = %v, want %v", b.calls, want)
+	}
+}
+
+// The temp path must keep dst's .vhdx extension -- regression guard for
+// issue #319: a temp path ending in ".converting" instead of ".vhdx" made
+// the real CreateVirtualDisk fail with "A virtual disk support provider for
+// the specified file was not found" (a real Windows error only the live
+// Win32 API surfaces, not fakeBackend).
+func TestConvertingTempPathKeepsExtension(t *testing.T) {
+	got := convertingTempPath(`C:\vms\slot1\disk.vhdx`)
+	want := `C:\vms\slot1\disk.converting.vhdx`
+	if got != want {
+		t.Errorf("convertingTempPath = %q, want %q", got, want)
+	}
+	if filepath.Ext(got) != ".vhdx" {
+		t.Errorf("convertingTempPath = %q, must keep the .vhdx extension CreateVirtualDisk selects its provider by", got)
 	}
 }
 
@@ -164,7 +237,7 @@ func TestConvert_DstDoesNotExistMidConversion(t *testing.T) {
 		if _, err := os.Stat(dst); !os.IsNotExist(err) {
 			t.Errorf("dst %s exists mid-conversion (before the payload copy even ran), want absent until rename", dst)
 		}
-		if _, err := os.Stat(dst + ".converting"); err != nil {
+		if _, err := os.Stat(convertingTempPath(dst)); err != nil {
 			t.Errorf("temp file missing mid-conversion: %v", err)
 		}
 	}
@@ -174,22 +247,21 @@ func TestConvert_DstDoesNotExistMidConversion(t *testing.T) {
 	if _, err := os.Stat(dst); err != nil {
 		t.Errorf("dst %s missing after a successful convert: %v", dst, err)
 	}
-	if _, err := os.Stat(dst + ".converting"); !os.IsNotExist(err) {
-		t.Errorf("temp file %s.converting still present after a successful convert, want renamed away", dst)
+	if _, err := os.Stat(convertingTempPath(dst)); !os.IsNotExist(err) {
+		t.Errorf("temp file %s still present after a successful convert, want renamed away", convertingTempPath(dst))
 	}
 }
 
 // TestConvert_ClearsStaleTempFile is the regression test for a prior
-// aborted Convert leaving dst+".converting" behind: the next Convert must
-// clear it rather than failing createFixed with EEXIST against its own
-// leftover.
+// aborted Convert leaving its temp file behind: the next Convert must clear
+// it rather than failing createFixed with EEXIST against its own leftover.
 func TestConvert_ClearsStaleTempFile(t *testing.T) {
 	dir := t.TempDir()
 	content := validSourceContent(t)
 	src := writeTempFile(t, dir, "src.img", content)
 	dst := filepath.Join(dir, "dst.vhdx")
 	device := writeTempFile(t, dir, "fake-device", nil)
-	writeTempFile(t, dir, "dst.vhdx.converting", []byte("stale leftover from an aborted convert"))
+	writeTempFile(t, dir, filepath.Base(convertingTempPath(dst)), []byte("stale leftover from an aborted convert"))
 
 	b := &fakeBackend{physPath: device}
 	if err := convert(src, dst, b); err != nil {

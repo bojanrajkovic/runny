@@ -241,6 +241,19 @@ func (c *capBuf) Write(p []byte) (int, error) {
 // capped at maxOutput bytes. Used for short provisioning steps and post-mortem
 // pulls.
 func (c *Client) Output(ctx bounded.Context, cmd string) ([]byte, int, error) {
+	return c.run(ctx, cmd, nil)
+}
+
+// RunWithInput is Output plus a stdin source, for a short bounded command that
+// needs input piped in (e.g. `cat > path`) rather than Start's long-running
+// Proc shape. Used to push a file's bytes to the guest when the boot backend
+// has no live share device to mount instead (windows; see
+// vm.Machine.NeedsRunnerPush).
+func (c *Client) RunWithInput(ctx bounded.Context, cmd string, stdin io.Reader) ([]byte, int, error) {
+	return c.run(ctx, cmd, stdin)
+}
+
+func (c *Client) run(ctx bounded.Context, cmd string, stdin io.Reader) ([]byte, int, error) {
 	sess, err := c.newSession()
 	if err != nil {
 		// Session-open failed: the exec never started, so no bytes reached the
@@ -248,6 +261,7 @@ func (c *Client) Output(ctx bounded.Context, cmd string) ([]byte, int, error) {
 		// never sent" from "ran and failed" (decision 18).
 		return nil, -1, fmt.Errorf("ssh session: %w: %w", ErrSessionOpen, err)
 	}
+	sess.Stdin = stdin
 
 	type result struct {
 		out  []byte

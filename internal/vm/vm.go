@@ -33,6 +33,13 @@ type BootOptions struct {
 	// below the bundle's recorded minimum is rejected, not clamped.
 	CPUCount   uint
 	MemorySize uint64
+	// SSHUser/SSHPassword are the pool's configured guest credentials --
+	// windows's Boot needs them to log in over the console and apply a
+	// one-time network fixup before returning (see hcs_windows.go's
+	// fixupNetwork); unused on darwin, where cloud-init's own netplan
+	// already brings the guest's network up correctly.
+	SSHUser     string
+	SSHPassword string
 }
 
 // ShareTag is the virtiofs mount tag guests use:
@@ -49,6 +56,13 @@ type Machine interface {
 	// Stop requests a graceful stop, waits up to grace, then force-stops.
 	// It must not fail-and-leave-running: force is the floor.
 	Stop(ctx bounded.Context, grace time.Duration) error
+	// NeedsRunnerPush reports whether Boot could not attach RunnerShareDir as
+	// a live guest share, meaning the runner tarball must instead be pushed
+	// over the guest's own SSH channel before StartRunner runs. False on
+	// darwin (virtiofs is live from Boot); true on windows (HCS's only
+	// Linux-guest-capable share device, Plan9, needs LCOW's own guest-side
+	// agent cooperation a bare compute system doesn't have — see hcs_windows.go).
+	NeedsRunnerPush() bool
 }
 
 // Manager boots bundles.

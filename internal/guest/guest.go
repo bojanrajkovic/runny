@@ -10,7 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -365,6 +368,61 @@ sudo ./bin/installdependencies.sh >/dev/null 2>&1 || true
 exec ./run.sh --jitconfig "$(cat)"
 `
 
+// runnerPushCacheDir is where PushRunnerTarball stages the tarball, relative
+// to $HOME, when the boot backend has no live share device (windows host —
+// see hcs_windows.go's NeedsRunnerPush doc comment for why). Under $HOME
+// rather than /mnt like the virtiofs CACHE convention above: the push runs
+// over the already-established SSH session as the same non-root user that
+// owns its own home dir, so no sudo is needed to create it.
+// provisionScriptLinuxPushed's CACHE line below must match this value.
+const runnerPushCacheDir = "runny-cache"
+
+// windows: no virtiofs-equivalent share device works from a bare compute
+// system -- PushRunnerTarball stages the tarball at $HOME/runny-cache before
+// this script runs, so there is no mount step here.
+const provisionScriptLinuxPushed = `set -e
+echo "runny: provision-clock $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+CACHE="$HOME/runny-cache"
+TARBALL="$CACHE/__RUNNER_TARBALL__"
+if [ ! -f "$TARBALL" ]; then echo "runny: runner tarball __RUNNER_TARBALL__ not in cache $CACHE" >&2; exit 78; fi
+RUNNER_DIR="$HOME/runny-runner"
+rm -rf "$RUNNER_DIR" && mkdir -p "$RUNNER_DIR" && cd "$RUNNER_DIR"
+tar -xzf "$TARBALL"
+sudo ./bin/installdependencies.sh >/dev/null 2>&1 || true
+exec ./run.sh --jitconfig "$(cat)"
+`
+
+// PushRunnerTarball streams localPath's content to
+// $HOME/runny-cache/<basename> on the guest via `cat >`, over the same
+// already-hardened SSH session StartRunner will use next. Only called when
+// vm.Machine.NeedsRunnerPush is true (windows): darwin's virtiofs share is
+// already live by the time PROVISION runs, so nothing needs pushing there.
+func (g *Guest) PushRunnerTarball(ctx bounded.Context, localPath string) error {
+	f, err := os.Open(localPath)
+	if err != nil {
+		return fmt.Errorf("opening runner tarball %s: %w", localPath, err)
+	}
+	defer f.Close()
+
+	// base crosses into a shell command string below — reuse the same
+	// trust-boundary guard provisionScript applies to the tarball name
+	// (charset carries no shell metacharacter and no `/`) rather than assume
+	// every caller already validated it.
+	base := filepath.Base(localPath)
+	if !runnerTarballRE.MatchString(base) {
+		return fmt.Errorf("refusing to push runner tarball with an unexpected name %q", base)
+	}
+	cmd := fmt.Sprintf(`mkdir -p "$HOME/%s" && cat > "$HOME/%s/%s"`, runnerPushCacheDir, runnerPushCacheDir, base)
+	out, code, err := g.c.RunWithInput(ctx, cmd, f)
+	if err != nil {
+		return fmt.Errorf("pushing runner tarball: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("pushing runner tarball: exit %d: %s", code, out)
+	}
+	return nil
+}
+
 // StartRunner stages and launches the runner for the pool's guest OS. The JIT
 // config is handed to run.sh over the SSH session's stdin — the script reads it
 // with `$(cat)` — and is NEVER interpolated into the command string. x/crypto
@@ -443,6 +501,12 @@ func guestSetupBlock(cmds []string) string {
 	return b.String()
 }
 
+// hostGOOS is runtime.GOOS, indirected so a test can exercise the windows
+// branch below on any host — the same swappable-var pattern
+// images.go's prepareBundleDiskFn already established for this exact class of
+// gap (platform-conditional logic that only really runs on one platform).
+var hostGOOS = runtime.GOOS
+
 // runnerTarballRE constrains the tarball basename the daemon substitutes into
 // the provision script. The name is daemon-resolved (GitHub's asset filename),
 // not client input, but it crosses into a shell command string, so this is a
@@ -458,7 +522,17 @@ func provisionScript(goos, runnerTarball string, env map[string]string, setup []
 	if !runnerTarballRE.MatchString(runnerTarball) {
 		return "", fmt.Errorf("refusing to stage runner tarball with an unexpected name %q", runnerTarball)
 	}
-	script := perOS(goos, provisionScriptDarwin, provisionScriptLinux)
+	// linuxScript forks on the HOST platform, not the guest one: this process
+	// compiles into whichever runnyd binary is actually running, so
+	// runtime.GOOS reliably reflects which VM backend booted the guest (the
+	// same reasoning vm.go's checkHostArch already relies on). windows hosts
+	// have no working live share device for a Linux guest — the tarball is
+	// pushed to $HOME/runny-cache before this script runs instead.
+	linuxScript := provisionScriptLinux
+	if hostGOOS == "windows" {
+		linuxScript = provisionScriptLinuxPushed
+	}
+	script := perOS(goos, provisionScriptDarwin, linuxScript)
 	script = strings.ReplaceAll(script, runnerTarballPlaceholder, runnerTarball)
 	// Prepend the pool's guest_env exports, then its guest_setup commands, to
 	// the runner launch: run.sh and every job step inherit the env, and setup

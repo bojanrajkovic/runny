@@ -13,6 +13,7 @@ go_library(
         "@com_github_microsoft_go_winio//pkg/guid",
     ] + select({
         "@rules_go//go/platform:windows": [
+            "//internal/winhcs/security",
             "@com_github_microsoft_go_winio//vhd",
         ],
         "//conditions:default": [],

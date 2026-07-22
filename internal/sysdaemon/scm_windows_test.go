@@ -349,6 +349,29 @@ func TestScmInstallReinstallUpdatesExistingService(t *testing.T) {
 	}
 }
 
+// Regression test: serviceConfig left ServiceType at its zero value, which
+// mgr.Mgr.CreateService silently substitutes SERVICE_WIN32_OWN_PROCESS for --
+// but mgr.Service.UpdateConfig has no such fallback, passing 0 straight to
+// the real ChangeServiceConfig, where it's neither a valid service type nor
+// SERVICE_NO_CHANGE. A real reinstall over an already-registered service
+// failed outright with "The parameter is incorrect"; the fake UpdateConfig
+// used elsewhere in this file doesn't validate its input, so only an
+// explicit assertion on the config passed to it catches a regression here.
+func TestScmInstallReinstallSetsExplicitServiceType(t *testing.T) {
+	var order []string
+	existing := &fakeService{name: WindowsServiceName, calls: &order, status: svc.Status{State: svc.Stopped}}
+	m := &fakeMgr{existing: existing, calls: &order}
+	r := &orderedRun{order: &order}
+	inst := newTestScmInstaller(m, r)
+	if err := inst.Install(context.Background()); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if existing.lastConfig.ServiceType != windows.SERVICE_WIN32_OWN_PROCESS {
+		t.Errorf("ServiceType = %v, want SERVICE_WIN32_OWN_PROCESS (0 breaks the real ChangeServiceConfig)",
+			existing.lastConfig.ServiceType)
+	}
+}
+
 // Regression test: UpdateConfig (unlike CreateService, which quotes its
 // exepath argument itself) passes BinaryPathName straight through with no
 // escaping — an unquoted path containing a space parses ambiguously (the

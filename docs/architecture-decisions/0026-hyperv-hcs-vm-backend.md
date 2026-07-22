@@ -2,6 +2,22 @@
 
 **Status:** Accepted (2026-07-22)
 
+**Amended:** 2026-07-22 — the "no console-based networking fallback" half of
+this decision is reversed. The rejected alternative's own reopening
+condition ("if `WaitIP` timeouts on a real image ever demonstrate the need")
+fired immediately: the currently-validated image's baked netplan matches
+`en*`, hv_netvsc always names the NIC `eth0`, and without a live fixup `eth0`
+never comes up at all — confirmed on real hardware from a from-scratch
+differencing-disk boot with zero prior state, and again on a plain classic
+Hyper-V VM, so it isn't an artifact of a dirtied image or of bare HCS
+specifically. `WaitIP` now gives the guest a bounded grace period to
+self-configure (preserving this ADR's original assumption for whatever
+image might actually satisfy it), then falls back once to a console-driven
+netplan drop-in (`internal/vm/netfixup_windows.go`) if the grace period
+elapses with no neighbor-table entry. See the Decision and Consequences
+sections below, updated in place rather than left describing a design the
+shipped code no longer matches.
+
 ## Context
 
 runnyd's Windows host path needs the same job ADR-0008 solved for darwin: drive an
@@ -61,8 +77,19 @@ SCSI-attached VHDX — the documented `ScsiDrive`/`File` boot-entry `DeviceType`
 values are unexercised even in Microsoft's own code and do not work). `WaitIP`
 polls `GetIpNetTable2` for a `Permanent` entry matching the guest's MAC — a small
 hand-written binding (`internal/vm/neighbortable_windows.go`), since
-`x/sys/windows` doesn't wrap this corner of `iphlpapi`. No console interaction: the
-guest is trusted to self-configure networking.
+`x/sys/windows` doesn't wrap this corner of `iphlpapi`.
+
+`WaitIP` gives the guest a bounded grace period (`waitIPGracePeriod`) to bring
+up networking on its own — the original assumption below, kept as the first
+thing tried. If the grace period elapses with no neighbor-table entry, it
+falls back once to a console-driven fixup (`internal/vm/netfixup_windows.go`):
+dial the HCS console pipe, log in, and apply a netplan drop-in matching by
+driver (`match: driver: hv_netvsc`) rather than by interface name, then
+verify `eth0` actually got an address. This is the demonstrated case for the
+currently-validated image (`ghcr.io/cirruslabs/ubuntu-runner-amd64`): its
+baked netplan matches interface names `en*`, which hv_netvsc's always-`eth0`
+naming never satisfies, so `eth0` sits down and DHCP never even starts
+without it.
 
 ## Consequences
 
@@ -73,9 +100,10 @@ guest is trusted to self-configure networking.
   30s of polling after both, across three separate runs) — `hcsMachine.Stop` scrubs
   it explicitly once the guest is confirmed stopped, or it would accumulate one stale
   row per boot cycle for the daemon's whole lifetime.
-- No console-based networking fallback exists. If a future or different guest image
-  ships a static, non-self-adapting netplan, `WaitIP` simply times out — that's the
-  signal to revisit this decision, not something defended against speculatively now.
+- A console-based networking fallback exists and is mandatory in practice for the
+  currently-validated image (see above). A future or different guest image whose
+  netplan actually self-adapts never triggers it — it gets its neighbor-table entry
+  within the grace period and `WaitIP` returns before the fallback ever runs.
 - Guest arch validation is `runtime.GOARCH`-relative, not hardcoded to amd64 — an
   arm64 Windows host booting `linux/arm64` guests needs no code change here.
 
@@ -83,9 +111,16 @@ guest is trusted to self-configure networking.
 
 - **`hcn.GetEndpointByID` / KVP for `WaitIP`**: both tried and rejected per the
   Context section above — neither reflects a bare compute system's lease reliably.
-- **Building the console-interaction DHCP fixup anyway, defensively**: rejected in
-  favor of trusting the validated image's actual behavior; the fixup can be added
-  later if `WaitIP` timeouts on a real image ever demonstrate the need.
 - **Hardcoding guest arch to amd64 per OS**: rejected once it became clear an arm64
   Windows host is a real (if currently unvalidated) Hyper-V target this project
   shouldn't need a second code path for.
+
+## Superseded rejection: the console-interaction DHCP fixup
+
+Originally rejected here "in favor of trusting the validated image's actual
+behavior," with an explicit reopening condition: "the fixup can be added
+later if `WaitIP` timeouts on a real image ever demonstrate the need." That
+condition fired on the very first real-hardware validation — trusting the
+image's behavior was the wrong call, not a defensible one that later
+changed. The fixup is now built, gated behind `WaitIP`'s grace period so it
+still costs nothing for an image that doesn't need it (see Decision above).

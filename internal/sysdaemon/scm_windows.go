@@ -169,7 +169,14 @@ func (s *scmInstaller) Install(ctx context.Context) error {
 
 // serviceConfig is the mgr.Config shared by every call site that creates or
 // updates the service (ensureService's two branches, Install's final
-// enable-auto-start), varying only StartType. BinaryPathName is pre-escaped
+// enable-auto-start), varying only StartType. ServiceType must be set
+// explicitly, not left at the zero value: x/sys/windows/svc/mgr's own
+// CreateService silently substitutes SERVICE_WIN32_OWN_PROCESS when it sees
+// a zero ServiceType, but UpdateConfig has no such fallback — it passes
+// ServiceType straight to ChangeServiceConfig, where 0 is neither a valid
+// service type nor SERVICE_NO_CHANGE (0xFFFFFFFF), so a reinstall over an
+// already-registered service failed outright with "The parameter is
+// incorrect" until this was set here too. BinaryPathName is pre-escaped
 // (syscall.EscapeArg, matching what CreateService already does internally
 // for its own separate exepath argument) since UpdateConfig passes it to
 // ChangeServiceConfig with no escaping of its own — an unquoted path
@@ -179,6 +186,7 @@ func (s *scmInstaller) Install(ctx context.Context) error {
 // setting it unconditionally is harmless there.
 func (s *scmInstaller) serviceConfig(startType uint32) mgr.Config {
 	return mgr.Config{
+		ServiceType:      windows.SERVICE_WIN32_OWN_PROCESS,
 		ServiceStartName: windowsServiceSID,
 		StartType:        startType,
 		SidType:          windows.SERVICE_SID_TYPE_UNRESTRICTED,

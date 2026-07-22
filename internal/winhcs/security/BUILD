@@ -8,7 +8,7 @@ go_library(
         "zsyscall_windows.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/winhcs/security",
-    visibility = ["//internal/winhcs:__subpackages__"],
+    visibility = ["//:__subpackages__"],
     deps = select({
         "@rules_go//go/platform:windows": [
             "@org_golang_x_sys//windows",

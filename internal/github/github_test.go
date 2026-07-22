@@ -237,19 +237,50 @@ func TestOrgTargetJITConfig(t *testing.T) {
 
 func TestRunnerDownloadPerOS(t *testing.T) {
 	c := newTestClient(t, &fakeGitHub{})
-	name, url, sha, err := c.RunnerDownload(testCtx(t), "darwin")
+	name, url, sha, err := c.RunnerDownload(testCtx(t), "darwin", "arm64")
 	if err != nil || !strings.Contains(name, "osx-arm64") || url != "https://example/osx" {
-		t.Errorf("darwin: %s %s %v", name, url, err)
+		t.Errorf("darwin/arm64: %s %s %v", name, url, err)
 	}
 	if sha != "ab12cd34" {
 		t.Errorf("sha = %q, want the downloads endpoint checksum", sha)
 	}
-	name, url, _, err = c.RunnerDownload(testCtx(t), "linux")
+	name, url, _, err = c.RunnerDownload(testCtx(t), "linux", "arm64")
 	if err != nil || !strings.Contains(name, "linux-arm64") || url != "https://example/linux" {
-		t.Errorf("linux: %s %s %v", name, url, err)
+		t.Errorf("linux/arm64: %s %s %v", name, url, err)
 	}
-	if _, _, _, err := c.RunnerDownload(testCtx(t), "windows"); err == nil {
+	if _, _, _, err := c.RunnerDownload(testCtx(t), "windows", "arm64"); err == nil {
 		t.Error("windows should be rejected")
+	}
+}
+
+// RunnerDownload must resolve the guest's ACTUAL architecture, not always
+// arm64 — regression guard for issue #319, where a hardcoded arm64 match
+// silently fetched an unusable runner binary for an amd64 Linux guest
+// (windows/HCS backend).
+func TestRunnerDownloadPerArch(t *testing.T) {
+	c := newTestClient(t, &fakeGitHub{})
+	name, url, _, err := c.RunnerDownload(testCtx(t), "linux", "amd64")
+	if err != nil || !strings.Contains(name, "linux-x64") || url != "https://example/x64" {
+		t.Errorf("linux/amd64: %s %s %v", name, url, err)
+	}
+	if _, _, _, err := c.RunnerDownload(testCtx(t), "linux", "riscv64"); err == nil {
+		t.Error("an unsupported arch should be rejected")
+	}
+}
+
+// The downloads-resolution cache is keyed by the (goos, goarch) pair, not
+// goos alone — otherwise a daemon running both an arm64 and an amd64 Linux
+// pool would have the second pool's resolution clobbered by (or clobber) the
+// first's under the same cache key.
+func TestRunnerDownloadCacheKeyedByArch(t *testing.T) {
+	f := &fakeGitHub{}
+	c := newTestClient(t, f)
+	if _, _, _, err := c.RunnerDownload(testCtx(t), "linux", "arm64"); err != nil {
+		t.Fatal(err)
+	}
+	name, _, _, err := c.RunnerDownload(testCtx(t), "linux", "amd64")
+	if err != nil || !strings.Contains(name, "linux-x64") {
+		t.Errorf("linux/amd64 after caching linux/arm64: %s %v", name, err)
 	}
 }
 

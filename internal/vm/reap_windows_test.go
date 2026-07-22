@@ -28,10 +28,12 @@ func (f *fakeReapSystem) Terminate(context.Context) error {
 	f.terminated = true
 	return f.terminateErr
 }
+
 func (f *fakeReapSystem) WaitCtx(context.Context) error {
 	f.waited = true
 	return f.waitErr
 }
+
 func (f *fakeReapSystem) Close() error {
 	f.closed = true
 	return f.closeErr

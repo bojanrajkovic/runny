@@ -91,7 +91,7 @@ type Client struct {
 	tokenPerms map[string]string
 	tokenExp   time.Time
 	instID     int64
-	runnerDL   map[string]runnerAsset // goos -> cached downloads resolution
+	runnerDL   map[string]runnerAsset // "goos/goarch" -> cached downloads resolution
 }
 
 // runnerAsset caches one downloads-endpoint resolution. Without it every
@@ -269,20 +269,31 @@ func (c *Client) GenerateJITConfig(ctx bounded.Context, name string, labels []st
 	return &JITRunner{RunnerID: resp.Runner.ID, EncodedJITConfig: resp.EncodedJITConfig}, nil
 }
 
-// RunnerDownload resolves the service-blessed actions-runner build for
-// osx/arm64 via the downloads endpoint. This is the only safe source: the
-// actions/runner repo's "latest" release can lag what the broker accepts,
-// and JIT runners cannot self-update (learned from a live Forbidden:
+// apiArch translates Go's GOARCH spelling to the runner-downloads endpoint's
+// own architecture strings (verified against a live call, issue #319: GitHub
+// spells amd64 "x64", not "amd64" — the same kind of translation apiOS
+// already does for goos "darwin" -> "osx").
+var apiArch = map[string]string{"amd64": "x64", "arm64": "arm64"}
+
+// RunnerDownload resolves the service-blessed actions-runner build for the
+// guest's exact os/arch via the downloads endpoint. This is the only safe
+// source: the actions/runner repo's "latest" release can lag what the broker
+// accepts, and JIT runners cannot self-update (learned from a live Forbidden:
 // "Runner version vX is deprecated and cannot receive messages").
 // The returned sha256 is the service-declared checksum of the tarball (may
 // be empty on older GHES); the downloader verifies it when present.
-func (c *Client) RunnerDownload(ctx bounded.Context, goos string) (filename, url, sha256 string, err error) {
+func (c *Client) RunnerDownload(ctx bounded.Context, goos, goarch string) (filename, url, sha256 string, err error) {
 	apiOS := map[string]string{"darwin": "osx", "linux": "linux"}[goos]
 	if apiOS == "" {
 		return "", "", "", fmt.Errorf("unsupported guest os %q", goos)
 	}
+	arch := apiArch[goarch]
+	if arch == "" {
+		return "", "", "", fmt.Errorf("unsupported guest arch %q", goarch)
+	}
+	key := goos + "/" + goarch
 	c.mu.Lock()
-	if a, ok := c.runnerDL[goos]; ok && time.Since(a.fetched) < runnerDLTTL {
+	if a, ok := c.runnerDL[key]; ok && time.Since(a.fetched) < runnerDLTTL {
 		c.mu.Unlock()
 		return a.filename, a.url, a.sha256, nil
 	}
@@ -305,17 +316,17 @@ func (c *Client) RunnerDownload(ctx bounded.Context, goos string) (filename, url
 		return "", "", "", fmt.Errorf("listing runner downloads: %w", err)
 	}
 	for _, d := range downloads {
-		if d.OS == apiOS && d.Architecture == "arm64" {
+		if d.OS == apiOS && d.Architecture == arch {
 			c.mu.Lock()
 			if c.runnerDL == nil {
 				c.runnerDL = map[string]runnerAsset{}
 			}
-			c.runnerDL[goos] = runnerAsset{filename: d.Filename, url: d.DownloadURL, sha256: d.SHA256, fetched: time.Now()}
+			c.runnerDL[key] = runnerAsset{filename: d.Filename, url: d.DownloadURL, sha256: d.SHA256, fetched: time.Now()}
 			c.mu.Unlock()
 			return d.Filename, d.DownloadURL, d.SHA256, nil
 		}
 	}
-	return "", "", "", fmt.Errorf("no %s/arm64 runner build in downloads list (%d entries)", apiOS, len(downloads))
+	return "", "", "", fmt.Errorf("no %s/%s runner build in downloads list (%d entries)", apiOS, arch, len(downloads))
 }
 
 // Runner is a registered self-hosted runner, as the reconcile loop sees it.

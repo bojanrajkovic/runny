@@ -286,7 +286,12 @@ func run(parent context.Context) error {
 				Home: dir,
 				Ref:  ref,
 				Runner: func(c bounded.Context) (string, string, string, error) {
-					return gh.RunnerDownload(c, osName)
+					// The guest's arch is never pool-configured, the same way
+					// Boot's own checkHostArch treats it: neither Hyper-V nor
+					// Virtualization.framework cross-emulates architectures, so
+					// the only guest arch this daemon can ever successfully
+					// boot is its own runtime.GOARCH.
+					return gh.RunnerDownload(c, osName, runtime.GOARCH)
 				},
 				StallBudget:   cfg.Deadlines.PullStall.D(),
 				ResolveBudget: cfg.Deadlines.Resolve.D(),

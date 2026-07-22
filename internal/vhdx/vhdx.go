@@ -49,8 +49,7 @@ const (
 type backend interface {
 	createFixed(path string, maximumSize uint64) (syscall.Handle, error)
 	createDifferencing(child, parent string) error
-	grantVmGroupAccessRead(path string) error
-	grantVmGroupAccessReadWrite(path string) error
+	grantVmGroupAccess(path string, readWrite bool) error
 	attach(handle syscall.Handle) error
 	physicalPath(handle syscall.Handle) (string, error)
 	detach(handle syscall.Handle) error
@@ -92,33 +91,28 @@ func (winioBackend) createDifferencing(child, parent string) error {
 	return vhd.CreateDiffVhd(child, parent, 0)
 }
 
-// grantVmGroupAccessRead grants the well-known "NT VIRTUAL MACHINE\Virtual
-// Machines" group (SID S-1-5-83-0) read access to path's DACL — the step
-// Hyper-V's own tooling (New-VM, Add-VMHardDiskDrive) applies automatically
-// and a bare HCS compute system never gets for free. Without it, Start fails
-// with "The chain of virtual hard disks is inaccessible. The process has not
-// been granted access rights to the parent virtual hard disk for the
-// differencing disk." — confirmed against real hardware, issue #319. Read is
-// correct for a parent: it's the shared, immutable base a differencing child
-// only ever reads from, never writes to.
-func (winioBackend) grantVmGroupAccessRead(path string) error {
+// grantVmGroupAccess grants the well-known "NT VIRTUAL MACHINE\Virtual
+// Machines" group (SID S-1-5-83-0) access to path's DACL — the step Hyper-V's
+// own tooling (New-VM, Add-VMHardDiskDrive) applies automatically and a bare
+// HCS compute system never gets for free. Without it, Start fails with "The
+// chain of virtual hard disks is inaccessible. The process has not been
+// granted access rights to the parent virtual hard disk for the
+// differencing disk." — confirmed against real hardware, issue #319.
+//
+// readWrite distinguishes the parent from the child of a differencing pair:
+// read-only is correct for the parent (the shared, immutable base a child
+// only ever reads from), but the SAME read-only grant on the child — what
+// hcsshim's own internal/computestorage helper applies to both base and diff
+// VHD, for its own container-base-layer use case — reproduced the identical
+// generic "Access is denied" on real hardware once the child was actually
+// attached as a running VM's writable boot disk: it's the disk every guest
+// write lands on. Full Control (matching Microsoft's own documented manual
+// fix-up for a Hyper-V VM's disk files) was the only thing that fixed it.
+func (winioBackend) grantVmGroupAccess(path string, readWrite bool) error {
+	if readWrite {
+		return security.GrantVmGroupAccessWithMask(path, security.AccessMaskAll)
+	}
 	return security.GrantVmGroupAccess(path)
-}
-
-// grantVmGroupAccessReadWrite grants the VM group Full Control, not just
-// Read — required on the CHILD of a differencing pair, which (unlike the
-// parent) is the live disk every guest write actually lands on. Read-only
-// (hcsshim's own internal/computestorage helper grants exactly that, on both
-// base and diff VHD, for its own container-base-layer use case) is enough
-// when nothing ever attaches the child as a running VM's writable boot
-// disk — it is not enough here: confirmed against real hardware, issue
-// #319, where a read-only grant on the child produced the identical
-// generic "Access is denied" this whole grant exists to prevent, and only
-// widening the child's grant to include write fixed it. Full Control
-// matches Microsoft's own documented manual fix-up for a Hyper-V VM's disk
-// files, not just enough bits to boot once.
-func (winioBackend) grantVmGroupAccessReadWrite(path string) error {
-	return security.GrantVmGroupAccessWithMask(path, security.AccessMaskAll)
 }
 
 func (winioBackend) attach(handle syscall.Handle) error {
@@ -157,10 +151,10 @@ func createDifferencing(child, parent string, b backend) error {
 	if err := b.createDifferencing(child, parent); err != nil {
 		return err
 	}
-	if err := b.grantVmGroupAccessRead(parent); err != nil {
+	if err := b.grantVmGroupAccess(parent, false); err != nil {
 		return fmt.Errorf("granting VM group read access to parent %s: %w", parent, err)
 	}
-	if err := b.grantVmGroupAccessReadWrite(child); err != nil {
+	if err := b.grantVmGroupAccess(child, true); err != nil {
 		return fmt.Errorf("granting VM group read-write access to child %s: %w", child, err)
 	}
 	return nil

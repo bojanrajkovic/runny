@@ -20,8 +20,8 @@ type fakeBackend struct {
 
 	createErr                  error
 	createDifferencingErr      error
-	grantVmGroupAccessReadErr  error
-	grantVmGroupAccessWriteErr error
+	grantVmGroupAccessReadErr  error // returned when grantVmGroupAccess is called with readWrite=false (the parent)
+	grantVmGroupAccessWriteErr error // returned when grantVmGroupAccess is called with readWrite=true (the child)
 	attachErr                  error
 	physPathErr                error
 	detachErr                  error
@@ -41,14 +41,13 @@ func (f *fakeBackend) createDifferencing(child, parent string) error {
 	return f.createDifferencingErr
 }
 
-func (f *fakeBackend) grantVmGroupAccessRead(path string) error {
+func (f *fakeBackend) grantVmGroupAccess(path string, readWrite bool) error {
+	if readWrite {
+		f.calls = append(f.calls, "grantVmGroupAccessReadWrite:"+path)
+		return f.grantVmGroupAccessWriteErr
+	}
 	f.calls = append(f.calls, "grantVmGroupAccessRead:"+path)
 	return f.grantVmGroupAccessReadErr
-}
-
-func (f *fakeBackend) grantVmGroupAccessReadWrite(path string) error {
-	f.calls = append(f.calls, "grantVmGroupAccessReadWrite:"+path)
-	return f.grantVmGroupAccessWriteErr
 }
 
 func (f *fakeBackend) createFixed(path string, maximumSize uint64) (syscall.Handle, error) {

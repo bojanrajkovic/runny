@@ -239,55 +239,13 @@ func (s *scmInstaller) ensureHome(ctx context.Context) error {
 		return fmt.Errorf("creating %s: %w", home.SystemHomeDir, err)
 	}
 	for _, args := range icaclsHomeArgs(home.SystemHomeDir, s.cfg.Operator) {
-		if _, err := s.runWithRetry(ctx, args[0], args[1:]...); err != nil {
+		if _, err := s.run(ctx, args[0], args[1:]...); err != nil {
 			return err
 		}
 	}
 	s.log("prepared %s (owned by %s, ACL grants %s + %s Modify)",
 		home.SystemHomeDir, windowsServiceSID, s.cfg.Operator, windowsServiceSID)
 	return nil
-}
-
-// icaclsRetries/icaclsRetryInterval bound runWithRetry's backoff — cheap
-// insurance against a genuinely transient handle collision (e.g. some other
-// process briefly opening a file under the tree ensureHome is re-ACLing),
-// not a fix for anything specific: the one failure mode that looked like a
-// multi-second version of this (retried past 30 attempts at 1s, same result
-// every time) turned out to be icaclsHomeArgs' /reset+/inheritance:r pair
-// deterministically emptying a directory's DACL before it could reach a
-// child — a real, non-transient bug, fixed by using /inheritance:d instead
-// (see icaclsHomeArgs' own doc comment) rather than by retrying around it.
-// Five attempts over ~3s costs nothing on the common case where nothing was
-// ever racing it, while still absorbing a brief, genuine collision.
-const icaclsRetries = 5
-
-// icaclsRetryInterval is a var, not a const, so tests can shrink it (same
-// seam shape as internal/vm/stop.go's stopSettle) rather than spending real
-// wall-clock time proving runWithRetry gives up after exhausting its budget.
-var icaclsRetryInterval = 500 * time.Millisecond
-
-// runWithRetry retries a single command a few times on failure — used only
-// for ensureHome's icacls calls (see icaclsRetries' doc comment for why).
-// Every other call site keeps calling s.run directly: a stager or service
-// operation failing isn't a transient-lock symptom, and retrying it would
-// just mask a real error behind a few seconds of silence.
-func (s *scmInstaller) runWithRetry(ctx context.Context, name string, args ...string) (string, error) {
-	var out string
-	var err error
-	for attempt := 0; attempt < icaclsRetries; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return out, ctx.Err()
-			case <-time.After(icaclsRetryInterval):
-			}
-		}
-		out, err = s.run(ctx, name, args...)
-		if err == nil {
-			return out, nil
-		}
-	}
-	return out, err
 }
 
 // Uninstall removes the runnyd service AND the home. Unlike darwin, nothing is

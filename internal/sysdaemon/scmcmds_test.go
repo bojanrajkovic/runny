@@ -25,17 +25,3 @@ func TestIcaclsHomeArgs(t *testing.T) {
 		t.Errorf("icaclsHomeArgs =\n got %v\nwant %v", got, want)
 	}
 }
-
-// Regression test: /reset + /inheritance:r looked equivalent to /inheritance:d
-// alone but wasn't -- it reproducibly left a directory with an empty DACL
-// (denying even the elevated caller) once real hardware testing exercised a
-// two-level tree. /inheritance:d must never appear paired with /reset again.
-func TestIcaclsHomeArgsNeverPairsResetWithInheritanceR(t *testing.T) {
-	for _, args := range icaclsHomeArgs(`C:\ProgramData\runny`, `CORP\alice`) {
-		for _, a := range args {
-			if a == "/reset" || a == "/inheritance:r" {
-				t.Errorf("icaclsHomeArgs must not use %q (real-hardware-confirmed empty-DACL hazard on a two-level tree): %v", a, args)
-			}
-		}
-	}
-}

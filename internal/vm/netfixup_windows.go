@@ -130,7 +130,14 @@ func consoleLogin(ctx bounded.Context, conn net.Conn, user, password string) err
 		default:
 		}
 		if err := consoleWrite(ctx, conn, "\r\n"); err != nil {
-			return err
+			// Wrapped the same as the ctx.Done() case above: ctx's wall-clock
+			// deadline can elapse a moment before its Done() channel closes
+			// (Go's timer scheduling isn't instantaneous, more so under CI
+			// load), so this write's own deadline -- capped to that same
+			// instant by consoleWrite's boundedDeadline -- can fire first.
+			// Either way the caller-meaningful fact is the same: no login
+			// prompt arrived in time.
+			return fmt.Errorf("no login prompt: %w (last output: %q)", err, seen)
 		}
 		// nil match: "login:" may straddle two separate drain calls (each
 		// starts its own read buffer), so only the externally-accumulated,

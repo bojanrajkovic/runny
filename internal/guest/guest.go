@@ -387,14 +387,15 @@ const provisionScriptLinux = linuxProvisionPrelude + linuxCacheMount + linuxProv
 // see hcs_windows.go's NeedsRunnerPush doc comment for why). Under $HOME
 // rather than /mnt like linuxCacheMount's CACHE: the push runs over the
 // already-established SSH session as the same non-root user that owns its
-// own home dir, so no sudo is needed to create it. linuxCachePushed's CACHE
-// line below must match this value.
+// own home dir, so no sudo is needed to create it. linuxCachePushed derives
+// its CACHE line from this constant rather than restating it, so the two
+// can't drift the way they briefly could when both were separate literals.
 const runnerPushCacheDir = "runny-cache"
 
 // linuxCachePushed: no virtiofs-equivalent share device works from a bare
 // compute system -- PushRunnerTarball stages the tarball at $HOME/runny-cache
 // before this script runs, so there is no mount step here.
-const linuxCachePushed = `CACHE="$HOME/runny-cache"
+const linuxCachePushed = `CACHE="$HOME/` + runnerPushCacheDir + `"
 `
 
 // provisionScriptLinuxPushed: the pushed-cache variant (windows, see

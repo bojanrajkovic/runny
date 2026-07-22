@@ -254,9 +254,19 @@ func (p *imagePuller) run() {
 			// concurrent slot's Ensure subscribes to — never in Ensure's own
 			// subscriber-side code, which every subscriber reaches
 			// independently and would race the (windows-only) VHDX
-			// conversion N times for one pull.
+			// conversion N times for one pull. A late, non-subscriber Ensure
+			// for this same digest can still reach its own cache-hit
+			// conversion call concurrently with this one (see images.go);
+			// vhdxConvertLocks serializes the two against the same dir.
 			bundle := tart.Bundle(p.destDir)
-			if perr := prepareBundleDisk(bundle); perr != nil {
+			release, lerr := oci.AcquireSlot(p.ctx, &vhdxConvertLocks, p.destDir, "VHDX conversion of "+p.destDir, nil)
+			if lerr != nil {
+				p.finish(ensureResult{err: fmt.Errorf("preparing bundle disk: %w", lerr)})
+				return
+			}
+			perr := prepareBundleDisk(bundle)
+			release()
+			if perr != nil {
 				// PullTo's own temp-dir+rename already guarantees "complete
 				// bundle or nothing landed" for the raw pull; a failure here
 				// would otherwise leave that guarantee broken specifically

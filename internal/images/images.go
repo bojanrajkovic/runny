@@ -108,7 +108,16 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string), onDigestResol
 		// early cache-hit path) would otherwise be treated as done forever --
 		// permanently failing CloneVHDX with no self-heal. prepareBundleDisk
 		// is a no-op off windows and a no-op once disk.vhdx already exists.
-		if perr := prepareBundleDisk(bundle); perr != nil {
+		// vhdxConvertLocks serializes this against imagePuller.run's own
+		// prepareBundleDisk call for the same dir, in case a concurrent
+		// puller is still mid-conversion when this cache-hit is reached.
+		release, lerr := oci.AcquireSlot(ctx, &vhdxConvertLocks, dir, "VHDX conversion of "+dir, nil)
+		if lerr != nil {
+			return "", "", "", fmt.Errorf("waiting to convert cached bundle: %w", lerr)
+		}
+		perr := prepareBundleDisk(bundle)
+		release()
+		if perr != nil {
 			return "", "", "", fmt.Errorf("converting cached bundle: %w", perr)
 		}
 		return digest, runnerVersion, bundle, nil // cache hit
@@ -312,6 +321,17 @@ type RunnerResolver func(ctx bounded.Context) (filename, url, sha256 string, err
 // The wait is transitively bounded by the holder's own stall-watched
 // download (a wait on a peer's already-bounded operation is itself bounded).
 var tarballLocks sync.Map // filename -> chan struct{} (capacity-1 semaphore)
+
+// vhdxConvertLocks serializes prepareBundleDisk per bundle dir: a late
+// Ensure for the same digest can reach the cache-hit branch below while
+// imagePuller.run is still converting that exact bundle -- both would
+// otherwise call vhdx.Convert concurrently against the same
+// disk.vhdx.converting temp path, each free to remove/recreate the
+// other's in-progress file. The loser waits, then finds disk.vhdx already
+// there (prepareBundleDisk's own early return) and no-ops, the same shape
+// tarballLocks and oci's pullLocks already use for the identical class of
+// problem.
+var vhdxConvertLocks sync.Map // bundle dir -> chan struct{} (capacity-1 semaphore)
 
 // tarballReserved tracks tarballs that Ensure() has resolved and downloaded
 // but whose RunnerVersion has not yet been published to slot status (the FSM

@@ -22,13 +22,19 @@ ADR-0026 for the Hyper-V backend's decisions and why; this doc is sharp edges on
   Microsoft Learn's `MIB_IPNET_ROW2`/`SOCKADDR_INET` pages (cited inline), not
   reconstructed from memory. If Microsoft ever adds fields to either struct,
   re-verify against the current docs before touching offsets.
-- **No console-interaction networking fallback exists, on purpose.** The
-  validated guest image (`ghcr.io/cirruslabs/ubuntu-runner-amd64`) self-configures
-  eth0 via cloud-init's own dynamically-generated netplan — confirmed end-to-end
-  (`Boot`→`WaitIP`→TCP:22 reachable) with zero console interaction. If a future
-  image needs a live DHCP fixup, `WaitIP` will simply time out; that's the signal
-  to build one, not something pre-built speculatively here (see ADR-0026's
-  rejected alternatives).
+- **A console-interaction networking fallback exists, and is load-bearing for
+  the currently-validated image.** The validated guest image
+  (`ghcr.io/cirruslabs/ubuntu-runner-amd64`) does NOT self-configure `eth0` on
+  this backend: its baked netplan matches interface names `en*`, which
+  hv_netvsc's always-`eth0` naming never satisfies, so `eth0` sits down and
+  DHCP never even starts without help — confirmed on real hardware from a
+  from-scratch differencing-disk boot with zero prior state, and again on a
+  plain classic Hyper-V VM. `hcsMachine.WaitIP` (`hcs_windows.go`) gives the
+  guest a bounded grace period to prove it can self-configure, then falls back
+  once to `fixupNetwork` (`netfixup_windows.go`): dial the HCS console pipe,
+  log in, and apply a netplan drop-in matching by driver instead of by
+  interface name. See ADR-0026's amendment for why the original "no fallback"
+  decision was reversed rather than merely revisited.
 - **`Boot` never calls `vhdx.CreateDifferencing` itself.** The slot's
   differencing-child VHDX is already there at `bundle.VHDXPath()` by the time
   `HCSManager.Boot` runs — `internal/tart.CloneVHDX` creates it during the FSM's

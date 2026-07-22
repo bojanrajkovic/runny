@@ -41,6 +41,7 @@ go_test(
     srcs = [
         "leases_test.go",
         "neighbortable_windows_test.go",
+        "netfixup_windows_test.go",
         "sizing_test.go",
         "stop_test.go",
     ],

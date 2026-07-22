@@ -213,29 +213,21 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 		return nil, fmt.Errorf("Start: %w", ctx.Err())
 	}
 
-	// Mandatory, not best-effort: without this, eth0 never comes up on this
-	// backend's validated image at all (see fixupNetwork's doc comment,
-	// issue #319), so WaitIP could never succeed regardless. An empty
-	// SSHUser means the caller never went through config defaulting
-	// (home/config.go always defaults it to "admin") -- fail loudly here
-	// rather than let WaitIP time out with a far less diagnosable error.
-	if opts.SSHUser == "" {
-		abandonComputeSystem(system, ep)
-		return nil, fmt.Errorf("windows backend requires SSHUser/SSHPassword to apply the mandatory network fixup (issue #319); got empty SSHUser")
-	}
-	if err := fixupNetwork(ctx, systemID, opts.SSHUser, opts.SSHPassword); err != nil {
-		abandonComputeSystem(system, ep)
-		return nil, fmt.Errorf("network fixup: %w", err)
-	}
-
-	return &hcsMachine{system: system, endpoint: ep, mac: ep.MacAddress}, nil
+	return &hcsMachine{
+		system:      system,
+		endpoint:    ep,
+		mac:         ep.MacAddress,
+		systemID:    systemID,
+		sshUser:     opts.SSHUser,
+		sshPassword: opts.SSHPassword,
+	}, nil
 }
 
 // consolePipeName is per-system so concurrent slots never collide on the
-// same named pipe. Nothing in this backend dials it today (the guest self-
-// configures networking with no console interaction needed — see
-// hcsMachine's WaitIP doc comment) — it exists for operator/debug access to
-// the boot console, the same reason vz guests get a display even headless.
+// same named pipe. hcsMachine.WaitIP's fixupNetwork fallback dials it when
+// the guest doesn't self-configure networking within waitIPGracePeriod (see
+// WaitIP's doc comment); it also exists for operator/debug access to the
+// boot console, the same reason vz guests get a display even headless.
 func consolePipeName(systemID string) string {
 	return `\\.\pipe\runny-console-` + systemID
 }
@@ -376,6 +368,12 @@ type hcsMachine struct {
 	system   *hcs.System
 	endpoint *hcn.HostComputeEndpoint
 	mac      string
+	systemID string
+
+	// sshUser/sshPassword are only used by WaitIP's fixupNetwork fallback --
+	// Boot itself needs neither, see WaitIP's doc comment.
+	sshUser     string
+	sshPassword string
 }
 
 func (m *hcsMachine) MAC() string { return m.mac }
@@ -391,21 +389,35 @@ func (m *hcsMachine) MAC() string { return m.mac }
 // RunnerShareDir, so PROVISION must push the tarball itself.
 func (m *hcsMachine) NeedsRunnerPush() bool { return true }
 
+// waitIPGracePeriod is how long WaitIP trusts the guest to self-configure
+// networking before it assumes the hv_netvsc/netplan mismatch fixupNetwork
+// exists for (issue #319, confirmed on the currently-validated image) and
+// falls back to it. Sized off HNS's own binding behavior -- the neighbor-
+// table entry it programs appears "within seconds of Start" for a guest
+// that completes DHCP on its own -- times a generous margin; a future image
+// that really does self-configure only ever pays this once, on its first
+// poll past a normal DHCP round-trip.
+const waitIPGracePeriod = 10 * time.Second
+
 // WaitIP polls the host IP neighbor table for a Permanent entry matching
-// this machine's MAC. HNS pre-commits the MAC->IP binding at endpoint
-// attach (validated on real hardware, issues #307/#308): the entry appears
-// within seconds of Start, well before the guest OS could have booted, and
-// carries exactly the IP the guest's own DHCP will obtain. This backend
-// does no console interaction to get there — the validated guest image's
-// cloud-init generates its own network config dynamically for whatever NIC
-// is actually present (confirmed: /etc/netplan/50-cloud-init.yaml already
-// matches eth0 with dhcp4: true, no live fixup needed). If a future image
-// ships a static installer-time netplan that doesn't self-adapt, WaitIP
-// simply times out — that's the signal to revisit this, not something to
-// defend against speculatively now.
+// this machine's MAC. HNS programs this MAC->IP binding once the guest's
+// own DHCP client completes (validated on real hardware, issues #307/#308/
+// #319) and it carries exactly the IP the guest is actually using.
+//
+// The currently-validated guest image (ghcr.io/cirruslabs/ubuntu-runner-
+// amd64) needs help getting there: its baked netplan matches interface
+// names "en*", which hv_netvsc's always-"eth0" naming never satisfies, so
+// eth0 sits down and DHCP never starts without fixupNetwork's console-
+// applied drop-in (issue #319). A future or different image that DOES
+// self-configure (the behavior this backend originally assumed, per
+// ADR-0026) never triggers the fallback: it gets its neighbor-table entry
+// within waitIPGracePeriod and this returns before the grace period ever
+// elapses.
 func (m *hcsMachine) WaitIP(ctx bounded.Context) (string, error) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
+	deadline := boundedDeadline(ctx, waitIPGracePeriod)
+	fixedUp := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -419,6 +431,16 @@ func (m *hcsMachine) WaitIP(ctx bounded.Context) (string, error) {
 			}
 			if ip, ok := findPermanentIP(entries, m.mac); ok {
 				return ip, nil
+			}
+			if fixedUp || time.Now().Before(deadline) {
+				continue
+			}
+			if m.sshUser == "" || m.sshPassword == "" {
+				return "", fmt.Errorf("no IP after %s and no SSHUser/SSHPassword configured to attempt the network fixup (issue #319)", waitIPGracePeriod)
+			}
+			fixedUp = true
+			if err := fixupNetwork(ctx, m.systemID, m.sshUser, m.sshPassword); err != nil {
+				return "", fmt.Errorf("network fixup: %w", err)
 			}
 		}
 	}

@@ -4,6 +4,8 @@ go_library(
     name = "telemetry",
     srcs = [
         "metrics.go",
+        "opencensus_bridge_other.go",
+        "opencensus_bridge_windows.go",
         "telemetry.go",
         "trace.go",
     ],
@@ -24,7 +26,12 @@ go_library(
         "@io_opentelemetry_go_otel_sdk//trace",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_trace//:trace",
-    ],
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@io_opentelemetry_go_otel_bridge_opencensus//:opencensus",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 go_test(

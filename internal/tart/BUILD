@@ -5,10 +5,18 @@ go_library(
     srcs = [
         "bundle.go",
         "clone.go",
+        "clone_windows.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/tart",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/clonefile"],
+    deps = [
+        "//internal/clonefile",
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "//internal/vhdx",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 go_test(

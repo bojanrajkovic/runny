@@ -31,8 +31,9 @@ var (
 	// ErrUnsupportedDiskFormat: ASIF (macOS 26 tart) is rejected until vz
 	// attachment support is verified — a clear error beats a hung boot.
 	ErrUnsupportedDiskFormat = errors.New("unsupported disk format (only raw is supported)")
-	// ErrUnsupportedGuest rejects bundles outside darwin/linux on arm64.
-	ErrUnsupportedGuest = errors.New("bundle is not a darwin/arm64 or linux/arm64 guest")
+	// ErrUnsupportedGuest rejects any (OS, Arch) shape outside
+	// darwin/arm64, linux/arm64, or linux/amd64 — see LoadConfig.
+	ErrUnsupportedGuest = errors.New("bundle is not a darwin/arm64, linux/arm64, or linux/amd64 guest")
 )
 
 // Bundle is a tart-format VM bundle directory.
@@ -41,6 +42,13 @@ type Bundle string
 func (b Bundle) ConfigPath() string { return filepath.Join(string(b), "config.json") }
 func (b Bundle) DiskPath() string   { return filepath.Join(string(b), "disk.img") }
 func (b Bundle) NVRAMPath() string  { return filepath.Join(string(b), "nvram.bin") }
+
+// VHDXPath is the Hyper-V backend's converted disk (internal/images'
+// post-pull conversion via internal/vhdx.Convert). Every pull produces
+// DiskPath regardless of host; VHDXPath exists only once a windows host has
+// converted it, and DiskPath is removed once VHDXPath exists (see
+// prepareBundleDisk) — Verify accepts either.
+func (b Bundle) VHDXPath() string { return filepath.Join(string(b), "disk.vhdx") }
 
 // Config is tart's config.json. hardwareModel and ecid are base64-encoded
 // Virtualization.framework data representations; this package keeps them as
@@ -93,10 +101,18 @@ func (c *Config) ECID() ([]byte, error) {
 	return b, nil
 }
 
-// LoadConfig reads and validates a bundle's config.json. darwin and linux
-// arm64 guests are supported; the VZ data representations
-// (hardwareModel/ecid) exist only on darwin bundles — linux boots via EFI
-// with the nvram.bin file as its variable store.
+// LoadConfig reads and validates a bundle's config.json. This is a pure
+// shape check — "is this a bundle my code knows how to interpret at all" —
+// deliberately independent of the host it happens to run on, so it stays
+// portable/testable everywhere. darwin/arm64 boots via VZ's Mac platform;
+// linux/arm64 and linux/amd64 both boot via EFI, VZ on darwin/arm64 hosts or
+// HCS on Windows hosts respectively. Neither Virtualization.framework nor
+// Hyper-V cross-emulates architectures (Rosetta translates userspace
+// binaries inside an already-booted arm64 Linux guest, it does not let VZ
+// boot an amd64 kernel), so "can THIS host actually boot THIS arch" is a
+// separate, host-capability check each platform's own Manager.Boot makes
+// against its own runtime.GOARCH — not something this portable check can
+// know.
 func (b Bundle) LoadConfig() (*Config, error) {
 	raw, err := os.ReadFile(b.ConfigPath())
 	if err != nil {
@@ -106,7 +122,10 @@ func (b Bundle) LoadConfig() (*Config, error) {
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", b.ConfigPath(), err)
 	}
-	if (c.OS != "darwin" && c.OS != "linux") || c.Arch != "arm64" {
+	switch {
+	case c.OS == "darwin" && c.Arch == "arm64":
+	case c.OS == "linux" && (c.Arch == "arm64" || c.Arch == "amd64"):
+	default:
 		return nil, fmt.Errorf("%w: %s/%s", ErrUnsupportedGuest, c.OS, c.Arch)
 	}
 	if c.DiskFormat != "" && c.DiskFormat != "raw" {
@@ -121,16 +140,34 @@ func (b Bundle) LoadConfig() (*Config, error) {
 	return &c, nil
 }
 
-// Verify checks that all three bundle files exist and are non-empty.
+// Verify checks that config.json and nvram.bin exist and are non-empty, and
+// that the disk is present in whichever form this bundle currently keeps it
+// in — DiskPath (every fresh pull) or VHDXPath (windows, once converted and
+// DiskPath removed; see prepareBundleDisk). Accepting either, rather than
+// requiring DiskPath specifically, is what lets a windows bundle reclaim the
+// raw copy's disk space without this cache-hit check forcing a full re-pull
+// on every subsequent Ensure.
 func (b Bundle) Verify() error {
-	for _, f := range BundleFiles {
-		fi, err := os.Stat(filepath.Join(string(b), f))
-		if err != nil {
-			return fmt.Errorf("bundle missing %s: %w", f, err)
+	for _, f := range []string{"config.json", "nvram.bin"} {
+		if err := verifyNonEmpty(filepath.Join(string(b), f)); err != nil {
+			return err
 		}
-		if fi.Size() == 0 {
-			return fmt.Errorf("bundle file %s is empty", f)
-		}
+	}
+	diskErr := verifyNonEmpty(b.DiskPath())
+	vhdxErr := verifyNonEmpty(b.VHDXPath())
+	if diskErr != nil && vhdxErr != nil {
+		return fmt.Errorf("bundle has neither disk.img nor disk.vhdx: %w", diskErr)
+	}
+	return nil
+}
+
+func verifyNonEmpty(path string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("bundle missing %s: %w", filepath.Base(path), err)
+	}
+	if fi.Size() == 0 {
+		return fmt.Errorf("bundle file %s is empty", filepath.Base(path))
 	}
 	return nil
 }

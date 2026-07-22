@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "clone_darwin.go",
         "clone_other.go",
+        "clone_windows.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/clonefile",
     visibility = ["//:__subpackages__"],

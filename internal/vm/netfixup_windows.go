@@ -5,6 +5,7 @@ package vm
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"strings"
 	"time"
@@ -85,6 +86,14 @@ func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) er
 	}
 	if !strings.Contains(out, "inet ") {
 		return fmt.Errorf("network fixup did not bring up eth0 with an address; console output: %q", out)
+	}
+
+	// Best-effort: log the console session out so the authenticated shell
+	// doesn't linger for the guest's whole active lifetime. Whether Hyper-V's
+	// own pipe-close would also have dropped it is unconfirmed; this doesn't
+	// depend on that either way.
+	if err := consoleWrite(ctx, conn, "exit\r\n"); err != nil {
+		slog.Warn("network fixup: logging out the console session failed; it may remain authenticated", "system_id", systemID, "err", err)
 	}
 	return nil
 }

@@ -20,8 +20,12 @@ const windowsServiceSID = `NT SERVICE\` + WindowsServiceName
 // read (and, via a second ACE, limited write) to every local user — exactly
 // the grant icaclsHomeArgs exists to strip before anything is staged into the
 // home, so a freshly created (or freshly reinstalled) tree is never
-// world-readable even for the brief window before /grant runs.
-const programDataLeakGroup = `BUILTIN\Users`
+// world-readable even for the brief window before /grant runs. Given as the
+// well-known SID (S-1-5-32-545, BUILTIN\Users) rather than the display name:
+// icacls resolves a bare name through the OS's own locale-dependent principal
+// lookup, so a non-English-locale host could fail to match this on
+// /remove:g — the `*SID` form icacls also accepts sidesteps that entirely.
+const programDataLeakGroup = `*S-1-5-32-545`
 
 // icaclsHomeArgs is the home ACL reset scmInstaller.Install runs, in order:
 //

@@ -95,7 +95,7 @@ func TestProvisionScriptStagesExactTarball(t *testing.T) {
 		{"darwin", "actions-runner-osx-arm64-2.320.0.tar.gz"},
 		{"linux", "actions-runner-linux-arm64-2.320.0.tar.gz"},
 	} {
-		script, err := provisionScript(tc.goos, tc.name, nil, nil)
+		script, err := provisionScript(tc.goos, tc.name, nil, nil, false)
 		if err != nil {
 			t.Fatalf("%s: provisionScript(%q): %v", tc.goos, tc.name, err)
 		}
@@ -114,51 +114,46 @@ func TestProvisionScriptStagesExactTarball(t *testing.T) {
 	}
 }
 
-// On a windows host, a linux guest's provision script must skip the virtiofs
-// mount entirely (schema 2.1 has no working live share device for a stock
-// Linux guest) and read the tarball from where PushRunnerTarball stages it
-// instead. hostGOOS is the swappable indirection over runtime.GOOS (mirroring
-// images.go's prepareBundleDiskFn) that lets this run on any host.
-func TestProvisionScriptLinuxSkipsMountOnWindowsHost(t *testing.T) {
-	orig := hostGOOS
-	t.Cleanup(func() { hostGOOS = orig })
-
+// When the caller's needsPush is true (the boot backend's own
+// vm.Machine.NeedsRunnerPush(), threaded through by the state machine), a
+// linux guest's provision script must skip the virtiofs mount entirely
+// (schema 2.1 has no working live share device for a stock Linux guest on a
+// bare compute system) and read the tarball from where PushRunnerTarball
+// stages it instead.
+func TestProvisionScriptLinuxSkipsMountWhenPushed(t *testing.T) {
 	const tarball = "actions-runner-linux-amd64-2.320.0.tar.gz"
 
-	hostGOOS = "windows"
-	script, err := provisionScript("linux", tarball, nil, nil)
+	script, err := provisionScript("linux", tarball, nil, nil, true)
 	if err != nil {
 		t.Fatalf("provisionScript: %v", err)
 	}
 	if strings.Contains(script, "mount") {
-		t.Errorf("windows-host linux script must not attempt any mount:\n%s", script)
+		t.Errorf("pushed linux script must not attempt any mount:\n%s", script)
 	}
 	if !strings.Contains(script, `CACHE="$HOME/`+runnerPushCacheDir+`"`) {
-		t.Errorf("windows-host linux script must read from $HOME/%s, got:\n%s", runnerPushCacheDir, script)
+		t.Errorf("pushed linux script must read from $HOME/%s, got:\n%s", runnerPushCacheDir, script)
 	}
 	if !strings.Contains(script, `TARBALL="$CACHE/`+tarball+`"`) {
-		t.Errorf("windows-host linux script must still stage the exact tarball %q:\n%s", tarball, script)
+		t.Errorf("pushed linux script must still stage the exact tarball %q:\n%s", tarball, script)
 	}
 
-	hostGOOS = "darwin"
-	script, err = provisionScript("linux", tarball, nil, nil)
+	script, err = provisionScript("linux", tarball, nil, nil, false)
 	if err != nil {
 		t.Fatalf("provisionScript: %v", err)
 	}
 	if !strings.Contains(script, "mount -t virtiofs") {
-		t.Errorf("darwin-host linux script must still mount virtiofs, got:\n%s", script)
+		t.Errorf("unpushed linux script must still mount virtiofs, got:\n%s", script)
 	}
 
-	// The darwin GUEST script is untouched by the HOST switch either way.
-	hostGOOS = "windows"
+	// The darwin GUEST script is unaffected by needsPush either way.
 	const darwinTarball = "actions-runner-osx-arm64-2.320.0.tar.gz"
-	darwinScript, err := provisionScript("darwin", darwinTarball, nil, nil)
+	darwinScript, err := provisionScript("darwin", darwinTarball, nil, nil, true)
 	if err != nil {
 		t.Fatalf("provisionScript: %v", err)
 	}
 	want := strings.ReplaceAll(provisionScriptDarwin, runnerTarballPlaceholder, darwinTarball)
 	if darwinScript != want {
-		t.Errorf("darwin guest script must be unaffected by hostGOOS, got:\n%s\nwant:\n%s", darwinScript, want)
+		t.Errorf("darwin guest script must be unaffected by needsPush, got:\n%s\nwant:\n%s", darwinScript, want)
 	}
 }
 
@@ -174,7 +169,7 @@ func TestProvisionScriptRejectsBadName(t *testing.T) {
 		"actions-runner-osx-arm64-2.320.0", // no .tar.gz
 		"foo bar.tar.gz",
 	} {
-		if _, err := provisionScript("darwin", bad, nil, nil); err == nil {
+		if _, err := provisionScript("darwin", bad, nil, nil, false); err == nil {
 			t.Errorf("provisionScript accepted an unsafe tarball name %q", bad)
 		}
 	}
@@ -207,7 +202,7 @@ func TestProvisionScriptInjectsGuestEnv(t *testing.T) {
 	const tarball = "actions-runner-osx-arm64-2.320.0.tar.gz"
 	script, err := provisionScript("darwin", tarball, map[string]string{
 		"HTTPS_PROXY": "socks5h://192.168.64.1:1080",
-	}, nil)
+	}, nil, false)
 	if err != nil {
 		t.Fatalf("provisionScript: %v", err)
 	}
@@ -225,7 +220,7 @@ func TestProvisionScriptInjectsGuestEnv(t *testing.T) {
 // pure no-op, never a stray blank line or export.
 func TestProvisionScriptNoGuestEnvIsInert(t *testing.T) {
 	const tarball = "actions-runner-osx-arm64-2.320.0.tar.gz"
-	script, err := provisionScript("darwin", tarball, nil, nil)
+	script, err := provisionScript("darwin", tarball, nil, nil, false)
 	if err != nil {
 		t.Fatalf("provisionScript: %v", err)
 	}
@@ -256,7 +251,7 @@ func TestProvisionScriptInjectsGuestSetupAfterGuestEnv(t *testing.T) {
 	const tarball = "actions-runner-osx-arm64-2.320.0.tar.gz"
 	script, err := provisionScript("darwin", tarball,
 		map[string]string{"HTTPS_PROXY": "socks5h://192.168.64.1:1080"},
-		[]string{"defaults write com.apple.dt.Xcode IDEPackageSupportUseBuiltinSCM -bool YES"})
+		[]string{"defaults write com.apple.dt.Xcode IDEPackageSupportUseBuiltinSCM -bool YES"}, false)
 	if err != nil {
 		t.Fatalf("provisionScript: %v", err)
 	}
@@ -275,11 +270,11 @@ func TestProvisionScriptInjectsGuestSetupAfterGuestEnv(t *testing.T) {
 // a pure no-op.
 func TestProvisionScriptNoGuestSetupIsInert(t *testing.T) {
 	const tarball = "actions-runner-osx-arm64-2.320.0.tar.gz"
-	without, err := provisionScript("darwin", tarball, nil, nil)
+	without, err := provisionScript("darwin", tarball, nil, nil, false)
 	if err != nil {
 		t.Fatalf("provisionScript: %v", err)
 	}
-	withEmpty, err := provisionScript("darwin", tarball, nil, []string{})
+	withEmpty, err := provisionScript("darwin", tarball, nil, []string{}, false)
 	if err != nil {
 		t.Fatalf("provisionScript: %v", err)
 	}

@@ -117,15 +117,20 @@ type Guest interface {
 	// StartRunner stages the actions runner from the cache share and launches
 	// run.sh with the JIT config; goos selects the per-OS provision path and
 	// runnerTarball is the exact tarball basename to stage (this cycle's
-	// resolved RunnerVersion), not a glob. It deliberately takes a plain
-	// context: the ctx is the proc's LIFETIME — the whole cycle, outliving
-	// PROVISION's deadline, cancelled by operator recycle or daemon shutdown —
-	// not an operation bound; session establishment is bounded internally by
-	// sshx's socket deadlines. env is the pool's guest_env, exported into the
-	// guest shell before run.sh launches so the runner and its job steps inherit
-	// it. setup is the pool's guest_setup, run after the env exports for
-	// system-level configuration env vars can't express.
-	StartRunner(ctx context.Context, jit, goos, runnerTarball string, env map[string]string, setup []string) (Proc, error)
+	// resolved RunnerVersion), not a glob. needsPush is the boot backend's own
+	// vm.Machine.NeedsRunnerPush() value, threaded through by the caller (the
+	// same value that gated whether PushRunnerTarball ran) rather than
+	// re-derived here, so there is exactly one source of truth for whether the
+	// guest has a live share or a pushed cache dir to stage from. It
+	// deliberately takes a plain context: the ctx is the proc's LIFETIME — the
+	// whole cycle, outliving PROVISION's deadline, cancelled by operator
+	// recycle or daemon shutdown — not an operation bound; session
+	// establishment is bounded internally by sshx's socket deadlines. env is
+	// the pool's guest_env, exported into the guest shell before run.sh
+	// launches so the runner and its job steps inherit it. setup is the pool's
+	// guest_setup, run after the env exports for system-level configuration
+	// env vars can't express.
+	StartRunner(ctx context.Context, jit, goos, runnerTarball string, env map[string]string, setup []string, needsPush bool) (Proc, error)
 	// PushRunnerTarball streams the local runner tarball at localPath to the
 	// guest's own runner-cache location, for a boot backend that couldn't
 	// attach RunnerShareDir as a live share (see vm.Machine.NeedsRunnerPush).

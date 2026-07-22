@@ -20,3 +20,7 @@ func cloner() statemachine.Cloner {
 // vmPreflight is windows-specific (see platform_windows.go); not applicable
 // here, so the doctor's caller never surfaces this check on darwin.
 func vmPreflight() (bool, string) { return true, "" }
+
+// vmBackendName identifies the VM backend for the telemetry resource
+// attribute (see telemetry.Setup's backend param).
+func vmBackendName() string { return "vz" }

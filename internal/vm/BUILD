@@ -26,6 +26,7 @@ go_library(
             "@com_github_code_hex_vz_v3//:vz",
         ],
         "@rules_go//go/platform:windows": [
+            "//internal/obs",
             "//internal/winhcs/hcn",
             "//internal/winhcs/hcs",
             "//internal/winhcs/hcs/schema2",

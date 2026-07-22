@@ -106,6 +106,37 @@ func TestScopelessContextIsPlainCall(t *testing.T) {
 	}
 }
 
+// Milestone must emit exactly one KindActionMilestone carrying the given
+// name, stamped with the caller's scope (cycle identity and step) the same
+// way every other Emit-based call is.
+func TestMilestoneCarriesNameAndScope(t *testing.T) {
+	var got []Event
+	emit := func(e Event) { got = append(got, e) }
+	ctx := WithStep(WithCycle(context.Background(), emit, testCycle()), "AWAIT_IP")
+
+	Milestone(ctx, "netplan-verified")
+
+	if len(got) != 1 {
+		t.Fatalf("got %d events, want 1", len(got))
+	}
+	e := got[0]
+	if e.Kind != KindActionMilestone {
+		t.Errorf("Kind = %q, want %q", e.Kind, KindActionMilestone)
+	}
+	if e.Milestone == nil || e.Milestone.Name != "netplan-verified" {
+		t.Errorf("Milestone = %+v, want Name=netplan-verified", e.Milestone)
+	}
+	if e.Step != "AWAIT_IP" {
+		t.Errorf("Step = %q, want AWAIT_IP", e.Step)
+	}
+}
+
+// Milestone on a context with no scope at all must be a safe no-op, the
+// same degradation every other Emit-based call in this package guarantees.
+func TestMilestoneNoScopeIsNoOp(t *testing.T) {
+	Milestone(context.Background(), "should-not-appear")
+}
+
 // Action must emit ActionStarted then ActionEnded, and ActionEnded must
 // carry outcome, error, and a non-negative duration.
 func TestActionCapturesOutcomeErrorDuration(t *testing.T) {

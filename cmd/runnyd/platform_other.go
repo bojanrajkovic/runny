@@ -32,3 +32,9 @@ func cloner() statemachine.Cloner {
 // vmPreflight is windows-specific (see platform_windows.go); not applicable
 // here, so the doctor's caller never surfaces this check on this platform.
 func vmPreflight() (bool, string) { return true, "" }
+
+// vmBackendName identifies the VM backend for the telemetry resource
+// attribute (see telemetry.Setup's backend param) — a build with no real
+// backend still reports one, so a fleet's traces/metrics never show an
+// empty/missing value for a host that's simply unsupported.
+func vmBackendName() string { return "unsupported" }

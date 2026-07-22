@@ -37,3 +37,7 @@ func vmPreflight() (bool, string) {
 	}
 	return true, fmt.Sprintf("windows/%s, build %d, Default Switch resolvable", runtime.GOARCH, osversion.Build())
 }
+
+// vmBackendName identifies the VM backend for the telemetry resource
+// attribute (see telemetry.Setup's backend param).
+func vmBackendName() string { return "hcs" }

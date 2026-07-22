@@ -243,7 +243,7 @@ func run(parent context.Context) error {
 	// Off by default: cfg.Observability.OTLP.Endpoint == "" installs nothing
 	// and otlpShutdown is a no-op, so an unconfigured daemon runs identically
 	// to one built without this package.
-	otlpShutdown, err := telemetry.Setup(ctx, cfg.Observability.OTLP, version, prefix, logger)
+	otlpShutdown, err := telemetry.Setup(ctx, cfg.Observability.OTLP, version, prefix, vmBackendName(), logger)
 	if err != nil {
 		return fmt.Errorf("telemetry: %w", err)
 	}

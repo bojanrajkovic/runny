@@ -167,6 +167,8 @@ func (a *traceAssembler) emit(e obs.Event) {
 		a.httpRoundTrip(e)
 	case obs.KindDetail:
 		a.detail(e)
+	case obs.KindActionMilestone:
+		a.actionMilestone(e)
 	case obs.KindVMInfo:
 		a.vmInfo(e)
 	case obs.KindImageInfo:
@@ -363,6 +365,26 @@ func (a *traceAssembler) detail(e obs.Event) {
 		default:
 			ss.lastDetail = e.Detail.Text
 		}
+	})
+}
+
+// actionMilestone renders one KindActionMilestone as a genuine, distinctly-
+// timestamped span event on the currently open action — unlike detail's
+// last-value-wins attribute, every milestone survives independently, so a
+// multi-stage action's trace shows which stage was reached and when, not
+// just its final outcome. Action-scoped only, by design: a milestone fired
+// with no action currently open (misuse — see Milestone's own doc comment)
+// has nothing to attach to and is silently dropped, the same degrade-to-
+// no-op the rest of this package uses for a stray or scope-less event.
+func (a *traceAssembler) actionMilestone(e obs.Event) {
+	if e.Milestone == nil {
+		return
+	}
+	a.withStep(e, func(cs *cycleSpans, ss *stepSpans) {
+		if ss.current == nil {
+			return
+		}
+		ss.current.span.AddEvent(e.Milestone.Name, trace.WithTimestamp(e.Time))
 	})
 }
 

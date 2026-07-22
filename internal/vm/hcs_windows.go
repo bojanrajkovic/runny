@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
+	"github.com/bojanrajkovic/runny/internal/obs"
 	"github.com/bojanrajkovic/runny/internal/tart"
 	"github.com/bojanrajkovic/runny/internal/winhcs/hcn"
 	"github.com/bojanrajkovic/runny/internal/winhcs/hcs"
@@ -381,7 +382,16 @@ func (m *hcsMachine) WaitIP(ctx bounded.Context) (string, error) {
 				return "", fmt.Errorf("no IP after %s and no SSHUser/SSHPassword configured to attempt the network fixup (issue #319)", waitIPGracePeriod)
 			}
 			fixedUp = true
-			if err := fixupNetwork(ctx, m.systemID, m.sshUser, m.sshPassword); err != nil {
+			// Wrapped in its own named action (not folded silently into
+			// AWAIT_IP's step span) so a trace/metric can distinguish "this
+			// cycle needed the fixup" from "HNS was just slow" -- the two
+			// looked identical before (issue #320's 4th comment: an
+			// AWAIT_SSH failure on an IP WaitIP had just reported as good,
+			// with nothing correlating it back to the fixup-fallback path).
+			if err := obs.Action(ctx, obs.ActionNetworkFixup, func(context.Context) error {
+				obs.Milestone(ctx, "grace-period-elapsed")
+				return fixupNetwork(ctx, m.systemID, m.sshUser, m.sshPassword)
+			}); err != nil {
 				return "", fmt.Errorf("network fixup: %w", err)
 			}
 		}

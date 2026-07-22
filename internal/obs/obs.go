@@ -39,6 +39,13 @@ const (
 	// whichever cycle triggered it, unlike a shared image pull (see pull.go
 	// for the pull-scoped kinds).
 	KindTarballDone Kind = "tarball_done"
+	// KindActionMilestone marks a discrete, named point in time within the
+	// currently open action — unlike KindDetail (a last-value-wins
+	// progress annotation collapsed onto whichever span closes next),
+	// every milestone renders as its own timestamped span event, so a
+	// multi-stage action (see Milestone) can show which stage was reached
+	// and when, not just its final outcome.
+	KindActionMilestone Kind = "action_milestone"
 )
 
 // Action names are a closed set: each becomes a span name on the trace side
@@ -60,6 +67,8 @@ const (
 	ActionResolve       = "resolve"        // registry manifest round-trip → digest
 	ActionTarballEnsure = "tarball-ensure" // runner-tarball resolve + download (or cache hit)
 	ActionWaitForPull   = "wait-for-pull"  // time subscribed to the shared pull actor
+	// AWAIT_IP (windows only).
+	ActionNetworkFixup = "network-fixup" // console-driven netplan fixup fallback (issue #319/#320)
 )
 
 // Attr keys are closed-set for the same reason action names are: a typo'd
@@ -161,6 +170,16 @@ type DetailEvent struct {
 	Text string
 }
 
+// ActionMilestoneEvent names a discrete point reached within the currently
+// open action (see Milestone). Name is a short, closed-set-by-convention
+// label (a call site's own constant, not guest- or operator-controlled
+// text) — unlike DetailEvent.Text, which is meant for free-form progress
+// text, a milestone name becomes a span event name, so it should read like
+// "netplan-applied", not a sentence.
+type ActionMilestoneEvent struct {
+	Name string
+}
+
 // VMEvent carries VM identity learned mid-cycle (MAC, then IP).
 type VMEvent struct {
 	MAC string
@@ -241,18 +260,19 @@ type Event struct {
 	Step  string
 	Kind  Kind
 
-	StepInfo *StepEvent
-	Action   *ActionEvent
-	HTTP     *HTTPEvent
-	Detail   *DetailEvent
-	VM       *VMEvent
-	Image    *ImageEvent
-	Runner   *RunnerEvent
-	Job      *JobEvent
-	Audit    *AuditEvent
-	Finish   *FinishEvent
-	PullInfo *PullEvent
-	Tarball  *TarballEvent
+	StepInfo  *StepEvent
+	Action    *ActionEvent
+	HTTP      *HTTPEvent
+	Detail    *DetailEvent
+	VM        *VMEvent
+	Image     *ImageEvent
+	Runner    *RunnerEvent
+	Job       *JobEvent
+	Audit     *AuditEvent
+	Finish    *FinishEvent
+	PullInfo  *PullEvent
+	Tarball   *TarballEvent
+	Milestone *ActionMilestoneEvent
 }
 
 // Emitter receives every event a scope produces. Installed by the daemon;
@@ -395,4 +415,15 @@ func Action(ctx context.Context, name string, fn func(context.Context) error, at
 	}})
 
 	return err
+}
+
+// Milestone marks a discrete, named point in time within the currently open
+// action — sugar over Emit(KindActionMilestone), the same way Action is
+// sugar over Emit(KindAction{Started,Ended}). Call it only from within (or
+// downstream of) an Action's fn: a milestone fired with no action currently
+// open on ctx's step has nothing to attach to and is dropped by the trace
+// consumer. On a context with no scope (or a nil emitter), a safe no-op —
+// domain packages call it without knowing or caring which case applies.
+func Milestone(ctx context.Context, name string) {
+	Emit(ctx, Event{Kind: KindActionMilestone, Milestone: &ActionMilestoneEvent{Name: name}})
 }

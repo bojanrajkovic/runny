@@ -34,6 +34,21 @@ zero logic divergence -- but it must be repeated on every re-vendor, the same
 as the import-path rewrite itself. `hcn`, `computestorage`, and `osversion`
 were never nested this way upstream, so they're unaffected.
 
+**The flatten has a Bazel-only half, easy to miss.** gazelle regenerates each
+package's `importpath` on the Go path alone, but does not widen an existing
+`visibility` attribute on its own -- the flatten PR left `hcs` and
+`hcs/schema2` (and, latently, every other previously-nested package) at
+gazelle's original `visibility = ["//internal/winhcs:__subpackages__"]`,
+scoped for the OLD double-`internal/` layout. `go build`/`go vet` don't
+enforce Bazel visibility at all, so this passed silently until
+`internal/vm/hcs_windows.go` tried to depend on `hcs`/`hcs/schema2` through
+Bazel and hit "target ... is not visible from target //internal/vm:vm". Widen
+the specific package's `visibility` to `["//:__subpackages__"]` (matching
+`hcn`/`computestorage`/`osversion`, which were never nested and so never had
+this problem) the moment something outside `internal/winhcs` needs to depend
+on it -- gazelle preserves a manually-widened `visibility` on later runs, it
+just never widens one itself.
+
 ## Vendored packages
 
 The package tree under this directory (`bazel query //internal/winhcs/...`,

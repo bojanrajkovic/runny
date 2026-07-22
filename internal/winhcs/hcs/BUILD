@@ -13,7 +13,7 @@ go_library(
         "waithelper.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/winhcs/hcs",
-    visibility = ["//internal/winhcs:__subpackages__"],
+    visibility = ["//:__subpackages__"],
     deps = select({
         "@rules_go//go/platform:windows": [
             "//internal/winhcs/computestorage",

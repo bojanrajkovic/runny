@@ -173,6 +173,7 @@ go_test(
     deps = [
         "//internal/home",
         "//internal/launchd",
+        "//internal/oci",
         "//internal/socket",
         "//internal/statemachine",
         "//internal/sysdaemon",

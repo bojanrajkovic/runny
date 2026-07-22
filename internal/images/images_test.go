@@ -2,11 +2,13 @@ package images
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +18,19 @@ import (
 	"github.com/bojanrajkovic/runny/internal/oci"
 	"github.com/bojanrajkovic/runny/internal/tart"
 )
+
+// TestMain stubs prepareBundleDiskFn as a no-op for this package's whole test
+// suite by default. prepareBundleDisk's real, windows-only VHDX conversion
+// behavior is internal/vhdx's test suite's job -- this package's fakes
+// (fakeBundle's placeholder disk.img, puller_test.go's in-memory-only fake
+// attempt functions) were never meant to be real convertible images, so
+// running the real implementation against them fails on windows for reasons
+// unrelated to whatever each test actually checks. The two tests that cover
+// prepareBundleDiskFn's call sites directly (below) override it locally.
+func TestMain(m *testing.M) {
+	prepareBundleDiskFn = func(tart.Bundle) error { return nil }
+	os.Exit(m.Run())
+}
 
 // eventCapture collects obs events; the emitter can fire from the puller's
 // goroutine, so appends are locked.
@@ -148,6 +163,73 @@ func TestEnsureCacheHitEmitsNoWaitForPull(t *testing.T) {
 	}
 	if got := cap.actionEvents(obs.ActionWaitForPull); len(got) != 0 {
 		t.Errorf("cache hit emitted wait-for-pull events: %+v", got)
+	}
+}
+
+// The cache-hit fast path must run prepareBundleDiskFn before declaring the
+// bundle done -- a raw-only bundle (disk.img present, no disk.vhdx yet, e.g.
+// a windows conversion interrupted by a crash before imagePuller.run ever
+// got to it) reaches this path directly and never touches the puller at
+// all, so this is the only place left that can convert it.
+func TestEnsureCacheHitRunsPrepareBundleDisk(t *testing.T) {
+	cap := &eventCapture{}
+	dir := t.TempDir()
+	ref := oci.Ref{Host: "h", Name: "n", Tag: "t"}
+	fakeBundle(t, home.Dir(dir).ImageBundleDir(ref.String(), "sha256:hit"))
+
+	var called atomic.Bool
+	prev := prepareBundleDiskFn
+	prepareBundleDiskFn = func(tart.Bundle) error {
+		called.Store(true)
+		return nil
+	}
+	t.Cleanup(func() { prepareBundleDiskFn = prev })
+
+	e := &Ensurer{
+		Home:    home.Dir(dir),
+		Ref:     ref,
+		resolve: func(ctx context.Context) (string, error) { return "sha256:hit", nil },
+		acquire: func(string, oci.Ref, func(string)) (chan ensureResult, func()) {
+			t.Error("cache hit must not subscribe to the shared puller")
+			return nil, nil
+		},
+	}
+
+	if _, _, _, err := e.Ensure(scopedCtx(cap), nil, nil); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if !called.Load() {
+		t.Error("cache-hit path did not run prepareBundleDiskFn")
+	}
+}
+
+// A prepareBundleDiskFn failure on the cache-hit path must surface as an
+// Ensure error -- silently returning the unconverted bundle would leave a
+// windows caller to fail later at CloneVHDX with a far less obvious cause.
+func TestEnsureCacheHitPrepareBundleDiskFailureSurfaces(t *testing.T) {
+	cap := &eventCapture{}
+	dir := t.TempDir()
+	ref := oci.Ref{Host: "h", Name: "n", Tag: "t"}
+	fakeBundle(t, home.Dir(dir).ImageBundleDir(ref.String(), "sha256:hit"))
+
+	wantErr := errors.New("conversion failed")
+	prev := prepareBundleDiskFn
+	prepareBundleDiskFn = func(tart.Bundle) error { return wantErr }
+	t.Cleanup(func() { prepareBundleDiskFn = prev })
+
+	e := &Ensurer{
+		Home:    home.Dir(dir),
+		Ref:     ref,
+		resolve: func(ctx context.Context) (string, error) { return "sha256:hit", nil },
+		acquire: func(string, oci.Ref, func(string)) (chan ensureResult, func()) {
+			t.Error("cache hit must not subscribe to the shared puller")
+			return nil, nil
+		},
+	}
+
+	_, _, _, err := e.Ensure(scopedCtx(cap), nil, nil)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Ensure err = %v, want wrapping %v", err, wantErr)
 	}
 }
 

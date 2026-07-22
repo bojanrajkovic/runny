@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/bojanrajkovic/runny/internal/home"
+	"github.com/bojanrajkovic/runny/internal/oci"
 	"github.com/bojanrajkovic/runny/internal/socket"
 	"github.com/bojanrajkovic/runny/internal/sysdaemon"
 )
@@ -203,8 +204,15 @@ func TestCheckDiskHeadroomImageAware(t *testing.T) {
 	const GiB = uint64(1 << 30)
 	const imageSize = int64(100 << 30) // 100 GiB image, compressed to something smaller on-disk
 
-	// Host has 48 GiB free — passes the old 30 GiB floor, fails for a 100 GiB image.
-	// (pull guard needs 100 + 2 = 102 GiB, host has 48 → doomed pull)
+	// floor is checkDiskHeadroom's own formula, computed here rather than
+	// hardcoded — oci.RequiredHeadroom's margin is platform-specific
+	// (windows needs roughly a second full-size copy during VHDX
+	// conversion; elsewhere just a flat safety margin), so a literal
+	// expected value would only be correct on one platform.
+	floor := uint64(imageSize) + oci.RequiredHeadroom(imageSize)
+
+	// Host has 48 GiB free — passes the old 30 GiB floor, fails for a 100 GiB
+	// image on every platform (48 GiB is below the floor regardless of margin shape).
 	ok, detail := checkDiskHeadroom(48*GiB, imageSize)
 	if ok {
 		t.Errorf("checkDiskHeadroom(48GiB, 100GiB image) = ok, want fail: host can't pull the image")
@@ -213,13 +221,19 @@ func TestCheckDiskHeadroomImageAware(t *testing.T) {
 		t.Errorf("detail %q should reference image size", detail)
 	}
 
-	// Host has 110 GiB free — enough for 100 GiB image + 2 GiB headroom.
-	ok, detail = checkDiskHeadroom(110*GiB, imageSize)
+	// Exactly at the floor: must pass. One GiB short: must fail.
+	ok, detail = checkDiskHeadroom(floor, imageSize)
 	if !ok {
-		t.Errorf("checkDiskHeadroom(110GiB, 100GiB image) = fail %q, want ok", detail)
+		t.Errorf("checkDiskHeadroom(floor, 100GiB image) = fail %q, want ok", detail)
+	}
+	ok, _ = checkDiskHeadroom(floor-GiB, imageSize)
+	if ok {
+		t.Error("checkDiskHeadroom(floor-1GiB, 100GiB image) = ok, want fail")
 	}
 
-	// No image size (maxImageBytes = 0): falls back to 30 GiB floor.
+	// No image size (maxImageBytes = 0): falls back to 30 GiB floor —
+	// RequiredHeadroom(0) never exceeds it on any platform (windows' margin
+	// is total-relative, and total is 0 here).
 	ok, _ = checkDiskHeadroom(29*GiB, 0)
 	if ok {
 		t.Error("checkDiskHeadroom(29GiB, no image) = ok, want fail: below 30 GiB fallback floor")
@@ -230,16 +244,16 @@ func TestCheckDiskHeadroomImageAware(t *testing.T) {
 	}
 
 	// Non-GiB-aligned image size: exact byte comparison catches this without
-	// ceiling division. floor = 100.5 GiB + 2 GiB = 102.5 GiB exactly;
-	// 102 GiB of free space is less than the floor, so it must fail.
+	// ceiling division.
 	nonAligned := int64(100<<30) + int64(512<<20) // 100.5 GiB
-	ok, _ = checkDiskHeadroom(102*GiB, nonAligned)
+	nonAlignedFloor := uint64(nonAligned) + oci.RequiredHeadroom(nonAligned)
+	ok, _ = checkDiskHeadroom(nonAlignedFloor-GiB, nonAligned)
 	if ok {
-		t.Error("checkDiskHeadroom(102GiB, 100.5GiB image) = ok, want fail: exact floor is 102.5GiB")
+		t.Error("checkDiskHeadroom(floor-1GiB, 100.5GiB image) = ok, want fail")
 	}
-	ok, _ = checkDiskHeadroom(103*GiB, nonAligned)
+	ok, _ = checkDiskHeadroom(nonAlignedFloor+GiB, nonAligned)
 	if !ok {
-		t.Error("checkDiskHeadroom(103GiB, 100.5GiB image) = fail, want ok")
+		t.Error("checkDiskHeadroom(floor+1GiB, 100.5GiB image) = fail, want ok")
 	}
 }
 

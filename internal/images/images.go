@@ -115,7 +115,7 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string), onDigestResol
 		if lerr != nil {
 			return "", "", "", fmt.Errorf("waiting to convert cached bundle: %w", lerr)
 		}
-		perr := prepareBundleDisk(bundle)
+		perr := prepareBundleDiskFn(bundle)
 		release()
 		if perr != nil {
 			return "", "", "", fmt.Errorf("converting cached bundle: %w", perr)
@@ -332,6 +332,15 @@ var tarballLocks sync.Map // filename -> chan struct{} (capacity-1 semaphore)
 // tarballLocks and oci's pullLocks already use for the identical class of
 // problem.
 var vhdxConvertLocks sync.Map // bundle dir -> chan struct{} (capacity-1 semaphore)
+
+// prepareBundleDiskFn is prepareBundleDisk, swappable in tests. Both call
+// sites below (Ensure's cache-hit branch and imagePuller.run) go through it
+// rather than calling prepareBundleDisk directly, so orchestration tests can
+// stub out the real, windows-only VHDX conversion instead of exercising it
+// against a fake bundle's placeholder disk.img -- prepareBundleDisk's own
+// conversion behavior is internal/vhdx's test suite's job, not duplicated
+// here.
+var prepareBundleDiskFn = prepareBundleDisk
 
 // tarballReserved tracks tarballs that Ensure() has resolved and downloaded
 // but whose RunnerVersion has not yet been published to slot status (the FSM

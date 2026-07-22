@@ -264,7 +264,7 @@ func (p *imagePuller) run() {
 				p.finish(ensureResult{err: fmt.Errorf("preparing bundle disk: %w", lerr)})
 				return
 			}
-			perr := prepareBundleDisk(bundle)
+			perr := prepareBundleDiskFn(bundle)
 			release()
 			if perr != nil {
 				// PullTo's own temp-dir+rename already guarantees "complete

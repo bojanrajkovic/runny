@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/bojanrajkovic/runny/internal/obs"
 	"github.com/bojanrajkovic/runny/internal/oci"
+	"github.com/bojanrajkovic/runny/internal/tart"
 )
 
 // testProto is the canonical test puller: stubbed-seam-ready, with short
@@ -107,6 +109,30 @@ func TestPullerSharesOutcomeAcrossSubscribers(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("attempt ran %d times, want exactly 1 (shared)", got)
+	}
+}
+
+// A prepareBundleDiskFn failure after a successful attempt wipes destDir
+// (no half-converted bundle left behind to poison a later Ensure's cache-hit
+// check forever) and finishes with the wrapped error, never a fabricated
+// success.
+func TestPullerPrepareBundleDiskFailureWipesDestDir(t *testing.T) {
+	dir := t.TempDir()
+	attempt := func(ctx context.Context) (string, error) { return "sha256:x", nil }
+
+	wantErr := errors.New("conversion failed")
+	prev := prepareBundleDiskFn
+	prepareBundleDiskFn = func(tart.Bundle) error { return wantErr }
+	t.Cleanup(func() { prepareBundleDiskFn = prev })
+
+	sub, rel := testAcquire(t, dir, nil, attempt, okFree(0))
+	defer rel()
+	r := recvWithin(t, sub, time.Second)
+	if !errors.Is(r.err, wantErr) {
+		t.Fatalf("puller err = %v, want wrapping %v", r.err, wantErr)
+	}
+	if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+		t.Errorf("destDir %s still exists after prepareBundleDiskFn failure, want wiped", dir)
 	}
 }
 

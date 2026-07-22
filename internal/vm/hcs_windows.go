@@ -4,6 +4,7 @@ package vm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -28,7 +29,10 @@ const (
 	// abandonedStopTimeout bounds the best-effort cleanup of a compute
 	// system whose Start blew its deadline — the same role
 	// vz_darwin.go's own abandonedStopTimeout plays for a wedged boot there,
-	// duplicated rather than shared since it's darwin-build-tagged.
+	// duplicated rather than shared since it's darwin-build-tagged. Also
+	// bounds reapPriorSystem's own cleanup of a system/endpoint left behind
+	// by an unclean prior shutdown — the same class of orphan, reaped at a
+	// different point in the lifecycle.
 	abandonedStopTimeout = 30 * time.Second
 
 	// forceStopTimeout bounds hcsStopOps.forceStop's own Terminate call — see
@@ -73,9 +77,23 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 		return nil, fmt.Errorf("resolving %q: %w", defaultSwitchName, err)
 	}
 
-	systemID := filepath.Base(string(bundle)) // the slot dir name: unique per cycle
+	// systemID is the slot dir name -- stable across every cycle that slot
+	// runs, NOT unique per cycle (the slot's own vmDir is reused cycle over
+	// cycle; only the cycle's own artifact dir under it gets a fresh random
+	// id). An unclean prior shutdown can leave a compute system and/or HNS
+	// endpoint registered under this exact ID/name, which would otherwise
+	// make CreateComputeSystem/CreateEndpoint below fail deterministically
+	// on every subsequent boot attempt for this slot -- reapPriorSystem
+	// clears that the same way CLONE's own RemoveAll(vmDir) self-heals a
+	// surviving clone file.
+	systemID := filepath.Base(string(bundle))
+	endpointName := "runny-" + systemID
+	if err := reapPriorSystem(systemID, endpointName); err != nil {
+		return nil, err
+	}
+
 	ep, err := network.CreateEndpoint(&hcn.HostComputeEndpoint{
-		Name:               "runny-" + systemID,
+		Name:               endpointName,
 		HostComputeNetwork: network.Id,
 		SchemaVersion:      hcn.V2SchemaVersion(),
 	})
@@ -239,6 +257,55 @@ func scrubNeighborEntry(mac string) {
 			return
 		}
 	}
+}
+
+// reapPriorSystem clears any compute system and/or HNS endpoint already
+// registered under systemID/endpointName before Boot creates fresh ones.
+// Both are stable per slot (see the systemID comment in Boot), so an
+// unclean prior shutdown -- a crash, kill -9, or a wedged Stop, none of
+// which reach hcsMachine.destroy, and even a clean System.Close does not
+// terminate a running system (see destroy's own doc comment) -- leaves a
+// leftover that would otherwise make CreateComputeSystem/CreateEndpoint
+// fail deterministically on every subsequent boot attempt for this slot,
+// forever, with no cold-start recovery. Uses its own bounded window rather
+// than Boot's ctx, matching abandonComputeSystem and forceStop's own
+// reasoning: this runs unconditionally at the top of every Boot, so it
+// must never eat into a healthy boot's deadline budget on the (expected to
+// be rare) path where there's nothing to reap.
+func reapPriorSystem(systemID, endpointName string) error {
+	ctx, cancel := bounded.WithTimeout(context.Background(), abandonedStopTimeout)
+	defer cancel()
+
+	system, sysErr := hcs.OpenComputeSystem(ctx, systemID)
+	if sysErr != nil && !hcs.IsNotExist(sysErr) {
+		return fmt.Errorf("checking for a stale compute system %s: %w", systemID, sysErr)
+	}
+	if system != nil {
+		slog.Warn("reaping compute system left behind by an unclean shutdown", "id", systemID)
+		if err := system.Terminate(ctx); err != nil {
+			slog.Error("reaping stale compute system: terminate failed", "id", systemID, "err", err)
+		}
+		if err := system.Close(); err != nil {
+			slog.Error("reaping stale compute system: close failed", "id", systemID, "err", err)
+		}
+	}
+
+	ep, epErr := hcn.GetEndpointByName(endpointName)
+	if epErr != nil {
+		var notFound hcn.EndpointNotFoundError
+		if errors.As(epErr, &notFound) {
+			return nil
+		}
+		return fmt.Errorf("checking for a stale HNS endpoint %q: %w", endpointName, epErr)
+	}
+	slog.Warn("reaping HNS endpoint left behind by an unclean shutdown", "id", ep.Id, "name", endpointName)
+	mac := ep.MacAddress
+	if err := ep.Delete(); err != nil {
+		slog.Error("reaping stale HNS endpoint: delete failed", "id", ep.Id, "err", err)
+		return nil
+	}
+	scrubNeighborEntry(mac)
+	return nil
 }
 
 // abandonComputeSystem is the failed-Start cleanup: nothing owns system or

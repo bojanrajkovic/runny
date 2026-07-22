@@ -34,8 +34,11 @@ func FindIPByMAC(leases, mac string) (string, bool) {
 	return "", false
 }
 
+// normalizeMAC accepts both the colon separator macOS's dhcpd_leases uses and
+// the dash separator Windows' hcn/Get-NetNeighbor use, so the same helper
+// backs WaitIP on both platforms.
 func normalizeMAC(s string) string {
-	parts := strings.Split(strings.TrimSpace(s), ":")
+	parts := strings.FieldsFunc(strings.TrimSpace(s), func(r rune) bool { return r == ':' || r == '-' })
 	out := make([]string, len(parts))
 	for i, p := range parts {
 		n, err := strconv.ParseUint(p, 16, 8)

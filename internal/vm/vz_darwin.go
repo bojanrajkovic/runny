@@ -24,10 +24,18 @@ var _ Manager = VZManager{}
 
 // Boot builds the VZ configuration from the bundle's tart config and starts
 // the guest, dispatching on the bundle's OS: the Mac platform
-// path for darwin, EFI for linux.
+// path for darwin, EFI for linux. checkHostArch (shared with hcs_windows.go)
+// rejects a bundle whose Arch doesn't match this host's own runtime.GOARCH —
+// LoadConfig's own validation is a portable shape check that deliberately
+// doesn't know which host it's running on, so a linux/amd64 bundle (a valid
+// shape for the Windows/HCS backend) would otherwise reach bootLinux
+// unchecked on an arm64 Mac, which can't execute it.
 func (m VZManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptions) (Machine, error) {
 	cfg, err := bundle.LoadConfig()
 	if err != nil {
+		return nil, err
+	}
+	if err := checkHostArch(cfg); err != nil {
 		return nil, err
 	}
 	switch cfg.OS {

@@ -1,20 +1,23 @@
-// Package vm boots tart-format bundles as macOS guests, in-process via
-// Virtualization.framework. The Manager/Machine seam exists so the
-// state machine tests against fakes on any OS; the real implementation is
-// darwin-only.
+// Package vm boots tart-format bundles as guest VMs, in-process — via
+// Virtualization.framework on darwin (vz_darwin.go) or bare Hyper-V compute
+// systems on windows (hcs_windows.go, ADR-0026). The Manager/Machine seam
+// exists so the state machine tests against fakes on any OS; the real
+// implementations are platform-specific.
 package vm
 
 import (
 	"errors"
+	"fmt"
+	"runtime"
 	"time"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
 	"github.com/bojanrajkovic/runny/internal/tart"
 )
 
-// ErrUnsupportedPlatform is returned when a boot is attempted on a
-// non-darwin build (the daemon's stub manager; see cmd/runnyd).
-var ErrUnsupportedPlatform = errors.New("vm boot requires darwin/arm64 (see -doctor)")
+// ErrUnsupportedPlatform is returned when a boot is attempted on a build with
+// no VM backend at all (the daemon's stub manager; see cmd/runnyd/platform_other.go).
+var ErrUnsupportedPlatform = errors.New("vm boot requires darwin/arm64 or windows (see -doctor)")
 
 // BootOptions configures one guest boot.
 type BootOptions struct {
@@ -51,4 +54,19 @@ type Machine interface {
 // Manager boots bundles.
 type Manager interface {
 	Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptions) (Machine, error)
+}
+
+// checkHostArch rejects a bundle whose Arch doesn't match this process's own
+// runtime.GOARCH — the host-capability half of guest validation that
+// tart.Bundle.LoadConfig deliberately leaves to each platform's own Boot
+// (LoadConfig is a portable shape check; neither Hyper-V nor
+// Virtualization.framework cross-emulates architectures, so "can THIS host
+// boot THIS arch" can only be answered here). Shared by vz_darwin.go and
+// hcs_windows.go so the two platforms can't independently drift on this
+// check the way they already did once (see ADR-0026).
+func checkHostArch(cfg *tart.Config) error {
+	if cfg.Arch != runtime.GOARCH {
+		return fmt.Errorf("%w: this host is %s, bundle is %s/%s", tart.ErrUnsupportedGuest, runtime.GOARCH, cfg.OS, cfg.Arch)
+	}
+	return nil
 }

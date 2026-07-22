@@ -169,7 +169,14 @@ func (s *scmInstaller) Install(ctx context.Context) error {
 
 // serviceConfig is the mgr.Config shared by every call site that creates or
 // updates the service (ensureService's two branches, Install's final
-// enable-auto-start), varying only StartType. BinaryPathName is pre-escaped
+// enable-auto-start), varying only StartType. ServiceType must be set
+// explicitly, not left at the zero value: x/sys/windows/svc/mgr's own
+// CreateService silently substitutes SERVICE_WIN32_OWN_PROCESS when it sees
+// a zero ServiceType, but UpdateConfig has no such fallback — it passes
+// ServiceType straight to ChangeServiceConfig, where 0 is neither a valid
+// service type nor SERVICE_NO_CHANGE (0xFFFFFFFF), so a reinstall over an
+// already-registered service failed outright with "The parameter is
+// incorrect" until this was set here too. BinaryPathName is pre-escaped
 // (syscall.EscapeArg, matching what CreateService already does internally
 // for its own separate exepath argument) since UpdateConfig passes it to
 // ChangeServiceConfig with no escaping of its own — an unquoted path
@@ -179,6 +186,7 @@ func (s *scmInstaller) Install(ctx context.Context) error {
 // setting it unconditionally is harmless there.
 func (s *scmInstaller) serviceConfig(startType uint32) mgr.Config {
 	return mgr.Config{
+		ServiceType:      windows.SERVICE_WIN32_OWN_PROCESS,
 		ServiceStartName: windowsServiceSID,
 		StartType:        startType,
 		SidType:          windows.SERVICE_SID_TYPE_UNRESTRICTED,
@@ -231,13 +239,55 @@ func (s *scmInstaller) ensureHome(ctx context.Context) error {
 		return fmt.Errorf("creating %s: %w", home.SystemHomeDir, err)
 	}
 	for _, args := range icaclsHomeArgs(home.SystemHomeDir, s.cfg.Operator) {
-		if _, err := s.run(ctx, args[0], args[1:]...); err != nil {
+		if _, err := s.runWithRetry(ctx, args[0], args[1:]...); err != nil {
 			return err
 		}
 	}
 	s.log("prepared %s (owned by %s, ACL grants %s + %s Modify)",
 		home.SystemHomeDir, windowsServiceSID, s.cfg.Operator, windowsServiceSID)
 	return nil
+}
+
+// icaclsRetries/icaclsRetryInterval bound runWithRetry's backoff — cheap
+// insurance against a genuinely transient handle collision (e.g. some other
+// process briefly opening a file under the tree ensureHome is re-ACLing),
+// not a fix for anything specific: the one failure mode that looked like a
+// multi-second version of this (retried past 30 attempts at 1s, same result
+// every time) turned out to be icaclsHomeArgs' /reset+/inheritance:r pair
+// deterministically emptying a directory's DACL before it could reach a
+// child — a real, non-transient bug, fixed by using /inheritance:d instead
+// (see icaclsHomeArgs' own doc comment) rather than by retrying around it.
+// Five attempts over ~3s costs nothing on the common case where nothing was
+// ever racing it, while still absorbing a brief, genuine collision.
+const icaclsRetries = 5
+
+// icaclsRetryInterval is a var, not a const, so tests can shrink it (same
+// seam shape as internal/vm/stop.go's stopSettle) rather than spending real
+// wall-clock time proving runWithRetry gives up after exhausting its budget.
+var icaclsRetryInterval = 500 * time.Millisecond
+
+// runWithRetry retries a single command a few times on failure — used only
+// for ensureHome's icacls calls (see icaclsRetries' doc comment for why).
+// Every other call site keeps calling s.run directly: a stager or service
+// operation failing isn't a transient-lock symptom, and retrying it would
+// just mask a real error behind a few seconds of silence.
+func (s *scmInstaller) runWithRetry(ctx context.Context, name string, args ...string) (string, error) {
+	var out string
+	var err error
+	for attempt := 0; attempt < icaclsRetries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return out, ctx.Err()
+			case <-time.After(icaclsRetryInterval):
+			}
+		}
+		out, err = s.run(ctx, name, args...)
+		if err == nil {
+			return out, nil
+		}
+	}
+	return out, err
 }
 
 // Uninstall removes the runnyd service AND the home. Unlike darwin, nothing is

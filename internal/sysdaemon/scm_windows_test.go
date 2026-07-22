@@ -108,11 +108,26 @@ func (f *fakeMgr) Disconnect() error { return nil }
 type orderedRun struct {
 	calls [][]string
 	order *[]string
+
+	// failFirst, if nonzero, makes the next failFirst invocations return an
+	// error before the calls that follow succeed -- simulates the transient
+	// Windows-Search-Service lock ensureHome's retry exists for. alwaysFail
+	// makes every invocation fail, for asserting runWithRetry gives up
+	// instead of retrying forever. Zero-value (neither set) never fails,
+	// preserving every other test's behavior unchanged.
+	failFirst  int
+	alwaysFail bool
 }
 
 func (r *orderedRun) run(_ context.Context, name string, args ...string) (string, error) {
 	r.calls = append(r.calls, append([]string{name}, args...))
 	*r.order = append(*r.order, "run:"+name)
+	if r.alwaysFail || r.failFirst > 0 {
+		if r.failFirst > 0 {
+			r.failFirst--
+		}
+		return "", fmt.Errorf("simulated transient lock")
+	}
 	return "", nil
 }
 
@@ -346,6 +361,64 @@ func TestScmInstallReinstallUpdatesExistingService(t *testing.T) {
 	}
 	if slices.Index(order, "update:"+WindowsServiceName) < 0 {
 		t.Error("an existing service's config must be updated (idempotent reinstall)")
+	}
+}
+
+// Regression test: serviceConfig left ServiceType at its zero value, which
+// mgr.Mgr.CreateService silently substitutes SERVICE_WIN32_OWN_PROCESS for --
+// but mgr.Service.UpdateConfig has no such fallback, passing 0 straight to
+// the real ChangeServiceConfig, where it's neither a valid service type nor
+// SERVICE_NO_CHANGE. A real reinstall over an already-registered service
+// failed outright with "The parameter is incorrect"; the fake UpdateConfig
+// used elsewhere in this file doesn't validate its input, so only an
+// explicit assertion on the config passed to it catches a regression here.
+func TestScmInstallReinstallSetsExplicitServiceType(t *testing.T) {
+	var order []string
+	existing := &fakeService{name: WindowsServiceName, calls: &order, status: svc.Status{State: svc.Stopped}}
+	m := &fakeMgr{existing: existing, calls: &order}
+	r := &orderedRun{order: &order}
+	inst := newTestScmInstaller(m, r)
+	if err := inst.Install(context.Background()); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if existing.lastConfig.ServiceType != windows.SERVICE_WIN32_OWN_PROCESS {
+		t.Errorf("ServiceType = %v, want SERVICE_WIN32_OWN_PROCESS (0 breaks the real ChangeServiceConfig)",
+			existing.lastConfig.ServiceType)
+	}
+}
+
+// ensureHome's icacls calls must survive a transient lock (Windows Search
+// Service materializing a profile for the freshly-registered service SID
+// briefly opens a handle somewhere under the tree being re-ACL'd, confirmed
+// against real hardware) rather than failing the whole install the first
+// time one call collides with it.
+func TestEnsureHomeRetriesTransientIcaclsFailure(t *testing.T) {
+	prev := icaclsRetryInterval
+	icaclsRetryInterval = time.Millisecond
+	defer func() { icaclsRetryInterval = prev }()
+
+	var order []string
+	m := &fakeMgr{calls: &order}
+	r := &orderedRun{order: &order, failFirst: icaclsRetries - 1} // succeeds on the last attempt
+	inst := newTestScmInstaller(m, r)
+	if err := inst.Install(context.Background()); err != nil {
+		t.Fatalf("Install: %v, want the transient failure absorbed by retry", err)
+	}
+}
+
+// A persistent icacls failure (not just a transient lock) must still fail
+// the install -- runWithRetry has a ceiling, not an infinite loop.
+func TestEnsureHomeGivesUpAfterExhaustingRetries(t *testing.T) {
+	prev := icaclsRetryInterval
+	icaclsRetryInterval = time.Millisecond
+	defer func() { icaclsRetryInterval = prev }()
+
+	var order []string
+	m := &fakeMgr{calls: &order}
+	r := &orderedRun{order: &order, alwaysFail: true}
+	inst := newTestScmInstaller(m, r)
+	if err := inst.Install(context.Background()); err == nil {
+		t.Fatal("Install: want an error from a persistently failing icacls call, got nil")
 	}
 }
 

@@ -169,6 +169,17 @@ func run(parent context.Context) error {
 	// which is read-only and runs alongside a live daemon whose clones must
 	// not be deleted.
 	if !*checkOnly {
+		// ReapOrphans runs BEFORE the sweep, not after: on a backend with an
+		// orphan class (windows' bare HCS compute systems — see
+		// vm.Manager.ReapOrphans' doc comment), an unclean prior shutdown can
+		// leave a slot's clone file still held open, and RemoveAll fails
+		// outright the moment it hits one — not skip-and-continue — which
+		// used to crash-loop the daemon forever with nothing in between ever
+		// reaping the orphan (issue #320). A no-op on backends with no such
+		// class (darwin).
+		if err := vmManager().ReapOrphans(dir.VMsDir()); err != nil {
+			return fmt.Errorf("reaping orphaned VMs: %w", err)
+		}
 		if err := os.RemoveAll(dir.VMsDir()); err != nil {
 			return fmt.Errorf("sweeping vms dir: %w", err)
 		}

@@ -58,3 +58,16 @@ ADR-0026 for the Hyper-V backend's decisions and why; this doc is sharp edges on
   the state machine knows to push the runner tarball over SSH instead
   (`internal/guest.Guest.PushRunnerTarball`) — don't "fix" `Boot` to attach a
   `Plan9` device without re-reading this note first.
+- **`Boot`'s own per-slot `reapPriorSystem` call and `HCSManager.ReapOrphans`
+  (`reap_windows.go`) are two different callers of the same reap, not two
+  mechanisms.** An unclean shutdown leaves a slot's compute system (and the
+  `vmwp.exe` worker process backing it) running with the slot's clone VHDX
+  still open — confirmed on real hardware: `cmd/runnyd`'s cold-start sweep
+  (`os.RemoveAll(vmsDir)`) hit exactly that open handle and crashed outright,
+  not skip-and-continue, crash-looping the daemon forever since nothing ever
+  reaped the orphan in between restarts (issue #320). `ReapOrphans` runs once
+  at startup, before that sweep, over every slot directory found; `Boot`'s own
+  call covers the same slot again per-boot as a second line of defense. Both
+  go through the `reapOps` seam (`reapPriorSystem`, `reapAllSlots`) so the
+  skip/proceed/fail-loud decision logic is unit-tested without hardware —
+  only the real HCS/HNS calls (`hcsReapOps`) need it.

@@ -22,6 +22,13 @@ type VZManager struct{}
 
 var _ Manager = VZManager{}
 
+// ReapOrphans is a no-op on darwin: Virtualization.framework has no orphan
+// class the way bare HCS compute systems do (see hcs_windows.go's
+// ReapOrphans) — a *vz.VirtualMachine releases on GC / process exit, and
+// there is no separate OS-level object left behind that could hold a clone
+// file open across a restart.
+func (VZManager) ReapOrphans(string) error { return nil }
+
 // Boot builds the VZ configuration from the bundle's tart config and starts
 // the guest, dispatching on the bundle's OS: the Mac platform
 // path for darwin, EFI for linux. checkHostArch (shared with hcs_windows.go)

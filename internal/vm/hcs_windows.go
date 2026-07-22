@@ -285,6 +285,17 @@ func reapPriorSystem(systemID, endpointName string) error {
 		if err := system.Terminate(ctx); err != nil {
 			slog.Error("reaping stale compute system: terminate failed", "id", systemID, "err", err)
 		}
+		// Terminate only REQUESTS shutdown -- it can return before the system
+		// actually exits -- so wait for the real exit notification before
+		// closing the handle or touching its endpoint below; closing/deleting
+		// out from under a guest that might still be running is the same
+		// mistake hcsMachine.Stop's wedged-stop path already avoids. A wait
+		// that doesn't resolve fails this Boot loudly; the FSM's own backoff
+		// gives the next attempt (and this same reap) another chance rather
+		// than risk detaching a still-live guest's networking.
+		if err := system.WaitCtx(ctx); err != nil {
+			return fmt.Errorf("stale compute system %s did not exit within the reap window: %w", systemID, err)
+		}
 		if err := system.Close(); err != nil {
 			slog.Error("reaping stale compute system: close failed", "id", systemID, "err", err)
 		}
@@ -316,12 +327,24 @@ func reapPriorSystem(systemID, endpointName string) error {
 // document, and CreateComputeSystem already succeeded, before Start is ever
 // called — so a Start that fails can still leak the same stale
 // neighbor-table entry a confirmed-stopped Machine's destroy() scrubs;
-// scrubNeighborEntry is shared for exactly that reason.
+// scrubNeighborEntry is shared for exactly that reason. Terminate only
+// REQUESTS shutdown -- it can return before the system actually exits -- so
+// this waits for the real exit notification (bounded by the same window)
+// before closing the handle or deleting the endpoint, the same ordering
+// reapPriorSystem uses and for the same reason: closing/deleting out from
+// under a guest that might still be running is the mistake hcsMachine.
+// Stop's wedged-stop path already avoids. A wait that doesn't resolve in
+// time leaves system/ep untouched for this slot's next Boot (and its own
+// reapPriorSystem) to try again, rather than risk that.
 func abandonComputeSystem(system *hcs.System, ep *hcn.HostComputeEndpoint) {
 	ctx, cancel := bounded.WithTimeout(context.Background(), abandonedStopTimeout)
 	defer cancel()
 	if err := system.Terminate(ctx); err != nil {
 		slog.Error("abandoned compute system: terminate failed", "id", system.ID(), "err", err)
+	}
+	if err := system.WaitCtx(ctx); err != nil {
+		slog.Error("abandoned compute system: did not exit before the cleanup window closed; leaving it in place for a later reap", "id", system.ID(), "err", err)
+		return
 	}
 	if err := system.Close(); err != nil {
 		slog.Error("abandoned compute system: close failed", "id", system.ID(), "err", err)

@@ -101,6 +101,16 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string), onDigestResol
 	dir := e.Home.ImageBundleDir(e.Ref.String(), digest)
 	bundle = tart.Bundle(dir)
 	if bundle.Verify() == nil {
+		// A bundle that verifies here may still be raw-only (disk.img with no
+		// disk.vhdx yet): Verify accepts either, so a prior pull interrupted
+		// between PullTo's atomic rename and prepareBundleDisk's conversion
+		// (which normally runs inside imagePuller.run, never reached by this
+		// early cache-hit path) would otherwise be treated as done forever --
+		// permanently failing CloneVHDX with no self-heal. prepareBundleDisk
+		// is a no-op off windows and a no-op once disk.vhdx already exists.
+		if perr := prepareBundleDisk(bundle); perr != nil {
+			return "", "", "", fmt.Errorf("converting cached bundle: %w", perr)
+		}
 		return digest, runnerVersion, bundle, nil // cache hit
 	}
 

@@ -6,7 +6,8 @@ The current shape of the daemon. Decisions and their alternatives live in
 ## System shape
 
 `runnyd` runs one destroy-and-recycle state machine per runner slot, boots tart-format
-guests in-process via Virtualization.framework (`internal/vm`), provisions
+guests in-process — via Virtualization.framework on darwin or bare HCS compute systems
+on Windows (`internal/vm`, ADR-0026) — provisions
 them over deadline-bounded SSH (`internal/sshx` → `internal/guest`),
 registers them with GitHub via JIT config (`internal/github`), and serves the
 `runny.v1` control surface over a unix socket (`internal/socket`) to
@@ -112,12 +113,14 @@ race-free without a careful never-touch rule.
 | `internal/home` | the `~/.runny` layout and the config schema (parse/default/validate once, at the boundary); a non-fatal warnings channel (`Config.Warnings`) runs local soft-validations feeding the config-compat gate (ADR-0022) |
 | `internal/cycle` | cycle.json records: write/read/prune, retention |
 | `internal/clonefile` | the APFS clonefile(2) wrapper: single-file copy-on-write clone (darwin); home of the darwin/non-darwin split both clone callers share |
-| `internal/tart` | tart bundle format: config.json parse, validation, bundle clone (per file via `internal/clonefile`) |
+| `internal/vhdx` | VHDX differencing-disk clone and raw-to-fixed conversion (windows); the parent-locator reader is cross-platform (prune's dependency check) |
+| `internal/tart` | tart bundle format: config.json parse, validation; bundle clone per-file via `internal/clonefile` (darwin) or `CloneVHDX` via `internal/vhdx` (windows) |
 | `internal/oci` | tart-format image pull: registry auth, manifest, Apple-LZ4 disk assembly; declared sizes enforced on every blob and decode |
+| `internal/winhcs` | vendored HCS/HNS binding (trimmed `Microsoft/hcsshim`, windows-only) — the boot-path core and endpoint management `internal/vm`'s Hyper-V backend drives |
 | `internal/sshx` | the only constructor of SSH clients (deadline recipe) |
 | `internal/guest` | what to *do* over SSH: stage runner from the per-slot virtiofs share, run.sh, diag pull |
 | `internal/github` | App JWT → installation token → JIT config; list/delete for reconcile |
-| `internal/vm` | Virtualization.framework boot (darwin), dhcpd-lease IP resolution |
+| `internal/vm` | guest boot + IP resolution: Virtualization.framework + dhcpd-lease parsing (darwin), bare HCS compute systems + host neighbor-table polling (windows, ADR-0026) |
 | `internal/statemachine` | the FSM; depends only on the seams above |
 | `internal/logring` | slog → file sink + in-memory rings for StreamLogs (daemon log, and a second ring of guest runner output — the default `runnyctl logs` stream) |
 | `internal/socket` | the gRPC server over the unix socket |

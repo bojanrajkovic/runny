@@ -141,6 +141,6 @@ go_library(
         "windows_crash_reporting.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/winhcs/hcs/schema2",
-    visibility = ["//internal/winhcs:__subpackages__"],
+    visibility = ["//:__subpackages__"],
     deps = ["//internal/winhcs/protocol/guestrequest"],
 )

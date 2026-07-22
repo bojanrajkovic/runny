@@ -386,9 +386,14 @@ the SCM's recovery policy, the same role KeepAlive plays on darwin.
 darwin, nothing is kept for reinstall, since the service account has no uid to
 keep stable.
 
-This installs and runs the service, but Windows has no VM backend yet — a
-runner pool configured here cannot provision jobs. Until that lands, this is
-install/uninstall plumbing only.
+A configured pool provisions Linux guests (arch matching the host's own —
+`amd64` on the amd64 Windows hosts this has been validated on) via bare
+Hyper-V compute systems (ADR-0026) — no `tart` binary, no classic Hyper-V VM. **A running guest
+does not show up in `Get-VM` or Hyper-V Manager**: bare compute systems bypass
+`vmms` entirely, so the operator-visible artifact is a `vmwp.exe` worker
+process per guest (`Get-Process vmwp`), not a `VM` object. The Default Switch
+must exist (Hyper-V's default install creates it) and have headroom in its
+endpoint pool for concurrent slots.
 
 ## The Runny app and the command-line tool
 

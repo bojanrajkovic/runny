@@ -124,8 +124,9 @@ func TestLoadConfigLinuxGuest(t *testing.T) {
 
 func TestLoadConfigRejectsUnsupportedGuests(t *testing.T) {
 	for name, cfg := range map[string]string{
-		"windows": `{"version":1,"os":"windows","arch":"arm64","cpuCount":2,"memorySize":1}`,
-		"x86":     `{"version":1,"os":"linux","arch":"amd64","cpuCount":2,"memorySize":1}`,
+		"windows guest": `{"version":1,"os":"windows","arch":"arm64","cpuCount":2,"memorySize":1}`,
+		"darwin/amd64":  `{"version":1,"os":"darwin","arch":"amd64","cpuCount":2,"memorySize":1}`,
+		"unknown arch":  `{"version":1,"os":"linux","arch":"riscv64","cpuCount":2,"memorySize":1}`,
 	} {
 		_, err := writeBundle(t, cfg).LoadConfig()
 		if !errors.Is(err, ErrUnsupportedGuest) {
@@ -139,6 +140,23 @@ func TestLoadConfigRejectsUnsupportedGuests(t *testing.T) {
 	}
 }
 
+// LoadConfig is a pure shape check, independent of the host it runs on: it
+// accepts every (OS, Arch) combination some platform's Manager.Boot can
+// actually drive, even ones this host can't itself boot right now (a linux
+// CI runner still parses a linux/amd64 config) — the "can THIS host boot
+// THIS arch" gate is each platform's own Boot, not this check (see
+// hcs_windows.go/vz_darwin.go's runtime.GOARCH rejection).
+func TestLoadConfigAcceptsEveryBootableGuestShape(t *testing.T) {
+	for name, cfg := range map[string]string{
+		"linux/arm64": `{"version":1,"os":"linux","arch":"arm64","cpuCount":2,"memorySize":1}`,
+		"linux/amd64": `{"version":1,"os":"linux","arch":"amd64","cpuCount":2,"memorySize":1}`,
+	} {
+		if _, err := writeBundle(t, cfg).LoadConfig(); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
 func TestVerify(t *testing.T) {
 	b := writeBundle(t, realConfig)
 	if err := b.Verify(); err != nil {
@@ -149,5 +167,24 @@ func TestVerify(t *testing.T) {
 	}
 	if err := b.Verify(); err == nil {
 		t.Error("Verify should fail with nvram.bin missing")
+	}
+}
+
+// A windows bundle deletes DiskPath once VHDXPath exists (prepareBundleDisk,
+// internal/images) to reclaim the raw copy's disk space; Verify must still
+// see that as complete, not force a re-pull.
+func TestVerifyAcceptsVHDXInPlaceOfDiskImg(t *testing.T) {
+	b := writeBundle(t, realConfig)
+	if err := os.Remove(b.DiskPath()); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Verify(); err == nil {
+		t.Error("Verify should fail with neither disk.img nor disk.vhdx present")
+	}
+	if err := os.WriteFile(b.VHDXPath(), []byte("vhdx"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Verify(); err != nil {
+		t.Errorf("Verify should accept disk.vhdx in place of disk.img: %v", err)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -249,12 +250,45 @@ func (p *imagePuller) run() {
 		}
 		dig, err := p.attempt(p.ctx)
 		if err == nil {
+			// prepareBundleDisk runs here, inside the single actor every
+			// concurrent slot's Ensure subscribes to — never in Ensure's own
+			// subscriber-side code, which every subscriber reaches
+			// independently and would race the (windows-only) VHDX
+			// conversion N times for one pull. A late, non-subscriber Ensure
+			// for this same digest can still reach its own cache-hit
+			// conversion call concurrently with this one (see images.go);
+			// vhdxConvertLocks serializes the two against the same dir.
+			bundle := tart.Bundle(p.destDir)
+			release, lerr := oci.AcquireSlot(p.ctx, &vhdxConvertLocks, p.destDir, "VHDX conversion of "+p.destDir, nil)
+			if lerr != nil {
+				p.finish(ensureResult{err: fmt.Errorf("preparing bundle disk: %w", lerr)})
+				return
+			}
+			perr := prepareBundleDiskFn(bundle)
+			release()
+			if perr != nil {
+				// PullTo's own temp-dir+rename already guarantees "complete
+				// bundle or nothing landed" for the raw pull; a failure here
+				// would otherwise leave that guarantee broken specifically
+				// for this (windows-only) step — disk.img present, no
+				// disk.vhdx, but still passing Verify (which accepts
+				// either), so a later Ensure would treat this half-converted
+				// bundle as a permanent cache hit with no self-heal (exactly
+				// the class of bug PullTo's own cache-hit check already
+				// exists to prevent, for a different cause). Wipe it so the
+				// next attempt re-pulls and re-converts from scratch. Safe
+				// unconditionally: this actor is the sole owner of destDir
+				// until finish() below hands it off.
+				_ = os.RemoveAll(p.destDir)
+				p.finish(ensureResult{err: fmt.Errorf("preparing bundle disk: %w", perr)})
+				return
+			}
 			// Finish even if the last subscriber left mid-attempt: the bundle
 			// really landed (the next cycle cache-hits it), so the terminal
 			// outcome — and its pull metric — must exist. Nobody waits on the
 			// broadcast (subs is empty), and finish's registry delete is
 			// guarded, so a successor puller for the same dir is untouched.
-			p.finish(ensureResult{digest: dig, bundle: tart.Bundle(p.destDir)})
+			p.finish(ensureResult{digest: dig, bundle: bundle})
 			return
 		}
 		if p.ctx.Err() != nil {

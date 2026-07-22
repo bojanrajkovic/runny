@@ -101,6 +101,25 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string), onDigestResol
 	dir := e.Home.ImageBundleDir(e.Ref.String(), digest)
 	bundle = tart.Bundle(dir)
 	if bundle.Verify() == nil {
+		// A bundle that verifies here may still be raw-only (disk.img with no
+		// disk.vhdx yet): Verify accepts either, so a prior pull interrupted
+		// between PullTo's atomic rename and prepareBundleDisk's conversion
+		// (which normally runs inside imagePuller.run, never reached by this
+		// early cache-hit path) would otherwise be treated as done forever --
+		// permanently failing CloneVHDX with no self-heal. prepareBundleDisk
+		// is a no-op off windows and a no-op once disk.vhdx already exists.
+		// vhdxConvertLocks serializes this against imagePuller.run's own
+		// prepareBundleDisk call for the same dir, in case a concurrent
+		// puller is still mid-conversion when this cache-hit is reached.
+		release, lerr := oci.AcquireSlot(ctx, &vhdxConvertLocks, dir, "VHDX conversion of "+dir, nil)
+		if lerr != nil {
+			return "", "", "", fmt.Errorf("waiting to convert cached bundle: %w", lerr)
+		}
+		perr := prepareBundleDiskFn(bundle)
+		release()
+		if perr != nil {
+			return "", "", "", fmt.Errorf("converting cached bundle: %w", perr)
+		}
 		return digest, runnerVersion, bundle, nil // cache hit
 	}
 
@@ -302,6 +321,26 @@ type RunnerResolver func(ctx bounded.Context) (filename, url, sha256 string, err
 // The wait is transitively bounded by the holder's own stall-watched
 // download (a wait on a peer's already-bounded operation is itself bounded).
 var tarballLocks sync.Map // filename -> chan struct{} (capacity-1 semaphore)
+
+// vhdxConvertLocks serializes prepareBundleDisk per bundle dir: a late
+// Ensure for the same digest can reach the cache-hit branch below while
+// imagePuller.run is still converting that exact bundle -- both would
+// otherwise call vhdx.Convert concurrently against the same
+// disk.vhdx.converting temp path, each free to remove/recreate the
+// other's in-progress file. The loser waits, then finds disk.vhdx already
+// there (prepareBundleDisk's own early return) and no-ops, the same shape
+// tarballLocks and oci's pullLocks already use for the identical class of
+// problem.
+var vhdxConvertLocks sync.Map // bundle dir -> chan struct{} (capacity-1 semaphore)
+
+// prepareBundleDiskFn is prepareBundleDisk, swappable in tests. Both call
+// sites below (Ensure's cache-hit branch and imagePuller.run) go through it
+// rather than calling prepareBundleDisk directly, so orchestration tests can
+// stub out the real, windows-only VHDX conversion instead of exercising it
+// against a fake bundle's placeholder disk.img -- prepareBundleDisk's own
+// conversion behavior is internal/vhdx's test suite's job, not duplicated
+// here.
+var prepareBundleDiskFn = prepareBundleDisk
 
 // tarballReserved tracks tarballs that Ensure() has resolved and downloaded
 // but whose RunnerVersion has not yet been published to slot status (the FSM

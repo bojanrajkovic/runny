@@ -5,6 +5,8 @@ go_library(
     srcs = [
         "disk_darwin.go",
         "disk_other.go",
+        "diskformat_other.go",
+        "diskformat_windows.go",
         "images.go",
         "prune.go",
         "puller.go",
@@ -19,7 +21,12 @@ go_library(
         "//internal/oci",
         "//internal/tart",
         "//internal/versioncore",
-    ],
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "//internal/vhdx",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 go_test(

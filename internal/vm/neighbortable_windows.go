@@ -29,21 +29,16 @@ var (
 const (
 	afINET = 2 // AF_INET, per ws2def.h -- the only family this backend queries.
 
-	// nlnsPermanent is NL_NEIGHBOR_STATE's NlnsPermanent value (nldef.h):
-	// "The IP address is a permanent address." Empirically confirmed via
-	// this exact backend's spike (an HCS-created endpoint's binding reads
-	// State=6 through Get-NetNeighbor) against the enumeration order
-	// Microsoft Learn documents for MIB_IPNET_ROW2.State:
-	// https://learn.microsoft.com/windows/win32/api/netioapi/ns-netioapi-mib_ipnet_row2
-	// (NlnsUnreachable=0, NlnsIncomplete=1, NlnsProbe=2, NlnsDelay=3,
-	// NlnsStale=4, NlnsReachable=5, NlnsPermanent=6, NlnsMaximum=7).
-	nlnsPermanent = 6
-
 	// ifMaxPhysAddressLength is IF_MAX_PHYS_ADDRESS_LENGTH (ifdef.h): the
 	// fixed capacity of MIB_IPNET_ROW2.PhysicalAddress, not the length of
 	// any one address (that's PhysicalAddressLength).
 	ifMaxPhysAddressLength = 32
 )
+
+// The NL_NEIGHBOR_STATE enum, neighborEntry, and the pure row-selection logic
+// (permanentIPs/selectLeaseIP) live in neighbortable.go, untagged, so
+// they're testable off real hardware -- this file is the windows-only
+// GetIpNetTable2 syscall glue that produces the rows they select from.
 
 // sockaddrInet mirrors SOCKADDR_INET (ws2ipdef.h):
 // https://learn.microsoft.com/windows/win32/api/ws2ipdef/ns-ws2ipdef-sockaddr_inet
@@ -91,36 +86,10 @@ type mibIPNetTable2Header struct {
 	numEntries uint32
 }
 
-// neighborEntry is this package's own view of a mibIPNetRow2 row: just the
-// fields WaitIP and teardown need.
-type neighborEntry struct {
-	ip             string
-	mac            string
-	state          int32
-	interfaceIndex uint32
-}
-
-func (e neighborEntry) permanent() bool { return e.state == nlnsPermanent }
-
 // readNeighborEntries is neighborEntries, swappable in tests so WaitIP's poll
 // loop (hcs_windows.go) exercises its matching logic against a fake table
 // instead of a live syscall -- same seam shape as stop.go's stopSettle var.
 var readNeighborEntries = neighborEntries
-
-// findPermanentIP returns the IP of the first Permanent entry in entries
-// whose physical address matches mac, normalized the same way WaitIP's
-// darwin sibling matches dhcpd_leases entries (leases.go's normalizeMAC) --
-// Windows renders MACs dash-separated, macOS colon-separated, so both sides
-// of every comparison always go through the same normalizer.
-func findPermanentIP(entries []neighborEntry, mac string) (string, bool) {
-	want := normalizeMAC(mac)
-	for _, e := range entries {
-		if e.permanent() && normalizeMAC(e.mac) == want {
-			return e.ip, true
-		}
-	}
-	return "", false
-}
 
 // neighborEntries calls GetIpNetTable2(AF_INET, ...), copies out every row
 // as a neighborEntry, and frees the table -- the caller never sees the raw

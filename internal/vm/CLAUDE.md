@@ -15,6 +15,10 @@ ADR-0026 for the Hyper-V backend's decisions and why; this doc is sharp edges on
   `hcsMachine.Stop`'s `destroy()` scrubs it explicitly (`deleteNeighborEntry`)
   once the guest is confirmed stopped — skip this and entries accumulate one
   stale row per boot cycle, bounded only by the Default Switch's MAC pool size.
+  A divergent boot leaves **more than one** `Permanent` row for the MAC (stale
+  pre-commit plus real lease), so `scrubNeighborEntry` deletes *every* match
+  (`permanentEntriesForMAC`), not just the first — a single-delete scrub leaks
+  the rest.
 - **`MIB_IPNET_ROW2`/`SOCKADDR_INET` are hand-laid-out, not generated.**
   `x/sys/windows` has no binding for this corner of `iphlpapi`, and mkwinsyscall
   wouldn't build cleanly against this repo's vendored copy — the struct fields,
@@ -35,6 +39,33 @@ ADR-0026 for the Hyper-V backend's decisions and why; this doc is sharp edges on
   log in, and apply a netplan drop-in matching by driver instead of by
   interface name. See ADR-0026's amendment for why the original "no fallback"
   decision was reversed rather than merely revisited.
+- **On the fixup path, `WaitIP` returns the console-observed address, NOT the
+  neighbor-table entry.** HNS's `Permanent` neighbor row is a pre-commit written
+  before the guest boots, and the guest's own DHCP client can land on a
+  *different* `/20` address — returning the pre-commit made `AWAIT_SSH` dial the
+  wrong host and destroy-recycle a healthy guest (~1/3 of boots, confirmed on
+  hardware). The table can't self-correct: HNS writes the real lease as
+  `Permanent` too, so a diverged MAC just shows two `Permanent` rows. `fixupNetwork`
+  reads `eth0`'s real address off the console (`parseInetIP`) and `WaitIP` returns
+  that; the neighbor table is re-read — **after** the fixup — only to flag the
+  divergence (`neighbor-ip-corrected` milestone + a `slog.Warn` listing the stale
+  rows via `divergentPermanentIPs`). The re-read must be post-fixup: a fresh
+  guest has no pre-commit row for its MAC at grace-elapse, so the stale
+  `Permanent` rows the warning reports only materialize once DHCP has settled —
+  a pre-fixup snapshot detects nothing and the correction goes silent. The pure
+  selectors (`permanentIPs`, `divergentPermanentIPs`, `learnedLeaseIP`) and the
+  console parser (`parseInetIP`) live in untagged files (`neighbortable.go`,
+  `netfixup.go`) so they unit-test off-hardware.
+- **`WaitIP`'s grace-period fast path accepts only a LEARNED neighbor row, never
+  a `Permanent` one.** A `Permanent` row is HNS's pre-boot pre-commit — a guess
+  the guest's DHCP routinely overrides — so returning it within grace would dial
+  a stale IP *and* short-circuit before the fixup that would correct it (a live
+  landmine for a self-configuring image whose lease diverges from the pre-commit).
+  `learnedLeaseIP` (`neighbortable.go`) returns only a `Reachable`/`Stale` row;
+  on the validated host HNS surfaces none, so grace always elapses to the fixup,
+  which derives the authoritative address from the console. Don't "simplify" this
+  back to trusting the neighbor table's `Permanent` entry as the lease — that is
+  the exact bug the fixup exists for.
 - **`Boot` never calls `vhdx.CreateDifferencing` itself.** The slot's
   differencing-child VHDX is already there at `bundle.VHDXPath()` by the time
   `HCSManager.Boot` runs — `internal/tart.CloneVHDX` creates it during the FSM's

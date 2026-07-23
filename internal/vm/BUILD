@@ -5,7 +5,9 @@ go_library(
     srcs = [
         "hcs_windows.go",
         "leases.go",
+        "neighbortable.go",
         "neighbortable_windows.go",
+        "netfixup.go",
         "netfixup_windows.go",
         "reap_windows.go",
         "sizing.go",
@@ -42,7 +44,8 @@ go_test(
     name = "vm_test",
     srcs = [
         "leases_test.go",
-        "neighbortable_windows_test.go",
+        "neighbortable_test.go",
+        "netfixup_test.go",
         "netfixup_windows_test.go",
         "reap_windows_test.go",
         "sizing_test.go",

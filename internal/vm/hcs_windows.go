@@ -242,12 +242,16 @@ func deleteEndpoint(ep *hcn.HostComputeEndpoint) {
 	}
 }
 
-// scrubNeighborEntry removes the stale Permanent neighbor-table entry HNS
+// scrubNeighborEntry removes the stale Permanent neighbor-table entries HNS
 // leaves behind for mac once its endpoint is gone — see hcsMachine.destroy's
 // doc comment for why this doesn't happen on its own. Shared by every
 // cleanup path that deletes an endpoint (a boot that fails at Start, and a
 // confirmed-stopped Machine both attach the endpoint before either one is
-// reached, so both can leak the same entry). Best-effort: only logs, since
+// reached, so both can leak the same entries). A divergent boot leaves MORE
+// THAN ONE Permanent row for the MAC (stale pre-commit plus real lease), so
+// this deletes every match, not just the first — otherwise the leftover
+// accumulates one row per diverged boot. Best-effort: a delete failure is
+// logged and the loop continues (one failure must not skip the rest), since
 // by this point the endpoint is already gone and there's nothing further a
 // caller could do differently.
 func scrubNeighborEntry(mac string) {
@@ -256,12 +260,9 @@ func scrubNeighborEntry(mac string) {
 		slog.Error("teardown: reading neighbor table for stale-entry scrub failed", "mac", mac, "err", err)
 		return
 	}
-	for _, e := range entries {
-		if e.permanent() && normalizeMAC(e.mac) == normalizeMAC(mac) {
-			if err := deleteNeighborEntry(e.ip, e.interfaceIndex); err != nil {
-				slog.Error("teardown: stale neighbor-table entry delete failed", "ip", e.ip, "mac", mac, "err", err)
-			}
-			return
+	for _, e := range permanentEntriesForMAC(entries, mac) {
+		if err := deleteNeighborEntry(e.ip, e.interfaceIndex); err != nil {
+			slog.Error("teardown: stale neighbor-table entry delete failed", "ip", e.ip, "mac", mac, "err", err)
 		}
 	}
 }
@@ -330,25 +331,30 @@ func (m *hcsMachine) NeedsRunnerPush() bool { return true }
 // poll past a normal DHCP round-trip.
 const waitIPGracePeriod = 10 * time.Second
 
-// WaitIP polls the host IP neighbor table for a Permanent entry matching
-// this machine's MAC. HNS programs this MAC->IP binding once the guest's
-// own DHCP client completes (validated on real hardware, issues #307/#308/
-// #319) and it carries exactly the IP the guest is actually using.
+// WaitIP returns the guest's actual lease IP -- the address later states dial
+// for SSH, and the one stamped as vm.ip in telemetry.
 //
-// The currently-validated guest image (ghcr.io/cirruslabs/ubuntu-runner-
-// amd64) needs help getting there: its baked netplan matches interface
-// names "en*", which hv_netvsc's always-"eth0" naming never satisfies, so
-// eth0 sits down and DHCP never starts without fixupNetwork's console-
-// applied drop-in (issue #319). A future or different image that DOES
-// self-configure (the behavior this backend originally assumed, per
-// ADR-0026) never triggers the fallback: it gets its neighbor-table entry
-// within waitIPGracePeriod and this returns before the grace period ever
-// elapses.
+// Within the grace period it accepts only a LEARNED neighbor row
+// (Reachable/Stale via learnedLeaseIP) -- an actual ARP resolution proving the
+// guest self-configured and is reachable. It never accepts HNS's Permanent row:
+// that's a pre-boot pre-commit, a guess the guest's DHCP routinely overrides, so
+// returning it would dial a stale IP and, worse, short-circuit before the fixup
+// that would have corrected it. A guest with a genuinely good netplan resolves
+// to a learned row and WaitIP returns within grace.
+//
+// The currently-validated guest image (ghcr.io/cirruslabs/ubuntu-runner-amd64)
+// does NOT self-configure: its baked netplan matches interface names "en*",
+// which hv_netvsc's always-"eth0" naming never satisfies, so eth0 sits down and
+// DHCP never starts without fixupNetwork's console-applied drop-in (issue #319).
+// On this host HNS surfaces no learned row at all (every row is Permanent), so
+// grace always elapses to the fixup. Once the fixup has logged in, the address
+// eth0 actually holds is read straight off the console and returned as
+// authoritative -- the neighbor table is only re-read to detect, and record,
+// the divergence against any stale Permanent pre-commit.
 func (m *hcsMachine) WaitIP(ctx bounded.Context) (string, error) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	deadline := boundedDeadline(ctx, waitIPGracePeriod)
-	fixedUp := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -360,28 +366,50 @@ func (m *hcsMachine) WaitIP(ctx bounded.Context) (string, error) {
 			if err != nil {
 				continue // transient GetIpNetTable2 failure; next tick retries
 			}
-			if ip, ok := findPermanentIP(entries, m.mac); ok {
+			if ip, ok := learnedLeaseIP(entries, m.mac); ok {
 				return ip, nil
 			}
-			if fixedUp || time.Now().Before(deadline) {
-				continue
+			if time.Now().Before(deadline) {
+				continue // still within grace; let the guest self-configure
 			}
 			if m.sshUser == "" || m.sshPassword == "" {
 				return "", fmt.Errorf("no IP after %s and no SSHUser/SSHPassword configured to attempt the network fixup (issue #319)", waitIPGracePeriod)
 			}
-			fixedUp = true
 			// Wrapped in its own named action (not folded silently into
 			// AWAIT_IP's step span) so a trace/metric can distinguish "this
 			// cycle needed the fixup" from "HNS was just slow" -- the two
 			// looked identical before, with an AWAIT_SSH failure downstream
 			// of a WaitIP that had just reported as good, and nothing
 			// correlating it back to the fixup-fallback path.
+			var leaseIP string
 			if err := obs.Action(ctx, obs.ActionNetworkFixup, func(context.Context) error {
 				obs.Milestone(ctx, "grace-period-elapsed")
-				return fixupNetwork(ctx, m.systemID, m.sshUser, m.sshPassword)
+				ip, err := fixupNetwork(ctx, m.systemID, m.sshUser, m.sshPassword)
+				if err != nil {
+					return err
+				}
+				leaseIP = ip
+				// Re-read AFTER the fixup: by now the guest's DHCP has settled
+				// and any stale HNS pre-commit rows for this MAC are visible, so
+				// this is the snapshot that actually shows the divergence the
+				// pre-fixup one couldn't (a fresh guest has no pre-commit row
+				// yet at grace-elapse). Best-effort: a transient re-read failure
+				// just skips the diagnostic, never fails the cycle.
+				if post, err := readNeighborEntries(); err == nil {
+					if other := divergentPermanentIPs(post, m.mac, leaseIP); len(other) > 0 {
+						// no-silent-failure: the milestone flags that WaitIP
+						// dialed something the neighbor table disagrees with, and
+						// the log carries the stale rows for the operator asking why.
+						obs.Milestone(ctx, "neighbor-ip-corrected")
+						slog.Warn("WaitIP: neighbor table holds a stale pre-commit differing from the guest's real lease; dialing the console-observed address",
+							"mac", m.mac, "neighbor_ips", other, "lease_ip", leaseIP)
+					}
+				}
+				return nil
 			}); err != nil {
 				return "", fmt.Errorf("network fixup: %w", err)
 			}
+			return leaseIP, nil
 		}
 	}
 }

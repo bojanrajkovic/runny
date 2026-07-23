@@ -61,13 +61,15 @@ const consoleSeenCap = 4096
 // This necessarily dials the console directly rather than SSH: the guest has
 // no working network yet, which is exactly the problem being fixed. Once
 // logged in, it writes a netplan drop-in matching by driver -- the idiomatic
-// Azure/Hyper-V pattern -- and applies it, then verifies eth0 actually got an
-// address before returning: a silent no-op here would just make a later
-// WaitIP timeout far less diagnosable.
-func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) error {
+// Azure/Hyper-V pattern -- and applies it, then reads eth0's address back and
+// returns it: a silent no-op here would just make a later WaitIP timeout far
+// less diagnosable, and the returned address is the one WaitIP actually dials
+// (the host neighbor table's Permanent row can name a different, stale address
+// -- see WaitIP's doc comment).
+func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) (string, error) {
 	conn, err := dialConsoleWithRetry(ctx, consolePipeName(systemID))
 	if err != nil {
-		return fmt.Errorf("dialing console: %w", err)
+		return "", fmt.Errorf("dialing console: %w", err)
 	}
 	// Milestones from here on: named, distinctly-timestamped span events on
 	// the caller's network-fixup action, so a trace shows which stage a run
@@ -79,7 +81,7 @@ func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) er
 
 	if err := consoleLogin(ctx, conn, sshUser, sshPassword); err != nil {
 		conn.Close()
-		return fmt.Errorf("console login: %w", err)
+		return "", fmt.Errorf("console login: %w", err)
 	}
 	obs.Milestone(ctx, "login-succeeded")
 
@@ -89,14 +91,25 @@ func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) er
 	// failure at any stage short-circuits before the final ip addr check,
 	// which is what the caller actually verifies against.
 	const cmd = `printf 'network:\n  version: 2\n  ethernets:\n    eth0:\n      match:\n        driver: hv_netvsc\n      dhcp4: true\n' | sudo tee /etc/netplan/60-runny-hv-netvsc-fix.yaml >/dev/null && sudo netplan apply && sleep 5 && ip -4 -o addr show eth0`
-	out, err := consoleRun(ctx, conn, cmd, 20*time.Second, func(s string) bool { return strings.Contains(s, "inet ") })
+	// The drain's stop condition IS the success condition: parseInetIP, not a
+	// bare "inet " substring. A serial/named-pipe console has no record
+	// boundary, so a read can end the instant "inet " arrives but before the
+	// address digits do -- stopping on the substring there would hand
+	// parseInetIP a truncated buffer and turn a healthy guest into a hard
+	// error. Draining until a complete, parseable CIDR is present keeps the
+	// wait and the verification the same test.
+	out, err := consoleRun(ctx, conn, cmd, 20*time.Second, func(s string) bool {
+		_, ok := parseInetIP(s)
+		return ok
+	})
 	if err != nil {
 		conn.Close()
-		return fmt.Errorf("applying network fixup: %w", err)
+		return "", fmt.Errorf("applying network fixup: %w", err)
 	}
-	if !strings.Contains(out, "inet ") {
+	leaseIP, ok := parseInetIP(out)
+	if !ok {
 		conn.Close()
-		return fmt.Errorf("network fixup did not bring up eth0 with an address; console output: %q", out)
+		return "", fmt.Errorf("network fixup did not bring up eth0 with an address; console output: %q", out)
 	}
 	obs.Milestone(ctx, "netplan-verified")
 
@@ -117,7 +130,7 @@ func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) er
 			slog.Warn("network fixup: logging out the console session failed; it may remain authenticated", "system_id", systemID, "err", err)
 		}
 	}()
-	return nil
+	return leaseIP, nil
 }
 
 // dialConsoleWithRetry retries the pipe dial within ctx: the console pipe

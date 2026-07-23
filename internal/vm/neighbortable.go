@@ -77,43 +77,31 @@ func divergentPermanentIPs(entries []neighborEntry, mac, leaseIP string) []strin
 	return other
 }
 
-// selectLeaseIP picks the guest's current address from a neighbor-table
-// snapshot, preferring a dynamically-learned lease (Reachable/Stale) over the
-// Permanent pre-commit when both exist for the same MAC -- the pre-commit can
-// name a stale address the guest's DHCP client never actually took. This is
-// the neighbor-table half of WaitIP's IP source (its "mechanism 1"): the clean
-// re-read that would correct the divergence *if* the host ever surfaced a
-// learned row at the real address.
+// learnedLeaseIP returns the guest's address from a neighbor-table snapshot,
+// accepting ONLY a dynamically-learned row (Reachable/Stale) -- an actual ARP
+// resolution to a reachable host. It deliberately never returns a Permanent
+// row: HNS's Permanent entry is a pre-boot *pre-commit*, a guess the guest's
+// own DHCP client routinely overrides (the exact divergence this backend's
+// fixup exists to correct), so trusting it as the lease would dial a stale IP.
 //
-// On the currently-validated host it never does -- HNS writes every row,
-// including the guest's real lease, as Permanent, so a diverged MAC shows two
-// Permanent rows and this selector cannot tell them apart. That is exactly why
-// WaitIP treats the console-observed address as authoritative once a fixup has
-// read it, and uses this selector only for the pre-fixup happy path (a guest
-// that self-configures within the grace period, where the single Permanent row
-// is correct by construction). The learned-preference branch is kept as the
-// robust rule for any host/HNS build that does surface a learned row.
-func selectLeaseIP(entries []neighborEntry, mac string) (string, bool) {
+// WaitIP calls this on the grace-period fast path: a guest that genuinely
+// self-configures shows up as a learned row and WaitIP returns before the
+// fixup. On the currently-validated host HNS surfaces no learned row at all
+// (every row is Permanent), so this finds nothing, grace elapses, and the
+// fixup derives the authoritative address from the console instead.
+//
+// Among multiple learned rows the choice is arbitrary but must be stable:
+// neighborEntry carries no recency signal, so "the newest lease" isn't
+// available -- the lexicographically smallest IP is a deterministic stand-in
+// that never depends on table iteration order.
+func learnedLeaseIP(entries []neighborEntry, mac string) (string, bool) {
 	want := normalizeMAC(mac)
-	var learnedIP, permanentIP string
-	var haveLearned, havePermanent bool
+	var ip string
+	var found bool
 	for _, e := range entries {
-		if normalizeMAC(e.mac) != want {
-			continue
-		}
-		// Among multiple learned rows the choice is arbitrary but must be
-		// stable: neighborEntry carries no recency signal, so "the newest
-		// lease" isn't available -- the lexicographically smallest IP is a
-		// deterministic stand-in that never depends on table iteration order.
-		if e.learned() && (!haveLearned || e.ip < learnedIP) {
-			learnedIP, haveLearned = e.ip, true
-		}
-		if e.permanent() && !havePermanent {
-			permanentIP, havePermanent = e.ip, true
+		if e.learned() && normalizeMAC(e.mac) == want && (!found || e.ip < ip) {
+			ip, found = e.ip, true
 		}
 	}
-	if haveLearned {
-		return learnedIP, true
-	}
-	return permanentIP, havePermanent
+	return ip, found
 }

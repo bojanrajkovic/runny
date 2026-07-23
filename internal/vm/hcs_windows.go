@@ -333,24 +333,23 @@ const waitIPGracePeriod = 10 * time.Second
 // WaitIP returns the guest's actual lease IP -- the address later states dial
 // for SSH, and the one stamped as vm.ip in telemetry.
 //
-// Within the grace period it trusts the host IP neighbor table: HNS pre-commits
-// a MAC->IP binding there at endpoint-attach (state Permanent, before the guest
-// boots), and a guest that self-configures to it (the behavior this backend
-// originally assumed, per ADR-0026) is reachable at that address. selectLeaseIP
-// reads it, preferring a dynamically-learned row if one ever appears.
+// Within the grace period it accepts only a LEARNED neighbor row
+// (Reachable/Stale via learnedLeaseIP) -- an actual ARP resolution proving the
+// guest self-configured and is reachable. It never accepts HNS's Permanent row:
+// that's a pre-boot pre-commit, a guess the guest's DHCP routinely overrides, so
+// returning it would dial a stale IP and, worse, short-circuit before the fixup
+// that would have corrected it. A guest with a genuinely good netplan resolves
+// to a learned row and WaitIP returns within grace.
 //
 // The currently-validated guest image (ghcr.io/cirruslabs/ubuntu-runner-amd64)
 // does NOT self-configure: its baked netplan matches interface names "en*",
 // which hv_netvsc's always-"eth0" naming never satisfies, so eth0 sits down and
 // DHCP never starts without fixupNetwork's console-applied drop-in (issue #319).
-// Crucially, the guest's own DHCP client can then land on a DIFFERENT address
-// than HNS's pre-commit (both read Permanent in the neighbor table -- HNS never
-// surfaces a distinct learned row at the real address, confirmed on hardware),
-// so the pre-commit is a stale IP that made AWAIT_SSH dial the wrong host and
-// destroy-recycle a healthy guest. Once the fixup has logged in, the address
+// On this host HNS surfaces no learned row at all (every row is Permanent), so
+// grace always elapses to the fixup. Once the fixup has logged in, the address
 // eth0 actually holds is read straight off the console and returned as
 // authoritative -- the neighbor table is only re-read to detect, and record,
-// the divergence.
+// the divergence against any stale Permanent pre-commit.
 func (m *hcsMachine) WaitIP(ctx bounded.Context) (string, error) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
@@ -366,7 +365,7 @@ func (m *hcsMachine) WaitIP(ctx bounded.Context) (string, error) {
 			if err != nil {
 				continue // transient GetIpNetTable2 failure; next tick retries
 			}
-			if ip, ok := selectLeaseIP(entries, m.mac); ok {
+			if ip, ok := learnedLeaseIP(entries, m.mac); ok {
 				return ip, nil
 			}
 			if time.Now().Before(deadline) {

@@ -73,52 +73,62 @@ func TestDivergentPermanentIPs(t *testing.T) {
 	}
 }
 
-func TestSelectLeaseIP(t *testing.T) {
-	// The divergence case (the whole reason mechanism 1 exists): the same MAC
-	// carries a stale Permanent pre-commit AND a learned lease at a different
-	// address. The selector must return the learned one.
-	diverged := []neighborEntry{
-		{ip: "172.18.192.241", mac: "00-15-5d-13-59-30", state: nlnsPermanent}, // stale pre-commit
-		{ip: "172.18.206.103", mac: "00-15-5d-13-59-30", state: nlnsReachable}, // real lease
+func TestLearnedLeaseIP(t *testing.T) {
+	// (a) A Permanent-only table (today's reality) yields NO match -- a
+	// Permanent row is HNS's pre-commit, never the lease -- so grace elapses
+	// and the fixup runs. This is the P1 the learned-only rule fixes.
+	permanentOnly := []neighborEntry{
+		{ip: "172.20.159.244", mac: "00-15-5d-dd-30-75", state: nlnsPermanent},
 	}
-	if ip, ok := selectLeaseIP(diverged, "00:15:5d:13:59:30"); !ok || ip != "172.18.206.103" {
-		t.Errorf("diverged: selectLeaseIP = %q, %v; want the learned 172.18.206.103", ip, ok)
-	}
-	// Order must not matter -- learned wins even when the Permanent row comes
-	// second in the table.
-	if ip, ok := selectLeaseIP([]neighborEntry{diverged[1], diverged[0]}, "00:15:5d:13:59:30"); !ok || ip != "172.18.206.103" {
-		t.Errorf("diverged (reordered): selectLeaseIP = %q, %v; want 172.18.206.103", ip, ok)
+	if ip, ok := learnedLeaseIP(permanentOnly, "00:15:5D:DD:30:75"); ok {
+		t.Errorf("permanent-only: learnedLeaseIP = %q, %v; want no match (never trust a pre-commit)", ip, ok)
 	}
 
-	// Multiple learned rows: the choice is arbitrary but must be stable
-	// (lexicographically smallest IP), independent of table order.
+	// (b) A learned Reachable/Stale row -- a real ARP resolution -- is returned.
+	learned := []neighborEntry{
+		{ip: "172.18.206.103", mac: "00-15-5d-13-59-30", state: nlnsReachable},
+	}
+	if ip, ok := learnedLeaseIP(learned, "00:15:5d:13:59:30"); !ok || ip != "172.18.206.103" {
+		t.Errorf("learned: learnedLeaseIP = %q, %v; want 172.18.206.103", ip, ok)
+	}
+
+	// (c) Both a learned row and a Permanent pre-commit for the MAC -> the
+	// learned one, never the Permanent, regardless of table order.
+	both := []neighborEntry{
+		{ip: "172.18.192.241", mac: "00-15-5d-13-59-30", state: nlnsPermanent}, // stale pre-commit
+		{ip: "172.18.206.103", mac: "00-15-5d-13-59-30", state: nlnsStale},     // real lease
+	}
+	if ip, ok := learnedLeaseIP(both, "00:15:5d:13:59:30"); !ok || ip != "172.18.206.103" {
+		t.Errorf("both: learnedLeaseIP = %q, %v; want the learned 172.18.206.103", ip, ok)
+	}
+	if ip, ok := learnedLeaseIP([]neighborEntry{both[1], both[0]}, "00:15:5d:13:59:30"); !ok || ip != "172.18.206.103" {
+		t.Errorf("both (reordered): learnedLeaseIP = %q, %v; want 172.18.206.103", ip, ok)
+	}
+
+	// (d) Multiple learned rows: deterministic (lexicographically smallest IP),
+	// independent of table order.
 	multiLearned := []neighborEntry{
 		{ip: "172.18.206.103", mac: "00-15-5d-13-59-30", state: nlnsStale},
 		{ip: "172.18.199.20", mac: "00-15-5d-13-59-30", state: nlnsReachable},
 		{ip: "172.18.192.241", mac: "00-15-5d-13-59-30", state: nlnsPermanent},
 	}
-	if ip, ok := selectLeaseIP(multiLearned, "00:15:5d:13:59:30"); !ok || ip != "172.18.199.20" {
-		t.Errorf("multi-learned: selectLeaseIP = %q, %v; want the smallest learned 172.18.199.20", ip, ok)
+	if ip, ok := learnedLeaseIP(multiLearned, "00:15:5d:13:59:30"); !ok || ip != "172.18.199.20" {
+		t.Errorf("multi-learned: learnedLeaseIP = %q, %v; want the smallest learned 172.18.199.20", ip, ok)
 	}
 	slices.Reverse(multiLearned)
-	if ip, ok := selectLeaseIP(multiLearned, "00:15:5d:13:59:30"); !ok || ip != "172.18.199.20" {
-		t.Errorf("multi-learned (reversed): selectLeaseIP = %q, %v; want a stable 172.18.199.20", ip, ok)
+	if ip, ok := learnedLeaseIP(multiLearned, "00:15:5d:13:59:30"); !ok || ip != "172.18.199.20" {
+		t.Errorf("multi-learned (reversed): learnedLeaseIP = %q, %v; want a stable 172.18.199.20", ip, ok)
 	}
 
-	// The ADR-0026 happy path (and the currently-validated host, where HNS
-	// only ever writes Permanent): only a Permanent pre-commit exists, and the
-	// selector must still return it -- the guest self-configured to it.
-	permanentOnly := []neighborEntry{
-		{ip: "172.20.159.244", mac: "00-15-5d-dd-30-75", state: nlnsPermanent},
-	}
-	if ip, ok := selectLeaseIP(permanentOnly, "00:15:5D:DD:30:75"); !ok || ip != "172.20.159.244" {
-		t.Errorf("permanent-only: selectLeaseIP = %q, %v; want the Permanent 172.20.159.244", ip, ok)
+	// (e) MAC normalization: dash-uppercase table row vs colon-lowercase query.
+	if ip, ok := learnedLeaseIP([]neighborEntry{{ip: "10.0.0.5", mac: "00-15-5D-DD-3E-DE", state: nlnsReachable}}, "00:15:5d:dd:3e:de"); !ok || ip != "10.0.0.5" {
+		t.Errorf("normalization: learnedLeaseIP = %q, %v; want 10.0.0.5", ip, ok)
 	}
 
-	if _, ok := selectLeaseIP(permanentOnly, "aa:bb:cc:dd:ee:ff"); ok {
+	if _, ok := learnedLeaseIP(learned, "aa:bb:cc:dd:ee:ff"); ok {
 		t.Error("found a lease for an absent MAC")
 	}
-	if _, ok := selectLeaseIP(nil, "00:15:5d:dd:30:75"); ok {
+	if _, ok := learnedLeaseIP(nil, "00:15:5d:dd:30:75"); ok {
 		t.Error("found a lease in an empty table")
 	}
 }

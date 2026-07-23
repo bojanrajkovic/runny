@@ -53,16 +53,16 @@ inconsistently, empty at first and populated later, unlike the neighbor table's
 immediate, stable read. KVP (`Get-VMNetworkAdapter` IP addresses) is unreachable for a
 bare compute system: it bypasses vmms entirely, which owns KVP.
 
-The pre-commit is only *usable* as the guest's address when the guest's own DHCP
-client happens to take it. It often does not: HNS runs its own DHCP server over
-the `/20`, and the lease the guest actually gets can be a different address than
-the pre-committed one. The neighbor table gives no way to tell the two apart —
-HNS writes the real lease as `Permanent` too, not as a dynamically-learned
-(`Reachable`/`Stale`) row, so a diverged MAC simply carries two `Permanent` rows
-at different IPs. The guest's real address is therefore read off the console
-during the network fixup (below), where the guest reports it directly; the
-neighbor table stays the source only for a guest that self-configures within the
-grace period, where the single pre-commit row is correct by construction.
+A `Permanent` row is never trusted as the guest's address. It is HNS's pre-boot
+pre-commit, and the guest's own DHCP client (HNS runs a DHCP server over the
+`/20`) routinely lands on a different address — and the neighbor table gives no
+way to tell the two apart, since HNS writes the real lease as `Permanent` too,
+not as a dynamically-learned (`Reachable`/`Stale`) row, so a diverged MAC simply
+carries two `Permanent` rows at different IPs. So the neighbor table is the IP
+source only within the grace period, and only for a *learned* row — an actual
+ARP resolution proving a self-configuring guest is reachable. A guest that needs
+the fixup surfaces no learned row, grace elapses, and its real address is read
+off the console during the fixup (below), where the guest reports it directly.
 
 **2. Does the guest need live console interaction to get networking up?** The
 concern (hv_netvsc naming the NIC `eth0` while a stock image's netplan might match
@@ -99,15 +99,18 @@ Schema 2.1, `HvSocket` populated, `SecureBoot` applied via the Microsoft UEFI CA
 template, `Chipset.Uefi.BootThis` omitted (UEFI auto-discovers the ESP on the
 SCSI-attached VHDX — the documented `ScsiDrive`/`File` boot-entry `DeviceType`
 values are unexercised even in Microsoft's own code and do not work). `WaitIP`
-polls `GetIpNetTable2` for a matching entry via a small hand-written binding
+polls `GetIpNetTable2` via a small hand-written binding
 (`internal/vm/neighbortable_windows.go`), since `x/sys/windows` doesn't wrap this
 corner of `iphlpapi`; the pure row-selection logic lives in
 `internal/vm/neighbortable.go` so it's unit-tested off-hardware.
 
 `WaitIP` gives the guest a bounded grace period (`waitIPGracePeriod`) to bring
 up networking on its own — the original assumption below, kept as the first
-thing tried. If the grace period elapses with no neighbor-table entry, it
-falls back once to a console-driven fixup (`internal/vm/netfixup_windows.go`):
+thing tried. Within grace it accepts only a *learned* (`Reachable`/`Stale`)
+neighbor row — an ARP resolution proving the guest is actually reachable — never
+HNS's `Permanent` pre-commit (Context Q1). If the grace period elapses with no
+learned row, it falls back once to a console-driven fixup
+(`internal/vm/netfixup_windows.go`):
 dial the HCS console pipe, log in, and apply a netplan drop-in matching by
 driver (`match: driver: hv_netvsc`) rather than by interface name, then read
 `eth0`'s address back off the console. This is the demonstrated case for the
@@ -126,7 +129,8 @@ to be post-fixup: a fresh guest has no pre-commit row for its MAC when the grace
 period elapses, so the stale rows only materialize once DHCP has settled — a
 pre-fixup snapshot would detect nothing and the correction would go silent. The
 neighbor-table read remains the *IP source* only on the grace-period happy path,
-where a self-configuring guest is reachable at the pre-commit by construction.
+and only for a learned row — a self-configuring guest that has actually resolved,
+never a bare `Permanent` pre-commit.
 
 ## Consequences
 
@@ -139,8 +143,9 @@ where a self-configuring guest is reachable at the pre-commit by construction.
   row per boot cycle for the daemon's whole lifetime.
 - A console-based networking fallback exists and is mandatory in practice for the
   currently-validated image (see above). A future or different guest image whose
-  netplan actually self-adapts never triggers it — it gets its neighbor-table entry
-  within the grace period and `WaitIP` returns before the fallback ever runs.
+  netplan actually self-adapts never triggers it — it resolves to a *learned*
+  neighbor row within the grace period and `WaitIP` returns before the fallback
+  ever runs.
 - On the fallback path the console read, not the neighbor table, is `WaitIP`'s
   IP source: HNS's `Permanent` pre-commit can diverge from the guest's real DHCP
   lease, and since HNS writes the real lease as `Permanent` too, no neighbor-table

@@ -236,6 +236,42 @@ gate (they already own the machine and the home DACL, and hold no operator
 ACE); a UAC-filtered, non-elevated admin does not — it must be granted an ACE
 like any other operator.
 
+**The client verifies the pipe server's owner before trusting the
+connection.** The system daemon's pipe name (`\\.\pipe\runnyd`) is necessarily
+predictable — clients compute it from the fixed system home, so it cannot be
+randomized — which leaves a squat window: during a service-restart interval on
+a shared multi-user box, an already-logged-in unprivileged user could
+pre-create the name and MITM a connecting `runnyctl`, harvesting operator
+traffic (debug-key injection carries SSH material) or feeding false responses.
+go-winio's `ListenPipe` creates the first instance with `FILE_CREATE`, so the
+real daemon's bind **fails loud** on a squatted name (never a silent join), and
+the service binds at boot before interactive logon — but neither closes the
+restart-window MITM. So the dial is mutually authenticated: the server already
+reads the client's SID by impersonation, and now the client reads the pipe's
+owner SID (`GetSecurityInfo(OWNER)` on the connected handle) and refuses the
+connection unless the owner is `BUILTIN\Administrators` (`S-1-5-32-544`, the
+live daemon's owner) or SYSTEM (`S-1-5-18`) — before any RPC or credential
+crosses the wire. Setting an object's owner to either principal requires
+membership in it (or `SeRestorePrivilege`), which an unprivileged squatter
+lacks, so its pipe is owned by *itself* and fails the check; an arbitrary user
+SID is never trusted. The read is fail-closed: an unreadable owner is refused,
+not waved through. This **closes the MITM residual**. The **DoS residual is
+accepted**: a squatter holding the name across a restart still blocks the real
+daemon's bind, but that fails visibly (bind error, SCM failure) rather than
+silently — the loud failure this project is built to prefer.
+
+The trusted owner is not left to chance: the daemon binds the system pipe with
+an explicit `O:BA` owner in its security descriptor. The unprivileged `NT
+SERVICE\runnyd` account carries Administrators as owner-eligible, so the pipe's
+default owner already lands on `BA` — setting it explicitly makes that a
+contract, so a host where the account cannot own as `BA` fails loud at bind
+rather than binding a pipe the client would silently refuse. The owner check is
+scoped to this **system** pipe alone: a per-user daemon's pipe carries an
+owner-only connect DACL (only the resolving user can open it — the
+pipe-namespace analogue of darwin's `0600` socket) and is owned by that user, so
+it has no cross-user squat exposure and the Administrators/SYSTEM owner check is
+not applied to it (applying it would falsely refuse a healthy non-admin daemon).
+
 The kill is cooperative, not preemptive: it cancels a context both stream
 handlers already select on between sends, so a handler currently blocked
 **inside** a send (a slow or non-reading client has exhausted HTTP/2 flow

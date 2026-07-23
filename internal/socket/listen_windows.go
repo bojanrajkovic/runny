@@ -10,8 +10,21 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// authenticatedUsersSDDL grants pipe connect to Authenticated Users. On the
-// system daemon it is a coarse connect filter, deliberately NOT the sole
+// authenticatedUsersSDDL is the system daemon pipe's security descriptor: owner
+// BUILTIN\Administrators (O:BA) plus a connect DACL granting Authenticated
+// Users.
+//
+// O:BA pins the owner deterministically. The client's dial trusts the system
+// pipe only if it is owned by Administrators or SYSTEM — an un-forgeable
+// anti-squat anchor (see cmd/runnyctl's dial). The unprivileged NT
+// SERVICE\runnyd account the daemon runs as carries Administrators as
+// owner-eligible, so the pipe's *default* owner already lands on BA; setting it
+// explicitly makes that a contract rather than an implicit token default. On any
+// host where the account cannot own as BA, ListenPipe fails loud at bind — the
+// no-silent-failure posture — instead of binding a pipe the client would then
+// silently refuse.
+//
+// The AU DACL is a coarse connect filter, deliberately NOT the sole
 // authorization tier the way a unix socket's 0600 mode is on darwin: any
 // authenticated principal can open the pipe, but the per-RPC
 // operator-revocation gate (armed unconditionally on the system daemon — the
@@ -19,7 +32,7 @@ import (
 // there is no unreadable-identity failure to degrade around) fails every RPC
 // closed for a principal absent from the home ACL. AU, not Everyone (WD): an
 // unauthenticated / anonymous logon has no business even reaching the gate.
-const authenticatedUsersSDDL = "D:(A;;GA;;;AU)"
+const authenticatedUsersSDDL = "O:BAD:(A;;GA;;;AU)"
 
 // pipeBufferBytes sizes the pipe's kernel input/output buffers. A zero-buffer
 // (winio's default) pipe makes every client WriteFile rendezvous with the

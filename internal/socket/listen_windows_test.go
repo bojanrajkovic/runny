@@ -65,15 +65,20 @@ func TestPipeTransportRoundTrip(t *testing.T) {
 const pipeDialAccessTest = 0x80000000 | 0x40000000
 
 // TestPipeSDDL pins the per-daemon connect DACL: the system daemon grants
-// Authenticated Users; a per-user daemon grants only the resolving user's own
-// SID (owner-only), so the descriptor names that SID and not AU.
+// Authenticated Users behind an explicit O:BA owner (the client trusts only an
+// Administrators/SYSTEM-owned system pipe); a per-user daemon grants only the
+// resolving user's own SID (owner-only), so the descriptor names that SID and
+// not AU.
 func TestPipeSDDL(t *testing.T) {
 	sys, err := pipeSDDL(true)
 	if err != nil {
 		t.Fatalf("pipeSDDL(system): %v", err)
 	}
-	if sys != authenticatedUsersSDDL {
-		t.Errorf("system pipe SDDL = %q, want %q", sys, authenticatedUsersSDDL)
+	// Literal, not compared to the const: this catches an edit that drops the
+	// O:BA owner the client's dial trusts, which a self-referential
+	// `sys != authenticatedUsersSDDL` check never could.
+	if want := "O:BAD:(A;;GA;;;AU)"; sys != want {
+		t.Errorf("system pipe SDDL = %q, want %q (explicit O:BA owner)", sys, want)
 	}
 
 	user, err := pipeSDDL(false)

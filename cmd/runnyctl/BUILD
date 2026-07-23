@@ -128,6 +128,7 @@ notarize_binary(
 go_test(
     name = "runnyctl_test",
     srcs = [
+        "dial_windows_test.go",
         "follow_test.go",
         "installdaemon_test.go",
         "installdaemon_windows_test.go",
@@ -146,7 +147,13 @@ go_test(
         "@org_golang_google_grpc//codes",
         "@org_golang_google_grpc//status",
         "@org_golang_google_protobuf//types/known/timestamppb",
-    ],
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@com_github_microsoft_go_winio//:go-winio",
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 stamped_go_binary(

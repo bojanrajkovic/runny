@@ -114,9 +114,25 @@ func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) er
 	// and best-effort: a probe failure or partial capture must never affect
 	// fixupNetwork's own success/failure, since this exists purely to build
 	// a correlatable dataset across future cycles, not to gate anything.
-	const diagCmd = `echo '--route--'; ip route show; echo '--ssh--'; sudo ss -tlnp 2>&1 | grep ':22 ' || echo 'not listening'; echo '--networkd--'; systemctl is-active systemd-networkd 2>&1; echo '--diagdone--'`
-	diagOut, _ := consoleRun(ctx, conn, diagCmd, 5*time.Second, func(s string) bool { return strings.Contains(s, "--diagdone--") })
-	obs.Emit(ctx, obs.Event{Kind: obs.KindDetail, Detail: &obs.DetailEvent{Text: diagOut}})
+	//
+	// Three separate captures/milestones, not one combined KindDetail: a
+	// first attempt combining all three into one blob got silently
+	// truncated by the OTel pipeline's attribute-value size cap before the
+	// ss/systemd-networkd portions ever survived, and KindDetail is
+	// last-value-wins besides (a second or third Detail on the same span
+	// overwrites the first, so splitting into multiple Details would have
+	// dropped exactly the same information a different way). Milestone
+	// renders as a genuine, additive span event instead -- each of these
+	// three survives independently, and each is short enough on its own to
+	// stay well under the size cap that truncated the combined version.
+	for _, diag := range []struct{ name, cmd string }{
+		{"diag-route", `ip route show; echo '--diagdone--'`},
+		{"diag-ssh", `sudo ss -tlnp 2>&1 | grep ':22 ' || echo 'not listening'; echo '--diagdone--'`},
+		{"diag-networkd", `systemctl is-active systemd-networkd 2>&1; echo '--diagdone--'`},
+	} {
+		out, _ := consoleRun(ctx, conn, diag.cmd, 3*time.Second, diagMarkerMatch)
+		obs.Milestone(ctx, diag.name+": "+diagOutput(out))
+	}
 
 	// Best-effort: log the console session out so the authenticated shell
 	// doesn't linger for the guest's whole active lifetime, off this
@@ -136,6 +152,31 @@ func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) er
 		}
 	}()
 	return nil
+}
+
+// diagMarkerMatch reports whether "--diagdone--" appears in s as a diag
+// command's REAL printed output (preceded by a line break), not merely as
+// part of the console's own echo of the typed command -- that echo contains
+// the quoted marker literal ('--diagdone--') on the same line as the rest of
+// the command, and matching on the bare substring could return the instant
+// that echo lands, before the command has actually run, silently capturing
+// nothing but the echo.
+func diagMarkerMatch(s string) bool {
+	return strings.Contains(s, "\n--diagdone--") || strings.Contains(s, "\r--diagdone--")
+}
+
+// diagOutput extracts a diag command's real printed output from consoleRun's
+// raw capture: cuts at the marker's own last occurrence, then drops the
+// echoed command line (everything up to its first line break).
+func diagOutput(out string) string {
+	text := out
+	if idx := strings.LastIndex(text, "--diagdone--"); idx >= 0 {
+		text = text[:idx]
+	}
+	if idx := strings.IndexAny(text, "\r\n"); idx >= 0 {
+		text = text[idx:]
+	}
+	return strings.TrimSpace(text)
 }
 
 // dialConsoleWithRetry retries the pipe dial within ctx: the console pipe

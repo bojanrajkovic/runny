@@ -63,11 +63,17 @@ ADR-0026 for the Hyper-V backend's decisions and why; this doc is sharp edges on
   mechanisms.** An unclean shutdown leaves a slot's compute system (and the
   `vmwp.exe` worker process backing it) running with the slot's clone VHDX
   still open — confirmed on real hardware: `cmd/runnyd`'s cold-start sweep
-  (`os.RemoveAll(vmsDir)`) hit exactly that open handle and crashed outright,
-  not skip-and-continue, crash-looping the daemon forever since nothing ever
-  reaped the orphan in between restarts (issue #320). `ReapOrphans` runs once
-  at startup, before that sweep, over every slot directory found; `Boot`'s own
-  call covers the same slot again per-boot as a second line of defense. Both
-  go through the `reapOps` seam (`reapPriorSystem`, `reapAllSlots`) so the
-  skip/proceed/fail-loud decision logic is unit-tested without hardware —
-  only the real HCS/HNS calls (`hcsReapOps`) need it.
+  (then a single `os.RemoveAll(vmsDir)`) hit exactly that open handle and
+  crashed outright, not skip-and-continue, crash-looping the daemon forever
+  since nothing ever reaped the orphan in between restarts. `ReapOrphans`
+  runs once at startup, before that sweep, over every slot directory found;
+  `Boot`'s own call covers the same slot again per-boot as a second line of
+  defense. Both go through the `reapOps` seam (`reapPriorSystem`,
+  `reapAllSlots`) so the skip/proceed/fail-loud decision logic is
+  unit-tested without hardware — only the real HCS/HNS calls (`hcsReapOps`)
+  need it. `ReapOrphans` is still best-effort per slot (a genuinely wedged
+  compute system that never confirms exit stays un-reaped this restart), so
+  `sweepVMsDir` (`cmd/runnyd/main.go`) removes vmsDir's entries one at a
+  time rather than the whole tree in one `RemoveAll` — a third line of
+  defense so that one still-wedged slot can't crash-loop startup for every
+  other slot.

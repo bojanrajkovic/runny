@@ -70,10 +70,10 @@ type Manager interface {
 	Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptions) (Machine, error)
 	// ReapOrphans clears any per-slot backend state an unclean shutdown left
 	// behind, for every entry under vmsDir, before the daemon's own startup
-	// sweep (os.RemoveAll(vmsDir)) deletes them — a backend whose orphan
-	// still holds a file open can otherwise make that sweep fail outright,
-	// crash-looping the daemon forever with no cold-start recovery (issue
-	// #320). Best-effort: a single slot's failure to reap must not fail
+	// sweep (cmd/runnyd's sweepVMsDir) removes them — a backend whose orphan
+	// still holds a file open can otherwise make that sweep fail to remove
+	// that one slot, crash-looping the daemon forever on the exact same
+	// lock. Best-effort: a single slot's failure to reap must not fail
 	// ReapOrphans itself, or a wedged orphan becomes a wedged daemon
 	// startup — exactly the failure mode this exists to kill. A no-op on
 	// backends with no such orphan class (darwin's Virtualization.framework

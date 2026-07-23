@@ -65,7 +65,7 @@ func TestOperatorGrantRendersConfirmation(t *testing.T) {
 	if f.granted.GetUser() != "alice" {
 		t.Errorf("request user = %q, want alice", f.granted.GetUser())
 	}
-	if got := buf.String(); got != "granted alice (uid 502) — reachable on the control socket now\n" {
+	if got := buf.String(); got != "granted alice (uid 502) — reachable on the control channel now\n" {
 		t.Errorf("output = %q", got)
 	}
 }
@@ -81,7 +81,7 @@ func TestOperatorGrantRendersSIDConfirmation(t *testing.T) {
 	if err := c.operatorGrant(t.Context(), `CORP\alice`); err != nil {
 		t.Fatalf("operatorGrant: %v", err)
 	}
-	want := `granted CORP\alice (` + sid + `) — reachable on the control socket now` + "\n"
+	want := `granted CORP\alice (` + sid + `) — reachable on the control channel now` + "\n"
 	if got := buf.String(); got != want {
 		t.Errorf("output = %q, want %q", got, want)
 	}

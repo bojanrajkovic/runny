@@ -13,8 +13,9 @@ import (
 // kernel-authenticated identity of the connecting peer (SO_PEERCRED on
 // darwin), read server-side so it cannot be forged by a client-supplied
 // value. SecurityLevel is deliberately NoSecurity — the channel is a
-// plaintext unix socket, and claiming a higher level would tell gRPC a
-// future per-RPC secret is safe to send in the clear.
+// plaintext local control channel (a unix socket on darwin, a named pipe on
+// windows), and claiming a higher level would tell gRPC a future per-RPC
+// secret is safe to send in the clear.
 type peerAuth struct {
 	credentials.CommonAuthInfo
 	// ID is the platform-native identity string, following

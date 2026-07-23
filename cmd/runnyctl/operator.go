@@ -27,7 +27,7 @@ func (c *ctl) operatorGrant(ctx context.Context, user string) error {
 	if c.json {
 		return c.emit(resp)
 	}
-	fmt.Fprintf(c.out, "granted %s (%s) — reachable on the control socket now\n",
+	fmt.Fprintf(c.out, "granted %s (%s) — reachable on the control channel now\n",
 		resp.GetUser(), operatorIDDisplay(resp.GetUid(), resp.GetSid()))
 	return nil
 }

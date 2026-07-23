@@ -43,15 +43,17 @@ ADR-0026 for the Hyper-V backend's decisions and why; this doc is sharp edges on
   hardware). The table can't self-correct: HNS writes the real lease as
   `Permanent` too, so a diverged MAC just shows two `Permanent` rows. `fixupNetwork`
   reads `eth0`'s real address off the console (`parseInetIP`) and `WaitIP` returns
-  that; the neighbor table is re-read only to flag the divergence
-  (`neighbor-ip-corrected` milestone + a `slog.Warn` when the lease matches none
-  of the MAC's `Permanent` rows — `permanentIPs`, not just the first, since stale
-  rows accumulate per MAC). The pure selectors (`permanentIPs`, `selectLeaseIP`)
-  and the console parser (`parseInetIP`) live in untagged files
-  (`neighbortable.go`, `netfixup.go`) so
-  they unit-test off-hardware; `selectLeaseIP`'s learned-over-`Permanent`
-  preference is a defensive rule for a host that ever surfaces a learned row —
-  the validated one never does.
+  that; the neighbor table is re-read — **after** the fixup — only to flag the
+  divergence (`neighbor-ip-corrected` milestone + a `slog.Warn` listing the stale
+  rows via `divergentPermanentIPs`). The re-read must be post-fixup: a fresh
+  guest has no pre-commit row for its MAC at grace-elapse, so the stale
+  `Permanent` rows the warning reports only materialize once DHCP has settled —
+  a pre-fixup snapshot detects nothing and the correction goes silent. The pure
+  selectors (`permanentIPs`, `divergentPermanentIPs`, `selectLeaseIP`) and the
+  console parser (`parseInetIP`) live in untagged files (`neighbortable.go`,
+  `netfixup.go`) so they unit-test off-hardware; `selectLeaseIP`'s
+  learned-over-`Permanent` preference is a defensive rule for a host that ever
+  surfaces a learned row — the validated one never does.
 - **`Boot` never calls `vhdx.CreateDifferencing` itself.** The slot's
   differencing-child VHDX is already there at `bundle.VHDXPath()` by the time
   `HCSManager.Boot` runs — `internal/tart.CloneVHDX` creates it during the FSM's

@@ -34,6 +34,45 @@ func TestPermanentIPs(t *testing.T) {
 	}
 }
 
+func TestDivergentPermanentIPs(t *testing.T) {
+	const lease = "172.18.206.103"
+
+	// (a) The real post-fixup shape: a Permanent row at the lease plus a stale
+	// pre-commit at a different IP -> the stale one is returned.
+	twoRows := []neighborEntry{
+		{ip: lease, mac: "00-15-5d-13-59-30", state: nlnsPermanent},
+		{ip: "172.18.192.241", mac: "00-15-5D-13-59-30", state: nlnsPermanent},
+	}
+	if got := divergentPermanentIPs(twoRows, "00:15:5d:13:59:30", lease); !slices.Equal(got, []string{"172.18.192.241"}) {
+		t.Errorf("two-row: divergentPermanentIPs = %v, want [172.18.192.241]", got)
+	}
+
+	// (b) The table agrees with the lease (only a Permanent row at the lease) -> empty.
+	if got := divergentPermanentIPs([]neighborEntry{twoRows[0]}, "00:15:5d:13:59:30", lease); len(got) != 0 {
+		t.Errorf("lease-only: divergentPermanentIPs = %v, want empty", got)
+	}
+
+	// (c) No rows for the MAC -> empty.
+	if got := divergentPermanentIPs(nil, "00:15:5d:13:59:30", lease); len(got) != 0 {
+		t.Errorf("empty table: divergentPermanentIPs = %v, want empty", got)
+	}
+
+	// (d) Learned rows are ignored -- only Permanent pre-commits count, even a
+	// learned row at a divergent IP is not a pre-commit divergence.
+	learnedDiverges := []neighborEntry{
+		{ip: lease, mac: "00-15-5d-13-59-30", state: nlnsPermanent},
+		{ip: "172.18.199.20", mac: "00-15-5d-13-59-30", state: nlnsReachable},
+	}
+	if got := divergentPermanentIPs(learnedDiverges, "00:15:5d:13:59:30", lease); len(got) != 0 {
+		t.Errorf("learned-diverges: divergentPermanentIPs = %v, want empty (learned rows ignored)", got)
+	}
+
+	// (e) MAC normalization: dash-uppercase table row vs colon-lowercase query.
+	if got := divergentPermanentIPs(twoRows, "00-15-5D-13-59-30", lease); !slices.Equal(got, []string{"172.18.192.241"}) {
+		t.Errorf("normalization: divergentPermanentIPs = %v, want [172.18.192.241]", got)
+	}
+}
+
 func TestSelectLeaseIP(t *testing.T) {
 	// The divergence case (the whole reason mechanism 1 exists): the same MAC
 	// carries a stale Permanent pre-commit AND a learned lease at a different

@@ -42,17 +42,13 @@ func (e neighborEntry) learned() bool {
 }
 
 // permanentIPs returns every Permanent-row IP for mac, in table order. These
-// are HNS *pre-commits* -- the MAC->IP bindings HNS writes at endpoint-attach,
-// before the guest's own DHCP client has run. WaitIP reads them only to compare
-// against the guest's real, console-observed lease and flag a divergence; they
-// are NOT the address WaitIP dials once a fixup has observed the true one (see
-// hcs_windows.go). Stale pre-commit rows accumulate for a MAC across cycles (see
-// internal/vm/CLAUDE.md), so WaitIP compares the lease against the whole set,
-// not just the first row: a divergence is "the lease matches none of the
-// pre-commits", deterministic no matter which stale row comes first. MACs are
-// normalized the same way WaitIP's darwin sibling matches dhcpd_leases entries
-// (leases.go's normalizeMAC) -- Windows renders MACs dash-separated, macOS
-// colon-separated, so both sides always go through the same normalizer.
+// are HNS *pre-commits* -- the MAC->IP bindings HNS writes at endpoint-attach.
+// They are NOT the address WaitIP dials once a fixup has observed the guest's
+// real lease off the console (see hcs_windows.go); WaitIP reads them only to
+// flag a divergence via divergentPermanentIPs. MACs are normalized the same way
+// WaitIP's darwin sibling matches dhcpd_leases entries (leases.go's
+// normalizeMAC) -- Windows renders MACs dash-separated, macOS colon-separated,
+// so both sides always go through the same normalizer.
 func permanentIPs(entries []neighborEntry, mac string) []string {
 	want := normalizeMAC(mac)
 	var ips []string
@@ -62,6 +58,23 @@ func permanentIPs(entries []neighborEntry, mac string) []string {
 		}
 	}
 	return ips
+}
+
+// divergentPermanentIPs returns the Permanent-row IPs for mac that differ from
+// leaseIP -- the stale pre-commit(s) the daemon would have dialed if it trusted
+// the neighbor table instead of the console-observed lease. Empty means no
+// divergence (the table agrees with the lease, or has no other Permanent row).
+// WaitIP calls this on a *post*-fixup table read: a fresh guest has no
+// pre-commit row for its MAC yet at grace-elapse, so the divergence only becomes
+// visible once DHCP has settled and HNS's stale rows are in the table.
+func divergentPermanentIPs(entries []neighborEntry, mac, leaseIP string) []string {
+	var other []string
+	for _, ip := range permanentIPs(entries, mac) {
+		if ip != leaseIP {
+			other = append(other, ip)
+		}
+	}
+	return other
 }
 
 // selectLeaseIP picks the guest's current address from a neighbor-table

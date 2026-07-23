@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"math"
 	"path/filepath"
-	"slices"
 	"time"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
@@ -376,11 +375,6 @@ func (m *hcsMachine) WaitIP(ctx bounded.Context) (string, error) {
 			if m.sshUser == "" || m.sshPassword == "" {
 				return "", fmt.Errorf("no IP after %s and no SSHUser/SSHPassword configured to attempt the network fixup (issue #319)", waitIPGracePeriod)
 			}
-			// The neighbor table's Permanent rows for this MAC are HNS's
-			// pre-commits; captured before the fixup so the guest's real lease
-			// can be compared against the whole set (stale rows accumulate per
-			// MAC across cycles, so any single row is an unreliable baseline).
-			precommits := permanentIPs(entries, m.mac)
 			// Wrapped in its own named action (not folded silently into
 			// AWAIT_IP's step span) so a trace/metric can distinguish "this
 			// cycle needed the fixup" from "HNS was just slow" -- the two
@@ -395,13 +389,21 @@ func (m *hcsMachine) WaitIP(ctx bounded.Context) (string, error) {
 					return err
 				}
 				leaseIP = ip
-				if len(precommits) > 0 && !slices.Contains(precommits, ip) {
-					// no-silent-failure: the trace milestone flags that WaitIP
-					// dialed something no pre-commit named, and the log carries
-					// the full pre-commit set for the operator asking why.
-					obs.Milestone(ctx, "neighbor-ip-corrected")
-					slog.Warn("WaitIP: guest lease diverged from HNS pre-commit; dialing the console-observed address",
-						"mac", m.mac, "precommit_ips", precommits, "lease_ip", ip)
+				// Re-read AFTER the fixup: by now the guest's DHCP has settled
+				// and any stale HNS pre-commit rows for this MAC are visible, so
+				// this is the snapshot that actually shows the divergence the
+				// pre-fixup one couldn't (a fresh guest has no pre-commit row
+				// yet at grace-elapse). Best-effort: a transient re-read failure
+				// just skips the diagnostic, never fails the cycle.
+				if post, err := readNeighborEntries(); err == nil {
+					if other := divergentPermanentIPs(post, m.mac, leaseIP); len(other) > 0 {
+						// no-silent-failure: the milestone flags that WaitIP
+						// dialed something the neighbor table disagrees with, and
+						// the log carries the stale rows for the operator asking why.
+						obs.Milestone(ctx, "neighbor-ip-corrected")
+						slog.Warn("WaitIP: neighbor table holds a stale pre-commit differing from the guest's real lease; dialing the console-observed address",
+							"mac", m.mac, "neighbor_ips", other, "lease_ip", leaseIP)
+					}
 				}
 				return nil
 			}); err != nil {

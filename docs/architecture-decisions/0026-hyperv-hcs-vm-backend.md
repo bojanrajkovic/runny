@@ -118,11 +118,15 @@ without it.
 
 That console-read address — the one the guest actually holds — is what `WaitIP`
 returns on the fixup path, **not** the neighbor-table pre-commit, which can name
-a stale, unreachable address (Context Q1). When the two differ, `WaitIP` emits a
-`neighbor-ip-corrected` trace milestone and logs both, so the correction is never
-silent. The neighbor-table read remains the source only on the grace-period
-happy path, where a self-configuring guest is reachable at the pre-commit by
-construction.
+a stale, unreachable address (Context Q1). To make the correction visible,
+`WaitIP` re-reads the neighbor table *after* the fixup and, if any `Permanent`
+row for the MAC now differs from the console lease, emits a
+`neighbor-ip-corrected` trace milestone and logs the stale rows. The re-read has
+to be post-fixup: a fresh guest has no pre-commit row for its MAC when the grace
+period elapses, so the stale rows only materialize once DHCP has settled — a
+pre-fixup snapshot would detect nothing and the correction would go silent. The
+neighbor-table read remains the *IP source* only on the grace-period happy path,
+where a self-configuring guest is reachable at the pre-commit by construction.
 
 ## Consequences
 

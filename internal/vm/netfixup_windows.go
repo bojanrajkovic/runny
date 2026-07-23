@@ -100,6 +100,24 @@ func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) er
 	}
 	obs.Milestone(ctx, "netplan-verified")
 
+	// Diagnostic-only, on every run (not just failures): issue #320 found
+	// AWAIT_SSH fails ~9x more often after this fixup runs (38.9% vs 4.3%
+	// over a 7-day sample) despite the guest's own network check above
+	// having just passed -- something between here and a working SSH
+	// connection still isn't ready, and the guest-side state at exactly
+	// this moment is unrecorded today. Captures whether sshd is actually
+	// listening, whether a route/gateway exists yet, and whether
+	// systemd-networkd is still mid-reconciliation (netplan apply reloads
+	// its entire config from every merged YAML file, including the
+	// image's own baked one alongside this drop-in, and the fixed 5s sleep
+	// above may not always be enough for that to fully settle). Read-only
+	// and best-effort: a probe failure or partial capture must never affect
+	// fixupNetwork's own success/failure, since this exists purely to build
+	// a correlatable dataset across future cycles, not to gate anything.
+	const diagCmd = `echo '--route--'; ip route show; echo '--ssh--'; sudo ss -tlnp 2>&1 | grep ':22 ' || echo 'not listening'; echo '--networkd--'; systemctl is-active systemd-networkd 2>&1; echo '--diagdone--'`
+	diagOut, _ := consoleRun(ctx, conn, diagCmd, 5*time.Second, func(s string) bool { return strings.Contains(s, "--diagdone--") })
+	obs.Emit(ctx, obs.Event{Kind: obs.KindDetail, Detail: &obs.DetailEvent{Text: diagOut}})
+
 	// Best-effort: log the console session out so the authenticated shell
 	// doesn't linger for the guest's whole active lifetime, off this
 	// function's own critical path -- fixupNetwork itself has already

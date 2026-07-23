@@ -95,16 +95,22 @@ func TestReadPeerImpersonatesClientSID(t *testing.T) {
 }
 
 // TestIsPrivilegedToken pins the privileged verdict logic deterministically,
-// independent of whether the CI runner is elevated: SYSTEM's SID is privileged
-// by the string short-circuit (the token is never consulted), and a non-SYSTEM
-// SID checked against a primary (non-impersonation) token reads non-privileged
-// — CheckTokenMembership rejects a primary token, and the code errs that to
-// false (the require-an-explicit-ACE safe direction).
+// independent of whether the CI runner is elevated-admin: SYSTEM's SID is
+// privileged by the string short-circuit (the token is never consulted), and a
+// non-SYSTEM SID checked against the NULL token (Token(0)) reads
+// non-privileged. CheckTokenMembership(NULL, …) uses the calling thread's
+// impersonation token; with no thread impersonation it errors, so IsMember
+// errors and the code errs that to false (the require-an-explicit-ACE safe
+// direction). We must NOT use the process's own primary token here — on an
+// admin runner it IS a member of Administrators, so IsMember would return true
+// (correctly: an elevated admin is a privileged peer), making the expected
+// value runner-dependent. Token(0) exercises the fail-closed path with no such
+// dependency.
 func TestIsPrivilegedToken(t *testing.T) {
 	if !isPrivilegedToken(systemSID, windows.Token(0)) {
 		t.Error("SYSTEM SID must be privileged")
 	}
-	if isPrivilegedToken("S-1-5-21-1-2-3-1001", windows.GetCurrentProcessToken()) {
-		t.Error("a non-SYSTEM SID with a primary token must read non-privileged")
+	if isPrivilegedToken("S-1-5-21-1-2-3-1001", windows.Token(0)) {
+		t.Error("a non-SYSTEM SID against the NULL token must read non-privileged (IsMember errors, fail closed)")
 	}
 }

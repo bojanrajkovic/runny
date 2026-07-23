@@ -10,25 +10,23 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// TestGrantRevokeArgs pins the exact icacls invocations: the home ACE must
-// be byte-identical to the install bootstrap's operator grant ((OI)(CI)M —
-// see internal/sysdaemon's icaclsHomeArgs) so ListIDs cannot tell a
-// bootstrap operator from a live-granted one, and revoke must hit the home
-// dir first (the ACL the revocation gate reads).
+// TestGrantRevokeArgs pins the exact icacls invocations: a single home-dir
+// target (the pipe control channel has no file to stamp), with a home ACE
+// byte-identical to the install bootstrap's operator grant ((OI)(CI)M — see
+// internal/sysdaemon's icaclsHomeArgs) so ListIDs cannot tell a bootstrap
+// operator from a live-granted one.
 func TestGrantRevokeArgs(t *testing.T) {
-	got := grantArgs(`C:\ProgramData\runny`, `C:\ProgramData\runny\runnyd.sock`, `CORP\alice`)
+	got := grantArgs(`C:\ProgramData\runny`, `CORP\alice`)
 	want := [][]string{
 		{"icacls", `C:\ProgramData\runny`, "/grant", `CORP\alice:(OI)(CI)M`},
-		{"icacls", `C:\ProgramData\runny\runnyd.sock`, "/grant", `CORP\alice:M`},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("grantArgs =\n got %v\nwant %v", got, want)
 	}
 
-	got = revokeArgs(`C:\ProgramData\runny`, `C:\ProgramData\runny\runnyd.sock`, `CORP\alice`)
+	got = revokeArgs(`C:\ProgramData\runny`, `CORP\alice`)
 	want = [][]string{
 		{"icacls", `C:\ProgramData\runny`, "/remove:g", `CORP\alice`},
-		{"icacls", `C:\ProgramData\runny\runnyd.sock`, "/remove:g", `CORP\alice`},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("revokeArgs =\n got %v\nwant %v", got, want)
@@ -61,10 +59,11 @@ func TestOperatorACEShape(t *testing.T) {
 }
 
 // TestOperatorSIDsWalk drives the real DACL walk (GetAce, the SID cast, the
-// SidTypeUser resolution) against a synthetic in-memory ACL: the current
-// user's allow-write ACE is a member; SYSTEM's identical ACE is not
-// (SidTypeWellKnownGroup, the same exclusion that keeps the bootstrap's
-// SYSTEM Full grant out of the operator list on a real home).
+// exclusion, the SidTypeUser resolution) against a synthetic in-memory ACL:
+// the current user's allow-write ACE is a member; SYSTEM's identical ACE is
+// not (excluded structurally by its S-1-5-18 SID, the same exclusion that
+// keeps the bootstrap's SYSTEM Full grant out of the operator list on a real
+// home).
 func TestOperatorSIDsWalk(t *testing.T) {
 	tu, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
@@ -104,6 +103,55 @@ func TestOperatorSIDsWalk(t *testing.T) {
 	}
 	if slices.Contains(ids, system.String()) {
 		t.Errorf("SYSTEM must be excluded (SidTypeWellKnownGroup), got %v", ids)
+	}
+}
+
+// TestOperatorSIDsExcludesServiceSID is the red test for #332: a service SID
+// (S-1-5-80-*, e.g. NT SERVICE\runnyd) carrying an allow-write ACE — exactly
+// the shape the install bootstrap writes for the daemon's own account, and
+// exactly what LookupAccountSid mislabels as SidTypeUser in the daemon's
+// context. The structural prefix exclusion must drop it regardless of that
+// type verdict, so the daemon never counts itself as an operator.
+func TestOperatorSIDsExcludesServiceSID(t *testing.T) {
+	svc, err := windows.StringToSid("S-1-5-80-3139157870-2983391045-3678747466-658725712-1809340420")
+	if err != nil {
+		t.Fatalf("StringToSid: %v", err)
+	}
+	entry := windows.EXPLICIT_ACCESS{
+		AccessPermissions: windows.FILE_GENERIC_READ | windows.FILE_GENERIC_WRITE,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       windows.NO_INHERITANCE,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeValue: windows.TrusteeValueFromSID(svc),
+		},
+	}
+	dacl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{entry}, nil)
+	if err != nil {
+		t.Fatalf("ACLFromEntries: %v", err)
+	}
+	ids, err := operatorSIDs(dacl)
+	if err != nil {
+		t.Fatalf("operatorSIDs: %v", err)
+	}
+	if slices.Contains(ids, svc.String()) {
+		t.Errorf("service SID (S-1-5-80-*) must be excluded structurally, got %v", ids)
+	}
+}
+
+// TestExcludedSID pins the structural exclusion directly: the well-known
+// singletons and the alias/service ranges are excluded; a real per-machine
+// user SID (S-1-5-21-*) is not.
+func TestExcludedSID(t *testing.T) {
+	for _, sid := range []string{"S-1-5-18", "S-1-5-19", "S-1-5-20", "S-1-5-32-544", "S-1-5-80-0", "S-1-5-80-1-2-3-4-5"} {
+		if !excludedSID(sid) {
+			t.Errorf("excludedSID(%q) = false, want true", sid)
+		}
+	}
+	for _, sid := range []string{"S-1-5-21-1111111111-2222222222-3333333333-1001", "S-1-5-21-9-9-9-500"} {
+		if excludedSID(sid) {
+			t.Errorf("excludedSID(%q) = true, want false", sid)
+		}
 	}
 }
 

@@ -66,26 +66,26 @@ type fakeReapOps struct {
 	openEndpointCalls int
 }
 
-func (f *fakeReapOps) openSystem(context.Context, string) (reapSystem, bool, error) {
+func (f *fakeReapOps) openSystem(context.Context, string) (reapSystem, error) {
 	f.openSystemCalls++
 	if f.systemErr != nil {
-		return nil, false, f.systemErr
+		return nil, f.systemErr
 	}
 	if f.system == nil {
-		return nil, false, nil
+		return nil, nil
 	}
-	return f.system, true, nil
+	return f.system, nil
 }
 
-func (f *fakeReapOps) openEndpoint(string) (reapEndpoint, bool, error) {
+func (f *fakeReapOps) openEndpoint(string) (reapEndpoint, error) {
 	f.openEndpointCalls++
 	if f.endpntErr != nil {
-		return nil, false, f.endpntErr
+		return nil, f.endpntErr
 	}
 	if f.endpoint == nil {
-		return nil, false, nil
+		return nil, nil
 	}
-	return f.endpoint, true, nil
+	return f.endpoint, nil
 }
 
 // TestReapPriorSystemNothingToReap: neither a stale system nor a stale
@@ -268,17 +268,17 @@ type countingReapOps struct {
 	delay   time.Duration
 }
 
-func (c *countingReapOps) openSystem(_ context.Context, systemID string) (reapSystem, bool, error) {
+func (c *countingReapOps) openSystem(_ context.Context, systemID string) (reapSystem, error) {
 	if c.delay > 0 {
 		time.Sleep(c.delay)
 	}
 	c.seen[systemID]++
 	if systemID == c.failFor {
-		return nil, false, context.DeadlineExceeded
+		return nil, context.DeadlineExceeded
 	}
-	return nil, false, nil
+	return nil, nil
 }
 
-func (c *countingReapOps) openEndpoint(string) (reapEndpoint, bool, error) {
-	return nil, false, nil
+func (c *countingReapOps) openEndpoint(string) (reapEndpoint, error) {
+	return nil, nil
 }

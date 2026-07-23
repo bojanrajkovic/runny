@@ -18,15 +18,15 @@ import (
 // reapOps are reapPriorSystem's real dependencies, split out so its decision
 // logic — skip-if-not-found, fail-loudly-if-wait-times-out, proceed-if-found
 // — is unit-testable off real hardware, the same split stop.go's stopOps
-// already made for stopMachine (issue #320).
+// already made for stopMachine.
 type reapOps interface {
-	// openSystem returns the existing compute system for systemID, or
-	// ok=false if none exists — reapPriorSystem's own tolerated case, not an
-	// error.
-	openSystem(ctx context.Context, systemID string) (sys reapSystem, ok bool, err error)
-	// openEndpoint returns the existing HNS endpoint for endpointName, or
-	// ok=false if none exists.
-	openEndpoint(endpointName string) (ep reapEndpoint, ok bool, err error)
+	// openSystem returns the existing compute system for systemID, or a nil
+	// reapSystem if none exists — reapPriorSystem's own tolerated case, not
+	// an error.
+	openSystem(ctx context.Context, systemID string) (reapSystem, error)
+	// openEndpoint returns the existing HNS endpoint for endpointName, or a
+	// nil reapEndpoint if none exists.
+	openEndpoint(endpointName string) (reapEndpoint, error)
 }
 
 // reapSystem is the subset of *hcs.System reapPriorSystem needs. *hcs.System
@@ -52,27 +52,27 @@ type reapEndpoint interface {
 // bindings directly.
 type hcsReapOps struct{}
 
-func (hcsReapOps) openSystem(ctx context.Context, systemID string) (reapSystem, bool, error) {
+func (hcsReapOps) openSystem(ctx context.Context, systemID string) (reapSystem, error) {
 	system, err := hcs.OpenComputeSystem(ctx, systemID)
 	if err != nil {
 		if hcs.IsNotExist(err) {
-			return nil, false, nil
+			return nil, nil
 		}
-		return nil, false, err
+		return nil, err
 	}
-	return system, true, nil
+	return system, nil
 }
 
-func (hcsReapOps) openEndpoint(endpointName string) (reapEndpoint, bool, error) {
+func (hcsReapOps) openEndpoint(endpointName string) (reapEndpoint, error) {
 	ep, err := hcn.GetEndpointByName(endpointName)
 	if err != nil {
 		var notFound hcn.EndpointNotFoundError
 		if errors.As(err, &notFound) {
-			return nil, false, nil
+			return nil, nil
 		}
-		return nil, false, err
+		return nil, err
 	}
-	return hcnEndpoint{ep}, true, nil
+	return hcnEndpoint{ep}, nil
 }
 
 // hcnEndpoint adapts *hcn.HostComputeEndpoint's fields (Id, MacAddress) to
@@ -104,46 +104,69 @@ func reapPriorSystem(ops reapOps, systemID, endpointName string) error {
 	ctx, cancel := bounded.WithTimeout(context.Background(), abandonedStopTimeout)
 	defer cancel()
 
-	system, ok, err := ops.openSystem(ctx, systemID)
+	system, err := ops.openSystem(ctx, systemID)
 	if err != nil {
 		return fmt.Errorf("checking for a stale compute system %s: %w", systemID, err)
 	}
-	if ok {
+	if system != nil {
 		slog.Warn("reaping compute system left behind by an unclean shutdown", "id", systemID)
-		if err := system.Terminate(ctx); err != nil {
-			slog.Error("reaping stale compute system: terminate failed", "id", systemID, "err", err)
-		}
-		// Terminate only REQUESTS shutdown -- it can return before the system
-		// actually exits -- so wait for the real exit notification before
-		// closing the handle or touching its endpoint below; closing/deleting
-		// out from under a guest that might still be running is the same
-		// mistake hcsMachine.Stop's wedged-stop path already avoids. A wait
-		// that doesn't resolve fails this reap loudly; the caller (Boot's own
-		// backoff, or ReapOrphans' best-effort per-slot loop) decides what
-		// happens next.
-		if err := system.WaitCtx(ctx); err != nil {
-			return fmt.Errorf("stale compute system %s did not exit within the reap window: %w", systemID, err)
-		}
-		if err := system.Close(); err != nil {
-			slog.Error("reaping stale compute system: close failed", "id", systemID, "err", err)
+		// terminateAndClose fails loudly only if WaitCtx never confirms
+		// exit; the caller (Boot's own backoff, or ReapOrphans' best-effort
+		// per-slot loop) decides what happens next.
+		if err := terminateAndClose(ctx, system, "reaping stale compute system"); err != nil {
+			return err
 		}
 	}
 
-	ep, ok, err := ops.openEndpoint(endpointName)
+	ep, err := ops.openEndpoint(endpointName)
 	if err != nil {
 		return fmt.Errorf("checking for a stale HNS endpoint %q: %w", endpointName, err)
 	}
-	if !ok {
+	if ep == nil {
 		return nil
 	}
 	slog.Warn("reaping HNS endpoint left behind by an unclean shutdown", "id", ep.ID(), "name", endpointName)
+	deleteEndpointAndScrub(ep, "reaping stale HNS endpoint")
+	return nil
+}
+
+// terminateAndClose runs terminate -> wait -> close, shared by
+// reapPriorSystem and hcs_windows.go's abandonComputeSystem -- both need the
+// same ordering for the same reason: Terminate only REQUESTS shutdown, so
+// this waits for the real exit notification (bounded by ctx) before closing
+// the handle -- closing out from under a guest that might still be running
+// is the mistake hcsMachine.Stop's wedged-stop path already avoids. Only a
+// WaitCtx failure is returned to the caller; Terminate/Close failures are
+// logged, not fatal, since WaitCtx is the sole authority on whether it was
+// safe to proceed. label distinguishes the two callers' log lines (the
+// underlying system is the same either way, but "reap" and "abandon" name
+// different circumstances).
+func terminateAndClose(ctx context.Context, sys reapSystem, label string) error {
+	if err := sys.Terminate(ctx); err != nil {
+		slog.Error(label+": terminate failed", "id", sys.ID(), "err", err)
+	}
+	if err := sys.WaitCtx(ctx); err != nil {
+		return fmt.Errorf("%s %s did not exit within the reap window: %w", label, sys.ID(), err)
+	}
+	if err := sys.Close(); err != nil {
+		slog.Error(label+": close failed", "id", sys.ID(), "err", err)
+	}
+	return nil
+}
+
+// deleteEndpointAndScrub deletes ep and scrubs its neighbor-table entry --
+// shared by reapPriorSystem and abandonComputeSystem, the two paths that
+// both attach an endpoint before either can be reached (see
+// scrubNeighborEntry's own doc comment). Best-effort: a delete failure is
+// logged, not returned -- there's nothing further either caller could do
+// differently.
+func deleteEndpointAndScrub(ep reapEndpoint, label string) {
 	mac := ep.MAC()
 	if err := ep.Delete(); err != nil {
-		slog.Error("reaping stale HNS endpoint: delete failed", "id", ep.ID(), "err", err)
-		return nil
+		slog.Error(label+": delete failed; it may leak until manually cleaned up", "id", ep.ID(), "err", err)
+		return
 	}
 	scrubNeighborEntry(mac)
-	return nil
 }
 
 // reapOrphansTimeout bounds reapAllSlots' entire pass over every slot found
@@ -158,12 +181,11 @@ var reapOrphansTimeout = 5 * time.Minute
 
 // ReapOrphans reaps every slot directory's stale compute system/HNS
 // endpoint left behind by an unclean shutdown, before the daemon's own
-// startup sweep (cmd/runnyd/main.go's os.RemoveAll(dir.VMsDir())) deletes
-// them -- otherwise that sweep can hit a file still held open by an
-// orphaned compute system and fail outright (not skip-and-continue),
-// crash-looping the daemon forever with no cold-start recovery (issue
-// #320): each restart hits the identical lock, since nothing reaped the
-// orphan in between.
+// startup sweep (cmd/runnyd/main.go's sweepVMsDir) removes them -- otherwise
+// that sweep can hit a file still held open by an orphaned compute system
+// and fail to remove that one slot, crash-looping the daemon forever on the
+// exact same lock with no cold-start recovery: nothing else ever reaps the
+// orphan in between restarts.
 func (HCSManager) ReapOrphans(vmsDir string) error {
 	return reapAllSlots(hcsReapOps{}, vmsDir)
 }

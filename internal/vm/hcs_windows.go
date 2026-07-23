@@ -277,34 +277,22 @@ func scrubNeighborEntry(mac string) {
 // document, and CreateComputeSystem already succeeded, before Start is ever
 // called — so a Start that fails can still leak the same stale
 // neighbor-table entry a confirmed-stopped Machine's destroy() scrubs;
-// scrubNeighborEntry is shared for exactly that reason. Terminate only
-// REQUESTS shutdown -- it can return before the system actually exits -- so
-// this waits for the real exit notification (bounded by the same window)
-// before closing the handle or deleting the endpoint, the same ordering
-// reapPriorSystem uses and for the same reason: closing/deleting out from
-// under a guest that might still be running is the mistake hcsMachine.
-// Stop's wedged-stop path already avoids. A wait that doesn't resolve in
-// time leaves system/ep untouched for this slot's next Boot (and its own
-// reapPriorSystem) to try again, rather than risk that.
+// scrubNeighborEntry is shared for exactly that reason. terminateAndClose
+// (reap_windows.go, shared with reapPriorSystem) waits for the real exit
+// notification before closing the handle or deleting the endpoint:
+// closing/deleting out from under a guest that might still be running is
+// the mistake hcsMachine.Stop's wedged-stop path already avoids. A wait
+// that doesn't resolve in time leaves system/ep untouched for this slot's
+// next Boot (and its own reapPriorSystem) to try again, rather than risk
+// that.
 func abandonComputeSystem(system *hcs.System, ep *hcn.HostComputeEndpoint) {
 	ctx, cancel := bounded.WithTimeout(context.Background(), abandonedStopTimeout)
 	defer cancel()
-	if err := system.Terminate(ctx); err != nil {
-		slog.Error("abandoned compute system: terminate failed", "id", system.ID(), "err", err)
-	}
-	if err := system.WaitCtx(ctx); err != nil {
+	if err := terminateAndClose(ctx, system, "abandoned compute system"); err != nil {
 		slog.Error("abandoned compute system: did not exit before the cleanup window closed; leaving it in place for a later reap", "id", system.ID(), "err", err)
 		return
 	}
-	if err := system.Close(); err != nil {
-		slog.Error("abandoned compute system: close failed", "id", system.ID(), "err", err)
-	}
-	mac := ep.MacAddress
-	if err := ep.Delete(); err != nil {
-		slog.Error("abandoned HNS endpoint: delete failed; endpoint may leak until manually cleaned up", "id", ep.Id, "err", err)
-		return
-	}
-	scrubNeighborEntry(mac)
+	deleteEndpointAndScrub(hcnEndpoint{ep}, "abandoned HNS endpoint")
 }
 
 type hcsMachine struct {
@@ -385,9 +373,9 @@ func (m *hcsMachine) WaitIP(ctx bounded.Context) (string, error) {
 			// Wrapped in its own named action (not folded silently into
 			// AWAIT_IP's step span) so a trace/metric can distinguish "this
 			// cycle needed the fixup" from "HNS was just slow" -- the two
-			// looked identical before (issue #320's 4th comment: an
-			// AWAIT_SSH failure on an IP WaitIP had just reported as good,
-			// with nothing correlating it back to the fixup-fallback path).
+			// looked identical before, with an AWAIT_SSH failure downstream
+			// of a WaitIP that had just reported as good, and nothing
+			// correlating it back to the fixup-fallback path.
 			if err := obs.Action(ctx, obs.ActionNetworkFixup, func(context.Context) error {
 				obs.Milestone(ctx, "grace-period-elapsed")
 				return fixupNetwork(ctx, m.systemID, m.sshUser, m.sshPassword)

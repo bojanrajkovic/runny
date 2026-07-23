@@ -94,23 +94,28 @@ func TestReadPeerImpersonatesClientSID(t *testing.T) {
 	}
 }
 
-// TestIsPrivilegedToken pins the privileged verdict logic deterministically,
-// independent of whether the CI runner is elevated-admin: SYSTEM's SID is
-// privileged by the string short-circuit (the token is never consulted), and a
-// non-SYSTEM SID checked against the NULL token (Token(0)) reads
-// non-privileged. CheckTokenMembership(NULL, …) uses the calling thread's
-// impersonation token; with no thread impersonation it errors, so IsMember
-// errors and the code errs that to false (the require-an-explicit-ACE safe
-// direction). We must NOT use the process's own primary token here — on an
-// admin runner it IS a member of Administrators, so IsMember would return true
-// (correctly: an elevated admin is a privileged peer), making the expected
-// value runner-dependent. Token(0) exercises the fail-closed path with no such
-// dependency.
+// TestIsPrivilegedToken pins the privileged verdict logic runner-agnostically:
+// SYSTEM's SID is privileged by the string short-circuit (the token is never
+// consulted), and a non-SYSTEM identity's verdict must equal the token's actual
+// Administrators membership. That membership is runner-dependent (true on an
+// elevated-admin runner like CI's windows-2022, false for a plain user), and
+// there is no deterministic way to force false from the runner's own token —
+// CheckTokenMembership(NULL) duplicates the primary token and checks that — so
+// we assert the verdict MATCHES an independent membership check on the same
+// token rather than hardcoding either boolean. Both sides derive from the same
+// IsMember call, so this pins the delegation without assuming privilege level.
 func TestIsPrivilegedToken(t *testing.T) {
 	if !isPrivilegedToken(systemSID, windows.Token(0)) {
 		t.Error("SYSTEM SID must be privileged")
 	}
-	if isPrivilegedToken("S-1-5-21-1-2-3-1001", windows.Token(0)) {
-		t.Error("a non-SYSTEM SID against the NULL token must read non-privileged (IsMember errors, fail closed)")
+	tok := windows.GetCurrentProcessToken()
+	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatalf("CreateWellKnownSid: %v", err)
+	}
+	member, merr := tok.IsMember(admins)
+	want := merr == nil && member // exactly isPrivilegedToken's non-SYSTEM verdict
+	if got := isPrivilegedToken("S-1-5-21-1-2-3-1001", tok); got != want {
+		t.Errorf("non-SYSTEM verdict = %v, want %v (must match the token's admin membership)", got, want)
 	}
 }

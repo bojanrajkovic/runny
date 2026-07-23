@@ -61,13 +61,15 @@ const consoleSeenCap = 4096
 // This necessarily dials the console directly rather than SSH: the guest has
 // no working network yet, which is exactly the problem being fixed. Once
 // logged in, it writes a netplan drop-in matching by driver -- the idiomatic
-// Azure/Hyper-V pattern -- and applies it, then verifies eth0 actually got an
-// address before returning: a silent no-op here would just make a later
-// WaitIP timeout far less diagnosable.
-func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) error {
+// Azure/Hyper-V pattern -- and applies it, then reads eth0's address back and
+// returns it: a silent no-op here would just make a later WaitIP timeout far
+// less diagnosable, and the returned address is the one WaitIP actually dials
+// (the host neighbor table's Permanent row can name a different, stale address
+// -- see WaitIP's doc comment).
+func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) (string, error) {
 	conn, err := dialConsoleWithRetry(ctx, consolePipeName(systemID))
 	if err != nil {
-		return fmt.Errorf("dialing console: %w", err)
+		return "", fmt.Errorf("dialing console: %w", err)
 	}
 	// Milestones from here on: named, distinctly-timestamped span events on
 	// the caller's network-fixup action, so a trace shows which stage a run
@@ -79,7 +81,7 @@ func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) er
 
 	if err := consoleLogin(ctx, conn, sshUser, sshPassword); err != nil {
 		conn.Close()
-		return fmt.Errorf("console login: %w", err)
+		return "", fmt.Errorf("console login: %w", err)
 	}
 	obs.Milestone(ctx, "login-succeeded")
 
@@ -92,11 +94,15 @@ func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) er
 	out, err := consoleRun(ctx, conn, cmd, 20*time.Second, func(s string) bool { return strings.Contains(s, "inet ") })
 	if err != nil {
 		conn.Close()
-		return fmt.Errorf("applying network fixup: %w", err)
+		return "", fmt.Errorf("applying network fixup: %w", err)
 	}
-	if !strings.Contains(out, "inet ") {
+	// parseInetIP both verifies eth0 got an address and extracts it: the same
+	// read serves as the success check and as the authoritative lease WaitIP
+	// returns, so the two can never disagree.
+	leaseIP, ok := parseInetIP(out)
+	if !ok {
 		conn.Close()
-		return fmt.Errorf("network fixup did not bring up eth0 with an address; console output: %q", out)
+		return "", fmt.Errorf("network fixup did not bring up eth0 with an address; console output: %q", out)
 	}
 	obs.Milestone(ctx, "netplan-verified")
 
@@ -117,7 +123,7 @@ func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) er
 			slog.Warn("network fixup: logging out the console session failed; it may remain authenticated", "system_id", systemID, "err", err)
 		}
 	}()
-	return nil
+	return leaseIP, nil
 }
 
 // dialConsoleWithRetry retries the pipe dial within ctx: the console pipe

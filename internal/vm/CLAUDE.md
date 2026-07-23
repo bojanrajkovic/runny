@@ -35,6 +35,21 @@ ADR-0026 for the Hyper-V backend's decisions and why; this doc is sharp edges on
   log in, and apply a netplan drop-in matching by driver instead of by
   interface name. See ADR-0026's amendment for why the original "no fallback"
   decision was reversed rather than merely revisited.
+- **On the fixup path, `WaitIP` returns the console-observed address, NOT the
+  neighbor-table entry.** HNS's `Permanent` neighbor row is a pre-commit written
+  before the guest boots, and the guest's own DHCP client can land on a
+  *different* `/20` address — returning the pre-commit made `AWAIT_SSH` dial the
+  wrong host and destroy-recycle a healthy guest (~1/3 of boots, confirmed on
+  hardware). The table can't self-correct: HNS writes the real lease as
+  `Permanent` too, so a diverged MAC just shows two `Permanent` rows. `fixupNetwork`
+  reads `eth0`'s real address off the console (`parseInetIP`) and `WaitIP` returns
+  that; the neighbor table is re-read only to flag the divergence
+  (`neighbor-ip-corrected` milestone + a `slog.Warn` with both IPs). The pure
+  selectors (`findPermanentIP`, `selectLeaseIP`) and the console parser
+  (`parseInetIP`) live in untagged files (`neighbortable.go`, `netfixup.go`) so
+  they unit-test off-hardware; `selectLeaseIP`'s learned-over-`Permanent`
+  preference is a defensive rule for a host that ever surfaces a learned row —
+  the validated one never does.
 - **`Boot` never calls `vhdx.CreateDifferencing` itself.** The slot's
   differencing-child VHDX is already there at `bundle.VHDXPath()` by the time
   `HCSManager.Boot` runs — `internal/tart.CloneVHDX` creates it during the FSM's

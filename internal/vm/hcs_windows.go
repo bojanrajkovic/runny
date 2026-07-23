@@ -330,25 +330,31 @@ func (m *hcsMachine) NeedsRunnerPush() bool { return true }
 // poll past a normal DHCP round-trip.
 const waitIPGracePeriod = 10 * time.Second
 
-// WaitIP polls the host IP neighbor table for a Permanent entry matching
-// this machine's MAC. HNS programs this MAC->IP binding once the guest's
-// own DHCP client completes (validated on real hardware, issues #307/#308/
-// #319) and it carries exactly the IP the guest is actually using.
+// WaitIP returns the guest's actual lease IP -- the address later states dial
+// for SSH, and the one stamped as vm.ip in telemetry.
 //
-// The currently-validated guest image (ghcr.io/cirruslabs/ubuntu-runner-
-// amd64) needs help getting there: its baked netplan matches interface
-// names "en*", which hv_netvsc's always-"eth0" naming never satisfies, so
-// eth0 sits down and DHCP never starts without fixupNetwork's console-
-// applied drop-in (issue #319). A future or different image that DOES
-// self-configure (the behavior this backend originally assumed, per
-// ADR-0026) never triggers the fallback: it gets its neighbor-table entry
-// within waitIPGracePeriod and this returns before the grace period ever
-// elapses.
+// Within the grace period it trusts the host IP neighbor table: HNS pre-commits
+// a MAC->IP binding there at endpoint-attach (state Permanent, before the guest
+// boots), and a guest that self-configures to it (the behavior this backend
+// originally assumed, per ADR-0026) is reachable at that address. selectLeaseIP
+// reads it, preferring a dynamically-learned row if one ever appears.
+//
+// The currently-validated guest image (ghcr.io/cirruslabs/ubuntu-runner-amd64)
+// does NOT self-configure: its baked netplan matches interface names "en*",
+// which hv_netvsc's always-"eth0" naming never satisfies, so eth0 sits down and
+// DHCP never starts without fixupNetwork's console-applied drop-in (issue #319).
+// Crucially, the guest's own DHCP client can then land on a DIFFERENT address
+// than HNS's pre-commit (both read Permanent in the neighbor table -- HNS never
+// surfaces a distinct learned row at the real address, confirmed on hardware),
+// so the pre-commit is a stale IP that made AWAIT_SSH dial the wrong host and
+// destroy-recycle a healthy guest. Once the fixup has logged in, the address
+// eth0 actually holds is read straight off the console and returned as
+// authoritative -- the neighbor table is only re-read to detect, and record,
+// the divergence.
 func (m *hcsMachine) WaitIP(ctx bounded.Context) (string, error) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	deadline := boundedDeadline(ctx, waitIPGracePeriod)
-	fixedUp := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -360,28 +366,46 @@ func (m *hcsMachine) WaitIP(ctx bounded.Context) (string, error) {
 			if err != nil {
 				continue // transient GetIpNetTable2 failure; next tick retries
 			}
-			if ip, ok := findPermanentIP(entries, m.mac); ok {
+			if ip, ok := selectLeaseIP(entries, m.mac); ok {
 				return ip, nil
 			}
-			if fixedUp || time.Now().Before(deadline) {
-				continue
+			if time.Now().Before(deadline) {
+				continue // still within grace; let the guest self-configure
 			}
 			if m.sshUser == "" || m.sshPassword == "" {
 				return "", fmt.Errorf("no IP after %s and no SSHUser/SSHPassword configured to attempt the network fixup (issue #319)", waitIPGracePeriod)
 			}
-			fixedUp = true
+			// The neighbor table's Permanent row for this MAC is HNS's
+			// pre-commit; captured before the fixup so it can be compared
+			// against the address the guest actually reports.
+			precommitIP, _ := findPermanentIP(entries, m.mac)
 			// Wrapped in its own named action (not folded silently into
 			// AWAIT_IP's step span) so a trace/metric can distinguish "this
 			// cycle needed the fixup" from "HNS was just slow" -- the two
 			// looked identical before, with an AWAIT_SSH failure downstream
 			// of a WaitIP that had just reported as good, and nothing
 			// correlating it back to the fixup-fallback path.
+			var leaseIP string
 			if err := obs.Action(ctx, obs.ActionNetworkFixup, func(context.Context) error {
 				obs.Milestone(ctx, "grace-period-elapsed")
-				return fixupNetwork(ctx, m.systemID, m.sshUser, m.sshPassword)
+				ip, err := fixupNetwork(ctx, m.systemID, m.sshUser, m.sshPassword)
+				if err != nil {
+					return err
+				}
+				leaseIP = ip
+				if precommitIP != "" && precommitIP != ip {
+					// no-silent-failure: the trace milestone flags that WaitIP
+					// dialed something other than the pre-commit, and the log
+					// carries the exact pair for the operator asking why.
+					obs.Milestone(ctx, "neighbor-ip-corrected")
+					slog.Warn("WaitIP: guest lease diverged from HNS pre-commit; dialing the console-observed address",
+						"mac", m.mac, "precommit_ip", precommitIP, "lease_ip", ip)
+				}
+				return nil
 			}); err != nil {
 				return "", fmt.Errorf("network fixup: %w", err)
 			}
+			return leaseIP, nil
 		}
 	}
 }

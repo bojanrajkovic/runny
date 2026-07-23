@@ -41,21 +41,33 @@ func (e neighborEntry) learned() bool {
 	return e.state == nlnsReachable || e.state == nlnsStale
 }
 
-// permanentIPs returns every Permanent-row IP for mac, in table order. These
-// are HNS *pre-commits* -- the MAC->IP bindings HNS writes at endpoint-attach.
-// They are NOT the address WaitIP dials once a fixup has observed the guest's
-// real lease off the console (see hcs_windows.go); WaitIP reads them only to
-// flag a divergence via divergentPermanentIPs. MACs are normalized the same way
-// WaitIP's darwin sibling matches dhcpd_leases entries (leases.go's
-// normalizeMAC) -- Windows renders MACs dash-separated, macOS colon-separated,
-// so both sides always go through the same normalizer.
-func permanentIPs(entries []neighborEntry, mac string) []string {
+// permanentEntriesForMAC returns every Permanent row for mac, in table order.
+// These are HNS *pre-commits* -- the MAC->IP bindings HNS writes at
+// endpoint-attach. A divergent boot leaves MORE THAN ONE for a single MAC (the
+// stale pre-commit plus the real lease, both written Permanent), so teardown's
+// scrub must delete all of them, not just the first, or the leftovers
+// accumulate one stale row per boot. MACs are normalized the same way WaitIP's
+// darwin sibling matches dhcpd_leases entries (leases.go's normalizeMAC) --
+// Windows renders MACs dash-separated, macOS colon-separated, so both sides
+// always go through the same normalizer.
+func permanentEntriesForMAC(entries []neighborEntry, mac string) []neighborEntry {
 	want := normalizeMAC(mac)
-	var ips []string
+	var out []neighborEntry
 	for _, e := range entries {
 		if e.permanent() && normalizeMAC(e.mac) == want {
-			ips = append(ips, e.ip)
+			out = append(out, e)
 		}
+	}
+	return out
+}
+
+// permanentIPs returns just the IPs of permanentEntriesForMAC -- the shape
+// divergentPermanentIPs needs (it compares against the console lease, which has
+// no interface index).
+func permanentIPs(entries []neighborEntry, mac string) []string {
+	var ips []string
+	for _, e := range permanentEntriesForMAC(entries, mac) {
+		ips = append(ips, e.ip)
 	}
 	return ips
 }

@@ -242,12 +242,16 @@ func deleteEndpoint(ep *hcn.HostComputeEndpoint) {
 	}
 }
 
-// scrubNeighborEntry removes the stale Permanent neighbor-table entry HNS
+// scrubNeighborEntry removes the stale Permanent neighbor-table entries HNS
 // leaves behind for mac once its endpoint is gone — see hcsMachine.destroy's
 // doc comment for why this doesn't happen on its own. Shared by every
 // cleanup path that deletes an endpoint (a boot that fails at Start, and a
 // confirmed-stopped Machine both attach the endpoint before either one is
-// reached, so both can leak the same entry). Best-effort: only logs, since
+// reached, so both can leak the same entries). A divergent boot leaves MORE
+// THAN ONE Permanent row for the MAC (stale pre-commit plus real lease), so
+// this deletes every match, not just the first — otherwise the leftover
+// accumulates one row per diverged boot. Best-effort: a delete failure is
+// logged and the loop continues (one failure must not skip the rest), since
 // by this point the endpoint is already gone and there's nothing further a
 // caller could do differently.
 func scrubNeighborEntry(mac string) {
@@ -256,12 +260,9 @@ func scrubNeighborEntry(mac string) {
 		slog.Error("teardown: reading neighbor table for stale-entry scrub failed", "mac", mac, "err", err)
 		return
 	}
-	for _, e := range entries {
-		if e.permanent() && normalizeMAC(e.mac) == normalizeMAC(mac) {
-			if err := deleteNeighborEntry(e.ip, e.interfaceIndex); err != nil {
-				slog.Error("teardown: stale neighbor-table entry delete failed", "ip", e.ip, "mac", mac, "err", err)
-			}
-			return
+	for _, e := range permanentEntriesForMAC(entries, mac) {
+		if err := deleteNeighborEntry(e.ip, e.interfaceIndex); err != nil {
+			slog.Error("teardown: stale neighbor-table entry delete failed", "ip", e.ip, "mac", mac, "err", err)
 		}
 	}
 }

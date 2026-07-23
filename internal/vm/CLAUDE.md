@@ -15,6 +15,10 @@ ADR-0026 for the Hyper-V backend's decisions and why; this doc is sharp edges on
   `hcsMachine.Stop`'s `destroy()` scrubs it explicitly (`deleteNeighborEntry`)
   once the guest is confirmed stopped — skip this and entries accumulate one
   stale row per boot cycle, bounded only by the Default Switch's MAC pool size.
+  A divergent boot leaves **more than one** `Permanent` row for the MAC (stale
+  pre-commit plus real lease), so `scrubNeighborEntry` deletes *every* match
+  (`permanentEntriesForMAC`), not just the first — a single-delete scrub leaks
+  the rest.
 - **`MIB_IPNET_ROW2`/`SOCKADDR_INET` are hand-laid-out, not generated.**
   `x/sys/windows` has no binding for this corner of `iphlpapi`, and mkwinsyscall
   wouldn't build cleanly against this repo's vendored copy — the struct fields,

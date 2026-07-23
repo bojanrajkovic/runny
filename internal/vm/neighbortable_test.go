@@ -5,6 +5,39 @@ import (
 	"testing"
 )
 
+func TestPermanentEntriesForMAC(t *testing.T) {
+	entries := []neighborEntry{
+		{ip: "172.20.144.1", mac: "00-15-5d-dd-3e-de", state: nlnsReachable, interfaceIndex: 7},    // learned, excluded
+		{ip: "172.20.159.244", mac: "00-15-5D-DD-30-75", state: nlnsPermanent, interfaceIndex: 29}, // stale pre-commit
+		{ip: "172.20.150.10", mac: "00-15-5d-dd-30-75", state: nlnsPermanent, interfaceIndex: 29},  // real lease, same MAC
+	}
+
+	// (a) A MAC with two Permanent rows -> BOTH are returned, with their
+	// interface indices intact (deleteNeighborEntry needs them). This is the
+	// regression the single-`return` scrub had: it deleted one and leaked the other.
+	got := permanentEntriesForMAC(entries, "00:15:5d:dd:30:75") // (c) colon-lowercase query vs dash-upper rows
+	want := []neighborEntry{
+		{ip: "172.20.159.244", mac: "00-15-5D-DD-30-75", state: nlnsPermanent, interfaceIndex: 29},
+		{ip: "172.20.150.10", mac: "00-15-5d-dd-30-75", state: nlnsPermanent, interfaceIndex: 29},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("permanentEntriesForMAC = %v, want both Permanent rows %v", got, want)
+	}
+
+	// (b) Learned rows are excluded even with the right MAC.
+	if got := permanentEntriesForMAC(entries, "00:15:5d:dd:3e:de"); len(got) != 0 {
+		t.Errorf("permanentEntriesForMAC returned a learned row: %v", got)
+	}
+
+	// (d) No match -> empty.
+	if got := permanentEntriesForMAC(entries, "aa:bb:cc:dd:ee:ff"); len(got) != 0 {
+		t.Errorf("permanentEntriesForMAC for an absent MAC = %v", got)
+	}
+	if got := permanentEntriesForMAC(nil, "00:15:5d:dd:30:75"); len(got) != 0 {
+		t.Errorf("permanentEntriesForMAC of an empty table = %v", got)
+	}
+}
+
 func TestPermanentIPs(t *testing.T) {
 	entries := []neighborEntry{
 		{ip: "172.20.144.1", mac: "00-15-5d-dd-3e-de", state: nlnsReachable},   // learned, excluded

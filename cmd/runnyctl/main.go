@@ -17,10 +17,8 @@ import (
 	"golang.org/x/term"
 
 	"github.com/rivo/uniseg"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -89,14 +87,8 @@ func run() error {
 		return err
 	}
 	socketPath := dir.SocketPath()
-	// unix: (single colon, opaque — not unix://, a scheme+authority form that
-	// only happens to work on unix because the leading "/" in an absolute
-	// unix path completes it to "unix:///abs/path"). A windows socketPath
-	// starts with a drive letter, not "/", so "unix://"+path leaves grpc's
-	// target parser trying to read "C:\Users\...\runnyd.sock" as a
-	// host:port authority — "too many colons in address".
-	conn, err := grpc.NewClient("unix:"+socketPath,
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Transport forks by platform (unix socket vs. named pipe); see dial.
+	conn, err := dial(socketPath)
 	if err != nil {
 		return err
 	}
@@ -123,7 +115,7 @@ func run() error {
 	// mid-stream death) OR the connection is currently Ready (the one-shot
 	// app-level case, daemon alive). Otherwise the bare error stands.
 	if shouldHint(err, c.connected || conn.GetState() == connectivity.Ready) {
-		return connHint(err, socketPath, socketFileExists(socketPath))
+		return connHint(err, socketPath, socketPresent(socketPath))
 	}
 	return err
 }
@@ -155,13 +147,6 @@ func connHint(err error, socketPath string, socketExists bool) error {
 		return fmt.Errorf("%w\n  hint: the socket at %s isn't answering — is runnyd hung or still starting?", err, socketPath)
 	}
 	return fmt.Errorf("%w\n  hint: no socket at %s — is runnyd running, or serving a different home?", err, socketPath)
-}
-
-// socketFileExists reports whether the daemon socket is present on disk. It only
-// steers connHint's wording, so a stat race is harmless either way.
-func socketFileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }
 
 type ctl struct {

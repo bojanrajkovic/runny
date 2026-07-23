@@ -202,6 +202,20 @@ not be read is denied (fail closed). Out-of-band ACL edits (a manual
 in-flight streams — only the in-process revoke path triggers the kill —
 but every new RPC still observes the edit immediately.
 
+**The revocation gate is unarmed on a platform with no real peer-identity
+read.** Fail-closed only degrades gracefully when a peer uid is at least
+*sometimes* readable; on a platform where it is *never* readable, arming
+the gate would deny every RPC unconditionally rather than fail closed on
+the exceptional case. Windows has no such read today — Microsoft's own
+AF_UNIX implementation deliberately omits credential passing, delegating
+socket authorization to filesystem ACLs on the socket path instead — so
+the system daemon there falls back to the socket-is-the-sole-gate baseline
+(above) with no live per-connection revoke: an ACL edit still lands, but
+only takes effect for new connections, not an in-flight kill. A real
+per-connection identity on Windows would need its own transport (a named
+pipe, impersonated to read the connecting token's SID), tracked as
+separate future work.
+
 The kill is cooperative, not preemptive: it cancels a context both stream
 handlers already select on between sends, so a handler currently blocked
 **inside** a send (a slow or non-reading client has exhausted HTTP/2 flow

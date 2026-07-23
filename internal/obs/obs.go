@@ -68,7 +68,7 @@ const (
 	ActionTarballEnsure = "tarball-ensure" // runner-tarball resolve + download (or cache hit)
 	ActionWaitForPull   = "wait-for-pull"  // time subscribed to the shared pull actor
 	// AWAIT_IP (windows only).
-	ActionNetworkFixup = "network-fixup" // console-driven netplan fixup fallback (issue #319/#320)
+	ActionNetworkFixup = "network-fixup" // console-driven netplan fixup fallback
 )
 
 // Attr keys are closed-set for the same reason action names are: a typo'd

@@ -30,7 +30,7 @@ jobs:
         with:
           persist-credentials: false
           lfs: true # internal/vhdx/testdata's binary fixtures are LFS-tracked
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/bazel
@@ -71,7 +71,7 @@ jobs:
         with:
           persist-credentials: false
           lfs: true # internal/vhdx/testdata's binary fixtures are LFS-tracked
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/Library/Caches/bazel
@@ -104,7 +104,7 @@ jobs:
         with:
           persist-credentials: false
           lfs: true # internal/vhdx/testdata's binary fixtures are LFS-tracked
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: C:/b
@@ -144,7 +144,7 @@ jobs:
         with:
           persist-credentials: false
           lfs: true # internal/vhdx/testdata's binary fixtures are LFS-tracked
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/Library/Caches/bazel
@@ -171,7 +171,7 @@ jobs:
         with:
           persist-credentials: false
           lfs: true # internal/vhdx/testdata's binary fixtures are LFS-tracked
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/Library/Caches/bazel
@@ -232,7 +232,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0 # tools/version.sh needs tags + history
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
           # No tool-install cache either: cold means cold. Tools come from
           # their pinned upstream releases, not a poisonable cache entry.

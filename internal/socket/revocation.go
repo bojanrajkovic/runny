@@ -3,6 +3,7 @@ package socket
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
 
 	"google.golang.org/grpc"
@@ -45,6 +46,10 @@ func newOperatorGate(armed bool, homeDir string) *operatorGate {
 	if !armed || !peerCredSupported {
 		return nil
 	}
+	// Announce the arm at INFO: the gate silently enforcing (or silently NOT
+	// arming) is exactly the invisible-outcome the no-silent-anything ethos
+	// rejects — an operator reading the log can confirm per-RPC revocation is live.
+	slog.Info("operator-revocation gate armed", "home_dir", homeDir)
 	return &operatorGate{homeDir: homeDir, streams: newFanoutRegistry[gateStream]()}
 }
 

@@ -3,7 +3,9 @@
 package socket
 
 import (
+	"log/slog"
 	"net"
+	"os"
 	"runtime"
 
 	"golang.org/x/sys/windows"
@@ -75,7 +77,17 @@ func impersonateAndRead(handle windows.Handle) (id string, privileged, ok bool) 
 	if r, _, _ := procImpersonateNamedPipeClient.Call(uintptr(handle)); r == 0 {
 		return "", false, false
 	}
-	defer windows.RevertToSelf()
+	defer func() {
+		if err := windows.RevertToSelf(); err != nil {
+			// Unrecoverable: UnlockOSThread (deferred earlier, so it runs after
+			// this) would return the thread to Go's scheduler pool still
+			// carrying the client's impersonation token — a silent privilege
+			// leak this project forbids. A daemon crash is a clean cold restart;
+			// a leaked token is not. Fail loud and exit.
+			slog.Error("RevertToSelf failed after pipe-client impersonation; exiting to avoid leaking the client token to the thread pool", "err", err)
+			os.Exit(1)
+		}
+	}()
 
 	var tok windows.Token
 	if err := windows.OpenThreadToken(windows.CurrentThread(), windows.TOKEN_QUERY, false, &tok); err != nil {

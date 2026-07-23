@@ -1,35 +1,36 @@
 package vm
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
-func TestFindPermanentIP(t *testing.T) {
+func TestPermanentIPs(t *testing.T) {
 	entries := []neighborEntry{
-		{ip: "172.20.144.1", mac: "00-15-5d-dd-3e-de", state: nlnsReachable}, // learned, not Permanent
-		{ip: "172.20.159.244", mac: "00-15-5D-DD-30-75", state: nlnsPermanent},
+		{ip: "172.20.144.1", mac: "00-15-5d-dd-3e-de", state: nlnsReachable},   // learned, excluded
+		{ip: "172.20.159.244", mac: "00-15-5D-DD-30-75", state: nlnsPermanent}, // stale pre-commit
+		{ip: "172.20.150.10", mac: "00-15-5d-dd-30-75", state: nlnsPermanent},  // another pre-commit, same MAC
 		{ip: "172.20.157.175", mac: "00-15-5d-dd-35-06", state: nlnsPermanent},
 	}
 
-	ip, ok := findPermanentIP(entries, "00:15:5d:dd:30:75") // colon-separated, lowercase
-	if !ok || ip != "172.20.159.244" {
-		t.Errorf("colon-separated match: %q, %v", ip, ok)
+	// Every Permanent row for the MAC, in table order -- normalization spans
+	// colon/dash and case on both sides.
+	if got := permanentIPs(entries, "00:15:5d:dd:30:75"); !slices.Equal(got, []string{"172.20.159.244", "172.20.150.10"}) {
+		t.Errorf("permanentIPs = %v, want both pre-commit rows in table order", got)
+	}
+	if got := permanentIPs(entries, "00-15-5D-DD-35-06"); !slices.Equal(got, []string{"172.20.157.175"}) {
+		t.Errorf("permanentIPs (single) = %v", got)
 	}
 
-	ip, ok = findPermanentIP(entries, "00-15-5D-DD-35-06") // dash-separated, uppercase
-	if !ok || ip != "172.20.157.175" {
-		t.Errorf("dash-separated match: %q, %v", ip, ok)
+	// A learned (non-Permanent) row is never a pre-commit, even with the right MAC.
+	if got := permanentIPs(entries, "00:15:5d:dd:3e:de"); len(got) != 0 {
+		t.Errorf("permanentIPs returned a non-Permanent row: %v", got)
 	}
-
-	// findPermanentIP is specifically the pre-commit reader: a learned
-	// (non-Permanent) entry never matches, even with the right MAC.
-	if _, ok := findPermanentIP(entries, "00:15:5d:dd:3e:de"); ok {
-		t.Error("matched a non-Permanent entry")
+	if got := permanentIPs(entries, "aa:bb:cc:dd:ee:ff"); len(got) != 0 {
+		t.Errorf("permanentIPs for an absent MAC = %v", got)
 	}
-
-	if _, ok := findPermanentIP(entries, "aa:bb:cc:dd:ee:ff"); ok {
-		t.Error("found an IP for an absent MAC")
-	}
-	if _, ok := findPermanentIP(nil, "00:15:5d:dd:30:75"); ok {
-		t.Error("found an IP in an empty table")
+	if got := permanentIPs(nil, "00:15:5d:dd:30:75"); len(got) != 0 {
+		t.Errorf("permanentIPs of an empty table = %v", got)
 	}
 }
 
@@ -48,6 +49,21 @@ func TestSelectLeaseIP(t *testing.T) {
 	// second in the table.
 	if ip, ok := selectLeaseIP([]neighborEntry{diverged[1], diverged[0]}, "00:15:5d:13:59:30"); !ok || ip != "172.18.206.103" {
 		t.Errorf("diverged (reordered): selectLeaseIP = %q, %v; want 172.18.206.103", ip, ok)
+	}
+
+	// Multiple learned rows: the choice is arbitrary but must be stable
+	// (lexicographically smallest IP), independent of table order.
+	multiLearned := []neighborEntry{
+		{ip: "172.18.206.103", mac: "00-15-5d-13-59-30", state: nlnsStale},
+		{ip: "172.18.199.20", mac: "00-15-5d-13-59-30", state: nlnsReachable},
+		{ip: "172.18.192.241", mac: "00-15-5d-13-59-30", state: nlnsPermanent},
+	}
+	if ip, ok := selectLeaseIP(multiLearned, "00:15:5d:13:59:30"); !ok || ip != "172.18.199.20" {
+		t.Errorf("multi-learned: selectLeaseIP = %q, %v; want the smallest learned 172.18.199.20", ip, ok)
+	}
+	slices.Reverse(multiLearned)
+	if ip, ok := selectLeaseIP(multiLearned, "00:15:5d:13:59:30"); !ok || ip != "172.18.199.20" {
+		t.Errorf("multi-learned (reversed): selectLeaseIP = %q, %v; want a stable 172.18.199.20", ip, ok)
 	}
 
 	// The ADR-0026 happy path (and the currently-validated host, where HNS

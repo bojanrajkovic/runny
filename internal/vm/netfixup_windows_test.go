@@ -115,6 +115,51 @@ func TestConsoleDrainNilMatchWaitsFullWindow(t *testing.T) {
 	}
 }
 
+// TestConsoleRunWaitsForFullAddress is the regression test for the P1 where
+// fixupNetwork's drain stopped on a bare "inet " substring but its success
+// check (parseInetIP) needs the whole "inet <ip>/<prefix>". A serial console
+// has no record boundary, so the address can arrive split across two reads:
+// stopping on the first would hand parseInetIP a truncated buffer and fail the
+// fixup on a healthy guest. With the parser as the stop condition, the drain
+// must wait for the second write before returning.
+func TestConsoleRunWaitsForFullAddress(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	go func() {
+		buf := make([]byte, 256)
+		if _, err := server.Read(buf); err != nil { // consume the echoed command
+			return
+		}
+		// First chunk carries "inet " but no address digits yet -- the old
+		// substring predicate would have stopped right here.
+		if _, err := server.Write([]byte("2: eth0    inet ")); err != nil {
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
+		server.Write([]byte("172.18.206.103/20 brd 172.18.207.255 scope global\r\n"))
+	}()
+
+	ctx, cancel := bounded.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	out, err := consoleRun(ctx, client, "ip -4 -o addr show eth0", 20*time.Second, func(s string) bool {
+		_, ok := parseInetIP(s)
+		return ok
+	})
+	if err != nil {
+		t.Fatalf("consoleRun: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 250*time.Millisecond {
+		t.Errorf("consoleRun returned after %v; it must wait past the split for the full address, not early-exit on the bare \"inet \" prefix", elapsed)
+	}
+	if ip, ok := parseInetIP(out); !ok || ip != "172.18.206.103" {
+		t.Errorf("parseInetIP(out) = %q, %v; want 172.18.206.103 from the reassembled output %q", ip, ok, out)
+	}
+}
+
 // fakeGetty emulates the console side of consoleLogin: a silent getty that
 // only prints "login:" once it sees input, then a username and password
 // prompt in sequence, matching consoleLogin's read/write choreography

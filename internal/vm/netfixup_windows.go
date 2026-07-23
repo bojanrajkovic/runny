@@ -91,14 +91,21 @@ func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) (s
 	// failure at any stage short-circuits before the final ip addr check,
 	// which is what the caller actually verifies against.
 	const cmd = `printf 'network:\n  version: 2\n  ethernets:\n    eth0:\n      match:\n        driver: hv_netvsc\n      dhcp4: true\n' | sudo tee /etc/netplan/60-runny-hv-netvsc-fix.yaml >/dev/null && sudo netplan apply && sleep 5 && ip -4 -o addr show eth0`
-	out, err := consoleRun(ctx, conn, cmd, 20*time.Second, func(s string) bool { return strings.Contains(s, "inet ") })
+	// The drain's stop condition IS the success condition: parseInetIP, not a
+	// bare "inet " substring. A serial/named-pipe console has no record
+	// boundary, so a read can end the instant "inet " arrives but before the
+	// address digits do -- stopping on the substring there would hand
+	// parseInetIP a truncated buffer and turn a healthy guest into a hard
+	// error. Draining until a complete, parseable CIDR is present keeps the
+	// wait and the verification the same test.
+	out, err := consoleRun(ctx, conn, cmd, 20*time.Second, func(s string) bool {
+		_, ok := parseInetIP(s)
+		return ok
+	})
 	if err != nil {
 		conn.Close()
 		return "", fmt.Errorf("applying network fixup: %w", err)
 	}
-	// parseInetIP both verifies eth0 got an address and extracts it: the same
-	// read serves as the success check and as the authoritative lease WaitIP
-	// returns, so the two can never disagree.
 	leaseIP, ok := parseInetIP(out)
 	if !ok {
 		conn.Close()

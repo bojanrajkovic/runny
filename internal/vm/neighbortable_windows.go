@@ -36,7 +36,7 @@ const (
 )
 
 // The NL_NEIGHBOR_STATE enum, neighborEntry, and the pure row-selection logic
-// (findPermanentIP/selectLeaseIP) live in neighbortable.go, untagged, so
+// (permanentIPs/selectLeaseIP) live in neighbortable.go, untagged, so
 // they're testable off real hardware -- this file is the windows-only
 // GetIpNetTable2 syscall glue that produces the rows they select from.
 

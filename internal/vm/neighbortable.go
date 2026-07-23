@@ -41,24 +41,27 @@ func (e neighborEntry) learned() bool {
 	return e.state == nlnsReachable || e.state == nlnsStale
 }
 
-// findPermanentIP returns the IP of the first Permanent entry in entries whose
-// physical address matches mac. This is specifically the HNS *pre-commit* --
-// the MAC->IP binding HNS writes at endpoint-attach, before the guest's own
-// DHCP client has run. WaitIP reads it only to compare against the guest's
-// real, console-observed lease and flag a divergence; it is NOT the address
-// WaitIP dials once a fixup has observed the true one (see hcs_windows.go).
-// MACs are normalized the same way WaitIP's darwin sibling matches
-// dhcpd_leases entries (leases.go's normalizeMAC) -- Windows renders MACs
-// dash-separated, macOS colon-separated, so both sides always go through the
-// same normalizer.
-func findPermanentIP(entries []neighborEntry, mac string) (string, bool) {
+// permanentIPs returns every Permanent-row IP for mac, in table order. These
+// are HNS *pre-commits* -- the MAC->IP bindings HNS writes at endpoint-attach,
+// before the guest's own DHCP client has run. WaitIP reads them only to compare
+// against the guest's real, console-observed lease and flag a divergence; they
+// are NOT the address WaitIP dials once a fixup has observed the true one (see
+// hcs_windows.go). Stale pre-commit rows accumulate for a MAC across cycles (see
+// internal/vm/CLAUDE.md), so WaitIP compares the lease against the whole set,
+// not just the first row: a divergence is "the lease matches none of the
+// pre-commits", deterministic no matter which stale row comes first. MACs are
+// normalized the same way WaitIP's darwin sibling matches dhcpd_leases entries
+// (leases.go's normalizeMAC) -- Windows renders MACs dash-separated, macOS
+// colon-separated, so both sides always go through the same normalizer.
+func permanentIPs(entries []neighborEntry, mac string) []string {
 	want := normalizeMAC(mac)
+	var ips []string
 	for _, e := range entries {
 		if e.permanent() && normalizeMAC(e.mac) == want {
-			return e.ip, true
+			ips = append(ips, e.ip)
 		}
 	}
-	return "", false
+	return ips
 }
 
 // selectLeaseIP picks the guest's current address from a neighbor-table
@@ -79,18 +82,25 @@ func findPermanentIP(entries []neighborEntry, mac string) (string, bool) {
 // robust rule for any host/HNS build that does surface a learned row.
 func selectLeaseIP(entries []neighborEntry, mac string) (string, bool) {
 	want := normalizeMAC(mac)
-	var permanentIP string
-	var havePermanent bool
+	var learnedIP, permanentIP string
+	var haveLearned, havePermanent bool
 	for _, e := range entries {
 		if normalizeMAC(e.mac) != want {
 			continue
 		}
-		if e.learned() {
-			return e.ip, true
+		// Among multiple learned rows the choice is arbitrary but must be
+		// stable: neighborEntry carries no recency signal, so "the newest
+		// lease" isn't available -- the lexicographically smallest IP is a
+		// deterministic stand-in that never depends on table iteration order.
+		if e.learned() && (!haveLearned || e.ip < learnedIP) {
+			learnedIP, haveLearned = e.ip, true
 		}
 		if e.permanent() && !havePermanent {
 			permanentIP, havePermanent = e.ip, true
 		}
+	}
+	if haveLearned {
+		return learnedIP, true
 	}
 	return permanentIP, havePermanent
 }

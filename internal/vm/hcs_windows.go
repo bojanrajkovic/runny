@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
@@ -375,10 +376,11 @@ func (m *hcsMachine) WaitIP(ctx bounded.Context) (string, error) {
 			if m.sshUser == "" || m.sshPassword == "" {
 				return "", fmt.Errorf("no IP after %s and no SSHUser/SSHPassword configured to attempt the network fixup (issue #319)", waitIPGracePeriod)
 			}
-			// The neighbor table's Permanent row for this MAC is HNS's
-			// pre-commit; captured before the fixup so it can be compared
-			// against the address the guest actually reports.
-			precommitIP, _ := findPermanentIP(entries, m.mac)
+			// The neighbor table's Permanent rows for this MAC are HNS's
+			// pre-commits; captured before the fixup so the guest's real lease
+			// can be compared against the whole set (stale rows accumulate per
+			// MAC across cycles, so any single row is an unreliable baseline).
+			precommits := permanentIPs(entries, m.mac)
 			// Wrapped in its own named action (not folded silently into
 			// AWAIT_IP's step span) so a trace/metric can distinguish "this
 			// cycle needed the fixup" from "HNS was just slow" -- the two
@@ -393,13 +395,13 @@ func (m *hcsMachine) WaitIP(ctx bounded.Context) (string, error) {
 					return err
 				}
 				leaseIP = ip
-				if precommitIP != "" && precommitIP != ip {
+				if len(precommits) > 0 && !slices.Contains(precommits, ip) {
 					// no-silent-failure: the trace milestone flags that WaitIP
-					// dialed something other than the pre-commit, and the log
-					// carries the exact pair for the operator asking why.
+					// dialed something no pre-commit named, and the log carries
+					// the full pre-commit set for the operator asking why.
 					obs.Milestone(ctx, "neighbor-ip-corrected")
 					slog.Warn("WaitIP: guest lease diverged from HNS pre-commit; dialing the console-observed address",
-						"mac", m.mac, "precommit_ip", precommitIP, "lease_ip", ip)
+						"mac", m.mac, "precommit_ips", precommits, "lease_ip", ip)
 				}
 				return nil
 			}); err != nil {

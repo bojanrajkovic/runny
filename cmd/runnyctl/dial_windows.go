@@ -8,6 +8,7 @@ import (
 	"net"
 
 	winio "github.com/Microsoft/go-winio"
+	"github.com/bojanrajkovic/runny/internal/home"
 	"golang.org/x/sys/windows"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -86,9 +87,9 @@ func verifyPipeOwner(conn net.Conn) error {
 // server read identity and group membership but grants it no rights to act as
 // the client — the minimum the operator-revocation read requires.
 //
-// After the dial, the client verifies the pipe's owner is Administrators or
-// SYSTEM before handing the conn to gRPC — mutual authentication that refuses a
-// squatted pipe before any RPC or credential is sent.
+// After dialing the SYSTEM pipe, the client verifies its owner is Administrators
+// or SYSTEM before handing the conn to gRPC — mutual authentication that refuses
+// a squatted pipe before any RPC or credential is sent.
 //
 // passthrough:runnyd, not a target grpc must resolve: the real endpoint is the
 // context dialer, and passthrough hands the client a single fixed address so no
@@ -100,9 +101,19 @@ func dial(socketPath string) (*grpc.ClientConn, error) {
 			if err != nil {
 				return nil, err
 			}
-			if err := verifyPipeOwner(conn); err != nil {
-				_ = conn.Close()
-				return nil, err
+			// Owner-verify the SYSTEM pipe only. Its name is fixed and
+			// predictable (home.PipeName), so a squatter can pre-create it —
+			// the exposure the owner check exists to close. A per-user daemon's
+			// pipe has an owner-only connect DACL (only the resolving user can
+			// open it — the pipe-namespace analogue of darwin's 0600 socket) and
+			// is owned by that user, not Administrators/SYSTEM: the anti-squat
+			// check neither applies (no cross-user exposure) nor would pass, so
+			// applying it there would falsely refuse a healthy non-admin daemon.
+			if socketPath == home.PipeName {
+				if err := verifyPipeOwner(conn); err != nil {
+					_ = conn.Close()
+					return nil, err
+				}
 			}
 			return conn, nil
 		}),

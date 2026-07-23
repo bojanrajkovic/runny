@@ -260,6 +260,18 @@ accepted**: a squatter holding the name across a restart still blocks the real
 daemon's bind, but that fails visibly (bind error, SCM failure) rather than
 silently — the loud failure this project is built to prefer.
 
+The trusted owner is not left to chance: the daemon binds the system pipe with
+an explicit `O:BA` owner in its security descriptor. The unprivileged `NT
+SERVICE\runnyd` account carries Administrators as owner-eligible, so the pipe's
+default owner already lands on `BA` — setting it explicitly makes that a
+contract, so a host where the account cannot own as `BA` fails loud at bind
+rather than binding a pipe the client would silently refuse. The owner check is
+scoped to this **system** pipe alone: a per-user daemon's pipe carries an
+owner-only connect DACL (only the resolving user can open it — the
+pipe-namespace analogue of darwin's `0600` socket) and is owned by that user, so
+it has no cross-user squat exposure and the Administrators/SYSTEM owner check is
+not applied to it (applying it would falsely refuse a healthy non-admin daemon).
+
 The kill is cooperative, not preemptive: it cancels a context both stream
 handlers already select on between sends, so a handler currently blocked
 **inside** a send (a slow or non-reading client has exhausted HTTP/2 flow

@@ -52,6 +52,7 @@ go_test(
     name = "socket_test",
     srcs = [
         "operator_test.go",
+        "operator_windows_test.go",
         "peercred_test.go",
         "registry_test.go",
         "revocation_test.go",

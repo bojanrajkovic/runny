@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -16,9 +17,11 @@ func TestSweepVMsDirMissingIsNoOp(t *testing.T) {
 }
 
 // TestSweepVMsDirBestEffortContinuesPastFailure: one slot that can't be
-// fully removed (its directory entry is locked down here to simulate a
-// still-open orphan on the real backend) must not stop the others from
-// being swept -- a single wedged slot must not crash-loop the whole sweep.
+// removed (removeAll is faked to fail for it, standing in for a real
+// backend's still-open file handle -- OS permission bits don't portably
+// simulate this, Windows ACLs don't honor chmod the way POSIX does) must
+// not stop the others from being swept -- a single wedged slot must not
+// crash-loop the whole sweep.
 func TestSweepVMsDirBestEffortContinuesPastFailure(t *testing.T) {
 	vmsDir := t.TempDir()
 	for _, name := range []string{"slot-a", "slot-b", "slot-c"} {
@@ -26,18 +29,15 @@ func TestSweepVMsDirBestEffortContinuesPastFailure(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	wedged := filepath.Join(vmsDir, "slot-b")
-	if err := os.WriteFile(filepath.Join(wedged, "clone.vhdx"), nil, 0o644); err != nil {
-		t.Fatal(err)
+
+	orig := removeAll
+	removeAll = func(path string) error {
+		if filepath.Base(path) == "slot-b" {
+			return errors.New("simulated: still held open")
+		}
+		return orig(path)
 	}
-	// Removing a directory's entry requires write permission on the
-	// directory itself, not the entry -- stripping it here makes
-	// os.RemoveAll(wedged) fail on clone.vhdx, standing in for a real
-	// backend's still-open file handle.
-	if err := os.Chmod(wedged, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.Chmod(wedged, 0o755) })
+	t.Cleanup(func() { removeAll = orig })
 
 	if err := sweepVMsDir(vmsDir, slog.Default()); err != nil {
 		t.Fatalf("sweepVMsDir = %v, want nil (best-effort: a slot that can't be removed is logged, not fatal)", err)
@@ -47,7 +47,7 @@ func TestSweepVMsDirBestEffortContinuesPastFailure(t *testing.T) {
 			t.Errorf("%s still exists (stat err = %v); want it removed despite slot-b failing", name, err)
 		}
 	}
-	if _, err := os.Stat(wedged); err != nil {
+	if _, err := os.Stat(filepath.Join(vmsDir, "slot-b")); err != nil {
 		t.Errorf("slot-b (the wedged entry) should still exist, stat err = %v", err)
 	}
 }

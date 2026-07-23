@@ -523,12 +523,19 @@ func sweepVMsDir(vmsDir string, logger *slog.Logger) error {
 	}
 	for _, e := range entries {
 		p := filepath.Join(vmsDir, e.Name())
-		if err := os.RemoveAll(p); err != nil {
+		if err := removeAll(p); err != nil {
 			logger.Warn("sweeping vms dir: one slot could not be fully removed; it may still be held open by an unreaped orphan", "path", p, "err", err)
 		}
 	}
 	return nil
 }
+
+// removeAll is os.RemoveAll, indirected so tests can inject a failure for
+// one specific path without depending on OS-specific permission semantics
+// (chmod-based removal restrictions don't behave the same on Windows as on
+// POSIX -- a still-open file handle, the real backend's failure mode, isn't
+// portably reproducible in a unit test either).
+var removeAll = os.RemoveAll
 
 // runReload is the shared reload entry point for the Reload RPC, UpgradeReload
 // RPC, and SIGHUP — see run()'s three call sites, which all serialize through

@@ -51,7 +51,11 @@ func TestPipeTransportRoundTrip(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	resp, err := runnyv1.NewRunnyServiceClient(conn).GetStatus(t.Context(), &runnyv1.GetStatusRequest{})
+	// Bound the RPC so a wedged handshake fails fast with a clear error rather
+	// than blocking the suite until bazel's SIGKILL.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp, err := runnyv1.NewRunnyServiceClient(conn).GetStatus(ctx, &runnyv1.GetStatusRequest{})
 	if err != nil {
 		t.Fatalf("GetStatus over pipe: %v", err)
 	}

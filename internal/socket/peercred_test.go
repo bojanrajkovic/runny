@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -65,7 +66,11 @@ func TestPeerCredsCarriesIdentityOverRealSocket(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 	client := runnyv1.NewRunnyServiceClient(conn)
 
-	if _, err := client.GetStatus(t.Context(), &runnyv1.GetStatusRequest{}); err != nil {
+	// Bound the RPC so a wedged handshake fails fast with a clear error rather
+	// than blocking the suite until bazel's SIGKILL.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := client.GetStatus(ctx, &runnyv1.GetStatusRequest{}); err != nil {
 		t.Fatalf("insecure client could not complete an RPC against a peerCreds server: %v", err)
 	}
 

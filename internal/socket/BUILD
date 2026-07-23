@@ -63,6 +63,7 @@ go_test(
         "registry_test.go",
         "revocation_test.go",
         "socket_test.go",
+        "watchdog_test.go",
     ],
     embed = [":socket"],
     deps = [

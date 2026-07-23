@@ -3,6 +3,7 @@ package socket
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
 
 	"google.golang.org/grpc"
@@ -36,39 +37,48 @@ var errRevoked = errors.New("operator revoked")
 
 // newOperatorGate returns an armed gate reading homeDir's ACL, or nil when
 // armed is false (a per-user daemon has no ACL-managed operator set to
-// enforce against) or when peerCredSupported is false (this platform has no
-// real peer-identity read to enforce against -- arming anyway would deny
-// every RPC, since check/stream fail closed on an unreadable identity; see
-// peerCredSupported's own doc comment). A nil *operatorGate is pass-through
-// everywhere below, falling back to the socket-is-the-sole-gate baseline.
+// enforce against) or when the peerCredSupported arming check fails (this
+// platform has no working peer-identity read to enforce against -- arming
+// anyway would deny every RPC, since check/stream fail closed on an
+// unreadable identity; see peerCredSupported's per-platform doc comments).
+// The && ordering is load-bearing: the arming check runs only when arming
+// is actually requested, because on Windows it is a live socket self-probe.
+// A nil *operatorGate is pass-through everywhere below, falling back to the
+// socket-is-the-sole-gate baseline. Arming is announced at INFO — the
+// visible confirmation that per-RPC revocation is enforced with a real
+// peer-identity read, mirroring the loud per-platform log when the check
+// fails.
 func newOperatorGate(armed bool, homeDir string) *operatorGate {
-	if !armed || !peerCredSupported {
+	if !armed || !peerCredSupported() {
 		return nil
 	}
+	slog.Info("operator revocation gate armed: per-RPC checks enforced with a kernel-authenticated peer-identity read")
 	return &operatorGate{homeDir: homeDir, streams: newFanoutRegistry[gateStream]()}
 }
 
 // check is the shared identity → verdict, resolving the identity from ctx
 // first: fail closed (PermissionDenied) when the peer identity could not be
-// read, else checkID's verdict.
+// read; nil for the platform's always-authorized principal (the Privileged
+// verdict readPeerID attached at handshake — root on darwin, SYSTEM or an
+// elevated Administrators member on Windows — which bypasses the socket's
+// access control by design and holds no ACE); else checkID's verdict.
 func (g *operatorGate) check(ctx context.Context) error {
-	id, ok := peerID(ctx)
+	id, privileged, ok := peerID(ctx)
 	if !ok {
 		return status.Error(codes.PermissionDenied, "operator revocation check: peer identity could not be read")
+	}
+	if privileged {
+		return nil
 	}
 	return g.checkID(id)
 }
 
-// checkID is check without the peer-identity lookup, for callers (stream)
-// that already resolved it: nil for the platform's privileged principal
-// (darwin's root bypasses the socket's 0600 mode by design and holds no
-// ACE), PermissionDenied for any identity absent from a fresh, uncached
-// ListIDs read. Membership is plain string equality against the
-// platform-native identities the ACL read returns.
+// checkID is the ACL half of check, for callers that already resolved the
+// identity and consulted the privileged verdict: PermissionDenied for any
+// identity absent from a fresh, uncached ListIDs read. Membership is plain
+// string equality against the platform-native identities the ACL read
+// returns.
 func (g *operatorGate) checkID(id string) error {
-	if privilegedPeerID(id) {
-		return nil
-	}
 	ids, err := opacl.ListIDs(g.homeDir)
 	if err != nil {
 		return status.Errorf(codes.PermissionDenied, "operator revocation check: reading the operator set: %v", err)
@@ -97,7 +107,7 @@ func (g *operatorGate) unary(ctx context.Context, req any, info *grpc.UnaryServe
 // is converted to PermissionDenied instead of the handler's nil —
 // visible-not-silent.
 func (g *operatorGate) stream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	id, ok := peerID(ss.Context())
+	id, privileged, ok := peerID(ss.Context())
 	if !ok {
 		return status.Error(codes.PermissionDenied, "operator revocation check: peer identity could not be read")
 	}
@@ -107,8 +117,12 @@ func (g *operatorGate) stream(srv any, ss grpc.ServerStream, info *grpc.StreamSe
 	defer g.streams.register(gateStream{id: id, cancel: cancel})()
 	defer cancel(nil) // release the child context's resources either way
 
-	if err := g.checkID(id); err != nil {
-		return err
+	// The privileged principal skips the ACL check for the same reason
+	// check does: it holds no ACE, so a membership read could only deny it.
+	if !privileged {
+		if err := g.checkID(id); err != nil {
+			return err
+		}
 	}
 	err := handler(srv, wrapped)
 	if err == nil && errors.Is(context.Cause(ctx), errRevoked) {

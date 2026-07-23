@@ -23,6 +23,14 @@ type peerAuth struct {
 	// platform, or a cred-read miss) — distinct from a real privileged peer
 	// ("0" on darwin: root, which bypasses the socket's 0600 mode).
 	ID *string
+	// Privileged marks the platform's always-authorized principal — root on
+	// darwin, SYSTEM or an elevated Administrators member on Windows. It is
+	// determined by readPeerID alongside ID, while the platform has the
+	// peer's kernel credential or token in hand: an identity string alone
+	// cannot answer Windows admin membership, so the verdict travels with
+	// the identity instead of being re-derived from it. Meaningless when ID
+	// is nil.
+	Privileged bool
 }
 
 func (peerAuth) AuthType() string { return "peercred" }
@@ -51,8 +59,9 @@ func (peerCreds) ServerHandshake(conn net.Conn) (net.Conn, credentials.AuthInfo,
 	if uc, ok := conn.(*net.UnixConn); ok {
 		if sc, err := uc.SyscallConn(); err == nil {
 			_ = sc.Control(func(fd uintptr) {
-				if id, ok := readPeerID(fd); ok {
+				if id, privileged, ok := readPeerID(fd); ok {
 					auth.ID = &id
+					auth.Privileged = privileged
 				}
 			})
 		}
@@ -66,18 +75,18 @@ func (peerCreds) Info() credentials.ProtocolInfo {
 
 func (c peerCreds) Clone() credentials.TransportCredentials { return c }
 
-// peerID extracts the calling peer's kernel-authenticated identity set by
-// peerCreds during ServerHandshake. ok is false whenever it is not known —
-// no peer in ctx, a foreign AuthInfo implementation, or a nil ID — never a
-// client-controlled value.
-func peerID(ctx context.Context) (string, bool) {
+// peerID extracts the calling peer's kernel-authenticated identity and
+// privileged verdict set by peerCreds during ServerHandshake. ok is false
+// whenever the identity is not known — no peer in ctx, a foreign AuthInfo
+// implementation, or a nil ID — never a client-controlled value.
+func peerID(ctx context.Context) (id string, privileged, ok bool) {
 	p, ok := peer.FromContext(ctx)
 	if !ok {
-		return "", false
+		return "", false, false
 	}
 	auth, ok := p.AuthInfo.(peerAuth)
 	if !ok || auth.ID == nil {
-		return "", false
+		return "", false, false
 	}
-	return *auth.ID, true
+	return *auth.ID, auth.Privileged, true
 }

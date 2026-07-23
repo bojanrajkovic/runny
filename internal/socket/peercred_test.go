@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -83,46 +84,69 @@ func TestPeerCredsCarriesIdentityOverRealSocket(t *testing.T) {
 		t.Error("SecurityLevel unset")
 	}
 
-	// The stub always reports "unknown" on non-darwin; darwin must resolve
-	// the real connecting uid (this test process's own), formatted as
-	// os/user.User.Uid's decimal string.
-	if runtime.GOOS != "darwin" {
-		if auth.ID != nil {
-			t.Errorf("non-darwin stub must report unknown, got id %q", *auth.ID)
+	// darwin and windows must resolve the real connecting identity (this
+	// test process's own); the remaining-platform stub always reports
+	// unknown. The exact-SID assertion for windows lives in the
+	// windows-tagged readPeerID test, which has the token APIs in reach.
+	switch runtime.GOOS {
+	case "darwin":
+		if auth.ID == nil {
+			t.Fatal("darwin must read the peer identity, got unknown")
 		}
-		return
-	}
-	if auth.ID == nil {
-		t.Fatal("darwin must read the peer identity, got unknown")
-	}
-	if want := strconv.Itoa(os.Getuid()); *auth.ID != want {
-		t.Errorf("id = %q, want this process's uid %q", *auth.ID, want)
+		if want := strconv.Itoa(os.Getuid()); *auth.ID != want {
+			t.Errorf("id = %q, want this process's uid %q", *auth.ID, want)
+		}
+		if want := os.Getuid() == 0; auth.Privileged != want {
+			t.Errorf("Privileged = %v, want %v (uid %d)", auth.Privileged, want, os.Getuid())
+		}
+	case "windows":
+		if auth.ID == nil {
+			t.Fatal("windows must read the peer identity, got unknown")
+		}
+		if !strings.HasPrefix(*auth.ID, "S-1-") {
+			t.Errorf("id = %q, want a SID string", *auth.ID)
+		}
+	default:
+		if auth.ID != nil {
+			t.Errorf("the remaining-platform stub must report unknown, got id %q", *auth.ID)
+		}
 	}
 }
 
 func TestPeerID(t *testing.T) {
-	id, ok := peerID(t.Context())
+	id, _, ok := peerID(t.Context())
 	if ok {
 		t.Errorf("no peer in context: expected unknown, got id %q", id)
 	}
 
-	// Both identity shapes pass through verbatim: a darwin decimal uid and a
-	// Windows SID are opaque strings to the transport layer.
-	for _, want := range []string{"42", "S-1-5-21-1111111111-2222222222-3333333333-1001"} {
-		w := want
-		ctx := peer.NewContext(t.Context(), &peer.Peer{AuthInfo: peerAuth{ID: &w}})
-		if id, ok := peerID(ctx); !ok || id != want {
-			t.Errorf("peerID = (%q, %v), want (%q, true)", id, ok, want)
+	// Both identity shapes pass through verbatim — a darwin decimal uid and a
+	// Windows SID are opaque strings to the transport layer — and the
+	// privileged verdict travels beside the identity, never re-derived from
+	// the string ("0" with the flag unset stays unprivileged).
+	for _, c := range []struct {
+		id         string
+		privileged bool
+	}{
+		{"42", false},
+		{"S-1-5-21-1111111111-2222222222-3333333333-1001", false},
+		{"0", true},
+		{"0", false},
+		{"S-1-5-18", true},
+	} {
+		w := c.id
+		ctx := peer.NewContext(t.Context(), &peer.Peer{AuthInfo: peerAuth{ID: &w, Privileged: c.privileged}})
+		if id, privileged, ok := peerID(ctx); !ok || id != c.id || privileged != c.privileged {
+			t.Errorf("peerID = (%q, %v, %v), want (%q, %v, true)", id, privileged, ok, c.id, c.privileged)
 		}
 	}
 
 	ctx := peer.NewContext(t.Context(), &peer.Peer{AuthInfo: peerAuth{ID: nil}})
-	if _, ok := peerID(ctx); ok {
+	if _, _, ok := peerID(ctx); ok {
 		t.Error("nil ID must report unknown")
 	}
 
 	ctx = peer.NewContext(t.Context(), &peer.Peer{AuthInfo: otherAuthInfo{}})
-	if _, ok := peerID(ctx); ok {
+	if _, _, ok := peerID(ctx); ok {
 		t.Error("a non-peerAuth AuthInfo must report unknown, not panic or misread")
 	}
 }

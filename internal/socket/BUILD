@@ -70,6 +70,7 @@ go_test(
         "@org_golang_google_grpc//codes",
         "@org_golang_google_grpc//credentials",
         "@org_golang_google_grpc//credentials/insecure",
+        "@org_golang_google_grpc//metadata",
         "@org_golang_google_grpc//peer",
         "@org_golang_google_grpc//status",
         "@org_golang_google_grpc//test/bufconn",
@@ -79,12 +80,10 @@ go_test(
         "@rules_go//go/platform:darwin": [
             "//internal/bounded",
             "//internal/opacl",
-            "@org_golang_google_grpc//metadata",
         ],
         "@rules_go//go/platform:ios": [
             "//internal/bounded",
             "//internal/opacl",
-            "@org_golang_google_grpc//metadata",
         ],
         "//conditions:default": [],
     }),

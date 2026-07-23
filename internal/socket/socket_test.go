@@ -21,6 +21,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
@@ -273,20 +274,87 @@ func TestLookupUsernameResolvesQuickly(t *testing.T) {
 	}
 }
 
+// fakeServerStream is the minimal grpc.ServerStream a stream interceptor
+// test needs: only Context() is exercised by operatorGate.stream. Portable
+// (not in the darwin-gated revocation_test.go) so the privileged-flag
+// plumbing tests run everywhere.
+type fakeServerStream struct {
+	ctx context.Context
+}
+
+func (f *fakeServerStream) SetHeader(metadata.MD) error  { return nil }
+func (f *fakeServerStream) SendHeader(metadata.MD) error { return nil }
+func (f *fakeServerStream) SetTrailer(metadata.MD)       {}
+func (f *fakeServerStream) Context() context.Context     { return f.ctx }
+func (f *fakeServerStream) SendMsg(m any) error          { return nil }
+func (f *fakeServerStream) RecvMsg(m any) error          { return nil }
+
+// stubPeerCredSupported pins the per-platform arming check for the test, so
+// both arming branches are exercised on every platform (and windows tests
+// don't spend a real self-probe per gate construction).
+func stubPeerCredSupported(t *testing.T, supported bool) {
+	t.Helper()
+	orig := peerCredSupported
+	peerCredSupported = func() bool { return supported }
+	t.Cleanup(func() { peerCredSupported = orig })
+}
+
 // TestNewOperatorGateRequiresPeerCredSupport pins that an armed request only
-// actually arms the gate on a platform with a real peer-identity read
-// (peerCredSupported) -- arming it anywhere else would deny every RPC
-// outright (peerID never resolves, and the gate fails closed on an
-// unreadable identity by design), so newOperatorGate degrades to nil
+// actually arms the gate when the platform arming check reports a real
+// peer-identity read (peerCredSupported) -- arming it anywhere else would
+// deny every RPC outright (peerID never resolves, and the gate fails closed
+// on an unreadable identity by design), so newOperatorGate degrades to nil
 // (pass-through, the socket-is-the-sole-gate baseline) instead.
 func TestNewOperatorGateRequiresPeerCredSupport(t *testing.T) {
+	stubPeerCredSupported(t, false)
+	if g := newOperatorGate(true, t.TempDir()); g != nil {
+		t.Fatalf("newOperatorGate(true, ...) = %v with no peer-cred support, want nil", g)
+	}
+
+	stubPeerCredSupported(t, true)
+	if g := newOperatorGate(true, t.TempDir()); g == nil {
+		t.Fatal("newOperatorGate(true, ...) = nil on a supported platform, want an armed gate")
+	}
+
+	// The check must not run at all when arming isn't requested: on windows
+	// it is a real socket self-probe, pointless for a per-user daemon.
+	peerCredSupported = func() bool {
+		t.Fatal("peerCredSupported consulted for an unarmed gate")
+		return true
+	}
+	if g := newOperatorGate(false, t.TempDir()); g != nil {
+		t.Fatalf("newOperatorGate(false, ...) = %v, want nil", g)
+	}
+}
+
+// TestOperatorGatePrivilegedFlagDrivesExemption pins the reshaped seam: the
+// gate's always-authorized exemption is the peerAuth Privileged verdict the
+// platform read attached, never re-derived from the identity string. A
+// privileged peer passes check and stream without any ACL read (the SID
+// below is in no ACL); an unprivileged peer carrying darwin-root's "0" is
+// still denied.
+func TestOperatorGatePrivilegedFlagDrivesExemption(t *testing.T) {
+	stubPeerCredSupported(t, true)
 	g := newOperatorGate(true, t.TempDir())
-	if peerCredSupported {
-		if g == nil {
-			t.Fatal("newOperatorGate(true, ...) = nil on a peerCredSupported platform, want an armed gate")
-		}
-	} else if g != nil {
-		t.Fatalf("newOperatorGate(true, ...) = %v on a platform with no peer-cred support, want nil", g)
+
+	privCtx := asPrivilegedOperator(t.Context(), "S-1-5-18")
+	if err := g.check(privCtx); err != nil {
+		t.Fatalf("check(privileged peer) = %v, want nil", err)
+	}
+
+	handled := false
+	handler := func(srv any, stream grpc.ServerStream) error { handled = true; return nil }
+	if err := g.stream(nil, &fakeServerStream{ctx: privCtx}, &grpc.StreamServerInfo{FullMethod: "/test/Watch"}, handler); err != nil {
+		t.Fatalf("stream(privileged peer) = %v, want nil", err)
+	}
+	if !handled {
+		t.Fatal("stream handler not invoked for a privileged peer")
+	}
+
+	// "0" without the flag: no exemption, and no ACE in the (empty or
+	// unreadable) ACL — denied, proving the string is no longer consulted.
+	if err := g.check(asOperatorID(t.Context(), "0")); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("check(unprivileged %q) = %v, want PermissionDenied", "0", err)
 	}
 }
 
@@ -1104,16 +1172,26 @@ func captureDaemonLog(t *testing.T) *logring.Ring {
 }
 
 // asOperator returns a context carrying a peerAuth identity, as if the
-// caller authenticated over the real socket with this uid. Lives here (not
-// the darwin-gated operator_test.go) so portable tests can use it too.
+// caller authenticated over the real socket with this uid — including the
+// privileged verdict darwin's readPeerID would attach (uid 0 is root). Lives
+// here (not the darwin-gated operator_test.go) so portable tests can use it
+// too.
 func asOperator(ctx context.Context, uid uint32) context.Context {
-	return asOperatorID(ctx, strconv.FormatUint(uint64(uid), 10))
+	id := strconv.FormatUint(uint64(uid), 10)
+	return peer.NewContext(ctx, &peer.Peer{AuthInfo: peerAuth{ID: &id, Privileged: uid == 0}})
 }
 
 // asOperatorID is asOperator for a raw platform-native identity string — a
-// SID-shaped identity, or a pre-formatted uid.
+// SID-shaped identity, or a pre-formatted uid — always unprivileged.
 func asOperatorID(ctx context.Context, id string) context.Context {
 	return peer.NewContext(ctx, &peer.Peer{AuthInfo: peerAuth{ID: &id}})
+}
+
+// asPrivilegedOperator is asOperatorID with the privileged verdict set, as
+// the platform read attaches for root on darwin and SYSTEM or an elevated
+// Administrators member on Windows.
+func asPrivilegedOperator(ctx context.Context, id string) context.Context {
+	return peer.NewContext(ctx, &peer.Peer{AuthInfo: peerAuth{ID: &id, Privileged: true}})
 }
 
 // stubUsername makes lookupUsername resolve every uid to name for the test.

@@ -13,7 +13,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
@@ -120,19 +119,6 @@ func TestOperatorGateUnaryDeniesPostRevoke(t *testing.T) {
 		t.Fatal("handler invoked for a revoked operator")
 	}
 }
-
-// fakeServerStream is the minimal grpc.ServerStream a stream interceptor
-// test needs: only Context() is exercised by operatorGate.stream.
-type fakeServerStream struct {
-	ctx context.Context
-}
-
-func (f *fakeServerStream) SetHeader(metadata.MD) error  { return nil }
-func (f *fakeServerStream) SendHeader(metadata.MD) error { return nil }
-func (f *fakeServerStream) SetTrailer(metadata.MD)       {}
-func (f *fakeServerStream) Context() context.Context     { return f.ctx }
-func (f *fakeServerStream) SendMsg(m any) error          { return nil }
-func (f *fakeServerStream) RecvMsg(m any) error          { return nil }
 
 // TestOperatorGateStreamKilledOnRevoke pins the in-flight-stream-kill
 // mechanism: a stream already registered before a revoke is cancelled by

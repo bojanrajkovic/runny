@@ -272,7 +272,7 @@ func recoveryStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, 
 // Serve listens on the platform control channel (a unix socket on darwin, a
 // named pipe on windows — see the per-platform listen) until ctx ends.
 func (s *Server) Serve(ctx context.Context, socketPath string) error {
-	ln, err := listen(socketPath)
+	ln, err := listen(socketPath, s.IsSystemDaemon)
 	if err != nil {
 		return err
 	}

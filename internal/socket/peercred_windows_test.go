@@ -32,7 +32,7 @@ func ownProcessSID(t *testing.T) string {
 // cannot be reproduced in a single process.
 func TestReadPeerImpersonatesClientSID(t *testing.T) {
 	name := uniquePipeName(t)
-	ln, err := listen(name)
+	ln, err := listen(name, true)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}

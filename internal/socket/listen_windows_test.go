@@ -11,6 +11,7 @@ import (
 	"time"
 
 	winio "github.com/Microsoft/go-winio"
+	"golang.org/x/sys/windows"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -31,7 +32,7 @@ func uniquePipeName(t *testing.T) string {
 // GetStatus RPC — the async winio net.Conn carries HTTP/2 correctly.
 func TestPipeTransportRoundTrip(t *testing.T) {
 	name := uniquePipeName(t)
-	ln, err := listen(name)
+	ln, err := listen(name, true)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -62,3 +63,31 @@ func TestPipeTransportRoundTrip(t *testing.T) {
 // pipeDialAccessTest is GENERIC_READ|GENERIC_WRITE, matching runnyctl's client
 // dial access (dial_windows.go's pipeDialAccess, which lives in package main).
 const pipeDialAccessTest = 0x80000000 | 0x40000000
+
+// TestPipeSDDL pins the per-daemon connect DACL: the system daemon grants
+// Authenticated Users; a per-user daemon grants only the resolving user's own
+// SID (owner-only), so the descriptor names that SID and not AU.
+func TestPipeSDDL(t *testing.T) {
+	sys, err := pipeSDDL(true)
+	if err != nil {
+		t.Fatalf("pipeSDDL(system): %v", err)
+	}
+	if sys != authenticatedUsersSDDL {
+		t.Errorf("system pipe SDDL = %q, want %q", sys, authenticatedUsersSDDL)
+	}
+
+	user, err := pipeSDDL(false)
+	if err != nil {
+		t.Fatalf("pipeSDDL(per-user): %v", err)
+	}
+	if user == authenticatedUsersSDDL {
+		t.Error("per-user pipe SDDL must not grant Authenticated Users")
+	}
+	tu, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatalf("GetTokenUser: %v", err)
+	}
+	if want := "D:(A;;GA;;;" + tu.User.Sid.String() + ")"; user != want {
+		t.Errorf("per-user pipe SDDL = %q, want %q (owner-only)", user, want)
+	}
+}

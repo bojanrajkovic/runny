@@ -145,7 +145,10 @@ password would be the one remaining door back into `admin`.
 Authorization is the socket itself: the `0600` `runnyd.sock` is the sole gate,
 deliberately — whoever can open it already transitively holds everything
 injection grants (the config that can set `ssh_hardening: off`, the App key, the
-daemon binary). For a per-user agent the socket is owner-only. For the headless
+daemon binary). For a per-user agent the socket is owner-only — on Windows the
+equivalent is a per-user pipe whose name is derived from the resolved home (so
+two users' daemons never collide on, or squat, one pipe) and whose security
+descriptor grants connect to the owning user's SID alone. For the headless
 system daemon (below) it is owned by the `_runny` service account and reachable
 by the operator account through the home's inheriting ACL — intentional: that
 operator is the trusted administrator who landed the App key and edits the

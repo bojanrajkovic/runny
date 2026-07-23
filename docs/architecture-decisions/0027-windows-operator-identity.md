@@ -146,9 +146,14 @@ in-flight stream kill apply.
   can reach it; the handshake peeks one byte first (a client message must be
   pending to impersonate against) and replays it so the HTTP/2 stream loses
   nothing.
-- Windows authorization is a two-tier model that differs from darwin's: the
-  pipe SD is a coarse connect filter and the per-RPC gate is primary, rather
-  than the socket's own mode being the outer gate. Documented in
+- Windows authorization is a two-tier model that differs from darwin's *for the
+  system daemon*: the pipe SD is a coarse connect filter and the per-RPC gate is
+  primary, rather than the socket's own mode being the outer gate. A *per-user*
+  Windows daemon keeps darwin's single-owner shape — its pipe name is derived
+  from the resolved home (distinct per user, un-squattable) and its SD grants
+  connect to the owning user's SID alone, the owner-only analogue of the 0600
+  per-user socket; the gate stays unarmed there, as on a per-user home
+  everywhere (a single owner, no ACL-managed operator set). Documented in
   `docs/security.md`.
 - `peerCredSupported` is unconditionally true on Windows — the gate always arms
   on the system daemon, with no probe to fail — where the darwin value tracks

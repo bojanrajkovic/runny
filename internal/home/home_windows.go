@@ -2,7 +2,12 @@
 
 package home
 
-import "golang.org/x/sys/windows"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+
+	"golang.org/x/sys/windows"
+)
 
 // SystemHomeDir is the fixed home of a non-root system daemon; see the unix
 // declaration for the deployment model it anchors. The conventional
@@ -10,14 +15,27 @@ import "golang.org/x/sys/windows"
 // of scope.
 const SystemHomeDir = `C:\ProgramData\runny`
 
-// PipeName is the control channel's named-pipe path on windows — a single
-// fixed name, not derived from the home dir (a pipe lives in the kernel's pipe
-// namespace, not on disk under the home). runnyd binds it and clients dial it.
+// PipeName is the system daemon's control-channel pipe — a single fixed name
+// its clients (the elevated operator's runnyctl, running as a different
+// account) can compute without knowing the daemon's identity. runnyd binds it
+// and clients dial it.
 const PipeName = `\\.\pipe\runnyd`
 
-// SocketPath returns the windows control channel: the named pipe. The path is
-// home-independent (unlike darwin's in-home unix socket), so d is ignored.
-func (d Dir) SocketPath() string { return PipeName }
+// SocketPath returns the windows control channel: a named pipe (not an in-home
+// file — a pipe lives in the kernel's pipe namespace). The system daemon uses
+// the fixed PipeName; a per-user daemon derives a name from its resolved home
+// so two users' daemons never collide on one pipe (and cannot squat each
+// other's — pipe instances are first-come). A per-user client resolves the same
+// home and so computes the same name. Owner-only access is the pipe's SD, set
+// at bind (see internal/socket's listen), the pipe-namespace analogue of
+// darwin's 0600 socket.
+func (d Dir) SocketPath() string {
+	if string(d) == SystemHomeDir {
+		return PipeName
+	}
+	sum := sha256.Sum256([]byte(d))
+	return `\\.\pipe\runnyd-` + hex.EncodeToString(sum[:8])
+}
 
 // ownedByCurrentUser reports whether path exists and its owner SID equals the
 // current process token's user SID — the same ownership (not writability)

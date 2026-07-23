@@ -62,6 +62,10 @@ func TestReadPeerImpersonatesClientSID(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer func() { _ = client.Close() }()
+	// Bound the raw write: on a mis-sized (unbuffered) pipe a client write
+	// rendezvous-blocks the server reader, so fail in seconds with a clear
+	// message rather than hanging the suite until bazel's SIGKILL.
+	_ = client.SetWriteDeadline(time.Now().Add(2 * time.Second))
 	if _, err := client.Write([]byte{'A', 'B'}); err != nil {
 		t.Fatalf("client write: %v", err)
 	}

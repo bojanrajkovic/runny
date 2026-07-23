@@ -21,6 +21,18 @@ import (
 // unauthenticated / anonymous logon has no business even reaching the gate.
 const authenticatedUsersSDDL = "D:(A;;GA;;;AU)"
 
+// pipeBufferBytes sizes the pipe's kernel input/output buffers. A zero-buffer
+// (winio's default) pipe makes every client WriteFile rendezvous with the
+// server reader — the write does not complete until the server has read every
+// byte. The handshake reads the client SID by impersonating the pipe, and that
+// impersonation peeks only the client's first byte before pausing to read the
+// token; a client mid-write would stall against the paused reader (a real
+// deadlock, seen in TestReadPeerImpersonatesClientSID). A non-trivial buffer
+// lets the client's handshake bytes land immediately, so no client write ever
+// blocks on the server's read cadence. 64 KiB comfortably holds gRPC's HTTP/2
+// preface and settings.
+const pipeBufferBytes = 64 * 1024
+
 // listen binds the control channel for a windows daemon: a named pipe. winio's
 // ListenPipe creates each instance FILE_FLAG_OVERLAPPED and hands back an
 // async net.Conn driven over an IOCP — the shape gRPC needs — and its concrete
@@ -38,7 +50,11 @@ func listen(path string, systemDaemon bool) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	ln, err := winio.ListenPipe(path, &winio.PipeConfig{SecurityDescriptor: sddl})
+	ln, err := winio.ListenPipe(path, &winio.PipeConfig{
+		SecurityDescriptor: sddl,
+		InputBufferSize:    pipeBufferBytes,
+		OutputBufferSize:   pipeBufferBytes,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("listening on %s: %w", path, err)
 	}

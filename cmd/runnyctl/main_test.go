@@ -970,6 +970,31 @@ func TestRenderCycleShowsOperatorSubject(t *testing.T) {
 	}
 }
 
+// TestRenderCycleShowsOperatorSIDSubject pins the sid half of the subject
+// clause: a Windows record carries operator_sid instead of operator_uid,
+// and renders resolved-name-first with the same bare-identity fallback the
+// uid shape has.
+func TestRenderCycleShowsOperatorSIDSubject(t *testing.T) {
+	const sid = "S-1-5-21-1111111111-2222222222-3333333333-1001"
+	var buf bytes.Buffer
+	c := &ctl{out: &buf}
+	c.renderCycle(&runnyv1.CycleRecord{
+		CycleId: "abcd1234", Slot: "win-1", Result: "success",
+		Started: timestamppb.New(time.Now()), Finished: timestamppb.New(time.Now()),
+		InjectedKeys: []*runnyv1.InjectedKey{
+			{Fingerprint: "SHA256:abc", Outcome: "ok", State: "DEBUG", OperatorSid: sid, OperatorUser: `CORP\bob`},
+			{Fingerprint: "SHA256:def", Outcome: "ok", State: "DEBUG", OperatorSid: sid},
+		},
+	})
+	out := buf.String()
+	if !strings.Contains(out, `SHA256:abc · by CORP\bob (`+sid+`)`) {
+		t.Errorf("named sid subject missing or misplaced:\n%s", out)
+	}
+	if !strings.Contains(out, "SHA256:def · by "+sid) {
+		t.Errorf("sid-only fallback missing:\n%s", out)
+	}
+}
+
 func TestRenderCycleContamination(t *testing.T) {
 	var buf bytes.Buffer
 	c := &ctl{out: &buf}

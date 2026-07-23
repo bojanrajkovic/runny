@@ -90,7 +90,7 @@ func ListIDs(homeDir string) ([]string, error) {
 // in the daemon's own process context LookupAccountSid reports the service SID
 // `NT SERVICE\runnyd` (S-1-5-80-*) as SidTypeUser, which would slip the
 // bootstrap's own service ACE into the operator set — the daemon counting
-// itself as an operator. excludedSID drops SYSTEM/LOCAL SERVICE/NETWORK
+// itself as an operator. ExcludedSID drops SYSTEM/LOCAL SERVICE/NETWORK
 // SERVICE, the S-1-5-32- built-in aliases
 // (Administrators, Users, ...), and the S-1-5-80- service range up front. The
 // SidTypeUser check is kept as a secondary filter: it still drops a SID that no
@@ -114,7 +114,7 @@ func operatorSIDs(dacl *windows.ACL) ([]string, error) {
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		s := sid.String()
-		if excludedSID(s) {
+		if ExcludedSID(s) {
 			continue
 		}
 		if _, _, accType, err := sid.LookupAccount(""); err != nil || accType != windows.SidTypeUser {
@@ -125,14 +125,17 @@ func operatorSIDs(dacl *windows.ACL) ([]string, error) {
 	return ids, nil
 }
 
-// excludedSID reports whether a SID string can never be an operator: the
+// ExcludedSID reports whether a SID string can never be an operator: the
 // well-known singletons SYSTEM (S-1-5-18), LOCAL SERVICE (S-1-5-19), and
 // NETWORK SERVICE (S-1-5-20); the S-1-5-32- built-in alias range
 // (Administrators, Users, and the rest); and the S-1-5-80- service SID range
 // (`NT SERVICE\*`, including the daemon's own account). Prefix-matched so it is
 // independent of LookupAccountSid's type verdict, which misreports the service
-// SID as a user in the daemon's context.
-func excludedSID(sid string) bool {
+// SID as a user in the daemon's context. Exported so the grant-target refusal
+// (internal/socket) and this read-side exclusion enforce one identical rule —
+// a SID refused for write must never be one that would be hidden from the
+// read, or a live ACE could orphan out of ListIDs' view.
+func ExcludedSID(sid string) bool {
 	switch sid {
 	case "S-1-5-18", "S-1-5-19", "S-1-5-20":
 		return true

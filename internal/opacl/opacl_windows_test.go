@@ -106,12 +106,12 @@ func TestOperatorSIDsWalk(t *testing.T) {
 	}
 }
 
-// TestOperatorSIDsExcludesServiceSID is the red test for #332: a service SID
-// (S-1-5-80-*, e.g. NT SERVICE\runnyd) carrying an allow-write ACE — exactly
-// the shape the install bootstrap writes for the daemon's own account, and
-// exactly what LookupAccountSid mislabels as SidTypeUser in the daemon's
-// context. The structural prefix exclusion must drop it regardless of that
-// type verdict, so the daemon never counts itself as an operator.
+// TestOperatorSIDsExcludesServiceSID is the red test for the service-SID leak:
+// a service SID (S-1-5-80-*, e.g. NT SERVICE\runnyd) carrying an allow-write
+// ACE — exactly the shape the install bootstrap writes for the daemon's own
+// account, and exactly what LookupAccountSid mislabels as SidTypeUser in the
+// daemon's context. The structural prefix exclusion must drop it regardless of
+// that type verdict, so the daemon never counts itself as an operator.
 func TestOperatorSIDsExcludesServiceSID(t *testing.T) {
 	svc, err := windows.StringToSid("S-1-5-80-3139157870-2983391045-3678747466-658725712-1809340420")
 	if err != nil {
@@ -144,13 +144,13 @@ func TestOperatorSIDsExcludesServiceSID(t *testing.T) {
 // user SID (S-1-5-21-*) is not.
 func TestExcludedSID(t *testing.T) {
 	for _, sid := range []string{"S-1-5-18", "S-1-5-19", "S-1-5-20", "S-1-5-32-544", "S-1-5-80-0", "S-1-5-80-1-2-3-4-5"} {
-		if !excludedSID(sid) {
-			t.Errorf("excludedSID(%q) = false, want true", sid)
+		if !ExcludedSID(sid) {
+			t.Errorf("ExcludedSID(%q) = false, want true", sid)
 		}
 	}
 	for _, sid := range []string{"S-1-5-21-1111111111-2222222222-3333333333-1001", "S-1-5-21-9-9-9-500"} {
-		if excludedSID(sid) {
-			t.Errorf("excludedSID(%q) = true, want false", sid)
+		if ExcludedSID(sid) {
+			t.Errorf("ExcludedSID(%q) = true, want false", sid)
 		}
 	}
 }

@@ -153,11 +153,13 @@ config, so it already holds that same transitive power. The audit trail is the
 accountability layer, not a second authorization tier.
 
 **Each `injected_keys` entry is stamped with the authenticated peer.** The
-daemon reads the connecting operator's uid server-side via `SO_PEERCRED` on
-the `0600` socket — authoritative and not client-forgeable — and records it
-alongside a best-effort username snapshot, surfaced in `runnyctl why` (e.g.
-"by bob (uid 503)"). A root peer, which bypasses the socket's `0600` mode, is
-recorded as `uid 0`; a uid the daemon cannot read (a non-darwin host, or a
+daemon reads the connecting operator's identity server-side on the `0600`
+socket (`SO_PEERCRED`'s uid on darwin; on Windows the AF_UNIX getpeerpid
+ioctl resolved to the connecting process token's SID) — authoritative and
+not client-forgeable — and records it alongside a best-effort username
+snapshot, surfaced in `runnyctl why` (e.g. "by bob (uid 503)"). A root
+peer, which bypasses the socket's `0600` mode, is recorded as `uid 0`; an
+identity the daemon cannot read (a platform with no peer read, or a
 cred-read failure) is recorded as unknown rather than failing the request —
 an audit enhancement, never a second gate. This closes the "an operator did
 X" → "operator A did X" gap once more than one operator identity can exist;
@@ -195,26 +197,46 @@ actively kills that operator's in-flight streams (`WatchStatus`,
 `StreamLogs`) the moment `runnyctl operator revoke` lands the ACL mutation,
 via an event-driven per-uid cancel registry — no polling, no lingering
 read stream. The killed stream ends with a `PermissionDenied` the client
-can show, not a silent clean close. Root always passes (uid 0 bypasses the
-socket's `0600` mode by design and holds no ACE); a peer whose uid could
-not be read is denied (fail closed). Out-of-band ACL edits (a manual
+can show, not a silent clean close. The platform's already-privileged
+principals always pass — root on darwin, SYSTEM and elevated
+Administrators on Windows — since they bypass the socket's access control
+by design and hold no ACE; a peer whose identity could not be read is
+denied (fail closed). Out-of-band ACL edits (a manual
 `chmod`, or `install-daemon` resetting the ACL) are not swept for
 in-flight streams — only the in-process revoke path triggers the kill —
 but every new RPC still observes the edit immediately.
 
-**The revocation gate is unarmed on a platform with no real peer-identity
-read.** Fail-closed only degrades gracefully when a peer uid is at least
-*sometimes* readable; on a platform where it is *never* readable, arming
-the gate would deny every RPC unconditionally rather than fail closed on
-the exceptional case. Windows has no such read today — Microsoft's own
-AF_UNIX implementation deliberately omits credential passing, delegating
-socket authorization to filesystem ACLs on the socket path instead — so
-the system daemon there falls back to the socket-is-the-sole-gate baseline
-(above) with no live per-connection revoke: an ACL edit still lands, but
-only takes effect for new connections, not an in-flight kill. A real
-per-connection identity on Windows would need its own transport (a named
-pipe, impersonated to read the connecting token's SID), tracked as
-separate future work.
+**The revocation gate arms only where a real peer-identity read exists,
+proven at startup where the read is undocumented surface.** Fail-closed
+only degrades gracefully when a peer identity is at least *sometimes*
+readable; on a platform where it is *never* readable, arming the gate
+would deny every RPC unconditionally rather than fail closed on the
+exceptional case. On darwin the read is `SO_PEERCRED` (documented,
+always-on kernel surface) and the gate simply arms. On Windows —
+whose AF_UNIX implementation deliberately omits credential passing —
+the read is the AF_UNIX getpeerpid ioctl resolved to the connecting
+process token's SID, once per connection, server-side, never
+client-forgeable; but that ioctl is undocumented, so the daemon proves it
+before relying on it: at startup it dials its own socket and requires its
+own PID and token-user SID back, and only a passing probe arms the gate.
+A probe failure (a future Windows build changing the ioctl) is loud
+feature loss, never lockout and never silent: one error log, and the
+daemon falls back to the documented socket-is-the-sole-gate baseline
+(above) with no live per-connection revoke. SYSTEM and elevated
+Administrators pass the armed gate without holding an ACE and are refused
+as grant targets — they hold Full ACEs from the install bootstrap's DACL
+plus `SeTakeOwnershipPrivilege`, so denying them would be theater, the
+same already-privileged rationale as root on darwin. The accepted
+residual: Windows peer identity is PID-indirected (the ioctl attests the
+peer PID; the SID comes from opening that process's token), unlike
+darwin's direct per-connection kernel attestation, so a peer-exit/PID-reuse
+window exists — exploitable only by a principal that already holds write
+access to the socket (an operator, already past the authorization
+boundary), against an audit trail documented as good-faith reconstruction;
+the read happens at handshake, while the peer demonstrably just connected,
+narrowing the window to microseconds. The remaining platforms (linux and
+friends) have no peer-identity read wired up, so the gate stays unarmed
+there on the same socket-is-the-sole-gate baseline.
 
 The kill is cooperative, not preemptive: it cancels a context both stream
 handlers already select on between sends, so a handler currently blocked

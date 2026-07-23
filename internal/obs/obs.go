@@ -165,19 +165,11 @@ type ActionEvent struct {
 	Duration time.Duration
 }
 
-// DetailEvent carries a live annotation ("2.1 GiB at 41 MiB/s").
+// DetailEvent carries a live annotation ("2.1 GiB at 41 MiB/s") or, under
+// KindActionMilestone, a milestone name (see Milestone) — the shape is the
+// same single string either way; Kind decides how a consumer renders it.
 type DetailEvent struct {
 	Text string
-}
-
-// ActionMilestoneEvent names a discrete point reached within the currently
-// open action (see Milestone). Name is a short, closed-set-by-convention
-// label (a call site's own constant, not guest- or operator-controlled
-// text) — unlike DetailEvent.Text, which is meant for free-form progress
-// text, a milestone name becomes a span event name, so it should read like
-// "netplan-applied", not a sentence.
-type ActionMilestoneEvent struct {
-	Name string
 }
 
 // VMEvent carries VM identity learned mid-cycle (MAC, then IP).
@@ -260,19 +252,18 @@ type Event struct {
 	Step  string
 	Kind  Kind
 
-	StepInfo  *StepEvent
-	Action    *ActionEvent
-	HTTP      *HTTPEvent
-	Detail    *DetailEvent
-	VM        *VMEvent
-	Image     *ImageEvent
-	Runner    *RunnerEvent
-	Job       *JobEvent
-	Audit     *AuditEvent
-	Finish    *FinishEvent
-	PullInfo  *PullEvent
-	Tarball   *TarballEvent
-	Milestone *ActionMilestoneEvent
+	StepInfo *StepEvent
+	Action   *ActionEvent
+	HTTP     *HTTPEvent
+	Detail   *DetailEvent
+	VM       *VMEvent
+	Image    *ImageEvent
+	Runner   *RunnerEvent
+	Job      *JobEvent
+	Audit    *AuditEvent
+	Finish   *FinishEvent
+	PullInfo *PullEvent
+	Tarball  *TarballEvent
 }
 
 // Emitter receives every event a scope produces. Installed by the daemon;
@@ -425,5 +416,5 @@ func Action(ctx context.Context, name string, fn func(context.Context) error, at
 // consumer. On a context with no scope (or a nil emitter), a safe no-op —
 // domain packages call it without knowing or caring which case applies.
 func Milestone(ctx context.Context, name string) {
-	Emit(ctx, Event{Kind: KindActionMilestone, Milestone: &ActionMilestoneEvent{Name: name}})
+	Emit(ctx, Event{Kind: KindActionMilestone, Detail: &DetailEvent{Text: name}})
 }

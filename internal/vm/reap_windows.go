@@ -195,11 +195,9 @@ func reapAllSlots(ops reapOps, vmsDir string) error {
 		if !e.IsDir() {
 			continue
 		}
-		select {
-		case <-ctx.Done():
-			slog.Error("startup: orphan reap pass ran out of time; remaining slots left for a later restart", "err", ctx.Err())
+		if err := ctx.Err(); err != nil {
+			slog.Error("startup: orphan reap pass ran out of time; remaining slots left for a later restart", "err", err)
 			return nil
-		default:
 		}
 		systemID := e.Name()
 		if err := reapPriorSystem(ops, systemID, "runny-"+systemID); err != nil {

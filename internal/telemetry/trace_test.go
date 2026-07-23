@@ -285,8 +285,8 @@ func TestTraceConsumerActionMilestoneRendersOnOpenAction(t *testing.T) {
 	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
 	emit(obs.Event{Time: at(1), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindStepEntered, StepInfo: &obs.StepEvent{}})
 	emit(obs.Event{Time: at(2), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindActionStarted, Action: &obs.ActionEvent{Name: "network-fixup"}})
-	emit(obs.Event{Time: at(3), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindActionMilestone, Milestone: &obs.ActionMilestoneEvent{Name: "console-dialed"}})
-	emit(obs.Event{Time: at(4), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindActionMilestone, Milestone: &obs.ActionMilestoneEvent{Name: "login-succeeded"}})
+	emit(obs.Event{Time: at(3), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindActionMilestone, Detail: &obs.DetailEvent{Text: "console-dialed"}})
+	emit(obs.Event{Time: at(4), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindActionMilestone, Detail: &obs.DetailEvent{Text: "login-succeeded"}})
 	emit(obs.Event{Time: at(5), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindActionEnded, Action: &obs.ActionEvent{Name: "network-fixup", Outcome: obs.OutcomeOK, Duration: 3 * time.Second}})
 	emit(obs.Event{Time: at(6), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindStepLeft, StepInfo: &obs.StepEvent{Outcome: obs.OutcomeOK}})
 	emit(obs.Event{Time: at(7), Cycle: testCycle, Kind: obs.KindCycleFinished, Finish: &obs.FinishEvent{Result: "success"}})
@@ -317,7 +317,7 @@ func TestTraceConsumerActionMilestoneWithNoOpenActionIsDropped(t *testing.T) {
 
 	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
 	emit(obs.Event{Time: at(1), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindStepEntered, StepInfo: &obs.StepEvent{}})
-	emit(obs.Event{Time: at(2), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindActionMilestone, Milestone: &obs.ActionMilestoneEvent{Name: "stray"}})
+	emit(obs.Event{Time: at(2), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindActionMilestone, Detail: &obs.DetailEvent{Text: "stray"}})
 	emit(obs.Event{Time: at(3), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindStepLeft, StepInfo: &obs.StepEvent{Outcome: obs.OutcomeOK}})
 	emit(obs.Event{Time: at(4), Cycle: testCycle, Kind: obs.KindCycleFinished, Finish: &obs.FinishEvent{Result: "success"}})
 

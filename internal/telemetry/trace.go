@@ -377,14 +377,14 @@ func (a *traceAssembler) detail(e obs.Event) {
 // has nothing to attach to and is silently dropped, the same degrade-to-
 // no-op the rest of this package uses for a stray or scope-less event.
 func (a *traceAssembler) actionMilestone(e obs.Event) {
-	if e.Milestone == nil {
+	if e.Detail == nil {
 		return
 	}
 	a.withStep(e, func(cs *cycleSpans, ss *stepSpans) {
 		if ss.current == nil {
 			return
 		}
-		ss.current.span.AddEvent(e.Milestone.Name, trace.WithTimestamp(e.Time))
+		ss.current.span.AddEvent(e.Detail.Text, trace.WithTimestamp(e.Time))
 	})
 }
 

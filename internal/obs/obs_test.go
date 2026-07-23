@@ -123,8 +123,8 @@ func TestMilestoneCarriesNameAndScope(t *testing.T) {
 	if e.Kind != KindActionMilestone {
 		t.Errorf("Kind = %q, want %q", e.Kind, KindActionMilestone)
 	}
-	if e.Milestone == nil || e.Milestone.Name != "netplan-verified" {
-		t.Errorf("Milestone = %+v, want Name=netplan-verified", e.Milestone)
+	if e.Detail == nil || e.Detail.Text != "netplan-verified" {
+		t.Errorf("Detail = %+v, want Text=netplan-verified", e.Detail)
 	}
 	if e.Step != "AWAIT_IP" {
 		t.Errorf("Step = %q, want AWAIT_IP", e.Step)

@@ -169,7 +169,17 @@ func run(parent context.Context) error {
 	// which is read-only and runs alongside a live daemon whose clones must
 	// not be deleted.
 	if !*checkOnly {
-		if err := os.RemoveAll(dir.VMsDir()); err != nil {
+		// ReapOrphans runs BEFORE the sweep, not after: on a backend with an
+		// orphan class (windows' bare HCS compute systems — see
+		// vm.Manager.ReapOrphans' doc comment), an unclean prior shutdown can
+		// leave a slot's clone file still held open, and RemoveAll fails
+		// outright the moment it hits one — not skip-and-continue — which
+		// used to crash-loop the daemon forever with nothing in between ever
+		// reaping the orphan. A no-op on backends with no such class (darwin).
+		if err := vmManager().ReapOrphans(dir.VMsDir()); err != nil {
+			return fmt.Errorf("reaping orphaned VMs: %w", err)
+		}
+		if err := sweepVMsDir(dir.VMsDir(), logger); err != nil {
 			return fmt.Errorf("sweeping vms dir: %w", err)
 		}
 		if err := dir.Ensure(); err != nil {
@@ -232,7 +242,7 @@ func run(parent context.Context) error {
 	// Off by default: cfg.Observability.OTLP.Endpoint == "" installs nothing
 	// and otlpShutdown is a no-op, so an unconfigured daemon runs identically
 	// to one built without this package.
-	otlpShutdown, err := telemetry.Setup(ctx, cfg.Observability.OTLP, version, prefix, logger)
+	otlpShutdown, err := telemetry.Setup(ctx, cfg.Observability.OTLP, version, prefix, vmBackendName(), logger)
 	if err != nil {
 		return fmt.Errorf("telemetry: %w", err)
 	}
@@ -495,6 +505,37 @@ func run(parent context.Context) error {
 	}
 	return err
 }
+
+// sweepVMsDir removes vmsDir's own entries one at a time instead of the
+// whole tree in a single os.RemoveAll: ReapOrphans' own best-effort reap can
+// still leave one genuinely wedged slot's backend state holding its clone
+// file open, and that one holdout must not abort the sweep for every other
+// slot -- reproducing the exact crash-loop ReapOrphans exists to end, just
+// narrowed to whichever slot didn't reap. A missing vmsDir is not an error;
+// there is nothing to sweep on a first cold start.
+func sweepVMsDir(vmsDir string, logger *slog.Logger) error {
+	entries, err := os.ReadDir(vmsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range entries {
+		p := filepath.Join(vmsDir, e.Name())
+		if err := removeAll(p); err != nil {
+			logger.Warn("sweeping vms dir: one slot could not be fully removed; it may still be held open by an unreaped orphan", "path", p, "err", err)
+		}
+	}
+	return nil
+}
+
+// removeAll is os.RemoveAll, indirected so tests can inject a failure for
+// one specific path without depending on OS-specific permission semantics
+// (chmod-based removal restrictions don't behave the same on Windows as on
+// POSIX -- a still-open file handle, the real backend's failure mode, isn't
+// portably reproducible in a unit test either).
+var removeAll = os.RemoveAll
 
 // runReload is the shared reload entry point for the Reload RPC, UpgradeReload
 // RPC, and SIGHUP — see run()'s three call sites, which all serialize through

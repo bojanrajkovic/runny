@@ -115,6 +115,8 @@ func (f *fakeVM) Boot(ctx bounded.Context, b tart.Bundle, o vm.BootOptions) (vm.
 	return f.machine, nil
 }
 
+func (f *fakeVM) ReapOrphans(string) error { return nil }
+
 func (f *fakeVM) lastRunnerCacheDir() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()

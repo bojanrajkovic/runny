@@ -13,6 +13,7 @@ import (
 	"github.com/Microsoft/go-winio"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
+	"github.com/bojanrajkovic/runny/internal/obs"
 )
 
 // consoleDialTimeout bounds each individual pipe-dial attempt inside
@@ -68,11 +69,19 @@ func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) er
 	if err != nil {
 		return fmt.Errorf("dialing console: %w", err)
 	}
+	// Milestones from here on: named, distinctly-timestamped span events on
+	// the caller's network-fixup action, so a trace shows which stage a run
+	// reached and when -- not just its final duration and outcome. Each one
+	// only fires once its stage has actually completed; the LAST milestone
+	// present when a failed action's span ends is exactly the stage that was
+	// in progress when the error surfaced.
+	obs.Milestone(ctx, "console-dialed")
 
 	if err := consoleLogin(ctx, conn, sshUser, sshPassword); err != nil {
 		conn.Close()
 		return fmt.Errorf("console login: %w", err)
 	}
+	obs.Milestone(ctx, "login-succeeded")
 
 	// One combined, single-line command: a heredoc doesn't survive the
 	// console's line-ending handling reliably (confirmed the hard way), so
@@ -89,6 +98,7 @@ func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) er
 		conn.Close()
 		return fmt.Errorf("network fixup did not bring up eth0 with an address; console output: %q", out)
 	}
+	obs.Milestone(ctx, "netplan-verified")
 
 	// Best-effort: log the console session out so the authenticated shell
 	// doesn't linger for the guest's whole active lifetime, off this

@@ -274,6 +274,62 @@ func TestTraceConsumerConcurrentDetail(t *testing.T) {
 	})
 }
 
+// TestTraceConsumerActionMilestoneRendersOnOpenAction: milestones fired
+// while an action is open must land as distinctly-named, distinctly-
+// timestamped span events on THAT action's span — not folded into a single
+// last-value-wins attribute the way KindDetail is — so a trace shows which
+// stages a multi-stage action actually reached.
+func TestTraceConsumerActionMilestoneRendersOnOpenAction(t *testing.T) {
+	emit, exp := newTestAssembler(t)
+
+	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
+	emit(obs.Event{Time: at(1), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindStepEntered, StepInfo: &obs.StepEvent{}})
+	emit(obs.Event{Time: at(2), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindActionStarted, Action: &obs.ActionEvent{Name: "network-fixup"}})
+	emit(obs.Event{Time: at(3), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindActionMilestone, Detail: &obs.DetailEvent{Text: "console-dialed"}})
+	emit(obs.Event{Time: at(4), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindActionMilestone, Detail: &obs.DetailEvent{Text: "login-succeeded"}})
+	emit(obs.Event{Time: at(5), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindActionEnded, Action: &obs.ActionEvent{Name: "network-fixup", Outcome: obs.OutcomeOK, Duration: 3 * time.Second}})
+	emit(obs.Event{Time: at(6), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindStepLeft, StepInfo: &obs.StepEvent{Outcome: obs.OutcomeOK}})
+	emit(obs.Event{Time: at(7), Cycle: testCycle, Kind: obs.KindCycleFinished, Finish: &obs.FinishEvent{Result: "success"}})
+
+	var action *tracetest.SpanStub
+	for i, s := range exp.GetSpans() {
+		if s.Name == "cycle.step.action network-fixup" {
+			action = &exp.GetSpans()[i]
+		}
+	}
+	if action == nil {
+		t.Fatal("network-fixup action span not found")
+	}
+	if len(action.Events) != 2 {
+		t.Fatalf("got %d span events, want 2 (console-dialed, login-succeeded): %+v", len(action.Events), action.Events)
+	}
+	if action.Events[0].Name != "console-dialed" || action.Events[1].Name != "login-succeeded" {
+		t.Errorf("event names = %q, %q, want console-dialed, login-succeeded", action.Events[0].Name, action.Events[1].Name)
+	}
+}
+
+// TestTraceConsumerActionMilestoneWithNoOpenActionIsDropped: a milestone
+// fired with no action currently open (misuse — Milestone is meant to be
+// called only from within an Action's fn) has nothing to attach to and must
+// be silently dropped, never misattributed to the step or root span.
+func TestTraceConsumerActionMilestoneWithNoOpenActionIsDropped(t *testing.T) {
+	emit, exp := newTestAssembler(t)
+
+	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
+	emit(obs.Event{Time: at(1), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindStepEntered, StepInfo: &obs.StepEvent{}})
+	emit(obs.Event{Time: at(2), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindActionMilestone, Detail: &obs.DetailEvent{Text: "stray"}})
+	emit(obs.Event{Time: at(3), Cycle: testCycle, Step: "AWAIT_IP", Kind: obs.KindStepLeft, StepInfo: &obs.StepEvent{Outcome: obs.OutcomeOK}})
+	emit(obs.Event{Time: at(4), Cycle: testCycle, Kind: obs.KindCycleFinished, Finish: &obs.FinishEvent{Result: "success"}})
+
+	for _, s := range exp.GetSpans() {
+		for _, ev := range s.Events {
+			if ev.Name == "stray" {
+				t.Fatalf("milestone with no open action leaked onto span %q", s.Name)
+			}
+		}
+	}
+}
+
 // TestTraceConsumerDeadlineIsFailure regression-tests a bug caught in review:
 // stepLeft/actionEnded only checked obs.OutcomeError, so a state that missed
 // its bounded.Context deadline (cycle.OutcomeDeadline, wire value

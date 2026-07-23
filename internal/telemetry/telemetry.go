@@ -17,6 +17,7 @@ import (
 	"os"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/sdk/metric"
@@ -41,7 +42,15 @@ func noop(context.Context) error { return nil }
 // route to log through otel.SetErrorHandler. Setup installs process-global
 // OTEL providers, so call it at most once per process — cmd/runnyd does, at
 // startup, before any goroutine could observe the providers mid-swap.
-func Setup(ctx context.Context, cfg home.OTLPConfig, version, instanceID string, log *slog.Logger) (Shutdown, error) {
+//
+// backend (cmd/runnyd's own vmBackendName(): "vz", "hcs", or "unsupported")
+// rides the resource the same way host.name/service.instance.id do — it's a
+// process-level constant (a running daemon only ever uses the one backend
+// it was built for), never a per-cycle fact, so every span and metric this
+// process ever emits carries it for free, with no per-event plumbing and no
+// cycle.json/proto schema change needed to answer "which backend did this
+// trace come from."
+func Setup(ctx context.Context, cfg home.OTLPConfig, version, instanceID, backend string, log *slog.Logger) (Shutdown, error) {
 	if !cfg.Enabled() {
 		return noop, nil
 	}
@@ -65,6 +74,7 @@ func Setup(ctx context.Context, cfg home.OTLPConfig, version, instanceID string,
 		semconv.ServiceVersion(version),
 		semconv.ServiceInstanceID(instanceID),
 		semconv.HostName(hostname),
+		attribute.String("runny.backend", backend),
 	))
 	if err != nil {
 		return noop, fmt.Errorf("telemetry: building resource: %w", err)

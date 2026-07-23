@@ -10,7 +10,7 @@ import (
 )
 
 func TestSetupOffByDefault(t *testing.T) {
-	shutdown, err := Setup(context.Background(), home.OTLPConfig{}, "dev", "instance", slog.Default())
+	shutdown, err := Setup(context.Background(), home.OTLPConfig{}, "dev", "instance", "test-backend", slog.Default())
 	if err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -24,7 +24,7 @@ func TestSetupOffByDefault(t *testing.T) {
 // caller's deadline fires, not once the collector answers.
 func TestShutdownBoundedOnUnreachableEndpoint(t *testing.T) {
 	cfg := home.OTLPConfig{Endpoint: "http://127.0.0.1:1", MetricsInterval: home.Duration(time.Second)}
-	shutdown, err := Setup(context.Background(), cfg, "dev", "instance", slog.Default())
+	shutdown, err := Setup(context.Background(), cfg, "dev", "instance", "test-backend", slog.Default())
 	if err != nil {
 		t.Fatalf("Setup: %v", err)
 	}

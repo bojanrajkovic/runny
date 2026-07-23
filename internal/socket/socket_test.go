@@ -193,6 +193,23 @@ func TestLookupUsernameResolvesQuickly(t *testing.T) {
 	}
 }
 
+// TestNewOperatorGateRequiresPeerCredSupport pins that an armed request only
+// actually arms the gate on a platform with a real peer-identity read
+// (peerCredSupported) -- arming it anywhere else would deny every RPC
+// outright (peerUID never resolves, and the gate fails closed on an
+// unreadable uid by design), so newOperatorGate degrades to nil
+// (pass-through, the socket-is-the-sole-gate baseline) instead.
+func TestNewOperatorGateRequiresPeerCredSupport(t *testing.T) {
+	g := newOperatorGate(true, t.TempDir())
+	if peerCredSupported {
+		if g == nil {
+			t.Fatal("newOperatorGate(true, ...) = nil on a peerCredSupported platform, want an armed gate")
+		}
+	} else if g != nil {
+		t.Fatalf("newOperatorGate(true, ...) = %v on a platform with no peer-cred support, want nil", g)
+	}
+}
+
 // TestLookupUsernameUnknownUIDIsEmpty pins the existing best-effort fallback:
 // a uid with no matching account resolves to "", not an error or a hang.
 func TestLookupUsernameUnknownUIDIsEmpty(t *testing.T) {

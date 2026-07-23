@@ -39,6 +39,13 @@ const (
 	// whichever cycle triggered it, unlike a shared image pull (see pull.go
 	// for the pull-scoped kinds).
 	KindTarballDone Kind = "tarball_done"
+	// KindActionMilestone marks a discrete, named point in time within the
+	// currently open action — unlike KindDetail (a last-value-wins
+	// progress annotation collapsed onto whichever span closes next),
+	// every milestone renders as its own timestamped span event, so a
+	// multi-stage action (see Milestone) can show which stage was reached
+	// and when, not just its final outcome.
+	KindActionMilestone Kind = "action_milestone"
 )
 
 // Action names are a closed set: each becomes a span name on the trace side
@@ -60,6 +67,8 @@ const (
 	ActionResolve       = "resolve"        // registry manifest round-trip → digest
 	ActionTarballEnsure = "tarball-ensure" // runner-tarball resolve + download (or cache hit)
 	ActionWaitForPull   = "wait-for-pull"  // time subscribed to the shared pull actor
+	// AWAIT_IP (windows only).
+	ActionNetworkFixup = "network-fixup" // console-driven netplan fixup fallback
 )
 
 // Attr keys are closed-set for the same reason action names are: a typo'd
@@ -156,7 +165,9 @@ type ActionEvent struct {
 	Duration time.Duration
 }
 
-// DetailEvent carries a live annotation ("2.1 GiB at 41 MiB/s").
+// DetailEvent carries a live annotation ("2.1 GiB at 41 MiB/s") or, under
+// KindActionMilestone, a milestone name (see Milestone) — the shape is the
+// same single string either way; Kind decides how a consumer renders it.
 type DetailEvent struct {
 	Text string
 }
@@ -395,4 +406,15 @@ func Action(ctx context.Context, name string, fn func(context.Context) error, at
 	}})
 
 	return err
+}
+
+// Milestone marks a discrete, named point in time within the currently open
+// action — sugar over Emit(KindActionMilestone), the same way Action is
+// sugar over Emit(KindAction{Started,Ended}). Call it only from within (or
+// downstream of) an Action's fn: a milestone fired with no action currently
+// open on ctx's step has nothing to attach to and is dropped by the trace
+// consumer. On a context with no scope (or a nil emitter), a safe no-op —
+// domain packages call it without knowing or caring which case applies.
+func Milestone(ctx context.Context, name string) {
+	Emit(ctx, Event{Kind: KindActionMilestone, Detail: &DetailEvent{Text: name}})
 }

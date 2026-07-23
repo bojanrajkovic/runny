@@ -7,6 +7,7 @@ go_library(
         "leases.go",
         "neighbortable_windows.go",
         "netfixup_windows.go",
+        "reap_windows.go",
         "sizing.go",
         "stop.go",
         "vm.go",
@@ -25,6 +26,7 @@ go_library(
             "@com_github_code_hex_vz_v3//:vz",
         ],
         "@rules_go//go/platform:windows": [
+            "//internal/obs",
             "//internal/winhcs/hcn",
             "//internal/winhcs/hcs",
             "//internal/winhcs/hcs/schema2",
@@ -42,6 +44,7 @@ go_test(
         "leases_test.go",
         "neighbortable_windows_test.go",
         "netfixup_windows_test.go",
+        "reap_windows_test.go",
         "sizing_test.go",
         "stop_test.go",
     ],

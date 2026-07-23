@@ -36,9 +36,13 @@ var errRevoked = errors.New("operator revoked")
 
 // newOperatorGate returns an armed gate reading homeDir's ACL, or nil when
 // armed is false (a per-user daemon has no ACL-managed operator set to
-// enforce against). A nil *operatorGate is pass-through everywhere below.
+// enforce against) or when peerCredSupported is false (this platform has no
+// real peer-identity read to enforce against -- arming anyway would deny
+// every RPC, since check/stream fail closed on an unreadable uid; see
+// peerCredSupported's own doc comment). A nil *operatorGate is pass-through
+// everywhere below, falling back to the socket-is-the-sole-gate baseline.
 func newOperatorGate(armed bool, homeDir string) *operatorGate {
-	if !armed {
+	if !armed || !peerCredSupported {
 		return nil
 	}
 	return &operatorGate{homeDir: homeDir, streams: newFanoutRegistry[gateStream]()}

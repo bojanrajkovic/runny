@@ -4,6 +4,12 @@ package socket
 
 import "golang.org/x/sys/unix"
 
+// peerCredSupported gates newOperatorGate: only a platform with a real
+// kernel-authenticated peer-identity read can enforce the operator-
+// revocation gate's fail-closed contract without locking every RPC out
+// permanently. See peercred_other.go for the non-darwin story.
+const peerCredSupported = true
+
 // readPeerUID reads the connecting peer's kernel-authenticated uid via
 // SO_PEERCRED (LOCAL_PEERCRED on darwin). Validated against a real unix
 // socket by the multi-operator design spike (aclprobe): a fresh 0600 socket's

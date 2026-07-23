@@ -166,6 +166,7 @@ go_test(
         "reload_test.go",
         "rotate_test.go",
         "svc_windows_test.go",
+        "sweepvmsdir_test.go",
         "testconfig_test.go",
         "upgrade_test.go",
     ],

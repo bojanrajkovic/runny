@@ -12,7 +12,6 @@ import (
 	"os/user"
 	"regexp"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -541,8 +540,12 @@ func logOperatorCommand(ctx context.Context, verb, slot string, attrs ...any) {
 	if slot != "" {
 		args = append(args, "slot", slot)
 	}
-	if uid, u := operatorIdentity(ctx); uid != nil {
-		args = append(args, "operator_uid", *uid)
+	if id, u := operatorIdentity(ctx); id != "" {
+		if uid, sid := splitIdentity(id); uid != nil {
+			args = append(args, "operator_uid", *uid)
+		} else {
+			args = append(args, "operator_sid", sid)
+		}
 		if u != "" {
 			args = append(args, "operator_user", u)
 		}
@@ -724,10 +727,11 @@ var lookupID = user.LookupId
 // resolution entirely rather than piling on.
 var lookupInFlight = make(chan struct{}, 1)
 
-// lookupUsername resolves uid to a username, best-effort: "" on any
-// resolution failure, on a usernameLookupBound timeout, or when a previous
-// lookup is still stuck (see lookupInFlight).
-func lookupUsername(uid uint32) string {
+// lookupUsername resolves a platform-native identity string (decimal uid or
+// SID — user.LookupId accepts whichever its platform mints) to a username,
+// best-effort: "" on any resolution failure, on a usernameLookupBound
+// timeout, or when a previous lookup is still stuck (see lookupInFlight).
+func lookupUsername(id string) string {
 	select {
 	case lookupInFlight <- struct{}{}:
 	default:
@@ -737,7 +741,7 @@ func lookupUsername(uid uint32) string {
 	go func() {
 		defer func() { <-lookupInFlight }()
 		name := ""
-		if u, err := lookupID(strconv.FormatUint(uint64(uid), 10)); err == nil {
+		if u, err := lookupID(id); err == nil {
 			name = u.Username
 		}
 		ch <- name
@@ -789,9 +793,12 @@ func (s *Server) InjectDebugKey(ctx context.Context, req *runnyv1.InjectDebugKey
 	queueBound, handlerWait := s.injectBounds()
 
 	// The operator identity for the audit trail: the kernel-authenticated
-	// peer uid (never client-supplied), and its username resolved
-	// best-effort here so the FSM stays free of os/user.
-	operatorUID, operatorUser := operatorIdentity(ctx)
+	// peer identity (never client-supplied), and its username resolved
+	// best-effort here so the FSM stays free of os/user. splitIdentity fans
+	// it into the record's (uid, sid) field pair here so the FSM stays free
+	// of identity-shape knowledge too.
+	operatorID, operatorUser := operatorIdentity(ctx)
+	operatorUID, operatorSID := splitIdentity(operatorID)
 
 	// The lookup above can take up to usernameLookupBound; a client that
 	// canceled or hit its own deadline during that stall must not have a key
@@ -808,7 +815,7 @@ func (s *Server) InjectDebugKey(ctx context.Context, req *runnyv1.InjectDebugKey
 		PubKey: line, Fingerprint: fp, Comment: comment, Hold: hold,
 		CycleID: st.CycleID, SeenState: st.State, // both pins from the same read
 		Expires: time.Now().Add(queueBound), Reply: reply,
-		OperatorUID: operatorUID, OperatorUser: operatorUser,
+		OperatorUID: operatorUID, OperatorSID: operatorSID, OperatorUser: operatorUser,
 	}) {
 		return nil, status.Errorf(codes.Unavailable, "slot %s is not accepting commands", slot.Name())
 	}
@@ -972,6 +979,7 @@ func recordToProto(r *cycle.Record) *runnyv1.CycleRecord {
 			State:        k.State,
 			OperatorUid:  k.OperatorUID,
 			OperatorUser: k.OperatorUser,
+			OperatorSid:  k.OperatorSID,
 		})
 	}
 	if r.Failure != nil {

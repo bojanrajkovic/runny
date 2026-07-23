@@ -427,13 +427,18 @@ message InjectedKey {
   string state = 7;
   // The kernel-authenticated uid of the peer that ran `runnyctl debug`, read
   // server-side via SO_PEERCRED — never client-supplied. Unset (no has-bit)
-  // when the daemon could not read it (non-darwin, or a cred-read failure);
-  // distinct from uid 0, which is a real possible peer (root bypasses the
-  // socket's 0600 mode).
+  // when the daemon could not read it, or when the identity is non-numeric
+  // and carried in operator_sid instead; distinct from uid 0, which is a
+  // real possible peer (root bypasses the socket's 0600 mode).
   optional uint32 operator_uid = 8;
-  // The operator_uid's username, resolved best-effort at request time; empty
-  // if the uid could not be resolved to an account.
+  // The peer identity's username, resolved best-effort at request time;
+  // empty if the identity could not be resolved to an account.
   string operator_user = 9;
+  // The peer identity when it is not a numeric uid: a Windows SID string,
+  // following os/user's platform-native identity convention. At most one of
+  // operator_uid/operator_sid is set; both absent means the identity could
+  // not be read.
+  string operator_sid = 10;
 }
 
 message StateRecord {
@@ -575,16 +580,21 @@ message InjectDebugKeyResponse {
 }
 
 message GrantOperatorRequest {
-  string user = 1;  // account name or uid
+  string user = 1;  // account name, numeric uid, or Windows SID
 }
 
 message RevokeOperatorRequest {
-  string user = 1;  // account name or uid
+  string user = 1;  // account name, numeric uid, or Windows SID
 }
 
 message OperatorMutation {
+  // Numeric identity (a darwin uid); a meaningless 0 when the mutated
+  // account's identity is non-numeric and carried in sid instead.
   uint32 uid = 1;
   string user = 2;
+  // Non-numeric platform-native identity (a Windows SID); empty when the
+  // identity is numeric and carried in uid.
+  string sid = 3;
 }
 
 message ListOperatorsRequest {}
@@ -594,6 +604,8 @@ message ListOperatorsResponse {
 }
 
 message Operator {
+  // Numeric identity (a darwin uid); a meaningless 0 when this operator's
+  // identity is non-numeric and carried in sid instead.
   uint32 uid = 1;
   string user = 2;
   // Empty when this account is the install-time bootstrap operator, not an
@@ -601,4 +613,7 @@ message Operator {
   string granted_by = 3;
   // Unset for the same reason granted_by is empty.
   google.protobuf.Timestamp granted_at = 4;
+  // Non-numeric platform-native identity (a Windows SID); empty when the
+  // identity is numeric and carried in uid.
+  string sid = 5;
 }

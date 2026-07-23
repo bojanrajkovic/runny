@@ -7,6 +7,7 @@ import (
 	"os/user"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -36,19 +37,20 @@ func (s *Server) requireSystemDaemon() error {
 }
 
 // resolveOperatorAccount looks up user by name first, then (if it parses as
-// a uint32) by uid — the "name or uid" contract GrantOperator/
-// RevokeOperator's user field promises. os/user has no context-aware
-// variant, but this is a local, human-initiated admin lookup against local
-// accounts; a stall would need a domain-joined Mac with a wedged directory
-// service, which is a bug report, not the unbounded-guest failure mode the
-// project's bounded-context invariant exists to kill.
+// a uint32, or is SID-shaped) by id — the "name, uid, or SID" contract
+// GrantOperator/RevokeOperator's user field promises. os/user has no
+// context-aware variant, but this is a local, human-initiated admin lookup
+// against local accounts; a stall would need a domain-joined host with a
+// wedged directory service, which is a bug report, not the unbounded-guest
+// failure mode the project's bounded-context invariant exists to kill.
 func resolveOperatorAccount(input string) (*user.User, error) {
 	u, err := user.Lookup(input)
 	if err == nil {
 		return u, nil
 	}
 	lookupErr := err
-	if _, perr := strconv.ParseUint(input, 10, 32); perr == nil {
+	_, perr := strconv.ParseUint(input, 10, 32)
+	if perr == nil || strings.HasPrefix(input, "S-1-") {
 		if u, err := user.LookupId(input); err == nil {
 			return u, nil
 		} else {
@@ -58,16 +60,38 @@ func resolveOperatorAccount(input string) (*user.User, error) {
 	return nil, fmt.Errorf("no such user %q: %w", input, lookupErr)
 }
 
-// operatorIdentity resolves the calling peer's kernel-authenticated uid and
-// best-effort username — the one resolver behind grant attribution,
-// injected-key audit rows, and lifecycle-command log lines. A nil uid means
-// the peer cred could not be read, never conflated with root's real uid 0.
-func operatorIdentity(ctx context.Context) (uid *uint32, username string) {
-	u, ok := peerUID(ctx)
-	if !ok {
+// splitIdentity fans one platform-native identity string (os/user.User.Uid's
+// convention: decimal uid on darwin, SID on Windows) out to the (uid, sid)
+// field pair every operator-facing record and message carries: a numeric
+// identity lands in the legacy uint32 uid field — darwin records stay
+// byte-for-byte what they were before the sid fields existed — and anything
+// else (including a numeric string too large for uint32, which no darwin
+// uid is) lands in the sid field, lossless. "" (unknown identity) yields
+// (nil, ""). No stamp site switches on the platform; the shape of the
+// identity itself decides.
+func splitIdentity(id string) (uid *uint32, sid string) {
+	if id == "" {
 		return nil, ""
 	}
-	return &u, lookupUsername(u)
+	if n, err := strconv.ParseUint(id, 10, 32); err == nil {
+		u := uint32(n)
+		return &u, ""
+	}
+	return nil, id
+}
+
+// operatorIdentity resolves the calling peer's kernel-authenticated
+// platform-native identity and best-effort username — the one resolver
+// behind grant attribution, injected-key audit rows, and lifecycle-command
+// log lines. An empty id means the peer cred could not be read, never
+// conflated with a real privileged peer ("0" on darwin is root, a real
+// possible identity).
+func operatorIdentity(ctx context.Context) (id, username string) {
+	pid, ok := peerID(ctx)
+	if !ok {
+		return "", ""
+	}
+	return pid, lookupUsername(pid)
 }
 
 func (s *Server) GrantOperator(ctx context.Context, req *runnyv1.GrantOperatorRequest) (*runnyv1.OperatorMutation, error) {
@@ -76,11 +100,11 @@ func (s *Server) GrantOperator(ctx context.Context, req *runnyv1.GrantOperatorRe
 	}
 	return s.mutateOperator(
 		ctx, req.GetUser(), "grant",
-		func(ops []opacl.Operator, uid uint32, u *user.User) error {
-			if u.Username == "root" || u.Uid == "0" {
-				return status.Error(codes.InvalidArgument, "refusing to grant root")
+		func(ops []opacl.Operator, u *user.User) error {
+			if err := refuseGrantTarget(u); err != nil {
+				return err
 			}
-			if hasUID(ops, uid) {
+			if hasID(ops, u.Uid) {
 				return status.Errorf(codes.FailedPrecondition, "%s is already an operator", u.Username)
 			}
 			return nil
@@ -95,8 +119,8 @@ func (s *Server) RevokeOperator(ctx context.Context, req *runnyv1.RevokeOperator
 	}
 	return s.mutateOperator(
 		ctx, req.GetUser(), "revoke",
-		func(ops []opacl.Operator, uid uint32, u *user.User) error {
-			if !hasUID(ops, uid) {
+		func(ops []opacl.Operator, u *user.User) error {
+			if !hasID(ops, u.Uid) {
 				return status.Errorf(codes.FailedPrecondition, "%s is not an operator", u.Username)
 			}
 			if len(ops) <= 1 {
@@ -111,13 +135,16 @@ func (s *Server) RevokeOperator(ctx context.Context, req *runnyv1.RevokeOperator
 
 // mutateOperator is the shared grant/revoke skeleton: resolve the account,
 // list the current operator set, run precheck (which returns the
-// grant-only "already an operator"/refuse-root or revoke-only "not an
+// grant-only "already an operator"/refused-target or revoke-only "not an
 // operator"/last-operator errors), apply the opacl mutation under a bound,
-// and append an attribution record. recordAction ("grant"/"revoke") is both
-// the operator-grants.jsonl verb and the apply-failure error message's verb.
+// and append an attribution record. The account's identity is u.Uid
+// verbatim — the platform-native string (decimal uid on darwin, SID on
+// Windows) every ACL read and record comparison uses. recordAction
+// ("grant"/"revoke") is both the operator-grants.jsonl verb and the
+// apply-failure error message's verb.
 func (s *Server) mutateOperator(
 	ctx context.Context, userArg, recordAction string,
-	precheck func(ops []opacl.Operator, uid uint32, u *user.User) error,
+	precheck func(ops []opacl.Operator, u *user.User) error,
 	apply func(actx bounded.Context, homeDir, sock, username string) error,
 ) (*runnyv1.OperatorMutation, error) {
 	u, err := resolveOperatorAccount(userArg)
@@ -126,11 +153,6 @@ func (s *Server) mutateOperator(
 		// caller's transient fault.
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
-	uid64, err := strconv.ParseUint(u.Uid, 10, 32)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "account %s has a non-numeric uid %q: %v", u.Username, u.Uid, err)
-	}
-	uid := uint32(uid64)
 
 	// The List-then-mutate sequence below must run as one unit: without this
 	// lock, two concurrent grant/revoke RPCs (gRPC dispatches unary calls on
@@ -144,7 +166,7 @@ func (s *Server) mutateOperator(
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "reading the operator set: %v", err)
 	}
-	if err := precheck(ops, uid, u); err != nil {
+	if err := precheck(ops, u); err != nil {
 		return nil, err
 	}
 
@@ -156,29 +178,39 @@ func (s *Server) mutateOperator(
 	defer cancel()
 	applyErr := apply(actx, s.HomeDir.String(), s.socketPath, u.Username)
 	if recordAction == "revoke" {
-		// Ground truth, not applyErr: chmodBoth's two chmod calls (home dir,
-		// then the live socket) aren't atomic, so a failure on the second can
-		// still leave the first — the ACL checkUID actually reads — already
+		// Ground truth, not applyErr: the two-target ACL mutation (home dir,
+		// then the live socket) isn't atomic, so a failure on the second can
+		// still leave the first — the ACL checkID actually reads — already
 		// mutated. Re-reading here means that partial failure still kills the
 		// operator's live streams, instead of their next RPC being silently
 		// denied while an already-open WatchStatus/StreamLogs lingers.
-		if uids, err := opacl.ListUIDs(s.HomeDir.String()); err == nil && !slices.Contains(uids, uid) {
-			s.gate.killStreams(uid)
+		if ids, err := opacl.ListIDs(s.HomeDir.String()); err == nil && !slices.Contains(ids, u.Uid) {
+			s.gate.killStreams(u.Uid)
 		}
 	}
 	if applyErr != nil {
 		return nil, status.Errorf(codes.Internal, "%s failed for %s: %v", recordAction, u.Username, applyErr)
 	}
 
-	byUID, byUser := operatorIdentity(ctx)
+	byID, byUser := operatorIdentity(ctx)
 	rec := home.OperatorGrant{
-		Action: recordAction, ByUID: byUID, ByUser: byUser,
-		TargetUID: uid, TargetUser: u.Username, At: time.Now(),
+		Action: recordAction, ByUser: byUser,
+		TargetUser: u.Username, At: time.Now(),
 	}
+	rec.ByUID, rec.BySID = splitIdentity(byID)
+	targetUID, targetSID := splitIdentity(u.Uid)
+	if targetUID != nil {
+		rec.TargetUID = *targetUID
+	}
+	rec.TargetSID = targetSID
 	if err := s.HomeDir.AppendOperatorGrant(rec); err != nil {
 		slog.Error("operator "+recordAction+": attribution record not written", "target", u.Username, "err", err)
 	}
-	return &runnyv1.OperatorMutation{Uid: uid, User: u.Username}, nil
+	mut := &runnyv1.OperatorMutation{User: u.Username, Sid: targetSID}
+	if targetUID != nil {
+		mut.Uid = *targetUID
+	}
+	return mut, nil
 }
 
 func (s *Server) ListOperators(_ context.Context, _ *runnyv1.ListOperatorsRequest) (*runnyv1.ListOperatorsResponse, error) {
@@ -192,8 +224,13 @@ func (s *Server) ListOperators(_ context.Context, _ *runnyv1.ListOperatorsReques
 	}
 	resp := &runnyv1.ListOperatorsResponse{}
 	for _, op := range ops {
-		e := &runnyv1.Operator{Uid: op.UID, User: op.User}
-		if g := latestGrant(grants, op.UID); g != nil {
+		e := &runnyv1.Operator{User: op.User}
+		uid, sid := splitIdentity(op.ID)
+		if uid != nil {
+			e.Uid = *uid
+		}
+		e.Sid = sid
+		if g := latestGrant(grants, op.ID); g != nil {
 			e.GrantedBy = g.ByUser
 			e.GrantedAt = timestamppb.New(g.At)
 		}
@@ -202,13 +239,25 @@ func (s *Server) ListOperators(_ context.Context, _ *runnyv1.ListOperatorsReques
 	return resp, nil
 }
 
-// latestGrant returns the most recent "grant" record for uid, or nil if
-// none exists (the install-time bootstrap operator, shown as "(install)").
-func latestGrant(grants []home.OperatorGrant, uid uint32) *home.OperatorGrant {
+// grantTargetID reads a record's target identity in platform-native form,
+// whichever field the record carries: target_sid when present, else the
+// legacy target_uid rendered back to its decimal string. Old darwin records
+// (written before target_sid existed) and new ones compare identically.
+func grantTargetID(g *home.OperatorGrant) string {
+	if g.TargetSID != "" {
+		return g.TargetSID
+	}
+	return strconv.FormatUint(uint64(g.TargetUID), 10)
+}
+
+// latestGrant returns the most recent "grant" record for the identity id,
+// or nil if none exists (the install-time bootstrap operator, shown as
+// "(install)").
+func latestGrant(grants []home.OperatorGrant, id string) *home.OperatorGrant {
 	var latest *home.OperatorGrant
 	for i := range grants {
 		g := &grants[i]
-		if g.TargetUID != uid || g.Action != "grant" {
+		if grantTargetID(g) != id || g.Action != "grant" {
 			continue
 		}
 		if latest == nil || g.At.After(latest.At) {
@@ -218,9 +267,9 @@ func latestGrant(grants []home.OperatorGrant, uid uint32) *home.OperatorGrant {
 	return latest
 }
 
-// hasUID is the one membership predicate Grant and Revoke share: the two
+// hasID is the one membership predicate Grant and Revoke share: the two
 // prechecks must agree on "is this account an operator" or an entry can
 // become un-grantable and un-revocable at once.
-func hasUID(ops []opacl.Operator, uid uint32) bool {
-	return slices.ContainsFunc(ops, func(o opacl.Operator) bool { return o.UID == uid })
+func hasID(ops []opacl.Operator, id string) bool {
+	return slices.ContainsFunc(ops, func(o opacl.Operator) bool { return o.ID == id })
 }

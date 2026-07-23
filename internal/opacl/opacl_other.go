@@ -12,9 +12,7 @@ import (
 // the ACL mechanism (and the system daemon it backs) is darwin-only.
 var ErrUnsupported = errors.New("opacl: operator ACL management requires darwin")
 
-func ListUIDs(homeDir string) ([]uint32, error) { return nil, ErrUnsupported }
-
-func List(homeDir string) ([]Operator, error) { return nil, ErrUnsupported }
+func ListIDs(homeDir string) ([]string, error) { return nil, ErrUnsupported }
 
 func Grant(ctx bounded.Context, homeDir, sock, username string) error { return ErrUnsupported }
 

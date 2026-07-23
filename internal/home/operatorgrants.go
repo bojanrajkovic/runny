@@ -17,16 +17,24 @@ import (
 func (d Dir) OperatorGrantsPath() string { return filepath.Join(string(d), "operator-grants.jsonl") }
 
 // OperatorGrant is one append-only entry: an operator granting or revoking
-// another. ByUID/ByUser identify the authenticated peer that ran the RPC
-// (SO_PEERCRED); TargetUID/TargetUser identify the account granted/revoked.
-// ByUID is nil when the peer cred could not be read — never a fabricated 0,
-// which would attribute the mutation to root (the same has-bit distinction
-// cycle.InjectedKey.OperatorUID draws).
+// another. ByUID/BySID/ByUser identify the authenticated peer that ran the
+// RPC (SO_PEERCRED); TargetUID/TargetSID/TargetUser identify the account
+// granted/revoked. Identities follow os/user.User.Uid's platform-native
+// convention: numeric uids land in the *UID fields, non-numeric identities
+// (Windows SIDs) in the *SID fields — at most one of each pair is set. ByUID
+// nil with BySID empty means the peer cred could not be read — never a
+// fabricated 0, which would attribute the mutation to root (the same
+// has-bit distinction cycle.InjectedKey.OperatorUID draws). A SID-shaped
+// target still writes target_uid (no omitempty, a pre-SID wire shape kept
+// for byte compatibility) as a meaningless 0; readers must prefer
+// target_sid whenever it is non-empty.
 type OperatorGrant struct {
 	Action     string    `json:"action"` // "grant" | "revoke"
 	ByUID      *uint32   `json:"by_uid,omitempty"`
+	BySID      string    `json:"by_sid,omitempty"`
 	ByUser     string    `json:"by_user"`
 	TargetUID  uint32    `json:"target_uid"`
+	TargetSID  string    `json:"target_sid,omitempty"`
 	TargetUser string    `json:"target_user"`
 	At         time.Time `json:"at"`
 }

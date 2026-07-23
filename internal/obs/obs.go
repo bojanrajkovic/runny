@@ -209,8 +209,10 @@ type JobEvent struct {
 
 // AuditEvent mirrors an operator debug-key audit append/update
 // (cycle.InjectedKey) — observational only, obs is not the audit's system
-// of record. OperatorUID is nil when the peer's uid could not be read,
-// distinct from a recorded uid 0 (root is a real possible peer).
+// of record. OperatorUID nil with OperatorSID empty means the peer's
+// identity could not be read, distinct from a recorded uid 0 (root is a
+// real possible peer); a non-numeric identity (a Windows SID) is carried in
+// OperatorSID, mirroring the record's own field pair.
 type AuditEvent struct {
 	Fingerprint  string
 	Comment      string
@@ -219,6 +221,7 @@ type AuditEvent struct {
 	Outcome      string
 	State        string
 	OperatorUID  *uint32
+	OperatorSID  string
 	OperatorUser string
 }
 

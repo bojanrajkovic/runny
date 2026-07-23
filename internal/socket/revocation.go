@@ -25,7 +25,7 @@ type operatorGate struct {
 }
 
 type gateStream struct {
-	uid    uint32
+	id     string
 	cancel context.CancelCauseFunc
 }
 
@@ -38,7 +38,7 @@ var errRevoked = errors.New("operator revoked")
 // armed is false (a per-user daemon has no ACL-managed operator set to
 // enforce against) or when peerCredSupported is false (this platform has no
 // real peer-identity read to enforce against -- arming anyway would deny
-// every RPC, since check/stream fail closed on an unreadable uid; see
+// every RPC, since check/stream fail closed on an unreadable identity; see
 // peerCredSupported's own doc comment). A nil *operatorGate is pass-through
 // everywhere below, falling back to the socket-is-the-sole-gate baseline.
 func newOperatorGate(armed bool, homeDir string) *operatorGate {
@@ -48,30 +48,32 @@ func newOperatorGate(armed bool, homeDir string) *operatorGate {
 	return &operatorGate{homeDir: homeDir, streams: newFanoutRegistry[gateStream]()}
 }
 
-// check is the shared uid → verdict, resolving uid from ctx first: fail
-// closed (PermissionDenied) when the peer uid could not be read, else
-// checkUID's verdict.
+// check is the shared identity → verdict, resolving the identity from ctx
+// first: fail closed (PermissionDenied) when the peer identity could not be
+// read, else checkID's verdict.
 func (g *operatorGate) check(ctx context.Context) error {
-	uid, ok := peerUID(ctx)
+	id, ok := peerID(ctx)
 	if !ok {
-		return status.Error(codes.PermissionDenied, "operator revocation check: peer uid could not be read")
+		return status.Error(codes.PermissionDenied, "operator revocation check: peer identity could not be read")
 	}
-	return g.checkUID(uid)
+	return g.checkID(id)
 }
 
-// checkUID is check without the peer-uid lookup, for callers (stream) that
-// already resolved it: nil for uid 0 (root bypasses the socket's 0600 mode
-// by design and holds no ACE), PermissionDenied for any uid absent from a
-// fresh, uncached ListUIDs read.
-func (g *operatorGate) checkUID(uid uint32) error {
-	if uid == 0 {
+// checkID is check without the peer-identity lookup, for callers (stream)
+// that already resolved it: nil for the platform's privileged principal
+// (darwin's root bypasses the socket's 0600 mode by design and holds no
+// ACE), PermissionDenied for any identity absent from a fresh, uncached
+// ListIDs read. Membership is plain string equality against the
+// platform-native identities the ACL read returns.
+func (g *operatorGate) checkID(id string) error {
+	if privilegedPeerID(id) {
 		return nil
 	}
-	uids, err := opacl.ListUIDs(g.homeDir)
+	ids, err := opacl.ListIDs(g.homeDir)
 	if err != nil {
 		return status.Errorf(codes.PermissionDenied, "operator revocation check: reading the operator set: %v", err)
 	}
-	if slices.Contains(uids, uid) {
+	if slices.Contains(ids, id) {
 		return nil
 	}
 	return status.Error(codes.PermissionDenied, "operator revoked")
@@ -87,7 +89,7 @@ func (g *operatorGate) unary(ctx context.Context, req any, info *grpc.UnaryServe
 }
 
 // stream is the ChainStreamInterceptor entry. It registers the stream's
-// (uid, cancel) BEFORE calling check — the ordering that closes the
+// (id, cancel) BEFORE calling check — the ordering that closes the
 // open-vs-revoke race: a stream opening concurrently with a revoke either
 // fails the (post-chmod) check below, or is already registered when the
 // sweep runs and gets cancelled. No interleaving lets a stream slip
@@ -95,17 +97,17 @@ func (g *operatorGate) unary(ctx context.Context, req any, info *grpc.UnaryServe
 // is converted to PermissionDenied instead of the handler's nil —
 // visible-not-silent.
 func (g *operatorGate) stream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	uid, ok := peerUID(ss.Context())
+	id, ok := peerID(ss.Context())
 	if !ok {
-		return status.Error(codes.PermissionDenied, "operator revocation check: peer uid could not be read")
+		return status.Error(codes.PermissionDenied, "operator revocation check: peer identity could not be read")
 	}
 
 	ctx, cancel := context.WithCancelCause(ss.Context())
 	wrapped := wrappedStream{ServerStream: ss, ctx: ctx}
-	defer g.streams.register(gateStream{uid: uid, cancel: cancel})()
+	defer g.streams.register(gateStream{id: id, cancel: cancel})()
 	defer cancel(nil) // release the child context's resources either way
 
-	if err := g.checkUID(uid); err != nil {
+	if err := g.checkID(id); err != nil {
 		return err
 	}
 	err := handler(srv, wrapped)
@@ -115,15 +117,15 @@ func (g *operatorGate) stream(srv any, ss grpc.ServerStream, info *grpc.StreamSe
 	return err
 }
 
-// killStreams cancels every registered stream owned by uid. Called by the
+// killStreams cancels every registered stream owned by id. Called by the
 // revoke path after the ACL mutation lands. Safe on a nil gate (a per-user
 // daemon, or a test Server that never called Serve).
-func (g *operatorGate) killStreams(uid uint32) {
+func (g *operatorGate) killStreams(id string) {
 	if g == nil {
 		return
 	}
 	g.streams.forEach(func(s gateStream) {
-		if s.uid == uid {
+		if s.id == id {
 			s.cancel(errRevoked)
 		}
 	})

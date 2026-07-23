@@ -130,12 +130,18 @@ type InjectedKey struct {
 	State string `json:"state"`
 	// OperatorUID is the kernel-authenticated uid of the peer that ran
 	// `runnyctl debug`, read server-side via SO_PEERCRED. nil means "unknown"
-	// (a non-darwin daemon or a cred-read failure) — distinct from a recorded
-	// uid 0, a real possible peer (root bypasses the socket's 0600 mode).
+	// (a cred-read failure, or a non-numeric identity carried in OperatorSID
+	// instead) — distinct from a recorded uid 0, a real possible peer (root
+	// bypasses the socket's 0600 mode).
 	OperatorUID *uint32 `json:"operator_uid,omitempty"`
-	// OperatorUser is OperatorUID's username, resolved best-effort at request
-	// time; empty if the uid could not be resolved to an account.
+	// OperatorUser is the peer identity's username, resolved best-effort at
+	// request time; empty if the identity could not be resolved to an account.
 	OperatorUser string `json:"operator_user,omitempty"`
+	// OperatorSID carries the peer identity when it is not a numeric uid — a
+	// Windows SID string, following os/user.User.Uid's platform-native
+	// convention. At most one of OperatorUID/OperatorSID is set; both absent
+	// means the identity could not be read.
+	OperatorSID string `json:"operator_sid,omitempty"`
 }
 
 // OperatorAccessFile is the write-ahead audit sidecar's name in a cycle dir

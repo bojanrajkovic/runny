@@ -866,6 +866,7 @@ func auditEvent(k cycle.InjectedKey) *obs.AuditEvent {
 		Outcome:      k.Outcome,
 		State:        k.State,
 		OperatorUID:  k.OperatorUID,
+		OperatorSID:  k.OperatorSID,
 		OperatorUser: k.OperatorUser,
 	}
 }
@@ -889,6 +890,7 @@ func (c *run) appendPending(ctx context.Context, cmd Command, state State) (int,
 		Outcome:      "pending",
 		State:        string(state),
 		OperatorUID:  cmd.OperatorUID,
+		OperatorSID:  cmd.OperatorSID,
 		OperatorUser: cmd.OperatorUser,
 	})
 	idx := len(c.rec.InjectedKeys) - 1
@@ -1095,6 +1097,7 @@ func (c *run) midJobInject(ctx context.Context, cmd Command) {
 			Outcome: "refused", State: string(StateJob),
 			Error:        "operator saw " + string(cmd.SeenState) + ", not JOB",
 			OperatorUID:  cmd.OperatorUID,
+			OperatorSID:  cmd.OperatorSID,
 			OperatorUser: cmd.OperatorUser,
 		})
 		cmd.reply(DebugKeyReply{Err: errors.New(
@@ -1109,7 +1112,7 @@ func (c *run) midJobInject(ctx context.Context, cmd Command) {
 		c.appendAudit(ctx, cycle.InjectedKey{
 			Fingerprint: fp, Comment: cmd.Comment, Injected: time.Now(), Reason: cmd.Reason,
 			Outcome: "re-armed", State: string(StateJob),
-			OperatorUID: cmd.OperatorUID, OperatorUser: cmd.OperatorUser,
+			OperatorUID: cmd.OperatorUID, OperatorSID: cmd.OperatorSID, OperatorUser: cmd.OperatorUser,
 		})
 		c.setArmedStatus(c.armedDetail(fp, c.arm.hold))
 		cmd.reply(c.armedReply())
@@ -1263,7 +1266,7 @@ func (c *run) debugReArm(ctx context.Context, cmd Command,
 		c.appendAudit(ctx, cycle.InjectedKey{
 			Fingerprint: cmd.Fingerprint, Comment: cmd.Comment, Injected: time.Now(), Reason: cmd.Reason,
 			Outcome: "re-armed", State: string(StateDebug),
-			OperatorUID: cmd.OperatorUID, OperatorUser: cmd.OperatorUser,
+			OperatorUID: cmd.OperatorUID, OperatorSID: cmd.OperatorSID, OperatorUser: cmd.OperatorUser,
 		})
 		cmd.reply(DebugKeyReply{User: c.deps.Pool.SSHUser, HostKeys: c.guest.HostKeys(), HoldUntil: newUntil})
 		return false

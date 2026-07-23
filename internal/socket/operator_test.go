@@ -28,15 +28,15 @@ const (
 	testGrantee2 = "_www"
 )
 
-// containsOperatorUser/containsOperatorUID are test-only equivalents of the
-// opacl.ContainsUser/ContainsUID helpers production code doesn't need
-// (production searches the operator list by uid alone, inline).
+// containsOperatorUser/containsOperatorID are test-only equivalents of the
+// opacl.ContainsUser/ContainsID helpers production code doesn't need
+// (production searches the operator list by identity alone, inline).
 func containsOperatorUser(ops []opacl.Operator, username string) bool {
 	return slices.ContainsFunc(ops, func(o opacl.Operator) bool { return o.User == username })
 }
 
-func containsOperatorUID(ops []opacl.Operator, uid uint32) bool {
-	return slices.ContainsFunc(ops, func(o opacl.Operator) bool { return o.UID == uid })
+func containsOperatorID(ops []opacl.Operator, id string) bool {
+	return slices.ContainsFunc(ops, func(o opacl.Operator) bool { return o.ID == id })
 }
 
 func requireGrantees(t *testing.T) {
@@ -253,8 +253,8 @@ func TestRevokeOperatorRevokesAndRecords(t *testing.T) {
 // test can drive mutateOperator directly with a slowed-down apply step,
 // widening the List-then-mutate race window deterministically instead of
 // hoping real scheduling happens to interleave two goroutines badly.
-func revokePrecheckForTest(ops []opacl.Operator, uid uint32, u *user.User) error {
-	if !containsOperatorUID(ops, uid) {
+func revokePrecheckForTest(ops []opacl.Operator, u *user.User) error {
+	if !containsOperatorID(ops, u.Uid) {
 		return status.Errorf(codes.FailedPrecondition, "%s is not an operator", u.Username)
 	}
 	if len(ops) <= 1 {

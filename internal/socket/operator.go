@@ -87,7 +87,7 @@ func splitIdentity(id string) (uid *uint32, sid string) {
 // conflated with a real privileged peer ("0" on darwin is root, a real
 // possible identity).
 func operatorIdentity(ctx context.Context) (id, username string) {
-	pid, ok := peerID(ctx)
+	pid, _, ok := peerID(ctx)
 	if !ok {
 		return "", ""
 	}

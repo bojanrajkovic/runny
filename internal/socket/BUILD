@@ -12,6 +12,7 @@ go_library(
         "peercred.go",
         "peercred_darwin.go",
         "peercred_other.go",
+        "peercred_windows.go",
         "registry.go",
         "revocation.go",
         "socket.go",
@@ -58,6 +59,7 @@ go_test(
         "operator_test.go",
         "operator_windows_test.go",
         "peercred_test.go",
+        "peercred_windows_test.go",
         "registry_test.go",
         "revocation_test.go",
         "socket_test.go",
@@ -92,6 +94,7 @@ go_test(
         ],
         "@rules_go//go/platform:windows": [
             "@com_github_microsoft_go_winio//:go-winio",
+            "@org_golang_x_sys//windows",
         ],
         "//conditions:default": [],
     }),

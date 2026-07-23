@@ -1105,9 +1105,12 @@ func captureDaemonLog(t *testing.T) *logring.Ring {
 
 // asOperator returns a context carrying a peerAuth identity, as if the
 // caller authenticated over the real socket with this uid. Lives here (not
-// the darwin-gated operator_test.go) so portable tests can use it too.
+// the darwin-gated operator_test.go) so portable tests can use it too. uid 0
+// carries Privileged=true, mirroring darwin's handshake (root is the
+// always-authorized principal); every other uid is a plain operator.
 func asOperator(ctx context.Context, uid uint32) context.Context {
-	return asOperatorID(ctx, strconv.FormatUint(uint64(uid), 10))
+	id := strconv.FormatUint(uint64(uid), 10)
+	return peer.NewContext(ctx, &peer.Peer{AuthInfo: peerAuth{ID: &id, Privileged: uid == 0}})
 }
 
 // asOperatorID is asOperator for a raw platform-native identity string — a

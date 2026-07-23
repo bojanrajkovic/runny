@@ -76,16 +76,3 @@ func TestResolveClientFallsBackWhenSystemDirAbsent(t *testing.T) {
 		t.Errorf("resolveClient(absent) = %q, want per-user ~/.runny", got)
 	}
 }
-
-// The socket lives inside the resolved home now — there is no separate socket
-// location once the home itself resolves.
-func TestSocketPathIsInsideResolvedHome(t *testing.T) {
-	systemDir := t.TempDir()
-	d, err := resolveClient(systemDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := filepath.Join(systemDir, socketName); d.SocketPath() != want {
-		t.Errorf("SocketPath = %q, want %q", d.SocketPath(), want)
-	}
-}

@@ -8,17 +8,26 @@ import (
 	"golang.org/x/sys/windows"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/bojanrajkovic/runny/internal/opacl"
 )
 
-// refuseGrantTarget rejects accounts that must never receive an operator
-// ACE. On Windows only real user accounts (SidTypeUser) are grantable: the
-// membership rule the DACL reader applies excludes everything else, so an
-// ACE for SYSTEM, Administrators, a group, or a service SID would either be
-// invisible to the operator list or a lie in it — and SYSTEM plus elevated
-// Administrators already bypass the home DACL (Full ACEs from the install
-// bootstrap, plus SeTakeOwnershipPrivilege), the same already-privileged
-// rationale behind darwin's root refusal.
+// refuseGrantTarget rejects accounts that must never receive an operator ACE,
+// enforcing the exact rule the DACL reader (opacl.operatorSIDs) applies, so no
+// SID can be write-granted yet read-hidden — a live ACE that ListOperators and
+// RevokeOperator could never see. A target is grantable iff it is neither a
+// well-known/service principal (opacl.ExcludedSID — structural, because
+// LookupAccountSid mislabels the service SID as SidTypeUser in the daemon's own
+// context) nor a group/alias (still caught by SidTypeUser: a domain group
+// shares the S-1-5-21- prefix with users, so the prefix check alone cannot
+// exclude it). SYSTEM and elevated Administrators already bypass the home DACL
+// (Full ACEs from the install bootstrap, plus SeTakeOwnershipPrivilege), the
+// same already-privileged rationale behind darwin's root refusal.
 func refuseGrantTarget(u *user.User) error {
+	if opacl.ExcludedSID(u.Uid) {
+		return status.Errorf(codes.InvalidArgument,
+			"refusing to grant %s: SYSTEM, service accounts, and built-in groups cannot be operators", u.Username)
+	}
 	sid, err := windows.StringToSid(u.Uid)
 	if err != nil {
 		return status.Errorf(codes.InvalidArgument, "account %s has an unparseable SID %q: %v", u.Username, u.Uid, err)
@@ -29,7 +38,7 @@ func refuseGrantTarget(u *user.User) error {
 	}
 	if accType != windows.SidTypeUser {
 		return status.Errorf(codes.InvalidArgument,
-			"refusing to grant %s: not a regular user account (SYSTEM, Administrators, groups, and service principals cannot be operators)", u.Username)
+			"refusing to grant %s: not a regular user account (groups cannot be operators)", u.Username)
 	}
 	return nil
 }

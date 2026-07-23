@@ -214,7 +214,9 @@ from `-doctor`, which runs the full network suite for operational diagnosis.
 
 ## On-disk layout
 
-`internal/home` is the authority. Shape: `config.yaml`, `runnyd.sock` (0600),
+`internal/home` is the authority. Shape: `config.yaml`, `runnyd.sock` (0600;
+on Windows the control channel is a named pipe, `\\.\pipe\runnyd`, not an
+in-home socket file),
 `logs/runnyd.log`, `images/<ref>/<digest>/` (immutable cache),
 `vms/<slot>/` (ephemeral, swept) — including `vms/<slot>/runner/`, the cycle's
 own per-slot directory holding its single cloned runner tarball (mounted

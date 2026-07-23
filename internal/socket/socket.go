@@ -7,8 +7,6 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log/slog"
-	"net"
-	"os"
 	"os/user"
 	"regexp"
 	"runtime/debug"
@@ -271,15 +269,12 @@ func recoveryStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, 
 	return handler(srv, ss)
 }
 
-// Serve listens on the unix socket (owner-only) until ctx ends.
+// Serve listens on the platform control channel (a unix socket on darwin, a
+// named pipe on windows — see the per-platform listen) until ctx ends.
 func (s *Server) Serve(ctx context.Context, socketPath string) error {
-	_ = os.Remove(socketPath) // stale socket from a previous run
-	ln, err := net.Listen("unix", socketPath)
+	ln, err := listen(socketPath, s.IsSystemDaemon)
 	if err != nil {
-		return fmt.Errorf("listening on %s: %w", socketPath, err)
-	}
-	if err := os.Chmod(socketPath, 0o600); err != nil {
-		return fmt.Errorf("restricting socket perms: %w", err)
+		return err
 	}
 	s.socketPath = socketPath
 	s.gate = newOperatorGate(s.IsSystemDaemon, s.HomeDir.String())

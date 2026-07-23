@@ -76,6 +76,8 @@ go_test(
         "instance_test.go",
         "operatorgrants_test.go",
         "resolve_test.go",
+        "socketpath_unix_test.go",
+        "socketpath_windows_test.go",
         "testconfig_test.go",
         "warnings_test.go",
     ],

@@ -145,7 +145,10 @@ password would be the one remaining door back into `admin`.
 Authorization is the socket itself: the `0600` `runnyd.sock` is the sole gate,
 deliberately — whoever can open it already transitively holds everything
 injection grants (the config that can set `ssh_hardening: off`, the App key, the
-daemon binary). For a per-user agent the socket is owner-only. For the headless
+daemon binary). For a per-user agent the socket is owner-only — on Windows the
+equivalent is a per-user pipe whose name is derived from the resolved home (so
+two users' daemons never collide on, or squat, one pipe) and whose security
+descriptor grants connect to the owning user's SID alone. For the headless
 system daemon (below) it is owned by the `_runny` service account and reachable
 by the operator account through the home's inheriting ACL — intentional: that
 operator is the trusted administrator who landed the App key and edits the
@@ -153,12 +156,14 @@ config, so it already holds that same transitive power. The audit trail is the
 accountability layer, not a second authorization tier.
 
 **Each `injected_keys` entry is stamped with the authenticated peer.** The
-daemon reads the connecting operator's uid server-side via `SO_PEERCRED` on
-the `0600` socket — authoritative and not client-forgeable — and records it
-alongside a best-effort username snapshot, surfaced in `runnyctl why` (e.g.
-"by bob (uid 503)"). A root peer, which bypasses the socket's `0600` mode, is
-recorded as `uid 0`; a uid the daemon cannot read (a non-darwin host, or a
-cred-read failure) is recorded as unknown rather than failing the request —
+daemon reads the connecting operator's platform-native identity server-side —
+the uid via `SO_PEERCRED` on darwin's `0600` socket, the SID by impersonating
+the named-pipe client on Windows — authoritative and not client-forgeable —
+and records it alongside a best-effort username snapshot, surfaced in `runnyctl
+why` (e.g. "by bob (uid 503)"). A root peer, which bypasses the socket's `0600`
+mode, is recorded as `uid 0`; an identity the daemon cannot read (a platform
+with no peer read, or a read failure) is recorded as unknown rather than
+failing the request —
 an audit enhancement, never a second gate. This closes the "an operator did
 X" → "operator A did X" gap once more than one operator identity can exist;
 see [ADR-0014](architecture-decisions/0014-debug-key-injection.md) for the
@@ -170,8 +175,10 @@ attribution only, no new persisted audit trail.
 **The control socket may grant several operator accounts, on the system
 daemon.** An existing operator grants another via `runnyctl operator grant`:
 the daemon, which owns its home, adds an inheriting ACL entry for the new
-account to the home dir (future artifacts) and directly to the live socket
-(no restart) — reaching the `GrantOperator`/`RevokeOperator` RPCs at all
+account to the home dir (future artifacts), and on darwin also to the live
+socket (no restart; the Windows control channel is a pipe with no file to
+stamp, so the home-dir ACE — which the gate reads — is the whole grant) —
+reaching the `GrantOperator`/`RevokeOperator` RPCs at all
 already means the caller is an operator, so granting another is transitive
 trust, not a new gate, the same posture ADR-0014 already established for
 debug-key injection. Grants are attributed in an `operator-grants.jsonl`
@@ -202,19 +209,32 @@ not be read is denied (fail closed). Out-of-band ACL edits (a manual
 in-flight streams — only the in-process revoke path triggers the kill —
 but every new RPC still observes the edit immediately.
 
-**The revocation gate is unarmed on a platform with no real peer-identity
-read.** Fail-closed only degrades gracefully when a peer uid is at least
-*sometimes* readable; on a platform where it is *never* readable, arming
-the gate would deny every RPC unconditionally rather than fail closed on
-the exceptional case. Windows has no such read today — Microsoft's own
-AF_UNIX implementation deliberately omits credential passing, delegating
-socket authorization to filesystem ACLs on the socket path instead — so
-the system daemon there falls back to the socket-is-the-sole-gate baseline
-(above) with no live per-connection revoke: an ACL edit still lands, but
-only takes effect for new connections, not an in-flight kill. A real
-per-connection identity on Windows would need its own transport (a named
-pipe, impersonated to read the connecting token's SID), tracked as
-separate future work.
+**On Windows the control channel is a named pipe, and its revocation gate is
+armed too.** Windows AF_UNIX carries no peer credential — Microsoft's own
+implementation deliberately omits it — so runnyd does not serve a unix socket
+there. It binds `\\.\pipe\runnyd` and reads the connecting client's SID by
+impersonating the pipe at the handshake (`ImpersonateNamedPipeClient`): a
+kernel-established identity, fixed when the client connected, not
+client-forgeable and not obtained by opening the client's process (which the
+unprivileged `NT SERVICE\runnyd` account cannot do across principals — the
+reason an earlier `getpeerpid` + `OpenProcess` approach was abandoned, and why
+the impersonation read takes its place). That read never fails on a live
+connection, so the gate arms unconditionally on the system daemon — no startup
+self-probe, no unarmed fallback. The client dials at `SECURITY_IDENTIFICATION`,
+which lets the daemon read its identity but grants it no right to act as the
+client.
+
+The pipe's security descriptor is only a coarse connect filter — any
+Authenticated User may open it — **not** the outer authorization tier a
+darwin unix socket's `0600` mode is. On Windows the per-RPC gate is the primary
+tier: an authenticated user who holds no operator ACE can open the pipe, but
+every RPC fails closed, loudly (`PermissionDenied`), and the same live revoke
+and in-flight stream kill as darwin apply. This is a deliberate tier shift, not
+a weakening — the socket-is-the-sole-gate baseline is replaced by the gate
+being always-on. SYSTEM and an elevated Administrators-group member bypass the
+gate (they already own the machine and the home DACL, and hold no operator
+ACE); a UAC-filtered, non-elevated admin does not — it must be granted an ACE
+like any other operator.
 
 The kill is cooperative, not preemptive: it cancels a context both stream
 handlers already select on between sends, so a handler currently blocked

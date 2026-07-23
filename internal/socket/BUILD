@@ -3,6 +3,8 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "socket",
     srcs = [
+        "listen_unix.go",
+        "listen_windows.go",
         "operator.go",
         "operator_darwin.go",
         "operator_other.go",
@@ -10,6 +12,7 @@ go_library(
         "peercred.go",
         "peercred_darwin.go",
         "peercred_other.go",
+        "peercred_windows.go",
         "registry.go",
         "revocation.go",
         "socket.go",
@@ -42,6 +45,7 @@ go_library(
             "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:windows": [
+            "@com_github_microsoft_go_winio//:go-winio",
             "@org_golang_x_sys//windows",
         ],
         "//conditions:default": [],
@@ -51,12 +55,15 @@ go_library(
 go_test(
     name = "socket_test",
     srcs = [
+        "listen_windows_test.go",
         "operator_test.go",
         "operator_windows_test.go",
         "peercred_test.go",
+        "peercred_windows_test.go",
         "registry_test.go",
         "revocation_test.go",
         "socket_test.go",
+        "watchdog_test.go",
     ],
     embed = [":socket"],
     deps = [
@@ -85,6 +92,10 @@ go_test(
             "//internal/bounded",
             "//internal/opacl",
             "@org_golang_google_grpc//metadata",
+        ],
+        "@rules_go//go/platform:windows": [
+            "@com_github_microsoft_go_winio//:go-winio",
+            "@org_golang_x_sys//windows",
         ],
         "//conditions:default": [],
     }),

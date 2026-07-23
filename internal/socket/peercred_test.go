@@ -98,10 +98,15 @@ func TestPeerCredsCarriesIdentityOverRealSocket(t *testing.T) {
 	if want := strconv.Itoa(os.Getuid()); *auth.ID != want {
 		t.Errorf("id = %q, want this process's uid %q", *auth.ID, want)
 	}
+	// The test process runs non-root under bazel, so the peer must read
+	// non-privileged — the flag tracks the real handshake, not a hardcode.
+	if os.Getuid() != 0 && auth.Privileged {
+		t.Error("a non-root peer must not be marked privileged")
+	}
 }
 
 func TestPeerID(t *testing.T) {
-	id, ok := peerID(t.Context())
+	id, _, ok := peerID(t.Context())
 	if ok {
 		t.Errorf("no peer in context: expected unknown, got id %q", id)
 	}
@@ -111,18 +116,25 @@ func TestPeerID(t *testing.T) {
 	for _, want := range []string{"42", "S-1-5-21-1111111111-2222222222-3333333333-1001"} {
 		w := want
 		ctx := peer.NewContext(t.Context(), &peer.Peer{AuthInfo: peerAuth{ID: &w}})
-		if id, ok := peerID(ctx); !ok || id != want {
-			t.Errorf("peerID = (%q, %v), want (%q, true)", id, ok, want)
+		if id, priv, ok := peerID(ctx); !ok || id != want || priv {
+			t.Errorf("peerID = (%q, %v, %v), want (%q, false, true)", id, priv, ok, want)
 		}
 	}
 
-	ctx := peer.NewContext(t.Context(), &peer.Peer{AuthInfo: peerAuth{ID: nil}})
-	if _, ok := peerID(ctx); ok {
+	// The privileged flag rides through alongside the identity.
+	pid := "0"
+	ctx := peer.NewContext(t.Context(), &peer.Peer{AuthInfo: peerAuth{ID: &pid, Privileged: true}})
+	if id, priv, ok := peerID(ctx); !ok || id != "0" || !priv {
+		t.Errorf("peerID = (%q, %v, %v), want (%q, true, true)", id, priv, ok, "0")
+	}
+
+	ctx = peer.NewContext(t.Context(), &peer.Peer{AuthInfo: peerAuth{ID: nil}})
+	if _, _, ok := peerID(ctx); ok {
 		t.Error("nil ID must report unknown")
 	}
 
 	ctx = peer.NewContext(t.Context(), &peer.Peer{AuthInfo: otherAuthInfo{}})
-	if _, ok := peerID(ctx); ok {
+	if _, _, ok := peerID(ctx); ok {
 		t.Error("a non-peerAuth AuthInfo must report unknown, not panic or misread")
 	}
 }

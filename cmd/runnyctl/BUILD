@@ -8,6 +8,8 @@ go_library(
     name = "runnyctl_lib",
     srcs = [
         "cli.go",
+        "dial_unix.go",
+        "dial_windows.go",
         "editconfig.go",
         "execssh_unix.go",
         "execssh_windows.go",
@@ -33,17 +35,78 @@ go_library(
         "//proto/runny/v1:runny",
         "@com_github_alecthomas_kong//:kong",
         "@com_github_rivo_uniseg//:uniseg",
-        "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//codes",
         "@org_golang_google_grpc//connectivity",
-        "@org_golang_google_grpc//credentials/insecure",
         "@org_golang_google_grpc//status",
         "@org_golang_google_protobuf//encoding/protojson",
         "@org_golang_google_protobuf//proto",
         "@org_golang_google_protobuf//types/known/durationpb",
         "@org_golang_x_term//:term",
     ] + select({
+        "@rules_go//go/platform:aix": [
+            "@org_golang_google_grpc//:grpc",
+            "@org_golang_google_grpc//credentials/insecure",
+        ],
+        "@rules_go//go/platform:android": [
+            "@org_golang_google_grpc//:grpc",
+            "@org_golang_google_grpc//credentials/insecure",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "@org_golang_google_grpc//:grpc",
+            "@org_golang_google_grpc//credentials/insecure",
+        ],
+        "@rules_go//go/platform:dragonfly": [
+            "@org_golang_google_grpc//:grpc",
+            "@org_golang_google_grpc//credentials/insecure",
+        ],
+        "@rules_go//go/platform:freebsd": [
+            "@org_golang_google_grpc//:grpc",
+            "@org_golang_google_grpc//credentials/insecure",
+        ],
+        "@rules_go//go/platform:illumos": [
+            "@org_golang_google_grpc//:grpc",
+            "@org_golang_google_grpc//credentials/insecure",
+        ],
+        "@rules_go//go/platform:ios": [
+            "@org_golang_google_grpc//:grpc",
+            "@org_golang_google_grpc//credentials/insecure",
+        ],
+        "@rules_go//go/platform:js": [
+            "@org_golang_google_grpc//:grpc",
+            "@org_golang_google_grpc//credentials/insecure",
+        ],
+        "@rules_go//go/platform:linux": [
+            "@org_golang_google_grpc//:grpc",
+            "@org_golang_google_grpc//credentials/insecure",
+        ],
+        "@rules_go//go/platform:netbsd": [
+            "@org_golang_google_grpc//:grpc",
+            "@org_golang_google_grpc//credentials/insecure",
+        ],
+        "@rules_go//go/platform:openbsd": [
+            "@org_golang_google_grpc//:grpc",
+            "@org_golang_google_grpc//credentials/insecure",
+        ],
+        "@rules_go//go/platform:osx": [
+            "@org_golang_google_grpc//:grpc",
+            "@org_golang_google_grpc//credentials/insecure",
+        ],
+        "@rules_go//go/platform:plan9": [
+            "@org_golang_google_grpc//:grpc",
+            "@org_golang_google_grpc//credentials/insecure",
+        ],
+        "@rules_go//go/platform:qnx": [
+            "@org_golang_google_grpc//:grpc",
+            "@org_golang_google_grpc//credentials/insecure",
+        ],
+        "@rules_go//go/platform:solaris": [
+            "@org_golang_google_grpc//:grpc",
+            "@org_golang_google_grpc//credentials/insecure",
+        ],
         "@rules_go//go/platform:windows": [
+            "@com_github_microsoft_go_winio//:go-winio",
+            "@org_golang_google_grpc//:grpc",
+            "@org_golang_google_grpc//credentials/insecure",
             "@org_golang_x_sys//windows",
         ],
         "//conditions:default": [],

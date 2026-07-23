@@ -1,6 +1,22 @@
-# ADR-0027: Windows operator identity — platform-native SID strings over the home DACL
+# ADR-0027: Windows operator identity — platform-native SID strings, read by named-pipe impersonation
 
 **Status:** Accepted (2026-07-23)
+
+**Amended:** 2026-07-23 — the peer-read half of this decision is reversed. The
+original plan kept the Windows peer read on the existing AF_UNIX socket via the
+`SIO_AF_UNIX_GETPEERPID` ioctl resolved through `OpenProcess` to the peer's
+token SID, arming the gate only behind a startup self-probe; the named-pipe
+`ImpersonateNamedPipeClient` transport was recorded here as a *rejected*
+alternative. Real hardware reversed that: cross-principal `OpenProcess` from the
+unprivileged `NT SERVICE\runnyd` account is target-dependent — it opened an
+admin user's token but was **denied** a `LOCAL SERVICE` process, with no
+`SeDebugPrivilege` to force it — and the arming self-probe can only ever open
+the daemon's *own* process, so it cannot detect that failure. The named-pipe
+impersonation read was then spike-validated on the real service account reading
+every principal, including the one `OpenProcess` refused. The identity-string
+and opacl-over-the-home-DACL halves are unchanged; the Decision, Rejected
+alternatives, and Consequences below are updated in place rather than left
+describing a peer read the shipped code never used.
 
 ## Context
 
@@ -11,18 +27,19 @@ injected keys and grant records) was built uid-first: `uint32` on the wire,
 account identity — `os/user.User.Uid` is a SID string
 (`S-1-5-21-…`) — so the grant path's `strconv.ParseUint(u.Uid, …)` fails for
 every Windows account, and nothing downstream of it could carry the identity
-even if it parsed. Separately, the Windows daemon has no peer-credential read
-wired up (`peercred_other.go`), so the revocation gate is unarmed there and
-audit rows record the operator as unknown.
+even if it parsed. Separately, the Windows daemon had no peer-credential read
+wired up, so the revocation gate was unarmed there and audit rows recorded the
+operator as unknown.
 
 The install bootstrap already writes a home DACL on Windows
 (`internal/sysdaemon`'s `icaclsHomeArgs`): an inheriting Modify grant for the
 operator and the service SID, inheritance from ProgramData severed, the
 BUILTIN\Users leak entry stripped. What was missing is the live half — the
 same Grant/Revoke/List operations `internal/opacl` performs against darwin's
-extended ACL, plus an identity representation those operations can traffic
-in. All Windows ACL and socket mechanics below were validated on real
-hardware (Windows 10 build 19045) against an installed system daemon.
+extended ACL, plus an identity representation those operations can traffic in,
+plus a peer read the gate can enforce against. All Windows ACL, pipe, and
+impersonation mechanics below were validated on real hardware against an
+installed system daemon.
 
 ## Decision
 
@@ -37,75 +54,105 @@ switches on platform. No unified cross-platform identity type exists because
 nothing needs cross-platform identity comparison — every ACL and every audit
 trail is host-local.
 
-**The Windows peer read stays on the existing AF_UNIX socket**, via the
-`SIO_AF_UNIX_GETPEERPID` WSAIoctl resolved to the peer process token's SID
-at handshake time. The ioctl's output buffer is trusted over its
-bytes-returned value, working around the known bug where bytes-returned
-reads zero despite a valid PID being written (microsoft/WSL#4676). Because
-that ioctl is undocumented surface, the revocation gate arms only after a
-startup self-probe: the daemon dials its own socket and requires its own PID
-and SID back. Probe failure logs loudly and leaves the gate unarmed — the
-socket-is-the-sole-gate baseline `docs/security.md` documents as the primary
-tier, never a silently weaker gate. (The peer-read half ships in a follow-up
-PR; this ADR records the whole decision.)
+**The Windows control channel is a named pipe (`\\.\pipe\runnyd`), and the peer
+identity is read by impersonating the connecting client at the handshake.**
+`ImpersonateNamedPipeClient` attaches the client's kernel-established security
+context to the reading thread; `OpenThreadToken` + `GetTokenUser` then recover
+the client SID with **no process open at all**, sidestepping the cross-principal
+`OpenProcess` denial entirely. The read never fails on a live connection, so the
+gate arms unconditionally on the system daemon — no startup self-probe, no
+unarmed fallback, no `peerCredSupported=false` degradation. The client dials at
+`SECURITY_IDENTIFICATION`, which lets the daemon read identity and group
+membership but grants it no right to *act as* the client (winio's default
+Anonymous level yields an unreadable token). The transport forks per platform
+behind a small seam (`listen`/`dial`/`SocketPath`, `readPeer`): darwin keeps the
+unix socket + `SO_PEERCRED`; the shared gRPC server, gate, and RPC handlers are
+untouched.
 
 **opacl gains a Windows implementation over the same home DACL the install
-bootstrap writes.** Grant/Revoke run `icacls` (the home dir gets the
-bootstrap's exact `(OI)(CI)M` ACE shape, so bootstrap and live-granted
-operators are indistinguishable to List; the live socket gets a
-belt-and-braces explicit stamp). ListIDs reads the DACL via
-`GetNamedSecurityInfo`/`GetAce`; membership is an ACCESS_ALLOWED ACE, not
-INHERIT_ONLY, mask carrying `FILE_WRITE_DATA`, SID resolving to
-`SidTypeUser` — which selects exactly the operator accounts and excludes the
-service SID, SYSTEM, Administrators, and CREATOR OWNER that the bootstrap
-also writes. SYSTEM and elevated Administrators bypass the gate entirely
-(they hold Full ACEs from the bootstrap's DACL conversion, plus
-`SeTakeOwnershipPrivilege`) — darwin's uid-0 rationale — and are refused as
-grant targets for the same reason root is: an ACE for an account the ACL
-cannot actually constrain would be a lie in the operator list.
+bootstrap writes.** Grant/Revoke run `icacls` against the home dir only — the
+pipe has no filesystem object to stamp, so unlike darwin there is no second
+live-socket target. The home ACE is the bootstrap's exact `(OI)(CI)M` shape, so
+bootstrap and live-granted operators are indistinguishable to List. ListIDs
+reads the DACL via `GetNamedSecurityInfo`/`GetAce`; membership is an
+ACCESS_ALLOWED ACE, not INHERIT_ONLY, whose mask carries `FILE_WRITE_DATA`, for
+a SID that is not a well-known or service principal. That last exclusion is
+**structural, by SID-string prefix** — `S-1-5-18/19/20`, the `S-1-5-32-`
+aliases, the `S-1-5-80-` service range — applied *before* trusting
+`LookupAccountSid`'s type, because in the daemon's own process context
+`LookupAccountSid` reports the service SID `NT SERVICE\runnyd` as `SidTypeUser`
+and would otherwise count the daemon itself as an operator. SYSTEM and an
+elevated Administrators member bypass the gate (they own the machine and the
+home DACL and hold no operator ACE, read from the same impersonation token —
+SYSTEM by SID, elevated admin by `CheckTokenMembership`; a UAC-filtered
+non-elevated admin reads false) and are refused as grant targets, the same
+already-privileged rationale as darwin's root.
+
+**The pipe's security descriptor is a coarse connect filter, not the outer
+authorization tier.** It grants connect to Authenticated Users only; the per-RPC
+revocation gate is the primary Windows tier. This is a deliberate tier shift
+from darwin, where the socket's own `0600` + inherited ACL is the outer gate: on
+Windows an authenticated user who holds no operator ACE can *open* the pipe, but
+every RPC fails closed and loud (`PermissionDenied`), and the same live revoke +
+in-flight stream kill apply.
 
 ## Rejected alternatives
 
 - **A unified cross-platform identity type** (a tagged uid-or-SID struct on
   wire and disk). Churns every darwin record, message, and reader to buy
   comparability that nothing needs — no code path ever compares a darwin
-  operator to a Windows one. The opaque string plus additive sid fields
-  keeps darwin's shipped shape byte-stable.
+  operator to a Windows one. The opaque string plus additive sid fields keeps
+  darwin's shipped shape byte-stable.
 
 - **Mapping SIDs to synthetic uint32 ids** to keep the existing wire type.
   RIDs collide across machines, virtual service accounts have no meaningful
   numeric identity at all, and the mapping table is new persistent state
   invented to serve a wire type the platform has outgrown.
 
-- **A named-pipe control channel with `ImpersonateNamedPipeClient`.**
-  Token-attested peer identity is genuinely stronger than PID indirection,
-  but a pipe's security descriptor is fixed per-listener at creation and has
-  no filesystem path — it splits the one-ACL model, so live grant/revoke
-  would need a second ACL mechanism kept in sync with the home DACL, and the
-  control transport forks per platform. Reopen if the self-probe fails on a
-  current supported Windows build, or if PID indirection is shown
-  exploitable beyond the accepted operator-only residual.
+- **The AF_UNIX socket + `SIO_AF_UNIX_GETPEERPID` ioctl + `OpenProcess`
+  peer read.** Keeps a single transport, but the SID comes from *opening the
+  peer's process*, and cross-principal `OpenProcess` from the unprivileged
+  service account is target-dependent — hardware-confirmed to open an admin
+  user's token yet be denied a `LOCAL SERVICE` process, with no
+  `SeDebugPrivilege` available to force it. Worse, the startup self-probe meant
+  to gate arming can only open the daemon's own process, so it is structurally
+  blind to exactly the cross-principal denial that breaks the real read. PID
+  indirection is also weaker than a token-attested identity. The pipe
+  impersonation read has none of these: it reads the client SID off the
+  kernel-established connection with no process open.
 
-- **Leaving the gate permanently unarmed on Windows.** Zero new surface, but
-  it leaves the lingering-connection revocation gap and unattributed audit
-  records on exactly one platform, for the cost of a handshake-time read
-  plus a startup probe.
+- **Granting the daemon `SeDebugPrivilege`** to force the `OpenProcess` read.
+  Machine-wide god-mode (open any process on the host) traded for one narrow
+  identity read — the opposite of this project's least-privilege service
+  account, and a far larger blast radius than the problem.
+
+- **Leaving the gate permanently unarmed on Windows.** Zero new surface, but it
+  forgoes live revoke and operator attribution on exactly one platform — the
+  lingering-connection gap ADR-0025 closed everywhere else — for the cost of a
+  handshake-time impersonation read that turned out to have no failure mode to
+  degrade around.
 
 ## Consequences
 
 - Windows reaches operator parity: grant/revoke/list against the home DACL,
   SID-string identities in grant records, injected-key audit rows, and
-  `runnyctl` output (rendered as the resolved `DOMAIN\name` plus the SID).
-- The documented residual: Windows peer identity is PID-indirected (the
-  ioctl attests the peer PID; the SID comes from opening that process's
-  token), not token-attested like darwin's `LOCAL_PEERCRED`. Exploiting the
-  indirection requires a principal already inside the authorization
-  boundary, in an audit trail documented as good-faith rather than
-  tamper-proof.
-- `peerCredSupported` becomes a per-platform arming check backed by the
-  self-probe, so a future Windows regression in the undocumented ioctl
-  degrades loudly to the documented socket-only baseline instead of denying
-  every RPC or silently mis-attributing.
+  `runnyctl` output; and a live, token-attested revocation gate — no PID
+  indirection, parity with darwin's `LOCAL_PEERCRED` rather than a documented
+  weaker residual.
+- The control transport forks per platform behind a small seam (`listen`,
+  `dial`, `home.SocketPath`, `readPeer`); the gRPC server, the revocation gate,
+  and every RPC handler are platform-agnostic above it. The pipe conn carries
+  the raw HANDLE (winio promotes `Fd()`) so the one impersonation at handshake
+  can reach it; the handshake peeks one byte first (a client message must be
+  pending to impersonate against) and replays it so the HTTP/2 stream loses
+  nothing.
+- Windows authorization is a two-tier model that differs from darwin's: the
+  pipe SD is a coarse connect filter and the per-RPC gate is primary, rather
+  than the socket's own mode being the outer gate. Documented in
+  `docs/security.md`.
+- `peerCredSupported` is unconditionally true on Windows — the gate always arms
+  on the system daemon, with no probe to fail — where the darwin value tracks
+  the real `SO_PEERCRED` capability.
 - Reinstall preserves live grants on Windows: the install ACL sequence
   deliberately converts and keeps existing explicit entries rather than
   resetting them (the `/inheritance:d` trade-off recorded in

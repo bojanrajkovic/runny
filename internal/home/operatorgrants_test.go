@@ -73,6 +73,58 @@ func TestOperatorGrantsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestOperatorGrantDarwinBytesUnchanged pins the exact darwin record bytes:
+// a uid-shaped grant (no SID identity anywhere) must marshal to the same
+// JSON it did before the by_sid/target_sid fields existed — the
+// additive-only compatibility contract for the on-disk attribution log.
+func TestOperatorGrantDarwinBytesUnchanged(t *testing.T) {
+	d := Dir(t.TempDir())
+	uid := uint32(501)
+	g := OperatorGrant{
+		Action: "grant", ByUID: &uid, ByUser: "brajkovic",
+		TargetUID: 503, TargetUser: "alice",
+		At: time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC),
+	}
+	if err := d.AppendOperatorGrant(g); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(d.OperatorGrantsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"action":"grant","by_uid":501,"by_user":"brajkovic","target_uid":503,"target_user":"alice","at":"2026-07-22T12:00:00Z"}` + "\n"
+	if string(raw) != want {
+		t.Errorf("darwin-shaped record bytes changed:\n got %q\nwant %q", raw, want)
+	}
+}
+
+// TestOperatorGrantSIDRoundTrip pins the Windows identity shape: SID-shaped
+// grantor and target identities land in by_sid/target_sid, with no
+// fabricated by_uid, and survive the disk round-trip.
+func TestOperatorGrantSIDRoundTrip(t *testing.T) {
+	d := Dir(t.TempDir())
+	const bySID = "S-1-5-21-1111111111-2222222222-3333333333-1001"
+	const targetSID = "S-1-5-21-1111111111-2222222222-3333333333-1002"
+	g := OperatorGrant{
+		Action: "grant", BySID: bySID, ByUser: `CORP\bob`,
+		TargetSID: targetSID, TargetUser: `CORP\alice`,
+		At: time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC),
+	}
+	if err := d.AppendOperatorGrant(g); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.ReadOperatorGrants()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].BySID != bySID || got[0].TargetSID != targetSID {
+		t.Errorf("sid fields did not round-trip: %+v", got)
+	}
+	if got[0].ByUID != nil {
+		t.Errorf("sid-shaped grantor fabricated by_uid=%d, want nil", *got[0].ByUID)
+	}
+}
+
 // TestReadOperatorGrantsMissingFile pins the "no grants/revokes yet" case: a
 // fresh install has no operator-grants.jsonl at all, which must read as an
 // empty list, not an error.

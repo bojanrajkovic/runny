@@ -469,9 +469,11 @@ func (a *traceAssembler) audit(e obs.Event) {
 	a.withCycle(e, func(cs *cycleSpans) {
 		// String fields attach unconditionally — an empty value is just
 		// empty (a disarm entry has no fingerprint, a success no error).
-		// Only OperatorUID is conditional: nil means the peer's uid could
-		// not be read — absent attribute, distinct from a recorded uid 0
-		// (root is a real peer).
+		// Only the identity pair is conditional: nil OperatorUID with an
+		// empty OperatorSID means the peer's identity could not be read —
+		// absent attributes, distinct from a recorded uid 0 (root is a real
+		// peer). A non-numeric identity attaches as operator_sid instead,
+		// mirroring the audit record's own field pair.
 		attrs := []attribute.KeyValue{
 			attribute.String("runny.audit.fingerprint", e.Audit.Fingerprint),
 			attribute.String("runny.audit.comment", e.Audit.Comment),
@@ -483,6 +485,9 @@ func (a *traceAssembler) audit(e obs.Event) {
 		}
 		if e.Audit.OperatorUID != nil {
 			attrs = append(attrs, attribute.Int64("runny.audit.operator_uid", int64(*e.Audit.OperatorUID)))
+		}
+		if e.Audit.OperatorSID != "" {
+			attrs = append(attrs, attribute.String("runny.audit.operator_sid", e.Audit.OperatorSID))
 		}
 		cs.root.AddEvent(string(e.Kind), trace.WithTimestamp(e.Time), trace.WithAttributes(attrs...))
 	})

@@ -230,12 +230,17 @@ type Command struct {
 	SeenState   State              // the state the operator saw (consent pin, decision 15)
 	Expires     time.Time          // enqueue + queueBound; consumers reject a late dequeue
 	Reply       chan DebugKeyReply // buffered 1; replied via select/default
-	// OperatorUID/OperatorUser identify the peer that issued this
-	// CmdDebugKey: the kernel-authenticated uid read server-side via
-	// SO_PEERCRED, and its username resolved best-effort at the socket layer.
-	// nil UID means unknown (non-darwin, or a cred-read failure) — distinct
-	// from a recorded uid 0 (root, which bypasses the socket's 0600 mode).
+	// OperatorUID/OperatorSID/OperatorUser identify the peer that issued
+	// this CmdDebugKey: the kernel-authenticated identity read server-side
+	// via SO_PEERCRED, already fanned out by the socket layer into the same
+	// (uid, sid) field pair the audit records carry — numeric identities in
+	// OperatorUID, Windows SIDs in OperatorSID, at most one set — with the
+	// username resolved best-effort there too, so the FSM stays free of both
+	// os/user and identity-shape knowledge. nil UID with an empty SID means
+	// unknown (a cred-read failure) — distinct from a recorded uid 0 (root,
+	// which bypasses the socket's 0600 mode).
 	OperatorUID  *uint32
+	OperatorSID  string
 	OperatorUser string
 }
 

@@ -6,6 +6,7 @@ go_library(
         "opacl.go",
         "opacl_darwin.go",
         "opacl_other.go",
+        "opacl_windows.go",
     ],
     cgo = True,
     importpath = "github.com/bojanrajkovic/runny/internal/opacl",
@@ -58,6 +59,7 @@ go_library(
         ],
         "@rules_go//go/platform:windows": [
             "//internal/bounded",
+            "@org_golang_x_sys//windows",
         ],
         "//conditions:default": [],
     }),
@@ -65,7 +67,10 @@ go_library(
 
 go_test(
     name = "opacl_test",
-    srcs = ["opacl_darwin_test.go"],
+    srcs = [
+        "opacl_darwin_test.go",
+        "opacl_windows_test.go",
+    ],
     embed = [":opacl"],
     deps = select({
         "@rules_go//go/platform:darwin": [
@@ -73,6 +78,9 @@ go_test(
         ],
         "@rules_go//go/platform:ios": [
             "//internal/bounded",
+        ],
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
         ],
         "//conditions:default": [],
     }),

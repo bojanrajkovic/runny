@@ -10,23 +10,25 @@ import (
 )
 
 // peerAuth is the AuthInfo peerCreds hands back from ServerHandshake: the
-// kernel-authenticated uid of the connecting peer (SO_PEERCRED on darwin),
-// read server-side so it cannot be forged by a client-supplied value.
-// SecurityLevel is deliberately NoSecurity — the channel is a plaintext unix
-// socket, and claiming a higher level would tell gRPC a future per-RPC secret
-// is safe to send in the clear.
+// kernel-authenticated identity of the connecting peer (SO_PEERCRED on
+// darwin), read server-side so it cannot be forged by a client-supplied
+// value. SecurityLevel is deliberately NoSecurity — the channel is a
+// plaintext unix socket, and claiming a higher level would tell gRPC a
+// future per-RPC secret is safe to send in the clear.
 type peerAuth struct {
 	credentials.CommonAuthInfo
-	// UID is nil when the daemon could not read it (non-darwin, or a
-	// cred-read miss) — distinct from a real peer uid 0 (root, which bypasses
-	// the socket's 0600 mode).
-	UID *uint32
+	// ID is the platform-native identity string, following
+	// os/user.User.Uid's convention: a decimal uid on darwin, a SID string
+	// on Windows. nil when the daemon could not read it (an unsupported
+	// platform, or a cred-read miss) — distinct from a real privileged peer
+	// ("0" on darwin: root, which bypasses the socket's 0600 mode).
+	ID *string
 }
 
 func (peerAuth) AuthType() string { return "peercred" }
 
 // peerCreds is a server-only credentials.TransportCredentials: it reads the
-// connecting peer's uid during ServerHandshake and otherwise does no
+// connecting peer's identity during ServerHandshake and otherwise does no
 // handshaking at all, like insecure.NewCredentials — which it embeds to
 // inherit ClientHandshake/OverrideServerName unchanged (every runny client
 // dials with insecure.NewCredentials, never this type, so ClientHandshake is
@@ -49,8 +51,8 @@ func (peerCreds) ServerHandshake(conn net.Conn) (net.Conn, credentials.AuthInfo,
 	if uc, ok := conn.(*net.UnixConn); ok {
 		if sc, err := uc.SyscallConn(); err == nil {
 			_ = sc.Control(func(fd uintptr) {
-				if uid, ok := readPeerUID(fd); ok {
-					auth.UID = &uid
+				if id, ok := readPeerID(fd); ok {
+					auth.ID = &id
 				}
 			})
 		}
@@ -64,18 +66,18 @@ func (peerCreds) Info() credentials.ProtocolInfo {
 
 func (c peerCreds) Clone() credentials.TransportCredentials { return c }
 
-// peerUID extracts the calling peer's kernel-authenticated uid set by
+// peerID extracts the calling peer's kernel-authenticated identity set by
 // peerCreds during ServerHandshake. ok is false whenever it is not known —
-// no peer in ctx, a foreign AuthInfo implementation, or a nil UID — never a
+// no peer in ctx, a foreign AuthInfo implementation, or a nil ID — never a
 // client-controlled value.
-func peerUID(ctx context.Context) (uint32, bool) {
+func peerID(ctx context.Context) (string, bool) {
 	p, ok := peer.FromContext(ctx)
 	if !ok {
-		return 0, false
+		return "", false
 	}
 	auth, ok := p.AuthInfo.(peerAuth)
-	if !ok || auth.UID == nil {
-		return 0, false
+	if !ok || auth.ID == nil {
+		return "", false
 	}
-	return *auth.UID, true
+	return *auth.ID, true
 }

@@ -4,6 +4,9 @@ go_library(
     name = "socket",
     srcs = [
         "operator.go",
+        "operator_darwin.go",
+        "operator_other.go",
+        "operator_windows.go",
         "peercred.go",
         "peercred_darwin.go",
         "peercred_other.go",
@@ -38,6 +41,9 @@ go_library(
         "@rules_go//go/platform:ios": [
             "@org_golang_x_sys//unix",
         ],
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
         "//conditions:default": [],
     }),
 )
@@ -46,6 +52,7 @@ go_test(
     name = "socket_test",
     srcs = [
         "operator_test.go",
+        "operator_windows_test.go",
         "peercred_test.go",
         "registry_test.go",
         "revocation_test.go",

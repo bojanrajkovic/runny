@@ -139,6 +139,57 @@ func TestInjectedKeyOperatorUIDRoundTrip(t *testing.T) {
 	}
 }
 
+// TestInjectedKeyDarwinBytesUnchanged pins the exact darwin disk bytes: a
+// uid-shaped entry (no SID identity) must marshal to the same JSON it did
+// before the operator_sid field existed — the additive-only compatibility
+// contract for cycle.json and operator-access.json.
+func TestInjectedKeyDarwinBytesUnchanged(t *testing.T) {
+	uid := uint32(503)
+	k := InjectedKey{
+		Fingerprint:  "SHA256:abc",
+		Injected:     time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC),
+		Outcome:      "ok",
+		State:        "DEBUG",
+		OperatorUID:  &uid,
+		OperatorUser: "bob",
+	}
+	data, err := json.Marshal(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"fingerprint":"SHA256:abc","injected":"2026-07-22T12:00:00Z","outcome":"ok","state":"DEBUG","operator_uid":503,"operator_user":"bob"}`
+	if string(data) != want {
+		t.Errorf("darwin-shaped InjectedKey bytes changed:\n got %s\nwant %s", data, want)
+	}
+}
+
+// TestInjectedKeyOperatorSIDRoundTrip pins the Windows identity shape: a
+// SID-shaped entry carries operator_sid with no fabricated operator_uid, and
+// survives the disk round-trip.
+func TestInjectedKeyOperatorSIDRoundTrip(t *testing.T) {
+	s := Store{SlotDir: filepath.Join(t.TempDir(), "runner-1")}
+	base := time.Date(2026, 6, 9, 22, 0, 0, 0, time.UTC)
+	const sid = "S-1-5-21-1111111111-2222222222-3333333333-1001"
+	rec := record("runner-1", "key00003", base, ResultFailure)
+	rec.InjectedKeys = []InjectedKey{
+		{Fingerprint: "SHA256:abc", Injected: base, Outcome: "ok", State: "DEBUG", OperatorSID: sid, OperatorUser: `CORP\bob`},
+	}
+	if err := s.Write(rec); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	recs, err := s.Recent(1, "")
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("Recent: %v, %d", err, len(recs))
+	}
+	got := recs[0].InjectedKeys
+	if len(got) != 1 || got[0].OperatorSID != sid || got[0].OperatorUser != `CORP\bob` {
+		t.Errorf("operator sid/user did not round-trip: %+v", got)
+	}
+	if got[0].OperatorUID != nil {
+		t.Errorf("sid-shaped entry fabricated operator_uid=%d, want nil", *got[0].OperatorUID)
+	}
+}
+
 func TestOldCycleJSONLoads(t *testing.T) {
 	// A cycle.json written before issue #39 (no injected_keys/operator_keys)
 	// must unmarshal unchanged.

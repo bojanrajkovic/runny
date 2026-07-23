@@ -10,8 +10,8 @@ import (
 	"net"
 	"os"
 	"os/user"
-	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -166,6 +166,86 @@ func TestRecordToProtoCarriesOperatorUID(t *testing.T) {
 	}
 }
 
+// TestRecordToProtoCarriesOperatorSID pins the sid half of the identity
+// pair on the wire: a sid-shaped entry carries operator_sid with no
+// fabricated operator_uid has-bit, mirroring the disk record.
+func TestRecordToProtoCarriesOperatorSID(t *testing.T) {
+	const sid = "S-1-5-21-1111111111-2222222222-3333333333-1001"
+	r := &cycle.Record{
+		CycleID: "abcd1234", Slot: "mac-1",
+		InjectedKeys: []cycle.InjectedKey{
+			{Fingerprint: "SHA256:abc", Outcome: "ok", State: "DEBUG", OperatorSID: sid, OperatorUser: `CORP\bob`},
+		},
+	}
+	got := recordToProto(r).GetInjectedKeys()
+	if len(got) != 1 || got[0].GetOperatorSid() != sid || got[0].GetOperatorUser() != `CORP\bob` {
+		t.Errorf("operator sid/user dropped: %+v", got)
+	}
+	if got[0].OperatorUid != nil {
+		t.Errorf("sid-shaped entry fabricated operator_uid=%d, want nil", *got[0].OperatorUid)
+	}
+}
+
+// TestSplitIdentity pins the one shared numeric-vs-SID fan-out every stamp
+// site relies on: numeric identities land in the legacy uint32 uid field
+// (darwin records unchanged), everything else — including numeric strings
+// too large for uint32, which no darwin uid is — lands in the sid field,
+// and an unknown ("") identity sets neither.
+func TestSplitIdentity(t *testing.T) {
+	const sid = "S-1-5-21-1111111111-2222222222-3333333333-1001"
+	uid503, uid0 := uint32(503), uint32(0)
+	cases := []struct {
+		id      string
+		wantUID *uint32
+		wantSID string
+	}{
+		{"503", &uid503, ""},
+		{"0", &uid0, ""},
+		{sid, nil, sid},
+		{"4294967296", nil, "4294967296"}, // too large for uint32: lossless sid-shaped fallback
+		{"", nil, ""},
+	}
+	for _, c := range cases {
+		uid, gotSID := splitIdentity(c.id)
+		if gotSID != c.wantSID {
+			t.Errorf("splitIdentity(%q) sid = %q, want %q", c.id, gotSID, c.wantSID)
+		}
+		switch {
+		case (uid == nil) != (c.wantUID == nil):
+			t.Errorf("splitIdentity(%q) uid = %v, want %v", c.id, uid, c.wantUID)
+		case uid != nil && *uid != *c.wantUID:
+			t.Errorf("splitIdentity(%q) uid = %d, want %d", c.id, *uid, *c.wantUID)
+		}
+	}
+}
+
+// TestLatestGrantMatchesAcrossShapes pins latestGrant's read contract: it
+// matches on the platform-native identity, reading whichever field a record
+// carries — old uid-shaped darwin records and sid-shaped Windows records
+// join to the same operator list without either shape shadowing the other.
+func TestLatestGrantMatchesAcrossShapes(t *testing.T) {
+	const sid = "S-1-5-21-1111111111-2222222222-3333333333-1001"
+	base := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	grants := []home.OperatorGrant{
+		{Action: "grant", ByUser: "brajkovic", TargetUID: 503, TargetUser: "alice", At: base},
+		{Action: "grant", ByUser: "brajkovic", TargetUID: 503, TargetUser: "alice", At: base.Add(time.Hour)},
+		{Action: "grant", ByUser: `CORP\bob`, TargetSID: sid, TargetUser: `CORP\carol`, At: base},
+		{Action: "revoke", ByUser: "brajkovic", TargetUID: 504, TargetUser: "dave", At: base},
+	}
+	if g := latestGrant(grants, "503"); g == nil || !g.At.Equal(base.Add(time.Hour)) {
+		t.Errorf("uid-shaped identity: got %+v, want the later grant record", g)
+	}
+	if g := latestGrant(grants, sid); g == nil || g.ByUser != `CORP\bob` {
+		t.Errorf("sid-shaped identity: got %+v, want CORP\\bob's grant", g)
+	}
+	if g := latestGrant(grants, "504"); g != nil {
+		t.Errorf("a revoke record must not count as a grant: got %+v", g)
+	}
+	if g := latestGrant(grants, "999"); g != nil {
+		t.Errorf("unknown identity must have no grant: got %+v", g)
+	}
+}
+
 // TestRecordToProtoCarriesEnding pins that the ending classification
 // (issue #229) survives the disk→wire conversion `runnyctl why` reads.
 func TestRecordToProtoCarriesEnding(t *testing.T) {
@@ -180,24 +260,24 @@ func TestRecordToProtoCarriesEnding(t *testing.T) {
 // goroutine plumbing delivers a fast local resolution well within its
 // timeout, rather than always falling through to the "" timeout path.
 func TestLookupUsernameResolvesQuickly(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("os.Getuid() is always -1 on windows — there's no real uid to resolve, and readPeerUID (peercred_other.go) never produces one there either")
-	}
-	got := lookupUsername(uint32(os.Getuid()))
+	// user.Current().Uid is the platform-native identity string on every
+	// platform (decimal uid on unix, SID on windows), so this exercises the
+	// real per-platform LookupId path everywhere.
 	want, err := user.Current()
 	if err != nil {
 		t.Skipf("user.Current unavailable in this environment: %v", err)
 	}
+	got := lookupUsername(want.Uid)
 	if got != want.Username {
-		t.Errorf("lookupUsername(%d) = %q, want %q", os.Getuid(), got, want.Username)
+		t.Errorf("lookupUsername(%q) = %q, want %q", want.Uid, got, want.Username)
 	}
 }
 
 // TestNewOperatorGateRequiresPeerCredSupport pins that an armed request only
 // actually arms the gate on a platform with a real peer-identity read
 // (peerCredSupported) -- arming it anywhere else would deny every RPC
-// outright (peerUID never resolves, and the gate fails closed on an
-// unreadable uid by design), so newOperatorGate degrades to nil
+// outright (peerID never resolves, and the gate fails closed on an
+// unreadable identity by design), so newOperatorGate degrades to nil
 // (pass-through, the socket-is-the-sole-gate baseline) instead.
 func TestNewOperatorGateRequiresPeerCredSupport(t *testing.T) {
 	g := newOperatorGate(true, t.TempDir())
@@ -210,10 +290,11 @@ func TestNewOperatorGateRequiresPeerCredSupport(t *testing.T) {
 	}
 }
 
-// TestLookupUsernameUnknownUIDIsEmpty pins the existing best-effort fallback:
-// a uid with no matching account resolves to "", not an error or a hang.
-func TestLookupUsernameUnknownUIDIsEmpty(t *testing.T) {
-	if got := lookupUsername(4294967295); got != "" {
+// TestLookupUsernameUnknownIDIsEmpty pins the existing best-effort fallback:
+// an identity with no matching account resolves to "", not an error or a
+// hang.
+func TestLookupUsernameUnknownIDIsEmpty(t *testing.T) {
+	if got := lookupUsername("4294967295"); got != "" {
 		t.Errorf("lookupUsername(unknown) = %q, want empty", got)
 	}
 }
@@ -236,12 +317,12 @@ func TestLookupUsernameCapsStuckGoroutines(t *testing.T) {
 
 	// First call: the goroutine blocks past usernameLookupBound, so the call
 	// returns "" but the underlying lookup is still stuck holding the slot.
-	if got := lookupUsername(501); got != "" {
+	if got := lookupUsername("501"); got != "" {
 		t.Errorf("first (stuck) call = %q, want empty (times out)", got)
 	}
 
 	// While stuck, a second call must NOT spawn another lookupID goroutine.
-	if got := lookupUsername(502); got != "" {
+	if got := lookupUsername("502"); got != "" {
 		t.Errorf("second call while stuck = %q, want empty (slot occupied)", got)
 	}
 	if n := calls.Load(); n != 1 {
@@ -255,7 +336,7 @@ func TestLookupUsernameCapsStuckGoroutines(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	var got string
 	for time.Now().Before(deadline) {
-		if got = lookupUsername(503); got == "resolved" {
+		if got = lookupUsername("503"); got == "resolved" {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -1026,7 +1107,13 @@ func captureDaemonLog(t *testing.T) *logring.Ring {
 // caller authenticated over the real socket with this uid. Lives here (not
 // the darwin-gated operator_test.go) so portable tests can use it too.
 func asOperator(ctx context.Context, uid uint32) context.Context {
-	return peer.NewContext(ctx, &peer.Peer{AuthInfo: peerAuth{UID: &uid}})
+	return asOperatorID(ctx, strconv.FormatUint(uint64(uid), 10))
+}
+
+// asOperatorID is asOperator for a raw platform-native identity string — a
+// SID-shaped identity, or a pre-formatted uid.
+func asOperatorID(ctx context.Context, id string) context.Context {
+	return peer.NewContext(ctx, &peer.Peer{AuthInfo: peerAuth{ID: &id}})
 }
 
 // stubUsername makes lookupUsername resolve every uid to name for the test.
@@ -1069,17 +1156,17 @@ func wantOperatorLine(t *testing.T, ring *logring.Ring, msg string, attrs map[st
 }
 
 // TestOperatorIdentityDistinguishesUnknownFromRoot pins the has-bit at the
-// shared resolver: an unreadable peer cred yields a nil uid — never a
-// fabricated 0 that grant attribution would record as root — while a real
-// uid-0 peer resolves to a non-nil 0 with its username.
+// shared resolver: an unreadable peer cred yields an empty identity — never
+// a fabricated "0" that grant attribution would record as root — while a
+// real uid-0 peer resolves to "0" with its username.
 func TestOperatorIdentityDistinguishesUnknownFromRoot(t *testing.T) {
 	stubUsername(t, "root")
-	if uid, user := operatorIdentity(t.Context()); uid != nil || user != "" {
-		t.Errorf("no peer cred: got uid=%v user=%q, want nil/empty", uid, user)
+	if id, user := operatorIdentity(t.Context()); id != "" || user != "" {
+		t.Errorf("no peer cred: got id=%q user=%q, want empty/empty", id, user)
 	}
-	uid, user := operatorIdentity(asOperator(t.Context(), 0))
-	if uid == nil || *uid != 0 || user != "root" {
-		t.Errorf("root peer: got uid=%v user=%q, want &0/root", uid, user)
+	id, user := operatorIdentity(asOperator(t.Context(), 0))
+	if id != "0" || user != "root" {
+		t.Errorf("root peer: got id=%q user=%q, want \"0\"/root", id, user)
 	}
 }
 

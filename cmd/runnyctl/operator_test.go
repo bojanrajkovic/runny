@@ -21,6 +21,7 @@ type fakeOperatorClient struct {
 	revoked  *runnyv1.RevokeOperatorRequest
 	grantErr error
 	revoked1 error
+	mut      *runnyv1.OperatorMutation // overrides the default uid-502 mutation when set
 	list     *runnyv1.ListOperatorsResponse
 	listErr  error
 }
@@ -30,6 +31,9 @@ func (f *fakeOperatorClient) GrantOperator(_ context.Context, req *runnyv1.Grant
 	if f.grantErr != nil {
 		return nil, f.grantErr
 	}
+	if f.mut != nil {
+		return f.mut, nil
+	}
 	return &runnyv1.OperatorMutation{Uid: 502, User: req.GetUser()}, nil
 }
 
@@ -37,6 +41,9 @@ func (f *fakeOperatorClient) RevokeOperator(_ context.Context, req *runnyv1.Revo
 	f.revoked = req
 	if f.revoked1 != nil {
 		return nil, f.revoked1
+	}
+	if f.mut != nil {
+		return f.mut, nil
 	}
 	return &runnyv1.OperatorMutation{Uid: 502, User: req.GetUser()}, nil
 }
@@ -60,6 +67,23 @@ func TestOperatorGrantRendersConfirmation(t *testing.T) {
 	}
 	if got := buf.String(); got != "granted alice (uid 502) — reachable on the control socket now\n" {
 		t.Errorf("output = %q", got)
+	}
+}
+
+// TestOperatorGrantRendersSIDConfirmation pins the Windows shape: a
+// SID-identified mutation renders the daemon-resolved DOMAIN\name with the
+// SID where a darwin confirmation shows "(uid N)".
+func TestOperatorGrantRendersSIDConfirmation(t *testing.T) {
+	const sid = "S-1-5-21-1111111111-2222222222-3333333333-1001"
+	var buf bytes.Buffer
+	f := &fakeOperatorClient{mut: &runnyv1.OperatorMutation{User: `CORP\alice`, Sid: sid}}
+	c := &ctl{client: f, out: &buf}
+	if err := c.operatorGrant(t.Context(), `CORP\alice`); err != nil {
+		t.Fatalf("operatorGrant: %v", err)
+	}
+	want := `granted CORP\alice (` + sid + `) — reachable on the control socket now` + "\n"
+	if got := buf.String(); got != want {
+		t.Errorf("output = %q, want %q", got, want)
 	}
 }
 
@@ -106,6 +130,31 @@ func TestOperatorListRendersTable(t *testing.T) {
 	}
 	if !strings.Contains(out, "alice") || !strings.Contains(out, "2026-06-20") {
 		t.Errorf("granted operator missing attribution:\n%s", out)
+	}
+}
+
+// TestOperatorListRendersSIDIdentity pins the Windows list shape: a
+// SID-identified operator renders its full SID in the identity column,
+// alongside the daemon-resolved account name, with attribution intact.
+func TestOperatorListRendersSIDIdentity(t *testing.T) {
+	const sid = "S-1-5-21-1111111111-2222222222-3333333333-1001"
+	when := time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC)
+	f := &fakeOperatorClient{list: &runnyv1.ListOperatorsResponse{
+		Operators: []*runnyv1.Operator{
+			{Sid: sid, User: `CORP\alice`, GrantedBy: `CORP\bob`, GrantedAt: timestamppb.New(when)},
+		},
+	}}
+	var buf bytes.Buffer
+	c := &ctl{client: f, out: &buf}
+	if err := c.operatorList(t.Context()); err != nil {
+		t.Fatalf("operatorList: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, sid) || !strings.Contains(out, `CORP\alice`) {
+		t.Errorf("sid identity not rendered:\n%s", out)
+	}
+	if !strings.Contains(out, `CORP\bob`) || !strings.Contains(out, "2026-07-22") {
+		t.Errorf("attribution lost for a sid-identified operator:\n%s", out)
 	}
 }
 

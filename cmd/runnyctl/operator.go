@@ -3,9 +3,21 @@ package main
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
 )
+
+// operatorIDDisplay renders a mutation/list entry's platform-native
+// identity: darwin's numeric shape keeps its "uid N" wording; a Windows SID
+// renders verbatim (the daemon already resolved the account name beside it,
+// so the SID is the identity, not a puzzle for the reader).
+func operatorIDDisplay(uid uint32, sid string) string {
+	if sid != "" {
+		return sid
+	}
+	return fmt.Sprintf("uid %d", uid)
+}
 
 func (c *ctl) operatorGrant(ctx context.Context, user string) error {
 	resp, err := c.client.GrantOperator(ctx, &runnyv1.GrantOperatorRequest{User: user})
@@ -15,7 +27,8 @@ func (c *ctl) operatorGrant(ctx context.Context, user string) error {
 	if c.json {
 		return c.emit(resp)
 	}
-	fmt.Fprintf(c.out, "granted %s (uid %d) — reachable on the control socket now\n", resp.GetUser(), resp.GetUid())
+	fmt.Fprintf(c.out, "granted %s (%s) — reachable on the control socket now\n",
+		resp.GetUser(), operatorIDDisplay(resp.GetUid(), resp.GetSid()))
 	return nil
 }
 
@@ -27,7 +40,8 @@ func (c *ctl) operatorRevoke(ctx context.Context, user string) error {
 	if c.json {
 		return c.emit(resp)
 	}
-	fmt.Fprintf(c.out, "revoked %s (uid %d) — new connections refused immediately\n", resp.GetUser(), resp.GetUid())
+	fmt.Fprintf(c.out, "revoked %s (%s) — new connections refused immediately\n",
+		resp.GetUser(), operatorIDDisplay(resp.GetUid(), resp.GetSid()))
 	return nil
 }
 
@@ -44,8 +58,15 @@ func (c *ctl) operatorList(ctx context.Context) error {
 		fmt.Fprintln(c.out, "no operators granted")
 		return nil
 	}
-	fmt.Fprintf(c.out, "%-10s %-5s %-12s %s\n", "USER", "UID", "GRANTED BY", "WHEN")
+	fmt.Fprintf(c.out, "%-10s %-5s %-12s %s\n", "USER", "ID", "GRANTED BY", "WHEN")
 	for _, op := range ops {
+		// The identity column carries whichever shape the daemon minted: a
+		// decimal uid (darwin) or the full SID (Windows) — no truncation, an
+		// audit surface reads exactly.
+		id := op.GetSid()
+		if id == "" {
+			id = strconv.FormatUint(uint64(op.GetUid()), 10)
+		}
 		grantedBy := op.GetGrantedBy()
 		when := ""
 		if at := op.GetGrantedAt(); at != nil {
@@ -63,7 +84,7 @@ func (c *ctl) operatorList(ctx context.Context) error {
 				grantedBy = "(unknown)"
 			}
 		}
-		fmt.Fprintf(c.out, "%-10s %-5d %-12s %s\n", op.GetUser(), op.GetUid(), grantedBy, when)
+		fmt.Fprintf(c.out, "%-10s %-5s %-12s %s\n", op.GetUser(), id, grantedBy, when)
 	}
 	return nil
 }

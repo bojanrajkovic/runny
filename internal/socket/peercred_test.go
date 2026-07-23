@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -29,12 +30,12 @@ func shortSocketDir(t *testing.T) string {
 	return dir
 }
 
-// TestPeerCredsCarriesUIDOverRealSocket proves the platform chain end to end:
+// TestPeerCredsCarriesIdentityOverRealSocket proves the platform chain end to end:
 // a real unix socket (bufconn has no fd, so SyscallConn().Control has nothing
 // to read), the server installed with peerCreds, and an insecure client (the
 // one every runny client actually is) still completing the handshake and
 // landing the caller's uid in the RPC context.
-func TestPeerCredsCarriesUIDOverRealSocket(t *testing.T) {
+func TestPeerCredsCarriesIdentityOverRealSocket(t *testing.T) {
 	sock := filepath.Join(shortSocketDir(t), "s.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
@@ -83,46 +84,51 @@ func TestPeerCredsCarriesUIDOverRealSocket(t *testing.T) {
 	}
 
 	// The stub always reports "unknown" on non-darwin; darwin must resolve
-	// the real connecting uid (this test process's own).
+	// the real connecting uid (this test process's own), formatted as
+	// os/user.User.Uid's decimal string.
 	if runtime.GOOS != "darwin" {
-		if auth.UID != nil {
-			t.Errorf("non-darwin stub must report unknown, got uid %d", *auth.UID)
+		if auth.ID != nil {
+			t.Errorf("non-darwin stub must report unknown, got id %q", *auth.ID)
 		}
 		return
 	}
-	if auth.UID == nil {
-		t.Fatal("darwin must read the peer uid, got unknown")
+	if auth.ID == nil {
+		t.Fatal("darwin must read the peer identity, got unknown")
 	}
-	if *auth.UID != uint32(os.Getuid()) {
-		t.Errorf("uid = %d, want this process's uid %d", *auth.UID, os.Getuid())
+	if want := strconv.Itoa(os.Getuid()); *auth.ID != want {
+		t.Errorf("id = %q, want this process's uid %q", *auth.ID, want)
 	}
 }
 
-func TestPeerUID(t *testing.T) {
-	uid, ok := peerUID(t.Context())
+func TestPeerID(t *testing.T) {
+	id, ok := peerID(t.Context())
 	if ok {
-		t.Errorf("no peer in context: expected unknown, got uid %d", uid)
+		t.Errorf("no peer in context: expected unknown, got id %q", id)
 	}
 
-	want := uint32(42)
-	ctx := peer.NewContext(t.Context(), &peer.Peer{AuthInfo: peerAuth{UID: &want}})
-	if uid, ok := peerUID(ctx); !ok || uid != 42 {
-		t.Errorf("peerUID = (%d, %v), want (42, true)", uid, ok)
+	// Both identity shapes pass through verbatim: a darwin decimal uid and a
+	// Windows SID are opaque strings to the transport layer.
+	for _, want := range []string{"42", "S-1-5-21-1111111111-2222222222-3333333333-1001"} {
+		w := want
+		ctx := peer.NewContext(t.Context(), &peer.Peer{AuthInfo: peerAuth{ID: &w}})
+		if id, ok := peerID(ctx); !ok || id != want {
+			t.Errorf("peerID = (%q, %v), want (%q, true)", id, ok, want)
+		}
 	}
 
-	ctx = peer.NewContext(t.Context(), &peer.Peer{AuthInfo: peerAuth{UID: nil}})
-	if _, ok := peerUID(ctx); ok {
-		t.Error("nil UID must report unknown")
+	ctx := peer.NewContext(t.Context(), &peer.Peer{AuthInfo: peerAuth{ID: nil}})
+	if _, ok := peerID(ctx); ok {
+		t.Error("nil ID must report unknown")
 	}
 
 	ctx = peer.NewContext(t.Context(), &peer.Peer{AuthInfo: otherAuthInfo{}})
-	if _, ok := peerUID(ctx); ok {
+	if _, ok := peerID(ctx); ok {
 		t.Error("a non-peerAuth AuthInfo must report unknown, not panic or misread")
 	}
 }
 
 // otherAuthInfo is a stand-in for some OTHER credentials.AuthInfo
-// implementation, to prove peerUID's type assertion fails closed rather than
+// implementation, to prove peerID's type assertion fails closed rather than
 // panicking or misreading foreign auth info.
 type otherAuthInfo struct{ credentials.CommonAuthInfo }
 

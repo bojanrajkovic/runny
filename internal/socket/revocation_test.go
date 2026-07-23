@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 
@@ -39,17 +38,15 @@ func newGateTestHome(t *testing.T) (homeDir string, g *operatorGate) {
 	return homeDir, newOperatorGate(true, homeDir)
 }
 
-func granteeUID(t *testing.T) uint32 {
+// granteeID returns testGrantee1's platform-native identity string —
+// exactly what the peer-cred read and the ACL read both traffic in.
+func granteeID(t *testing.T) string {
 	t.Helper()
 	u, err := user.Lookup(testGrantee1)
 	if err != nil {
 		t.Skipf("test principal %q not present on this host: %v", testGrantee1, err)
 	}
-	uid, err := strconv.ParseUint(u.Uid, 10, 32)
-	if err != nil {
-		t.Fatalf("parsing uid %q: %v", u.Uid, err)
-	}
-	return uint32(uid)
+	return u.Uid
 }
 
 func grantSock(homeDir string) string { return filepath.Join(homeDir, "runnyd.sock") }
@@ -65,7 +62,7 @@ func TestOperatorGateUnarmedWhenNotSystemDaemon(t *testing.T) {
 
 // TestOperatorGateRootAlwaysPasses pins that uid 0 bypasses the ACL check
 // entirely (root bypasses the socket's 0600 mode by design and holds no
-// ACE, so it can never appear in ListUIDs).
+// ACE, so it can never appear in ListIDs).
 func TestOperatorGateRootAlwaysPasses(t *testing.T) {
 	_, g := newGateTestHome(t)
 	ctx := asOperator(t.Context(), 0)
@@ -90,8 +87,8 @@ func TestOperatorGateUnknownUIDDenied(t *testing.T) {
 // is never consulted.
 func TestOperatorGateUnaryDeniesPostRevoke(t *testing.T) {
 	homeDir, g := newGateTestHome(t)
-	uid := granteeUID(t)
-	ctx := asOperator(t.Context(), uid)
+	id := granteeID(t)
+	ctx := asOperatorID(t.Context(), id)
 
 	actx, cancel := bounded.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -143,8 +140,8 @@ func (f *fakeServerStream) RecvMsg(m any) error          { return nil }
 // letting the handler's nil (a silent clean close) reach the client.
 func TestOperatorGateStreamKilledOnRevoke(t *testing.T) {
 	homeDir, g := newGateTestHome(t)
-	uid := granteeUID(t)
-	ctx := asOperator(t.Context(), uid)
+	id := granteeID(t)
+	ctx := asOperatorID(t.Context(), id)
 
 	actx, cancel := bounded.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -171,7 +168,7 @@ func TestOperatorGateStreamKilledOnRevoke(t *testing.T) {
 	if err := opacl.Revoke(actx, homeDir, grantSock(homeDir), testGrantee1); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	g.killStreams(uid)
+	g.killStreams(id)
 
 	select {
 	case err := <-errCh:
@@ -190,8 +187,7 @@ func TestOperatorGateStreamKilledOnRevoke(t *testing.T) {
 // on later for a reused id.
 func TestOperatorGateStreamDeregistersOnDenial(t *testing.T) {
 	_, g := newGateTestHome(t) // fresh ACL, testGrantee1 never granted
-	uid := granteeUID(t)
-	ctx := asOperator(t.Context(), uid)
+	ctx := asOperatorID(t.Context(), granteeID(t))
 
 	handler := func(srv any, stream grpc.ServerStream) error {
 		t.Fatal("handler invoked for a stream that should have been denied")
@@ -212,10 +208,10 @@ func TestOperatorGateStreamDeregistersOnDenial(t *testing.T) {
 // live socket) aren't atomic. If the first succeeds and the second fails,
 // mutateOperator used to skip killStreams entirely (gated behind apply
 // returning nil) — so the revoked uid's *next* RPC was already denied (the
-// home dir ACL, the one checkUID reads, was genuinely mutated) while any of
+// home dir ACL, the one checkID reads, was genuinely mutated) while any of
 // its already-open streams lingered forever, the exact bug this whole
 // change exists to close. mutateOperator now re-checks ground truth via
-// ListUIDs after apply, regardless of apply's error, and kills on that.
+// ListIDs after apply, regardless of apply's error, and kills on that.
 func TestMutateOperatorKillsStreamsOnPartialRevokeFailure(t *testing.T) {
 	requireGrantees(t)
 	s := newOperatorTestServer(t)
@@ -228,8 +224,7 @@ func TestMutateOperatorKillsStreamsOnPartialRevokeFailure(t *testing.T) {
 		t.Fatalf("grant 2 (so revoke isn't also the last-operator case): %v", err)
 	}
 
-	uid := granteeUID(t)
-	streamCtx := asOperator(t.Context(), uid)
+	streamCtx := asOperatorID(t.Context(), granteeID(t))
 	ss := &fakeServerStream{ctx: streamCtx}
 	handlerEntered := make(chan struct{})
 	handler := func(srv any, stream grpc.ServerStream) error {

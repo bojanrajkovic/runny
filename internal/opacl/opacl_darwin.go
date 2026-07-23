@@ -60,7 +60,6 @@ import "C"
 import (
 	"fmt"
 	"os/exec"
-	"os/user"
 	"strconv"
 	"strings"
 	"unsafe"
@@ -68,23 +67,24 @@ import (
 	"github.com/bojanrajkovic/runny/internal/bounded"
 )
 
-// maxACLOperators bounds the ALLOW-user entries List/ListUIDs reads back
+// maxACLOperators bounds the ALLOW-user entries List/ListIDs reads back
 // from one ACL: a bounded stack buffer, not a per-daemon operator-count
 // limit anyone is expected to approach. Entries beyond this are silently
 // dropped (read_acl_allow_uids has no overflow signal), which used to only
-// affect List's display output but now also feeds ListUIDs's per-RPC
+// affect List's display output but now also feeds ListIDs's per-RPC
 // authorization check (internal/socket/revocation.go) — sized generously
 // (healthy magnitude × a wide margin, not the sum of any real deployment's
 // expected grant count) as a stopgap against that; a real fix would make
 // truncation an explicit, loud error instead of a silent undercount.
 const maxACLOperators = 1024
 
-// ListUIDs reads homeDir's ACL for ALLOW-user-with-write entries and returns
-// the raw uids, skipping the per-entry user.LookupId resolution List does —
+// ListIDs reads homeDir's ACL for ALLOW-user-with-write entries and returns
+// the raw uids as decimal strings (os/user.User.Uid's platform-native
+// convention), skipping the per-entry user.LookupId resolution List does —
 // that resolution is display-only and the sole NSS-backed (potentially
 // slow) part of List. The per-RPC revocation gate calls this on every
 // RPC-start, so it must never pay directory-service latency.
-func ListUIDs(homeDir string) ([]uint32, error) {
+func ListIDs(homeDir string) ([]string, error) {
 	cpath := C.CString(homeDir)
 	defer C.free(unsafe.Pointer(cpath))
 	var buf [maxACLOperators]C.uint32_t
@@ -92,31 +92,11 @@ func ListUIDs(homeDir string) ([]uint32, error) {
 	if n < 0 {
 		return nil, nil // no ACL, or unreadable: no operators
 	}
-	uids := make([]uint32, n)
+	ids := make([]string, n)
 	for i := 0; i < n; i++ {
-		uids[i] = uint32(buf[i])
+		ids[i] = strconv.FormatUint(uint64(buf[i]), 10)
 	}
-	return uids, nil
-}
-
-// List reads homeDir's ACL for ALLOW-user entries — the authoritative,
-// durable operator set — via ListUIDs, resolving each uid to a username
-// best-effort (an unresolvable uid still appears, with an empty User).
-// Validated against a real chmod +a grant by the aclprobe spike.
-func List(homeDir string) ([]Operator, error) {
-	uids, err := ListUIDs(homeDir)
-	if err != nil {
-		return nil, err
-	}
-	ops := make([]Operator, 0, len(uids))
-	for _, uid := range uids {
-		name := ""
-		if u, err := user.LookupId(strconv.FormatUint(uint64(uid), 10)); err == nil {
-			name = u.Username
-		}
-		ops = append(ops, Operator{UID: uid, User: name})
-	}
-	return ops, nil
+	return ids, nil
 }
 
 // Grant adds an inheriting operator ACE for username to homeDir (so every

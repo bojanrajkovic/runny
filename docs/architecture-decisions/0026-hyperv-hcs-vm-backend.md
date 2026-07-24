@@ -164,8 +164,8 @@ never a bare `Permanent` pre-commit.
 ### Windows guests
 
 The compute-system document is otherwise identical; the guest OS only changes
-one field, `Chipset.Uefi.SecureBootTemplateId`
-(`secureBootTemplateFor`/`hcs_windows.go`): the Windows Secure Boot template GUID
+one field, `Chipset.Uefi.SecureBootTemplateId` (`HCSManager.Boot`/
+`hcs_windows.go`): the Windows Secure Boot template GUID
 `1734c6e8-3154-4dda-ba5f-a874cc483422` in place of the Linux-shim anchor above.
 `WaitIP` also branches (`waitIPLinux`/`waitIPWindows`): a Windows guest never
 hits the Linux path's hv_netvsc/netplan naming mismatch, so its `Permanent`

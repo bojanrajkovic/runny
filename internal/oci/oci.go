@@ -128,7 +128,7 @@ type descriptor struct {
 	MediaType   string            `json:"mediaType"`
 	Digest      string            `json:"digest"`
 	Size        int64             `json:"size"`
-	Annotations map[string]string `json:"annotations"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 func (d descriptor) uncompressedSize() (int64, error) {

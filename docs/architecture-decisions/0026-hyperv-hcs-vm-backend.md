@@ -19,8 +19,11 @@ real lease for Windows, because Windows never hits that mismatch. So
 `WaitIP` needs no grace period and no console fixup on the Windows path;
 `permanentLeaseIP` (`internal/vm/neighbortable.go`) is the pure selector,
 mirroring `learnedLeaseIP`'s determinism for the (unobserved, but
-theoretically possible) multiple-Permanent-row case. See the Decision and
-Consequences sections below, updated in place.
+theoretically possible) multiple-Permanent-row case. `Bundle.LoadConfig`
+accepts both `windows/amd64` and `windows/arm64` — arch validation stays
+`checkHostArch`'s job, not a per-OS hardcode (Context Q4's existing
+reasoning, now applied to Windows guests too, not just Linux). See the
+Decision and Consequences sections below, updated in place.
 
 **Amended:** 2026-07-23 — `WaitIP`'s IP *source* is corrected. The host neighbor
 table's `Permanent` row is HNS's pre-commit, written at endpoint-attach before
@@ -109,8 +112,12 @@ cross-emulates architectures (Rosetta 2 translates *userspace binaries* inside a
 already-booted arm64 Linux guest; it does not let VZ boot an x86_64 kernel), so the
 real constraint is host-relative — a guest's arch must equal the process's own
 `runtime.GOARCH`. `Bundle.LoadConfig` stays a portable, host-independent shape check
-(`{darwin+arm64, linux+arm64, linux+amd64, windows+amd64}`); each platform's own
-`Boot` adds the host-capability rejection against its own `runtime.GOARCH`.
+(`{darwin+arm64, linux+arm64, linux+amd64, windows+arm64, windows+amd64}`); each
+platform's own `Boot` adds the host-capability rejection against its own
+`runtime.GOARCH`. Windows guests follow the exact same rule as Linux guests here —
+both arches accepted by `LoadConfig`, the real host-capability gate left entirely to
+`checkHostArch` — not the `windows ⇒ amd64` hardcoding this section opens by
+rejecting.
 
 ## Decision
 
@@ -168,7 +175,11 @@ pre-commit row genuinely is the guest's real lease — a from-scratch spike
 no learned-row distinction, no console fixup. This is a guest-OS-conditional
 trust decision, not a reopening of Q1's "never trust `Permanent`" finding —
 that finding is specific to the Linux image's netplan behavior, which the
-Windows path never exercises.
+Windows path never exercises. The spike validated this on windows/amd64 only;
+windows/arm64 is accepted by `LoadConfig` on the same "real but currently
+unvalidated target" footing as linux/arm64 (Context Q4) — nothing about the
+mechanism (HNS's own DHCP pre-commit) is arch-specific, but re-confirm on
+arm64 hardware before leaning on that extrapolation for something load-bearing.
 
 ## Consequences
 

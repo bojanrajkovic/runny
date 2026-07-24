@@ -31,9 +31,9 @@ var (
 	// ErrUnsupportedDiskFormat: ASIF (macOS 26 tart) is rejected until vz
 	// attachment support is verified — a clear error beats a hung boot.
 	ErrUnsupportedDiskFormat = errors.New("unsupported disk format (only raw is supported)")
-	// ErrUnsupportedGuest rejects any (OS, Arch) shape outside
-	// darwin/arm64, linux/arm64, linux/amd64, or windows/amd64 — see LoadConfig.
-	ErrUnsupportedGuest = errors.New("bundle is not a darwin/arm64, linux/arm64, linux/amd64, or windows/amd64 guest")
+	// ErrUnsupportedGuest rejects any (OS, Arch) shape outside darwin/arm64,
+	// linux/{arm64,amd64}, or windows/{arm64,amd64} — see LoadConfig.
+	ErrUnsupportedGuest = errors.New("bundle is not a darwin/arm64, linux/arm64, linux/amd64, windows/arm64, or windows/amd64 guest")
 )
 
 // Bundle is a tart-format VM bundle directory.
@@ -105,14 +105,18 @@ func (c *Config) ECID() ([]byte, error) {
 // shape check — "is this a bundle my code knows how to interpret at all" —
 // deliberately independent of the host it happens to run on, so it stays
 // portable/testable everywhere. darwin/arm64 boots via VZ's Mac platform;
-// linux/{arm64,amd64} and windows/amd64 all boot via EFI, VZ on darwin/arm64
-// hosts or HCS on Windows hosts respectively. Neither Virtualization.framework
-// nor Hyper-V cross-emulates architectures (Rosetta translates userspace
-// binaries inside an already-booted arm64 Linux guest, it does not let VZ
-// boot an amd64 kernel), so "can THIS host actually boot THIS arch" is a
-// separate, host-capability check each platform's own Manager.Boot makes
-// against its own runtime.GOARCH — not something this portable check can
-// know.
+// linux/{arm64,amd64} and windows/{arm64,amd64} all boot via EFI, VZ on
+// darwin/arm64 hosts or HCS on Windows hosts respectively. Neither
+// Virtualization.framework nor Hyper-V cross-emulates architectures (Rosetta
+// translates userspace binaries inside an already-booted arm64 Linux guest,
+// it does not let VZ boot an amd64 kernel), so "can THIS host actually boot
+// THIS arch" is a separate, host-capability check each platform's own
+// Manager.Boot makes against its own runtime.GOARCH — not something this
+// portable check can know. windows/arm64 is accepted on the same reasoning
+// ADR-0026 already applied to linux/arm64: an arm64 Windows host is a real
+// (if currently unvalidated) Hyper-V target, and hardcoding Windows guests to
+// amd64 here would be a second, needless host-arch opinion this check
+// deliberately doesn't hold for any other OS.
 func (b Bundle) LoadConfig() (*Config, error) {
 	raw, err := os.ReadFile(b.ConfigPath())
 	if err != nil {
@@ -125,7 +129,7 @@ func (b Bundle) LoadConfig() (*Config, error) {
 	switch {
 	case c.OS == "darwin" && c.Arch == "arm64":
 	case c.OS == "linux" && (c.Arch == "arm64" || c.Arch == "amd64"):
-	case c.OS == "windows" && c.Arch == "amd64":
+	case c.OS == "windows" && (c.Arch == "arm64" || c.Arch == "amd64"):
 	default:
 		return nil, fmt.Errorf("%w: %s/%s", ErrUnsupportedGuest, c.OS, c.Arch)
 	}

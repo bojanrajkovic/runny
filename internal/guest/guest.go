@@ -723,11 +723,14 @@ const (
 // it further. Writing the bytes verbatim leaves decoding to the host side,
 // exactly like every POSIX Proc's output already does.
 //
-// The exit-code file's content is guarded by a digits-only regex before
-// `exit` casts it — defense in depth: the 250ms settle-then-redrain before
-// reading it already makes an empty/partial read practically unreachable,
-// but a non-numeric read falls through to another poll rather than crashing
-// the watcher on a bad cast.
+// The exit-code file's content is guarded by an integer regex before `exit`
+// casts it — defense in depth: the 250ms settle-then-redrain before reading
+// it already makes an empty/partial read practically unreachable, but a
+// non-numeric read falls through to another poll rather than crashing the
+// watcher on a bad cast. The sign is part of the match: a crashed process
+// reports a negative 32-bit exit code (an NTSTATUS like -1073741510), and a
+// digits-only guard would loop forever on exactly the exits that most need
+// reporting.
 const watcherScriptWindows = `$log = '` + runnerLogPathWindows + `'
 $exitFile = '` + runnerExitPathWindows + `'
 $pos = 0
@@ -753,7 +756,7 @@ while ($true) {
     Start-Sleep -Milliseconds 250
     Drain
     $code = (Get-Content -Path $exitFile -Raw).Trim()
-    if ($code -match '^\d+$') { exit ([int]$code) }
+    if ($code -match '^-?\d+$') { exit ([int]$code) }
   }
   Start-Sleep -Milliseconds 500
 }

@@ -1331,8 +1331,8 @@ func TestWatcherScriptWindowsContract(t *testing.T) {
 	if !strings.Contains(watcherScriptWindows, "exit ([int]$code)") {
 		t.Error("watcher script must exit with the runner's own exit code")
 	}
-	if !strings.Contains(watcherScriptWindows, `$code -match '^\d+$'`) {
-		t.Error("watcher script must guard the exit-code cast with a digits-only regex")
+	if !strings.Contains(watcherScriptWindows, `$code -match '^-?\d+$'`) {
+		t.Error("watcher script must guard the exit-code cast with an integer regex that accepts negative (crashed-process NTSTATUS) codes")
 	}
 	if strings.Contains(watcherScriptWindows, "[Console]::Out.Write") {
 		t.Error("watcher script must not write through [Console]::Out (OEM codepage re-encoding)")

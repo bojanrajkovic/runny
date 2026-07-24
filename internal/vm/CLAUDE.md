@@ -26,8 +26,10 @@ ADR-0026 for the Hyper-V backend's decisions and why; this doc is sharp edges on
   Microsoft Learn's `MIB_IPNET_ROW2`/`SOCKADDR_INET` pages (cited inline), not
   reconstructed from memory. If Microsoft ever adds fields to either struct,
   re-verify against the current docs before touching offsets.
-- **A console-interaction networking fallback exists, and is load-bearing for
-  the currently-validated image.** The validated guest image
+- **A console-interaction networking fallback exists for Linux guests, and is
+  load-bearing for the currently-validated image.** (Windows guests take a
+  different `WaitIP` path entirely — see the last bullet below.) The validated
+  Linux guest image
   (`ghcr.io/cirruslabs/ubuntu-runner-amd64`) does NOT self-configure `eth0` on
   this backend: its baked netplan matches interface names `en*`, which
   hv_netvsc's always-`eth0` naming never satisfies, so `eth0` sits down and
@@ -56,8 +58,8 @@ ADR-0026 for the Hyper-V backend's decisions and why; this doc is sharp edges on
   selectors (`permanentIPs`, `divergentPermanentIPs`, `learnedLeaseIP`) and the
   console parser (`parseInetIP`) live in untagged files (`neighbortable.go`,
   `netfixup.go`) so they unit-test off-hardware.
-- **`WaitIP`'s grace-period fast path accepts only a LEARNED neighbor row, never
-  a `Permanent` one.** A `Permanent` row is HNS's pre-boot pre-commit — a guess
+- **`waitIPLinux`'s grace-period fast path accepts only a LEARNED neighbor row,
+  never a `Permanent` one.** A `Permanent` row is HNS's pre-boot pre-commit — a guess
   the guest's DHCP routinely overrides — so returning it within grace would dial
   a stale IP *and* short-circuit before the fixup that would correct it (a live
   landmine for a self-configuring image whose lease diverges from the pre-commit).
@@ -108,3 +110,17 @@ ADR-0026 for the Hyper-V backend's decisions and why; this doc is sharp edges on
   time rather than the whole tree in one `RemoveAll` — a third line of
   defense so that one still-wedged slot can't crash-loop startup for every
   other slot.
+- **Windows guests trust the `Permanent` neighbor row DIRECTLY — this is not a
+  regression of the "never trust `Permanent`" rule above, it's guest-OS-
+  conditional.** `hcsMachine.WaitIP` dispatches on `guestOS` (set from
+  `cfg.OS` at `Boot`) to `waitIPLinux` or `waitIPWindows`. The Linux rule
+  exists because the validated Linux image's netplan mismatches hv_netvsc's
+  `eth0` naming, so its pre-commit routinely diverges from the real DHCP
+  lease. A Windows guest never hits that mismatch — a from-scratch spike
+  (`.spike-winboot`, 4 concurrent WS2025 boots, ARP-confirmed) found 0
+  divergence — so `waitIPWindows` polls `permanentLeaseIP`
+  (`neighbortable.go`) directly: no grace period, no console dial, no
+  `fixupNetwork`. If a future Windows image ever needs the fixup too, don't
+  "unify" the two paths reflexively — confirm the divergence on real hardware
+  first (ADR-0026's Windows-guests amendment), the same discipline that put
+  the Linux fixup here in the first place.

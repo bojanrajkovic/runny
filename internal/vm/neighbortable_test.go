@@ -165,3 +165,41 @@ func TestLearnedLeaseIP(t *testing.T) {
 		t.Error("found a lease in an empty table")
 	}
 }
+
+func TestPermanentLeaseIP(t *testing.T) {
+	// (a) The single-row Windows case: the Permanent pre-commit IS the
+	// lease, trusted directly with no grace period.
+	single := []neighborEntry{
+		{ip: "172.20.150.10", mac: "00-15-5d-dd-30-75", state: nlnsPermanent},
+	}
+	if ip, ok := permanentLeaseIP(single, "00:15:5D:DD:30:75"); !ok || ip != "172.20.150.10" {
+		t.Errorf("single: permanentLeaseIP = %q, %v; want 172.20.150.10", ip, ok)
+	}
+
+	// (b) A learned row is never a Permanent pre-commit, even with the right MAC.
+	if _, ok := permanentLeaseIP([]neighborEntry{{ip: "172.20.144.1", mac: "00-15-5d-dd-3e-de", state: nlnsReachable}}, "00:15:5d:dd:3e:de"); ok {
+		t.Error("permanentLeaseIP matched a learned row")
+	}
+
+	// (c) Multiple Permanent rows for one MAC: deterministic (lexicographically
+	// smallest IP), independent of table order -- mirrors learnedLeaseIP's
+	// multi-row tiebreak.
+	multi := []neighborEntry{
+		{ip: "172.20.159.244", mac: "00-15-5D-DD-30-75", state: nlnsPermanent},
+		{ip: "172.20.150.10", mac: "00-15-5d-dd-30-75", state: nlnsPermanent},
+	}
+	if ip, ok := permanentLeaseIP(multi, "00:15:5d:dd:30:75"); !ok || ip != "172.20.150.10" {
+		t.Errorf("multi: permanentLeaseIP = %q, %v; want the smallest 172.20.150.10", ip, ok)
+	}
+	slices.Reverse(multi)
+	if ip, ok := permanentLeaseIP(multi, "00:15:5d:dd:30:75"); !ok || ip != "172.20.150.10" {
+		t.Errorf("multi (reversed): permanentLeaseIP = %q, %v; want a stable 172.20.150.10", ip, ok)
+	}
+
+	if _, ok := permanentLeaseIP(single, "aa:bb:cc:dd:ee:ff"); ok {
+		t.Error("found a lease for an absent MAC")
+	}
+	if _, ok := permanentLeaseIP(nil, "00:15:5d:dd:30:75"); ok {
+		t.Error("found a lease in an empty table")
+	}
+}

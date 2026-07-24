@@ -1,5 +1,7 @@
 package vm
 
+import "slices"
+
 // The IP-neighbor-table selection logic WaitIP (hcs_windows.go) runs is pure
 // -- it decides which row to trust given a MAC and a snapshot of rows -- so it
 // lives here, untagged, tested on any host, apart from the windows-only
@@ -116,4 +118,27 @@ func learnedLeaseIP(entries []neighborEntry, mac string) (string, bool) {
 		}
 	}
 	return ip, found
+}
+
+// permanentLeaseIP returns the guest's address from a neighbor-table
+// snapshot, accepting HNS's own Permanent pre-commit row as authoritative —
+// the opposite trust decision from learnedLeaseIP above. That's deliberate,
+// not a contradiction: learnedLeaseIP exists because the currently-validated
+// *Linux* image's netplan mismatches hv_netvsc's eth0 naming, so its
+// Permanent pre-commit routinely diverges from the guest's real DHCP lease
+// (see hcs_windows.go's WaitIP doc comment). A *Windows* guest has no such
+// mismatch — Spike B proved HNS's pre-commit IS the guest's real lease for
+// Windows (0 divergence across 4 concurrent boots, ARP-confirmed) — so
+// hcs_windows.go's Windows WaitIP path can trust this row directly, with no
+// grace period and no console fixup. Among multiple Permanent rows for one
+// MAC (not observed for Windows in the spike, but permanentEntriesForMAC's
+// own doc notes a divergent boot can leave more than one), the
+// lexicographically smallest IP is the same deterministic stand-in
+// learnedLeaseIP uses — neighborEntry carries no recency signal.
+func permanentLeaseIP(entries []neighborEntry, mac string) (string, bool) {
+	ips := permanentIPs(entries, mac)
+	if len(ips) == 0 {
+		return "", false
+	}
+	return slices.Min(ips), true
 }

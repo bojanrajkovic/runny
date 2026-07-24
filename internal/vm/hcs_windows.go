@@ -24,7 +24,13 @@ const (
 	// template GUID -- the Linux-shim trust anchor. Validated at schema 2.1
 	// on real hardware (issue #308); do not change without re-validating.
 	secureBootTemplateID = "272e7447-90a4-4563-a4b9-8e4ab00526ce"
-	defaultSwitchName    = "Default Switch"
+	// windowsSecureBootTemplateID is the Windows Secure Boot template GUID --
+	// the only change a Windows guest needs versus the Linux boot recipe
+	// above (everything else in the compute-system document is guest-OS-
+	// agnostic). Hardware-validated booting WS2025 (.spike-winboot,
+	// 2026-07-23); do not change without re-validating.
+	windowsSecureBootTemplateID = "1734c6e8-3154-4dda-ba5f-a874cc483422"
+	defaultSwitchName           = "Default Switch"
 
 	// abandonedStopTimeout bounds the best-effort cleanup of a compute
 	// system whose Start blew its deadline — the same role
@@ -56,11 +62,12 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 	if err != nil {
 		return nil, err
 	}
-	// Hyper-V's HCS path here is Linux-only (issue #308 never describes
-	// booting a darwin guest on Hyper-V, which has no macOS boot support at
-	// all); checkHostArch (shared with vz_darwin.go) covers the arch half.
-	if cfg.OS != "linux" {
-		return nil, fmt.Errorf("%w: this backend only boots linux guests, bundle is %s/%s", tart.ErrUnsupportedGuest, cfg.OS, cfg.Arch)
+	// Hyper-V's HCS path here is Linux and Windows only (issue #308 never
+	// describes booting a darwin guest on Hyper-V, which has no macOS boot
+	// support at all); checkHostArch (shared with vz_darwin.go) covers the
+	// arch half.
+	if cfg.OS != "linux" && cfg.OS != "windows" {
+		return nil, fmt.Errorf("%w: this backend only boots linux or windows guests, bundle is %s/%s", tart.ErrUnsupportedGuest, cfg.OS, cfg.Arch)
 	}
 	if err := checkHostArch(cfg); err != nil {
 		return nil, err
@@ -120,6 +127,14 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 		return nil, fmt.Errorf("cpu_cores %d exceeds the maximum HCS can express", cpu)
 	}
 
+	// The Secure Boot template is the one field in the compute-system
+	// document below that differs by guest OS -- everything else is
+	// guest-OS-agnostic.
+	secureBootTemplate := secureBootTemplateID
+	if cfg.OS == "windows" {
+		secureBootTemplate = windowsSecureBootTemplateID
+	}
+
 	doc := &hcsschema.ComputeSystem{
 		Owner:         "runny",
 		SchemaVersion: &hcsschema.Version{Major: 2, Minor: 1},
@@ -127,7 +142,7 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 			Chipset: &hcsschema.Chipset{
 				Uefi: &hcsschema.Uefi{
 					ApplySecureBootTemplate: "Apply",
-					SecureBootTemplateId:    secureBootTemplateID,
+					SecureBootTemplateId:    secureBootTemplate,
 					// BootThis deliberately OMITTED: UEFI firmware
 					// auto-discovers the ESP on the SCSI-attached disk. The
 					// documented ScsiDrive/File DeviceType values are
@@ -218,16 +233,18 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 		endpoint:    ep,
 		mac:         ep.MacAddress,
 		systemID:    systemID,
+		guestOS:     cfg.OS,
 		sshUser:     opts.SSHUser,
 		sshPassword: opts.SSHPassword,
 	}, nil
 }
 
 // consolePipeName is per-system so concurrent slots never collide on the
-// same named pipe. hcsMachine.WaitIP's fixupNetwork fallback dials it when
-// the guest doesn't self-configure networking within waitIPGracePeriod (see
-// WaitIP's doc comment); it also exists for operator/debug access to the
-// boot console, the same reason vz guests get a display even headless.
+// same named pipe. hcsMachine.waitIPLinux's fixupNetwork fallback dials it
+// when the guest doesn't self-configure networking within waitIPGracePeriod
+// (see waitIPLinux's doc comment) -- Windows guests never dial it, see
+// waitIPWindows. It also exists for operator/debug access to the boot
+// console, the same reason vz guests get a display even headless.
 func consolePipeName(systemID string) string {
 	return `\\.\pipe\runny-console-` + systemID
 }
@@ -301,24 +318,31 @@ type hcsMachine struct {
 	endpoint *hcn.HostComputeEndpoint
 	mac      string
 	systemID string
+	// guestOS is cfg.OS as of Boot -- the dispatch key WaitIP branches on.
+	guestOS string
 
-	// sshUser/sshPassword are only used by WaitIP's fixupNetwork fallback --
-	// Boot itself needs neither, see WaitIP's doc comment.
+	// sshUser/sshPassword are only used by waitIPLinux's fixupNetwork
+	// fallback -- Boot itself needs neither, see waitIPLinux's doc comment.
+	// Unused on the Windows WaitIP path (waitIPWindows).
 	sshUser     string
 	sshPassword string
 }
 
 func (m *hcsMachine) MAC() string { return m.mac }
 
-// NeedsRunnerPush is always true here: schema 2.1's only Linux-guest-capable
-// share device is Plan9, and hot-adding a Plan9 share to a bare (non-LCOW)
-// compute system is rejected by HCS outright -- confirmed against real
-// hardware (issue #319): a generic Modify (a benign memory-size update)
-// succeeds fine on the same bare compute system, so Modify itself isn't the
-// problem -- Plan9 specifically is paired with LCOW's own guest-side GCS
-// bridge control protocol, not a device the guest kernel discovers on its
-// own the way SCSI/NetworkAdapters are. Boot never attaches anything for
-// RunnerShareDir, so PROVISION must push the tarball itself.
+// NeedsRunnerPush is always true here, for two different reasons per guest
+// OS. Linux: schema 2.1's only Linux-guest-capable share device is Plan9,
+// and hot-adding a Plan9 share to a bare (non-LCOW) compute system is
+// rejected by HCS outright -- confirmed against real hardware (issue #319):
+// a generic Modify (a benign memory-size update) succeeds fine on the same
+// bare compute system, so Modify itself isn't the problem -- Plan9
+// specifically is paired with LCOW's own guest-side GCS bridge control
+// protocol, not a device the guest kernel discovers on its own the way
+// SCSI/NetworkAdapters are. Windows: SSH-push was ruled regardless of
+// whether a live share device exists -- a ~50 MB runner copy is noise
+// against boot time, and VirtualSmb is reserved for a later optimization.
+// Either way, Boot never attaches anything for RunnerShareDir, so PROVISION
+// must push the tarball itself.
 func (m *hcsMachine) NeedsRunnerPush() bool { return true }
 
 // waitIPGracePeriod is how long WaitIP trusts the guest to self-configure
@@ -332,7 +356,48 @@ func (m *hcsMachine) NeedsRunnerPush() bool { return true }
 const waitIPGracePeriod = 10 * time.Second
 
 // WaitIP returns the guest's actual lease IP -- the address later states dial
-// for SSH, and the one stamped as vm.ip in telemetry.
+// for SSH, and the one stamped as vm.ip in telemetry. It dispatches on the
+// guest OS recorded at Boot: waitIPLinux and waitIPWindows need genuinely
+// different strategies, not just different constants -- see each one's own
+// doc comment for why.
+func (m *hcsMachine) WaitIP(ctx bounded.Context) (string, error) {
+	if m.guestOS == "windows" {
+		return m.waitIPWindows(ctx)
+	}
+	return m.waitIPLinux(ctx)
+}
+
+// waitIPWindows returns HNS's own Permanent pre-commit IP for the guest's
+// MAC, trusted directly -- no grace period, no learned-vs-permanent
+// distinction, no console fixup. Spike B proved this is safe for a Windows
+// guest specifically (0 divergence across 4 concurrent boots, ARP-confirmed,
+// see permanentLeaseIP's doc comment in neighbortable.go): Windows never hits
+// the hv_netvsc/netplan interface-naming mismatch waitIPLinux's fixup exists
+// for, so the pre-commit HNS writes at endpoint-attach IS the address the
+// guest's own DHCP client lands on.
+func (m *hcsMachine) waitIPWindows(ctx bounded.Context) (string, error) {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("waiting for neighbor-table entry for %s: %w", m.mac, ctx.Err())
+		case <-m.system.WaitChannel():
+			return "", fmt.Errorf("guest stopped while waiting for IP")
+		case <-t.C:
+			entries, err := readNeighborEntries()
+			if err != nil {
+				continue // transient GetIpNetTable2 failure; next tick retries
+			}
+			if ip, ok := permanentLeaseIP(entries, m.mac); ok {
+				return ip, nil
+			}
+		}
+	}
+}
+
+// waitIPLinux returns the guest's actual lease IP -- the address later states
+// dial for SSH, and the one stamped as vm.ip in telemetry.
 //
 // Within the grace period it accepts only a LEARNED neighbor row
 // (Reachable/Stale via learnedLeaseIP) -- an actual ARP resolution proving the
@@ -340,7 +405,7 @@ const waitIPGracePeriod = 10 * time.Second
 // that's a pre-boot pre-commit, a guess the guest's DHCP routinely overrides, so
 // returning it would dial a stale IP and, worse, short-circuit before the fixup
 // that would have corrected it. A guest with a genuinely good netplan resolves
-// to a learned row and WaitIP returns within grace.
+// to a learned row and waitIPLinux returns within grace.
 //
 // The currently-validated guest image (ghcr.io/cirruslabs/ubuntu-runner-amd64)
 // does NOT self-configure: its baked netplan matches interface names "en*",
@@ -351,7 +416,7 @@ const waitIPGracePeriod = 10 * time.Second
 // eth0 actually holds is read straight off the console and returned as
 // authoritative -- the neighbor table is only re-read to detect, and record,
 // the divergence against any stale Permanent pre-commit.
-func (m *hcsMachine) WaitIP(ctx bounded.Context) (string, error) {
+func (m *hcsMachine) waitIPLinux(ctx bounded.Context) (string, error) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	deadline := boundedDeadline(ctx, waitIPGracePeriod)

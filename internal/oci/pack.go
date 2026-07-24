@@ -25,6 +25,8 @@ const packDiskLayerSize = 512 << 20
 // lz4BlockSize is the Apple-LZ4 compression-block granularity WriteImage
 // frames each disk layer at. Unrelated to packDiskLayerSize (that's the
 // layer boundary; this is the compression unit inside one layer's stream).
+// ponytail: arbitrary, not measured -- tune if pack throughput or the
+// resulting compression ratio ever matters enough to profile.
 const lz4BlockSize = 1 << 20
 
 // mediaTypeOCIConfig is the standard OCI image-config media type. Real tart
@@ -84,7 +86,14 @@ func WriteImage(dir string, cfg tart.Config, disk io.Reader, nvram []byte) (Pack
 	if err != nil {
 		return PackedImage{}, err
 	}
-	ociConfigDesc, err := w.put(mediaTypeOCIConfig, []byte(fmt.Sprintf(`{"architecture":%q,"os":%q}`, cfg.Arch, cfg.OS)))
+	ociConfigBytes, err := json.Marshal(struct {
+		Architecture string `json:"architecture"`
+		OS           string `json:"os"`
+	}{Architecture: cfg.Arch, OS: cfg.OS})
+	if err != nil {
+		return PackedImage{}, fmt.Errorf("marshaling OCI config stub: %w", err)
+	}
+	ociConfigDesc, err := w.put(mediaTypeOCIConfig, ociConfigBytes)
 	if err != nil {
 		return PackedImage{}, err
 	}

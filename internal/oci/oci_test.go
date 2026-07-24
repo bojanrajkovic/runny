@@ -15,7 +15,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -315,10 +314,14 @@ func TestPackThenPullRoundTrips(t *testing.T) {
 	}
 }
 
-// TestPackThenPullRoundTripsMultipleDiskLayers forces WriteImage to split
-// the disk across more than one layer (packDiskLayerSize is 512 MiB; this
-// test can't afford that much data, so it drives putDiskLayers directly at
-// a tiny layer size instead of going through WriteImage's fixed constant).
+// TestPackThenPullRoundTripsMultipleDiskLayers forces WriteImage's disk
+// chunking to split across more than one layer AND exercises putDiskLayers'
+// concurrent compression path for real (packDiskLayerSize is 512 MiB; this
+// test can't afford that much data, so it calls putDiskLayers directly with
+// a tiny layerSize instead of going through WriteImage's fixed constant --
+// with dozens of layers from a small input, this is the test that would
+// catch a concurrency bug in descs' indexed writes, not just a size-1 case
+// that happens to never spawn more than one goroutine).
 func TestPackThenPullRoundTripsMultipleDiskLayers(t *testing.T) {
 	disk := append(bytes.Repeat([]byte("MULTILAYER "), 20_000), randomBytes(50_000)...)
 	dir := t.TempDir()
@@ -326,24 +329,13 @@ func TestPackThenPullRoundTripsMultipleDiskLayers(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := &blobWriter{dir: dir}
-	const tinyLayerSize = 32 * 1024
-	orig := disk
-	var diskDescs []descriptor
-	for off := 0; off < len(orig); off += tinyLayerSize {
-		end := min(off+tinyLayerSize, len(orig))
-		var enc bytes.Buffer
-		if err := appleLZ4Encode(&enc, orig[off:end], lz4BlockSize); err != nil {
-			t.Fatal(err)
-		}
-		desc, err := w.put(mediaTypeDiskV2, enc.Bytes())
-		if err != nil {
-			t.Fatal(err)
-		}
-		desc.Annotations = map[string]string{annotationUncompressedSize: strconv.Itoa(end - off)}
-		diskDescs = append(diskDescs, desc)
+	const tinyLayerSize = 4 * 1024
+	diskDescs, err := w.putDiskLayers(bytes.NewReader(disk), tinyLayerSize)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(diskDescs) < 2 {
-		t.Fatalf("test setup: want >1 disk layer, got %d", len(diskDescs))
+	if len(diskDescs) < 10 {
+		t.Fatalf("test setup: want a double-digit layer count to meaningfully exercise concurrency, got %d", len(diskDescs))
 	}
 	configDesc, err := w.put(mediaTypeConfig, []byte(`{"os":"windows","arch":"amd64","cpuCount":4,"memorySize":8589934592,"diskFormat":"raw"}`))
 	if err != nil {

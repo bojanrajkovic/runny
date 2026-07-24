@@ -382,8 +382,7 @@ func (c *Client) PullTo(ctx bounded.Context, ref Ref, destDir string) (string, e
 	// already spent waiting for the winner, and a cache hit must not depend
 	// on the network.
 	if raw, err := os.ReadFile(filepath.Join(destDir, "manifest.json")); err == nil && tart.Bundle(destDir).Verify() == nil {
-		sum := sha256.Sum256(raw)
-		digest := "sha256:" + hex.EncodeToString(sum[:])
+		digest := digestOf(raw)
 		if ref.Digest == "" || ref.Digest == digest {
 			return digest, nil
 		}
@@ -427,8 +426,7 @@ func (c *Client) fetchManifest(ctx context.Context, ref Ref) (*manifest, []byte,
 	if err != nil {
 		return nil, nil, "", err
 	}
-	sum := sha256.Sum256(body)
-	digest := "sha256:" + hex.EncodeToString(sum[:])
+	digest := digestOf(body)
 	if ref.Digest != "" && ref.Digest != digest {
 		return nil, nil, "", fmt.Errorf("manifest digest mismatch: pinned %s, got %s", ref.Digest, digest)
 	}
@@ -661,11 +659,25 @@ func isLoopbackHost(hostport string) bool {
 }
 
 func verifyDigest(want string, sum []byte) error {
-	got := "sha256:" + hex.EncodeToString(sum)
+	got := formatDigest(sum)
 	if want != got {
 		return fmt.Errorf("blob digest mismatch: manifest says %s, downloaded %s", want, got)
 	}
 	return nil
+}
+
+// formatDigest renders a sha256 sum as "sha256:<hex>" -- the one digest
+// string convention every caller in this package uses, both reading
+// (PullTo's cache-hit check, fetchManifest, verifyDigest) and writing
+// (pack.go's blobWriter).
+func formatDigest(sum []byte) string {
+	return "sha256:" + hex.EncodeToString(sum)
+}
+
+// digestOf hashes b and formats the result via formatDigest.
+func digestOf(b []byte) string {
+	sum := sha256.Sum256(b)
+	return formatDigest(sum[:])
 }
 
 func truncateFile(path string, size int64) error {

@@ -165,3 +165,26 @@ func TestWriteImageRejectsEmptyNVRAM(t *testing.T) {
 		t.Fatal("want an error for empty nvram, got nil")
 	}
 }
+
+// TestWriteImageRejectsConfigsLoadConfigWouldReject covers the gap a
+// code-review found: WriteImage used to happily pack any tart.Config,
+// deferring every one of these to a first-pull-time (or worse, first-boot)
+// failure instead of catching it deterministically at pack time. Each case
+// here is a config LoadConfig (internal/tart/bundle.go) is documented to
+// reject.
+func TestWriteImageRejectsConfigsLoadConfigWouldReject(t *testing.T) {
+	cases := map[string]tart.Config{
+		"zero cpuCount":                     {OS: "windows", Arch: "amd64", CPUCount: 0, MemorySize: 1 << 30},
+		"zero memorySize":                   {OS: "windows", Arch: "amd64", CPUCount: 1, MemorySize: 0},
+		"unsupported guest":                 {OS: "solaris", Arch: "sparc", CPUCount: 1, MemorySize: 1 << 30},
+		"darwin missing hardwareModel/ecid": {OS: "darwin", Arch: "arm64", CPUCount: 1, MemorySize: 1 << 30},
+	}
+	for name, cfg := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := WriteImage(t.TempDir(), cfg, bytes.NewReader([]byte("disk")), []byte{0})
+			if err == nil {
+				t.Fatal("want an error, got nil -- WriteImage packed a config LoadConfig would reject")
+			}
+		})
+	}
+}

@@ -2,15 +2,17 @@ package oci
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"sync"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/bojanrajkovic/runny/internal/tart"
 )
@@ -60,25 +62,37 @@ type PackedImage struct {
 //
 // nvram must be non-empty: tart.Bundle.Verify rejects an empty nvram.bin,
 // even for a windows guest whose HCS boot path never reads NVRAMPath at all.
+//
+// cfg is validated by running it through the real tart.Bundle.LoadConfig
+// before anything is written -- not a second, hand-maintained copy of
+// LoadConfig's rules that could silently drift from the original, but the
+// actual function every pulled bundle is checked against. Without this, a
+// bad --cpu-count/--memory-size/--os/--arch, or a darwin config missing
+// HardwareModelB64/ECIDB64, packs "successfully" and only fails the first
+// time anything tries to boot the image.
 func WriteImage(dir string, cfg tart.Config, disk io.Reader, nvram []byte) (PackedImage, error) {
 	if len(nvram) == 0 {
 		return PackedImage{}, errors.New("packing image: nvram must be non-empty (tart.Bundle.Verify requires it)")
 	}
-	if err := os.MkdirAll(filepath.Join(dir, "blobs", "sha256"), 0o755); err != nil {
-		return PackedImage{}, fmt.Errorf("creating layout dir: %w", err)
-	}
-	w := &blobWriter{dir: dir}
-
 	cfg.DiskFormat = "raw"
 	configBytes, err := json.Marshal(cfg)
 	if err != nil {
 		return PackedImage{}, fmt.Errorf("marshaling tart config: %w", err)
 	}
+	if err := validateConfig(configBytes); err != nil {
+		return PackedImage{}, fmt.Errorf("packing image: %w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(dir, "blobs", "sha256"), 0o755); err != nil {
+		return PackedImage{}, fmt.Errorf("creating layout dir: %w", err)
+	}
+	w := &blobWriter{dir: dir}
+
 	configDesc, err := w.put(mediaTypeConfig, configBytes)
 	if err != nil {
 		return PackedImage{}, err
 	}
-	diskDescs, err := w.putDiskLayers(disk)
+	diskDescs, err := w.putDiskLayers(disk, packDiskLayerSize)
 	if err != nil {
 		return PackedImage{}, err
 	}
@@ -130,26 +144,59 @@ func WriteImage(dir string, cfg tart.Config, disk io.Reader, nvram []byte) (Pack
 	return PackedImage{Dir: dir, Digest: manifestDesc.Digest}, nil
 }
 
+// validateConfig round-trips configBytes through tart.Bundle.LoadConfig in a
+// scratch directory -- LoadConfig only ever reads ConfigPath(), so a bare
+// config.json is a complete enough bundle for its purposes -- to catch
+// anything WriteImage's caller got wrong before a single blob is written.
+func validateConfig(configBytes []byte) error {
+	tmp, err := os.MkdirTemp("", "runny-image-pack-validate-*")
+	if err != nil {
+		return fmt.Errorf("validating config: %w", err)
+	}
+	defer os.RemoveAll(tmp)
+	if err := os.WriteFile(filepath.Join(tmp, "config.json"), configBytes, 0o644); err != nil {
+		return fmt.Errorf("validating config: %w", err)
+	}
+	if _, err := tart.Bundle(tmp).LoadConfig(); err != nil {
+		return fmt.Errorf("config would fail LoadConfig on pull: %w", err)
+	}
+	return nil
+}
+
 // blobWriter content-addresses blobs into dir/blobs/sha256, the OCI Image
 // Layout blob store.
 type blobWriter struct{ dir string }
 
 func (w *blobWriter) put(mediaType string, b []byte) (descriptor, error) {
-	sum := sha256.Sum256(b)
-	hexSum := hex.EncodeToString(sum[:])
-	if err := os.WriteFile(filepath.Join(w.dir, "blobs", "sha256", hexSum), b, 0o644); err != nil {
-		return descriptor{}, fmt.Errorf("writing blob sha256:%s: %w", hexSum, err)
+	digest := digestOf(b)
+	if err := os.WriteFile(filepath.Join(w.dir, "blobs", "sha256", digest[len("sha256:"):]), b, 0o644); err != nil {
+		return descriptor{}, fmt.Errorf("writing blob %s: %w", digest, err)
 	}
-	return descriptor{MediaType: mediaType, Digest: "sha256:" + hexSum, Size: int64(len(b))}, nil
+	return descriptor{MediaType: mediaType, Digest: digest, Size: int64(len(b))}, nil
 }
 
-// putDiskLayers reads disk in packDiskLayerSize chunks, Apple-LZ4-frames and
-// writes each as its own blob, and annotates it with the uncompressed size
-// diskLayerSizes (oci.go) needs to place it during a pull -- the exact
-// counterpart of what that function validates on the read side.
-func (w *blobWriter) putDiskLayers(disk io.Reader) ([]descriptor, error) {
+// putDiskLayers reads disk in layerSize chunks, sequentially (disk is a
+// single io.Reader -- reads can't run out of order), and Apple-LZ4-frames
+// and writes each chunk as its own blob CONCURRENTLY, up to one per CPU:
+// appleLZ4Encode's blocks are self-contained (see applelz4.go), so nothing
+// about compressing one layer depends on another, and the read side already
+// parallelizes the identical per-layer codec work the same way (Client.pull's
+// errgroup). Layer order is load-bearing -- diskLayerSizes (oci.go) derives
+// each layer's offset in disk.img from its position in the manifest -- so
+// results land in a pre-indexed slot (idx) rather than being appended as
+// they finish, and mu guards every access to descs (including the
+// sequential-loop's own append) since a concurrent index-write must never
+// race a later append's possible backing-array reallocation. layerSize is a
+// parameter (WriteImage always passes packDiskLayerSize) rather than reading
+// the package constant directly so tests can exercise many concurrent layers
+// without packing gigabytes of data.
+func (w *blobWriter) putDiskLayers(disk io.Reader, layerSize int) ([]descriptor, error) {
+	var g errgroup.Group
+	g.SetLimit(runtime.NumCPU())
+	var mu sync.Mutex
 	var descs []descriptor
-	buf := make([]byte, packDiskLayerSize)
+
+	buf := make([]byte, layerSize)
 	for {
 		n, err := io.ReadFull(disk, buf)
 		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
@@ -158,19 +205,37 @@ func (w *blobWriter) putDiskLayers(disk io.Reader) ([]descriptor, error) {
 		if n == 0 {
 			break
 		}
-		var enc bytes.Buffer
-		if encErr := appleLZ4Encode(&enc, buf[:n], lz4BlockSize); encErr != nil {
-			return nil, fmt.Errorf("compressing disk chunk: %w", encErr)
-		}
-		desc, putErr := w.put(mediaTypeDiskV2, enc.Bytes())
-		if putErr != nil {
-			return nil, putErr
-		}
-		desc.Annotations = map[string]string{annotationUncompressedSize: strconv.Itoa(n)}
-		descs = append(descs, desc)
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		chunk := make([]byte, n)
+		copy(chunk, buf[:n]) // buf is reused by the next read while this chunk compresses concurrently
+
+		mu.Lock()
+		idx := len(descs)
+		descs = append(descs, descriptor{})
+		mu.Unlock()
+
+		g.Go(func() error {
+			var enc bytes.Buffer
+			if encErr := appleLZ4Encode(&enc, chunk, lz4BlockSize); encErr != nil {
+				return fmt.Errorf("compressing disk chunk: %w", encErr)
+			}
+			desc, putErr := w.put(mediaTypeDiskV2, enc.Bytes())
+			if putErr != nil {
+				return putErr
+			}
+			desc.Annotations = map[string]string{annotationUncompressedSize: strconv.Itoa(len(chunk))}
+			mu.Lock()
+			descs[idx] = desc
+			mu.Unlock()
+			return nil
+		})
+
+		atEOF := errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+		if atEOF {
 			break
 		}
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 	if len(descs) == 0 {
 		return nil, errors.New("packing image: disk is empty")

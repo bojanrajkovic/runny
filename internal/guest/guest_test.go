@@ -21,21 +21,20 @@ import (
 	"github.com/bojanrajkovic/runny/internal/sshx"
 )
 
-// perOS is a loud three-way dispatch: darwin/linux/windows each select their
-// own value, and anything else is an error, not a silent darwin fallback —
-// a third guest OS existing makes the old fallthrough a no-silent-failure
+// perOS picks between darwinVal and linuxVal — the only two POSIX provision
+// shapes — and errors on anything else, not a silent darwin fallback: a
+// third guest OS existing makes the old fallthrough a no-silent-failure
 // violation, not a convenience.
-func TestPerOSDispatchesThreeWays(t *testing.T) {
+func TestPerOSDispatchesTwoWays(t *testing.T) {
 	cases := []struct {
 		goos string
 		want string
 	}{
 		{home.OSDarwin, "darwin"},
 		{home.OSLinux, "linux"},
-		{home.OSWindows, "windows"},
 	}
 	for _, tc := range cases {
-		got, err := perOS(tc.goos, "darwin", "linux", "windows")
+		got, err := perOS(tc.goos, "darwin", "linux")
 		if err != nil {
 			t.Errorf("perOS(%q, ...) unexpected error: %v", tc.goos, err)
 		}
@@ -45,9 +44,12 @@ func TestPerOSDispatchesThreeWays(t *testing.T) {
 	}
 }
 
+// Every windows call site dispatches to its own windows path before perOS
+// ever runs, so perOS itself doesn't know a windows value — an OS name
+// reaching it that isn't darwin or linux (windows included) is a loud error.
 func TestPerOSUnknownOSIsLoudError(t *testing.T) {
-	for _, goos := range []string{"", "plan9", "freebsd"} {
-		if _, err := perOS(goos, "darwin", "linux", "windows"); err == nil {
+	for _, goos := range []string{"", "plan9", "freebsd", home.OSWindows} {
+		if _, err := perOS(goos, "darwin", "linux"); err == nil {
 			t.Errorf("perOS(%q, ...) succeeded, want a loud error", goos)
 		}
 	}
@@ -1199,6 +1201,9 @@ func TestRotateScriptWindowsPinsACLPrependAndDetachedRestart(t *testing.T) {
 	if !strings.Contains(script, `icacls 'C:\ProgramData\ssh\administrators_authorized_keys' /inheritance:r /grant "SYSTEM:F" /grant "BUILTIN\Administrators:F"`) {
 		t.Errorf("windows rotate script missing the administrators_authorized_keys ACL fix:\n%s", script)
 	}
+	if !strings.Contains(script, "if ($LASTEXITCODE -ne 0) { exit 2 }") {
+		t.Errorf("windows rotate script must fail loudly when icacls itself errors:\n%s", script)
+	}
 	// The new directive must be prepended (built as directive + $existing),
 	// never appended ($existing + directive).
 	if !strings.Contains(script, `"PasswordAuthentication no`) {
@@ -1262,9 +1267,60 @@ func TestStartRunnerWindowsRejectsBadZipName(t *testing.T) {
 	}
 }
 
+// extractRunnerZipScript must make tar's own result the script's exit code
+// explicitly — native tar's exit-code propagation through -EncodedCommand is
+// version/mode-fragile, and a corrupt zip could otherwise read as success.
+func TestExtractRunnerZipScriptPropagatesExitCode(t *testing.T) {
+	script := extractRunnerZipScript("actions-runner-win-x64-2.320.0.zip")
+	if !strings.HasSuffix(strings.TrimRight(script, "\n"), "exit $LASTEXITCODE") {
+		t.Errorf("extract script must end with exit $LASTEXITCODE:\n%s", script)
+	}
+	if !strings.Contains(script, "tar -xf") {
+		t.Errorf("extract script must still invoke tar:\n%s", script)
+	}
+}
+
+// deliverJITConfigScript copies stdin to the .tmp path and renames it into
+// place in ONE script — no separate move exec — with -ErrorAction Stop on
+// the Move-Item so a failed rename (Move-Item's own errors are
+// non-terminating by default) doesn't silently exit 0.
+func TestDeliverJITConfigScriptCommitsAtomically(t *testing.T) {
+	script := deliverJITConfigScript()
+	if !strings.Contains(script, "[IO.File]::Create('"+jitPendingPathWindows+"')") {
+		t.Errorf("script must copy stdin to the .tmp path first:\n%s", script)
+	}
+	if !strings.Contains(script, "Move-Item -Force -Path '"+jitPendingPathWindows+"' -Destination '"+jitPathWindows+"' -ErrorAction Stop") {
+		t.Errorf("script must rename into place with -ErrorAction Stop:\n%s", script)
+	}
+}
+
+// The rotate and debug-key install scripts must share the exact same
+// administrators_authorized_keys ACL fragment — including the icacls
+// exit-code check (icacls failing loudly rather than being swallowed by
+// | Out-Null, the one condition under which a "successful" key append does
+// nothing) — so the ACL fix has exactly one home.
+func TestWindowsAuthorizedKeyScriptsShareACLFragment(t *testing.T) {
+	fragment := psAppendAuthorizedKeyLine("$x")
+	if !strings.Contains(fragment, "if ($LASTEXITCODE -ne 0) { exit 2 }") {
+		t.Errorf("shared ACL fragment must fail loudly on a failed icacls: %q", fragment)
+	}
+	rotate := fmt.Sprintf(rotateScriptWindowsTemplate, "AAAA key", "")
+	debug := fmt.Sprintf(installDebugKeyScriptWindows, "AAAA key", "AAAA key")
+	for _, s := range []struct {
+		name, script string
+	}{{"rotate", rotate}, {"debug key", debug}} {
+		if !strings.Contains(s.script, "if ($LASTEXITCODE -ne 0) { exit 2 }") {
+			t.Errorf("%s script missing the icacls exit-code check:\n%s", s.name, s.script)
+		}
+	}
+}
+
 // The watcher script tails the launcher's log/exit-code contract and exits
 // with the runner's own exit code — the anchor points StartRunner's windows
-// hand-off relies on.
+// hand-off relies on. Output goes to the raw stdout stream (never re-encoded
+// through [Console]::Out's OEM-codepage TextWriter, which would mangle
+// non-ASCII output and can split a multibyte sequence at a drain boundary).
+// The exit-code read is guarded by a digits-only regex before the cast.
 func TestWatcherScriptWindowsContract(t *testing.T) {
 	if !strings.Contains(watcherScriptWindows, runnerLogPathWindows) {
 		t.Error("watcher script must tail the launcher's log path")
@@ -1274,6 +1330,15 @@ func TestWatcherScriptWindowsContract(t *testing.T) {
 	}
 	if !strings.Contains(watcherScriptWindows, "exit ([int]$code)") {
 		t.Error("watcher script must exit with the runner's own exit code")
+	}
+	if !strings.Contains(watcherScriptWindows, `$code -match '^\d+$'`) {
+		t.Error("watcher script must guard the exit-code cast with a digits-only regex")
+	}
+	if strings.Contains(watcherScriptWindows, "[Console]::Out.Write") {
+		t.Error("watcher script must not write through [Console]::Out (OEM codepage re-encoding)")
+	}
+	if !strings.Contains(watcherScriptWindows, "OpenStandardOutput()") {
+		t.Error("watcher script must write raw bytes via the standard-output stream")
 	}
 }
 

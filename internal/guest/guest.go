@@ -94,24 +94,64 @@ type Guest struct {
 	goos string
 }
 
-// perOS selects darwinVal, linuxVal, or windowsVal for goos. An unrecognized
-// goos is a loud error, never a silent darwin fallback: home.validate()
-// already gates every config-declared pool os, so this only ever fires
-// against a value this package computed itself — a bug, not a config
-// mistake — and with three guest OSes now live, silently treating an
-// unknown one as darwin is exactly the failure mode this project exists to
-// kill.
-func perOS(goos, darwinVal, linuxVal, windowsVal string) (string, error) {
+// perOS selects darwinVal or linuxVal for goos, erroring on anything else —
+// including "windows": every windows call site dispatches to its own
+// windows-specific path before perOS ever runs (StartRunner, Rotate,
+// PushRunnerTarball, StopRunner, PullDiag, InstallAuthorizedKey, PullDebugSession
+// all branch on goos == home.OSWindows first), so perOS itself only ever
+// needs to pick between the two POSIX scripts. An unrecognized goos reaching
+// it — windows included — is a loud error, never a silent darwin fallback:
+// home.validate() already gates every config-declared pool os, so this only
+// ever fires against a value this package computed itself, a bug to fix, not
+// a case to swallow.
+func perOS(goos, darwinVal, linuxVal string) (string, error) {
 	switch goos {
 	case home.OSDarwin:
 		return darwinVal, nil
 	case home.OSLinux:
 		return linuxVal, nil
-	case home.OSWindows:
-		return windowsVal, nil
 	default:
 		return "", fmt.Errorf("guest: unknown guest os %q", goos)
 	}
+}
+
+// psQuote escapes s for embedding inside a PowerShell single-quoted string
+// literal ('...'): PS1's own escape convention is doubling the embedded
+// quote, distinct from POSIX's backslash-quote. Used at every windows
+// trust-boundary site where a Go string is spliced into a PS script.
+func psQuote(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
+}
+
+// administratorsAuthorizedKeysPath is the ONE authorized-keys file Windows
+// OpenSSH honors for a member of the Administrators group (the image's baked
+// Administrator account).
+const administratorsAuthorizedKeysPath = `C:\ProgramData\ssh\administrators_authorized_keys`
+
+// psAppendAuthorizedKeyLine renders the fragment that appends valueExpr (a PS
+// expression — a variable or a literal) to administrators_authorized_keys
+// and fixes its ACL, shared by rotate's cycle-key install and the debug-key
+// install so the ACL fix has exactly one home. The ACL fix is
+// security-load-bearing, not cosmetic: sshd silently ignores the whole file
+// unless its inherited permissions are stripped down to SYSTEM and
+// Administrators only, and doesn't say why the key never worked. icacls
+// failing is a loud `exit 2`, not swallowed by `| Out-Null` — a failed ACL
+// fix is the one condition under which a "successful" key append does
+// nothing, and `| Out-Null` on its own only discards icacls's stdout, not
+// $LASTEXITCODE.
+func psAppendAuthorizedKeyLine(valueExpr string) string {
+	return fmt.Sprintf(`Add-Content -Path '%s' -Value %s
+icacls '%s' /inheritance:r /grant "SYSTEM:F" /grant "BUILTIN\Administrators:F" | Out-Null
+if ($LASTEXITCODE -ne 0) { exit 2 }
+`, administratorsAuthorizedKeysPath, valueExpr, administratorsAuthorizedKeysPath)
+}
+
+// psCopyStdinToFile renders the PS fragment that copies stdin's bytes
+// verbatim to path — the windows equivalent of `cat > path`, and the only
+// shape used everywhere host bytes are streamed into a guest file (the
+// runner-zip push, the JIT-config delivery). Binary-safe; no scp protocol.
+func psCopyStdinToFile(path string) string {
+	return fmt.Sprintf(`$in=[Console]::OpenStandardInput(); $f=[IO.File]::Create('%s'); $in.CopyTo($f); $f.Close()`, path)
 }
 
 // The rotation scripts install the per-cycle public key and shut password
@@ -202,10 +242,8 @@ const captureHostKeysWindowsScript = `Get-ChildItem 'C:\ProgramData\ssh\ssh_host
 // restart is handed to a DETACHED process that sleeps briefly before
 // restarting the service, so this script's own exit status (and the
 // session carrying it) survives to be read back.
-const rotateScriptWindowsTemplate = `$pub = '%s'
-Add-Content -Path 'C:\ProgramData\ssh\administrators_authorized_keys' -Value $pub
-icacls 'C:\ProgramData\ssh\administrators_authorized_keys' /inheritance:r /grant "SYSTEM:F" /grant "BUILTIN\Administrators:F" | Out-Null
-$cfgPath = 'C:\ProgramData\ssh\sshd_config'
+var rotateScriptWindowsTemplate = `$pub = '%s'
+` + psAppendAuthorizedKeyLine("$pub") + `$cfgPath = 'C:\ProgramData\ssh\sshd_config'
 $existing = Get-Content -Path $cfgPath -Raw
 Set-Content -Path $cfgPath -Value ("PasswordAuthentication no` + "`r`n" + `" + $existing) -NoNewline
 %sStart-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 1; Restart-Service sshd' | Out-Null
@@ -287,7 +325,7 @@ func (d Dialer) Rotate(ctx bounded.Context, addr string, g statemachine.Guest, g
 		return nil, fmt.Errorf("rotate: %w", err)
 	}
 
-	script, err := perOS(goos, rotateScriptDarwin, rotateScriptLinux, "")
+	script, err := perOS(goos, rotateScriptDarwin, rotateScriptLinux)
 	if err != nil {
 		return nil, fmt.Errorf("rotate: %w", err)
 	}
@@ -302,7 +340,7 @@ func (d Dialer) Rotate(ctx bounded.Context, addr string, g statemachine.Guest, g
 	if d.Hardening.Scrambles() {
 		pw := rand.Text()
 		verifyPW = pw
-		scrambleLine, err := perOS(goos, scrambleLineDarwin, scrambleLineLinux, "")
+		scrambleLine, err := perOS(goos, scrambleLineDarwin, scrambleLineLinux)
 		if err != nil {
 			return nil, fmt.Errorf("rotate: %w", err)
 		}
@@ -364,18 +402,14 @@ func (d Dialer) rotateWindows(ctx bounded.Context, addr string, pg *Guest, signe
 	}
 
 	pubLine := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
-	// The pubkey/password values below are PowerShell single-quoted string
-	// literals; the only PS metacharacter a single-quoted literal cares about
-	// is the quote itself, doubled to escape (PS1's own convention, distinct
-	// from POSIX's backslash-quote).
-	pubEsc := strings.ReplaceAll(pubLine, "'", "''")
+	pubEsc := psQuote(pubLine)
 
 	verifyPW := d.SSH.Password
 	scramble := ""
 	if d.Hardening.Scrambles() {
 		pw := rand.Text()
 		verifyPW = pw
-		scramble = fmt.Sprintf(scrambleLineWindowsTemplate, strings.ReplaceAll(pw, "'", "''"))
+		scramble = fmt.Sprintf(scrambleLineWindowsTemplate, psQuote(pw))
 	}
 	script := fmt.Sprintf(rotateScriptWindowsTemplate, pubEsc, scramble)
 
@@ -595,7 +629,7 @@ func (g *Guest) PushRunnerTarball(ctx bounded.Context, localPath string) error {
 	if g.goos == home.OSWindows {
 		dest := runnerCacheDirWindows + `\` + base
 		script := fmt.Sprintf(`New-Item -Force -ItemType Directory -Path '%s' | Out-Null
-$in=[Console]::OpenStandardInput(); $f=[IO.File]::Create('%s'); $in.CopyTo($f); $f.Close()`, runnerCacheDirWindows, dest)
+`, runnerCacheDirWindows) + psCopyStdinToFile(dest)
 		out, code, err := g.c.RunWithInput(ctx, encodedCommand(script), f)
 		if err != nil {
 			return fmt.Errorf("pushing runner zip: %w", err)
@@ -681,9 +715,23 @@ const (
 // tolerates the log file not existing yet (the launcher may not have picked
 // up .jitconfig at the moment this starts) by simply continuing to poll —
 // PROVISION's own deadline is what bounds a launcher that never starts.
+//
+// Drain writes the raw log bytes straight to the standard-output stream
+// rather than through [Console]::Out (a TextWriter bound to the console's
+// OEM codepage): re-encoding through it would mangle non-ASCII runner
+// output, and a drain boundary landing mid-multibyte-sequence would corrupt
+// it further. Writing the bytes verbatim leaves decoding to the host side,
+// exactly like every POSIX Proc's output already does.
+//
+// The exit-code file's content is guarded by a digits-only regex before
+// `exit` casts it — defense in depth: the 250ms settle-then-redrain before
+// reading it already makes an empty/partial read practically unreachable,
+// but a non-numeric read falls through to another poll rather than crashing
+// the watcher on a bad cast.
 const watcherScriptWindows = `$log = '` + runnerLogPathWindows + `'
 $exitFile = '` + runnerExitPathWindows + `'
 $pos = 0
+$stdout = [Console]::OpenStandardOutput()
 function Drain {
   if (Test-Path $log) {
     $len = (Get-Item $log).Length
@@ -693,7 +741,8 @@ function Drain {
       $buf = New-Object byte[] ($len - $script:pos)
       $fs.Read($buf, 0, $buf.Length) | Out-Null
       $fs.Close()
-      [Console]::Out.Write([Text.Encoding]::UTF8.GetString($buf))
+      $script:stdout.Write($buf, 0, $buf.Length)
+      $script:stdout.Flush()
       $script:pos = $len
     }
   }
@@ -704,11 +753,36 @@ while ($true) {
     Start-Sleep -Milliseconds 250
     Drain
     $code = (Get-Content -Path $exitFile -Raw).Trim()
-    exit ([int]$code)
+    if ($code -match '^\d+$') { exit ([int]$code) }
   }
   Start-Sleep -Milliseconds 500
 }
 `
+
+// extractRunnerZipScript unpacks the pushed runner zip into runnerDirWindows.
+// tar's own exit-code propagation through -EncodedCommand is fragile across
+// PowerShell versions/modes ($LASTEXITCODE isn't reliably the script's own
+// exit code unless asked for explicitly) — a corrupt zip could otherwise
+// read as success. The trailing `exit $LASTEXITCODE` makes tar's own result
+// the script's result, explicitly.
+func extractRunnerZipScript(runnerTarball string) string {
+	return fmt.Sprintf(`if (!(Test-Path '%s')) { New-Item -ItemType Directory -Path '%s' | Out-Null }
+tar -xf '%s\%s' -C '%s'
+exit $LASTEXITCODE`, runnerDirWindows, runnerDirWindows, runnerCacheDirWindows, runnerTarball, runnerDirWindows)
+}
+
+// deliverJITConfigScript copies stdin to the .tmp path, then renames it into
+// place, in one script/session — one SSH round-trip instead of two, and
+// every windows guest command now goes through -EncodedCommand with no
+// plain-cmd exception. -ErrorAction Stop is load-bearing on the Move-Item:
+// its own errors are non-terminating by default, so without it a failed
+// rename would still exit 0. Write-then-rename atomicity is unaffected — the
+// launcher only ever observes jitPathWindows, and it's still written by a
+// single Move-Item, never partially.
+func deliverJITConfigScript() string {
+	return psCopyStdinToFile(jitPendingPathWindows) + fmt.Sprintf(`
+Move-Item -Force -Path '%s' -Destination '%s' -ErrorAction Stop`, jitPendingPathWindows, jitPathWindows)
+}
 
 // startRunnerWindows hands the runner off to the image's launcher and
 // starts the watcher session that becomes the returned Proc: extract the
@@ -722,9 +796,7 @@ func (g *Guest) startRunnerWindows(ctx context.Context, jit, runnerTarball strin
 	prep, cancel := bounded.WithTimeout(ctx, windowsPrepTimeout)
 	defer cancel()
 
-	extract := fmt.Sprintf(`if (!(Test-Path '%s')) { New-Item -ItemType Directory -Path '%s' | Out-Null }
-tar -xf '%s\%s' -C '%s'`, runnerDirWindows, runnerDirWindows, runnerCacheDirWindows, runnerTarball, runnerDirWindows)
-	out, code, err := g.c.Output(prep, encodedCommand(extract))
+	out, code, err := g.c.Output(prep, encodedCommand(extractRunnerZipScript(runnerTarball)))
 	if err != nil {
 		return nil, fmt.Errorf("extracting runner zip: %w", err)
 	}
@@ -732,21 +804,12 @@ tar -xf '%s\%s' -C '%s'`, runnerDirWindows, runnerDirWindows, runnerCacheDirWind
 		return nil, fmt.Errorf("extracting runner zip: exit %d: %s", code, out)
 	}
 
-	copyJIT := fmt.Sprintf(`$in=[Console]::OpenStandardInput(); $f=[IO.File]::Create('%s'); $in.CopyTo($f); $f.Close()`, jitPendingPathWindows)
-	out, code, err = g.c.RunWithInput(prep, encodedCommand(copyJIT), strings.NewReader(jit))
+	out, code, err = g.c.RunWithInput(prep, encodedCommand(deliverJITConfigScript()), strings.NewReader(jit))
 	if err != nil {
 		return nil, fmt.Errorf("delivering JIT config: %w", err)
 	}
 	if code != 0 {
 		return nil, fmt.Errorf("delivering JIT config: exit %d: %s", code, out)
-	}
-
-	out, code, err = g.c.Output(prep, fmt.Sprintf(`move /Y "%s" "%s"`, jitPendingPathWindows, jitPathWindows))
-	if err != nil {
-		return nil, fmt.Errorf("committing JIT config: %w", err)
-	}
-	if code != 0 {
-		return nil, fmt.Errorf("committing JIT config: exit %d: %s", code, out)
 	}
 
 	p, err := g.c.Start(ctx, encodedCommand(watcherScriptWindows), nil)
@@ -853,7 +916,7 @@ func provisionScript(goos, runnerTarball string, env map[string]string, setup []
 	if needsPush {
 		linuxScript = provisionScriptLinuxPushed
 	}
-	script, err := perOS(goos, provisionScriptDarwin, linuxScript, "")
+	script, err := perOS(goos, provisionScriptDarwin, linuxScript)
 	if err != nil {
 		return "", err
 	}
@@ -1054,16 +1117,13 @@ func (g *Guest) StopRunner(ctx bounded.Context) error {
 }
 
 // installDebugKeyScriptWindows appends the operator's key to
-// administrators_authorized_keys and fixes its ACL (the same
-// icacls call rotateScriptWindowsTemplate uses — sshd silently ignores this
-// file unless its ACL is stripped to SYSTEM+Administrators only), then
-// proves the line landed via a read-back. No command= recording wrapper: see
-// PullDebugSession's doc comment for why Windows debug sessions aren't
-// recorded in v1.
-const installDebugKeyScriptWindows = `$line = '%s'
-Add-Content -Path 'C:\ProgramData\ssh\administrators_authorized_keys' -Value $line
-icacls 'C:\ProgramData\ssh\administrators_authorized_keys' /inheritance:r /grant "SYSTEM:F" /grant "BUILTIN\Administrators:F" | Out-Null
-if (-not (Select-String -Path 'C:\ProgramData\ssh\administrators_authorized_keys' -SimpleMatch '%s' -Quiet)) { exit 1 }
+// administrators_authorized_keys and fixes its ACL — psAppendAuthorizedKeyLine,
+// the same fragment rotateScriptWindowsTemplate uses, so the ACL fix has
+// exactly one home — then proves the line landed via a read-back. No
+// command= recording wrapper: see PullDebugSession's doc comment for why
+// Windows debug sessions aren't recorded in v1.
+var installDebugKeyScriptWindows = `$line = '%s'
+` + psAppendAuthorizedKeyLine("$line") + `if (-not (Select-String -Path '` + administratorsAuthorizedKeysPath + `' -SimpleMatch '%s' -Quiet)) { exit 1 }
 `
 
 // InstallAuthorizedKey appends one authorized_keys line and proves it landed
@@ -1095,11 +1155,11 @@ func (g *Guest) InstallAuthorizedKey(ctx bounded.Context, line string) error {
 		// PullDebugSession's doc comment for the technical reason. Log loudly
 		// rather than silently hand out an unrecorded operator session.
 		slog.Warn("windows debug session: transcript capture is unsupported, the operator's session will not be recorded")
-		lineEsc := strings.ReplaceAll(line, "'", "''")
+		lineEsc := psQuote(line)
 		script := fmt.Sprintf(installDebugKeyScriptWindows, lineEsc, lineEsc)
 		out, code, err = c.Output(ctx, encodedCommand(script))
 	} else {
-		recorder, rErr := perOS(g.goos, debugRecorderDarwin, debugRecorderLinux, "")
+		recorder, rErr := perOS(g.goos, debugRecorderDarwin, debugRecorderLinux)
 		if rErr != nil {
 			return fmt.Errorf("installing debug key: %w", rErr)
 		}

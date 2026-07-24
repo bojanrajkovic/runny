@@ -100,6 +100,20 @@ func TestLoadConfigReal(t *testing.T) {
 	}
 }
 
+func TestLoadConfigWindowsGuest(t *testing.T) {
+	// Windows bundles carry no hardwareModel/ecid either — they boot via EFI,
+	// same as linux (see TestLoadConfigLinuxGuest).
+	b := writeBundle(t, `{"version":1,"os":"windows","arch":"amd64","cpuCount":2,"memorySize":4294967296,
+		"macAddress":"7a:47:bb:5f:97:c9","diskFormat":"raw"}`)
+	c, err := b.LoadConfig()
+	if err != nil {
+		t.Fatalf("windows bundle: %v", err)
+	}
+	if c.OS != "windows" || c.Arch != "amd64" {
+		t.Errorf("config = %+v", c)
+	}
+}
+
 func TestLoadConfigRejectsASIF(t *testing.T) {
 	b := writeBundle(t, `{"version":1,"os":"darwin","arch":"arm64","cpuCount":2,"memorySize":1,
 		"hardwareModel":"eA==","ecid":"eA==","diskFormat":"asif"}`)
@@ -124,7 +138,7 @@ func TestLoadConfigLinuxGuest(t *testing.T) {
 
 func TestLoadConfigRejectsUnsupportedGuests(t *testing.T) {
 	for name, cfg := range map[string]string{
-		"windows guest": `{"version":1,"os":"windows","arch":"arm64","cpuCount":2,"memorySize":1}`,
+		"windows/arm64": `{"version":1,"os":"windows","arch":"arm64","cpuCount":2,"memorySize":1}`,
 		"darwin/amd64":  `{"version":1,"os":"darwin","arch":"amd64","cpuCount":2,"memorySize":1}`,
 		"unknown arch":  `{"version":1,"os":"linux","arch":"riscv64","cpuCount":2,"memorySize":1}`,
 	} {
@@ -148,8 +162,9 @@ func TestLoadConfigRejectsUnsupportedGuests(t *testing.T) {
 // hcs_windows.go/vz_darwin.go's runtime.GOARCH rejection).
 func TestLoadConfigAcceptsEveryBootableGuestShape(t *testing.T) {
 	for name, cfg := range map[string]string{
-		"linux/arm64": `{"version":1,"os":"linux","arch":"arm64","cpuCount":2,"memorySize":1}`,
-		"linux/amd64": `{"version":1,"os":"linux","arch":"amd64","cpuCount":2,"memorySize":1}`,
+		"linux/arm64":   `{"version":1,"os":"linux","arch":"arm64","cpuCount":2,"memorySize":1}`,
+		"linux/amd64":   `{"version":1,"os":"linux","arch":"amd64","cpuCount":2,"memorySize":1}`,
+		"windows/amd64": `{"version":1,"os":"windows","arch":"amd64","cpuCount":2,"memorySize":1}`,
 	} {
 		if _, err := writeBundle(t, cfg).LoadConfig(); err != nil {
 			t.Errorf("%s: %v", name, err)

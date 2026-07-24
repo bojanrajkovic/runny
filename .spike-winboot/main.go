@@ -11,6 +11,7 @@
 //   - does each clone get a distinct IP? (network-identity uniqueness)
 //   - divergence rate across N boots (HNS pre-commit vs ARP-confirmed)
 //   - boot magnitude for the per-OS FSM bounds
+//
 // Throwaway; not shipped. The SID/COMPUTERNAME-collision verdict needs guest
 // login (a provisioned image) and is out of scope here.
 package main

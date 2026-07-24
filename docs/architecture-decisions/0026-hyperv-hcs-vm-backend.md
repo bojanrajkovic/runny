@@ -2,6 +2,26 @@
 
 **Status:** Accepted (2026-07-22)
 
+**Amended:** 2026-07-24 — Windows guest support added. `HCSManager.Boot` now
+accepts `cfg.OS == "windows"` alongside `"linux"`, selecting the Windows
+Secure Boot template GUID (`1734c6e8-3154-4dda-ba5f-a874cc483422` vs the
+Linux-shim anchor above) — everything else in the compute-system document
+(schema 2.1, `HvSocket`, SCSI-attached VHDX, `ComPorts`, `NetworkAdapters`)
+is unchanged and guest-OS-agnostic. `WaitIP` now dispatches on guest OS
+(`waitIPLinux`/`waitIPWindows`, `internal/vm/hcs_windows.go`): a Windows
+guest trusts HNS's `Permanent` pre-commit row **directly**, the opposite of
+this ADR's own Q1 finding for Linux. That is not a contradiction — Q1's
+"never trust Permanent" is a consequence of the specific Linux/hv_netvsc
+netplan mismatch below, not a property of HNS's pre-commit itself. A
+from-scratch spike (`.spike-winboot`, 4 concurrent WS2025 boots,
+ARP-confirmed) found 0 divergence between the pre-commit and the guest's
+real lease for Windows, because Windows never hits that mismatch. So
+`WaitIP` needs no grace period and no console fixup on the Windows path;
+`permanentLeaseIP` (`internal/vm/neighbortable.go`) is the pure selector,
+mirroring `learnedLeaseIP`'s determinism for the (unobserved, but
+theoretically possible) multiple-Permanent-row case. See the Decision and
+Consequences sections below, updated in place.
+
 **Amended:** 2026-07-23 — `WaitIP`'s IP *source* is corrected. The host neighbor
 table's `Permanent` row is HNS's pre-commit, written at endpoint-attach before
 the guest boots, and the guest's own DHCP client can land on a **different**
@@ -89,20 +109,22 @@ cross-emulates architectures (Rosetta 2 translates *userspace binaries* inside a
 already-booted arm64 Linux guest; it does not let VZ boot an x86_64 kernel), so the
 real constraint is host-relative — a guest's arch must equal the process's own
 `runtime.GOARCH`. `Bundle.LoadConfig` stays a portable, host-independent shape check
-(`{darwin+arm64, linux+arm64, linux+amd64}`); each platform's own `Boot` adds the
-host-capability rejection against its own `runtime.GOARCH`.
+(`{darwin+arm64, linux+arm64, linux+amd64, windows+amd64}`); each platform's own
+`Boot` adds the host-capability rejection against its own `runtime.GOARCH`.
 
 ## Decision
 
 Bare HCS compute systems (`internal/winhcs/hcs`), not classic vmms-managed VMs.
-Schema 2.1, `HvSocket` populated, `SecureBoot` applied via the Microsoft UEFI CA
-template, `Chipset.Uefi.BootThis` omitted (UEFI auto-discovers the ESP on the
-SCSI-attached VHDX — the documented `ScsiDrive`/`File` boot-entry `DeviceType`
+Schema 2.1, `HvSocket` populated, `SecureBoot` applied via a per-guest-OS
+template (below), `Chipset.Uefi.BootThis` omitted (UEFI auto-discovers the ESP on
+the SCSI-attached VHDX — the documented `ScsiDrive`/`File` boot-entry `DeviceType`
 values are unexercised even in Microsoft's own code and do not work). `WaitIP`
 polls `GetIpNetTable2` via a small hand-written binding
 (`internal/vm/neighbortable_windows.go`), since `x/sys/windows` doesn't wrap this
 corner of `iphlpapi`; the pure row-selection logic lives in
 `internal/vm/neighbortable.go` so it's unit-tested off-hardware.
+
+### Linux guests
 
 `WaitIP` gives the guest a bounded grace period (`waitIPGracePeriod`) to bring
 up networking on its own — the original assumption below, kept as the first
@@ -132,6 +154,22 @@ neighbor-table read remains the *IP source* only on the grace-period happy path,
 and only for a learned row — a self-configuring guest that has actually resolved,
 never a bare `Permanent` pre-commit.
 
+### Windows guests
+
+The compute-system document is otherwise identical; the guest OS only changes
+one field, `Chipset.Uefi.SecureBootTemplateId`
+(`secureBootTemplateFor`/`hcs_windows.go`): the Windows Secure Boot template GUID
+`1734c6e8-3154-4dda-ba5f-a874cc483422` in place of the Linux-shim anchor above.
+`WaitIP` also branches (`waitIPLinux`/`waitIPWindows`): a Windows guest never
+hits the Linux path's hv_netvsc/netplan naming mismatch, so its `Permanent`
+pre-commit row genuinely is the guest's real lease — a from-scratch spike
+(`.spike-winboot`, 4 concurrent WS2025 boots, ARP-confirmed) found 0 divergence.
+`waitIPWindows` therefore trusts `permanentLeaseIP` directly: no grace period,
+no learned-row distinction, no console fixup. This is a guest-OS-conditional
+trust decision, not a reopening of Q1's "never trust `Permanent`" finding —
+that finding is specific to the Linux image's netplan behavior, which the
+Windows path never exercises.
+
 ## Consequences
 
 - HCS compute systems are invisible to `Get-VM`/Hyper-V Manager — the `vmwp.exe`
@@ -153,6 +191,12 @@ never a bare `Permanent` pre-commit.
   `vm.ip` make the divergence visible in a trace.
 - Guest arch validation is `runtime.GOARCH`-relative, not hardcoded to amd64 — an
   arm64 Windows host booting `linux/arm64` guests needs no code change here.
+- A Windows guest's `WaitIP` has no console-fallback failure mode to reason
+  about — the entire fixup/divergence-detection machinery above is Linux-only.
+  A Windows guest that never gets a `Permanent` row at all (endpoint creation
+  failed, or the guest never DHCPs) times out the same way any other stalled
+  `WaitIP` does, with no special-cased error message the Linux path's
+  `SSHUser`/`SSHPassword`-missing check gets.
 
 ## Rejected alternatives
 

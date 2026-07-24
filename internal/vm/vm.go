@@ -33,11 +33,13 @@ type BootOptions struct {
 	// below the bundle's recorded minimum is rejected, not clamped.
 	CPUCount   uint
 	MemorySize uint64
-	// SSHUser/SSHPassword are the pool's configured guest credentials --
-	// windows's Boot needs them to log in over the console and apply a
-	// one-time network fixup before returning (see hcs_windows.go's
-	// fixupNetwork); unused on darwin, where cloud-init's own netplan
-	// already brings the guest's network up correctly.
+	// SSHUser/SSHPassword are the pool's configured guest credentials -- the
+	// Hyper-V/HCS backend's Linux guests need them to log in over the console
+	// and apply a one-time network fixup before returning (see
+	// hcs_windows.go's fixupNetwork); unused on darwin (cloud-init's own
+	// netplan already brings the guest's network up correctly) and unused
+	// for the same backend's Windows guests (HNS's own pre-commit IP is
+	// already correct, see hcs_windows.go's waitIPWindows).
 	SSHUser     string
 	SSHPassword string
 }

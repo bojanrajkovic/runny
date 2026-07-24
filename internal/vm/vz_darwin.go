@@ -48,6 +48,18 @@ func (m VZManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOption
 	switch cfg.OS {
 	case "linux":
 		return m.bootLinux(ctx, bundle, cfg, opts)
+	case "windows":
+		// Explicit, not left to fall through to bootDarwin's default case:
+		// Virtualization.framework has no Windows guest support at all
+		// (that's hcs_windows.go's job, windows/amd64-only). checkHostArch
+		// above already blocks this in practice — a windows bundle is always
+		// amd64, this backend only ever runs on an arm64 host — but that's
+		// incidental protection from an unrelated check, not a stated
+		// contract; a bundle's OS getting silently treated as "must be
+		// darwin then" the moment a third guest OS exists is exactly the
+		// class of mistake this backend's own no-silent-failure invariant
+		// exists to catch.
+		return nil, fmt.Errorf("%w: this backend only boots darwin or linux guests, bundle is %s/%s", tart.ErrUnsupportedGuest, cfg.OS, cfg.Arch)
 	default:
 		return m.bootDarwin(ctx, bundle, cfg, opts)
 	}

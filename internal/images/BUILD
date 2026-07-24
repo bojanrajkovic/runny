@@ -32,6 +32,7 @@ go_library(
 go_test(
     name = "images_test",
     srcs = [
+        "diskformat_windows_test.go",
         "images_test.go",
         "prune_test.go",
         "puller_test.go",

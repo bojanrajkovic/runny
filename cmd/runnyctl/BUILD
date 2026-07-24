@@ -132,6 +132,7 @@ go_test(
     srcs = [
         "dial_windows_test.go",
         "follow_test.go",
+        "image_test.go",
         "installdaemon_test.go",
         "installdaemon_windows_test.go",
         "main_test.go",

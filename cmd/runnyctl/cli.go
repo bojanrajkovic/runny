@@ -214,7 +214,7 @@ type ImagePackCmd struct {
 	Arch       string `required:"" help:"guest architecture (arm64 or amd64)"`
 	CPUCount   uint   `name:"cpu-count" required:"" help:"guest vCPU count"`
 	MemorySize uint64 `name:"memory-size" required:"" help:"guest memory size in bytes"`
-	NVRAM      string `name:"nvram" help:"path to nvram bytes to embed (default: a minimal placeholder; the HCS/windows boot path never reads it)"`
+	NVRAM      string `name:"nvram" help:"path to nvram bytes to embed (windows: default is a minimal placeholder, HCS never reads it; darwin/linux: required, VZ parses this file as real firmware state)"`
 }
 
 func (p *ImagePackCmd) Run() error {

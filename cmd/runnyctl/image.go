@@ -9,10 +9,13 @@ import (
 )
 
 // imagePlaceholderNVRAM is what a packed image's nvram layer holds when the
-// operator doesn't supply real nvram bytes via --nvram. HCS never reads
-// NVRAMPath (see internal/vm/hcs_windows.go), but tart.Bundle.Verify still
-// requires the file to be non-empty, so this is a Verify-satisfying stand-in,
-// not meaningful VM firmware state.
+// operator doesn't supply real nvram bytes via --nvram. Safe ONLY for
+// windows: HCS never reads NVRAMPath at all (see internal/vm/hcs_windows.go),
+// so any non-empty stand-in satisfies tart.Bundle.Verify without mattering
+// further. It is NOT safe for darwin/linux -- internal/vm's VZ backend opens
+// and parses NVRAMPath as real EFI/aux-storage firmware state
+// (vz.NewEFIVariableStore/vz.NewMacAuxiliaryStorage) -- so imagePack requires
+// --nvram explicitly for those guests instead of silently reusing this.
 var imagePlaceholderNVRAM = []byte{0}
 
 // imagePack reads diskPath and packs it into a tart-format OCI Image Layout
@@ -29,11 +32,14 @@ func imagePack(diskPath, layoutDir, guestOS, arch string, cpuCount uint, memoryS
 	defer disk.Close()
 
 	nvram := imagePlaceholderNVRAM
-	if nvramPath != "" {
+	switch {
+	case nvramPath != "":
 		nvram, err = os.ReadFile(nvramPath)
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", nvramPath, err)
 		}
+	case guestOS != "windows":
+		return fmt.Errorf("--nvram is required for --os %s (only windows guests can use the placeholder -- HCS never reads it, VZ does)", guestOS)
 	}
 
 	// Version is left unset: nothing in runny reads tart.Config.Version (grepped),

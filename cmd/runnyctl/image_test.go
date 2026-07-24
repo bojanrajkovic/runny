@@ -45,7 +45,8 @@ func TestImagePackCmdRun(t *testing.T) {
 	layoutDir := filepath.Join(dir, "out")
 
 	c := &ctl{out: io.Discard, err: io.Discard}
-	err := runArgs(t, c,
+	err := runArgs(
+		t, c,
 		"image", "pack", diskPath,
 		"--oci-layout", layoutDir,
 		"--os", "windows", "--arch", "amd64",
@@ -84,7 +85,8 @@ func TestImagePackRequiresNVRAMForNonWindows(t *testing.T) {
 
 	t.Run("linux via CLI", func(t *testing.T) {
 		c := &ctl{out: io.Discard, err: io.Discard}
-		err := runArgs(t, c,
+		err := runArgs(
+			t, c,
 			"image", "pack", diskPath,
 			"--oci-layout", filepath.Join(dir, "out-linux"),
 			"--os", "linux", "--arch", "amd64",

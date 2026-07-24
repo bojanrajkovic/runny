@@ -9,6 +9,15 @@ edges only.
 
 ## Sharp edges
 
+- **The package splits by guest-OS dialect: `guest.go` (shared machinery +
+  the dispatcher methods), `guest_posix.go` (darwin/linux scripts and
+  helpers), `winguest.go` (the windows dialect).** `winguest.go` is
+  deliberately not `guest_windows.go` — Go's implicit `_windows` GOOS file
+  suffix would constrain it to windows-only hosts, and this code must build
+  and test on every host (the FSM tests exercise the windows dialect on
+  macOS/Linux CI). Same rule for `winguest_test.go` vs `guest_test.go`. A
+  declaration belongs in the dialect file it's used only by; anything a
+  dispatcher method needs from both dialects stays in `guest.go`.
 - **`perOS` picks only between the two POSIX scripts (darwin/linux), and
   errors on anything else — windows included.** Every windows call site
   (`StartRunner`, `Rotate`, `PushRunnerTarball`, `StopRunner`, `PullDiag`,

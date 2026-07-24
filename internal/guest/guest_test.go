@@ -1,9 +1,13 @@
+// Tests for the shared machinery (guest.go) and the POSIX dialect
+// (guest_posix.go): the rotateServer SSH test harness, the dispatcher
+// methods exercised over it, and the POSIX script-content assertions.
+// Windows-dialect-only tests that don't need this harness live in
+// winguest_test.go.
 package guest
 
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -14,7 +18,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-	"unicode/utf16"
 
 	"golang.org/x/crypto/ssh"
 
@@ -1189,202 +1192,6 @@ func TestInstallDebugKeyUsesLinuxRecorderOnLinuxGuest(t *testing.T) {
 	}
 	if !strings.Contains(script, `-c "$SSH_ORIGINAL_COMMAND" -e`) {
 		t.Errorf("linux guest missing util-linux -c flag form\nscript: %q", script)
-	}
-}
-
-// The windows rotate script must set the administrators_authorized_keys ACL
-// (sshd silently ignores the file otherwise), PREPEND
-// PasswordAuthentication no (sshd_config is first-match-wins, and the stock
-// config ends with a Match Group administrators block an append would land
-// inside), and restart sshd via a DETACHED process (an inline restart would
-// kill the session issuing it).
-func TestRotateScriptWindowsPinsACLPrependAndDetachedRestart(t *testing.T) {
-	script := fmt.Sprintf(rotateScriptWindowsTemplate, "AAAA key", "")
-	if !strings.Contains(script, `icacls 'C:\ProgramData\ssh\administrators_authorized_keys' /inheritance:r /grant "SYSTEM:F" /grant "BUILTIN\Administrators:F"`) {
-		t.Errorf("windows rotate script missing the administrators_authorized_keys ACL fix:\n%s", script)
-	}
-	if !strings.Contains(script, "if ($LASTEXITCODE -ne 0) { exit 2 }") {
-		t.Errorf("windows rotate script must fail loudly when icacls itself errors:\n%s", script)
-	}
-	// The new directive must be prepended (built as directive + $existing),
-	// never appended ($existing + directive).
-	if !strings.Contains(script, `"PasswordAuthentication no`) {
-		t.Fatalf("windows rotate script missing the PasswordAuthentication directive:\n%s", script)
-	}
-	if strings.Contains(script, `$existing + "PasswordAuthentication no`) {
-		t.Error("windows rotate script appends PasswordAuthentication no instead of prepending it")
-	}
-	if !strings.Contains(script, `+ $existing)`) {
-		t.Errorf("windows rotate script must prepend the directive before $existing:\n%s", script)
-	}
-	if !strings.Contains(script, "Start-Process") || !strings.Contains(script, "Start-Sleep -Seconds 1; Restart-Service sshd") {
-		t.Errorf("windows rotate script must restart sshd via a detached, delayed process:\n%s", script)
-	}
-	// The restart must not run inline in this exec — that would kill the
-	// session issuing the restart before it could reply.
-	if strings.Contains(script, "\nRestart-Service sshd\n") {
-		t.Error("windows rotate script must not call Restart-Service inline")
-	}
-}
-
-// Plain rotate must never touch the account password; scramble uses
-// Set-LocalUser (net user prompts interactively above 14 chars and would
-// hang the exec).
-func TestRotateScrambleWindowsUsesSetLocalUser(t *testing.T) {
-	if strings.Contains(fmt.Sprintf(scrambleLineWindowsTemplate, "x"), "net user") {
-		t.Error("windows scramble line must not use net user")
-	}
-	if !strings.Contains(scrambleLineWindowsTemplate, "Set-LocalUser") {
-		t.Error("windows scramble line must use Set-LocalUser")
-	}
-	if !strings.Contains(scrambleLineWindowsTemplate, "-Name Administrator") {
-		t.Error("windows scramble line must target the baked Administrator account")
-	}
-}
-
-// The windows stop script matches the listener by --jitconfig in its
-// CommandLine (Get-CimInstance Win32_Process's CommandLine is the windows
-// equivalent of pgrep -f) and proves death by re-checking.
-func TestStopRunnerScriptWindowsShape(t *testing.T) {
-	if !strings.Contains(stopRunnerScriptWindows, "Win32_Process") {
-		t.Error("windows stop script must enumerate processes via Win32_Process")
-	}
-	if !strings.Contains(stopRunnerScriptWindows, "--jitconfig") {
-		t.Error("windows stop script must match on --jitconfig")
-	}
-	if !strings.Contains(stopRunnerScriptWindows, "Stop-Process") {
-		t.Error("windows stop script must kill via Stop-Process")
-	}
-	if !strings.Contains(stopRunnerScriptWindows, "exit 0") || !strings.Contains(stopRunnerScriptWindows, "exit 1") {
-		t.Error("windows stop script must have both a proven-dead and a survived exit path")
-	}
-}
-
-// startRunnerWindows refuses a runner asset name that isn't a well-formed
-// zip basename, the same trust-boundary discipline the POSIX path applies.
-func TestStartRunnerWindowsRejectsBadZipName(t *testing.T) {
-	g := &Guest{goos: home.OSWindows}
-	if _, err := g.startRunnerWindows(t.Context(), "jit", "actions-runner-win-x64-2.320.0.tar.gz"); err == nil {
-		t.Error("startRunnerWindows accepted a non-.zip runner asset name")
-	}
-}
-
-// extractRunnerZipScript must make tar's own result the script's exit code
-// explicitly — native tar's exit-code propagation through -EncodedCommand is
-// version/mode-fragile, and a corrupt zip could otherwise read as success.
-func TestExtractRunnerZipScriptPropagatesExitCode(t *testing.T) {
-	script := extractRunnerZipScript("actions-runner-win-x64-2.320.0.zip")
-	if !strings.HasSuffix(strings.TrimRight(script, "\n"), "exit $LASTEXITCODE") {
-		t.Errorf("extract script must end with exit $LASTEXITCODE:\n%s", script)
-	}
-	if !strings.Contains(script, "tar -xf") {
-		t.Errorf("extract script must still invoke tar:\n%s", script)
-	}
-}
-
-// The JIT blob is scp-streamed to the .tmp path and committed by a separate
-// Move-Item exec with -ErrorAction Stop (Move-Item's own errors are
-// non-terminating by default; without it a failed rename silently exits 0).
-// The rename staying a single same-volume Move-Item is what keeps the
-// launcher from ever reading a half-written blob.
-func TestCommitJITConfigScriptRenamesAtomically(t *testing.T) {
-	script := commitJITConfigScript()
-	if !strings.Contains(script, "Move-Item -Force -Path '"+jitPendingPathWindows+"' -Destination '"+jitPathWindows+"' -ErrorAction Stop") {
-		t.Errorf("script must rename into place with -ErrorAction Stop:\n%s", script)
-	}
-	if strings.Contains(script, "OpenStandardInput") {
-		t.Errorf("JIT commit must not read stdin through the PowerShell host:\n%s", script)
-	}
-}
-
-// File transfers speak SCP to the guest's native scp.exe sink — never a
-// PowerShell stdin read, which the PS 5.1 console-less host wedges or kills
-// (hardware-proven on the published image). The framing is one C-record:
-// header, bytes, NUL.
-func TestScpSourceFraming(t *testing.T) {
-	got, err := io.ReadAll(scpSource("x.bin", 3, strings.NewReader("abc")))
-	if err != nil {
-		t.Fatalf("reading scp source stream: %v", err)
-	}
-	want := "C0644 3 x.bin\nabc\x00"
-	if string(got) != want {
-		t.Errorf("scp framing = %q, want %q", got, want)
-	}
-	if cmd := scpSinkCommand(`C:\runny-cache\x.bin`); cmd != `scp -t C:\runny-cache\x.bin` {
-		t.Errorf("scp sink command = %q", cmd)
-	}
-}
-
-// Every EncodedCommand script runs with the progress stream silenced: PS
-// 5.1's console-less host otherwise serializes progress records (module
-// autoload's "Preparing modules for first use") as a #< CLIXML blob on
-// stderr, polluting parsed output — the rotate's host-key capture hit
-// exactly this on the published image.
-func TestEncodedCommandSilencesProgressStream(t *testing.T) {
-	cmd := encodedCommand("Get-Date")
-	b64 := strings.TrimPrefix(cmd, "powershell -NoProfile -NonInteractive -EncodedCommand ")
-	raw, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil {
-		t.Fatalf("decoding encoded command: %v", err)
-	}
-	u16 := make([]uint16, len(raw)/2)
-	for i := range u16 {
-		u16[i] = uint16(raw[2*i]) | uint16(raw[2*i+1])<<8
-	}
-	script := string(utf16.Decode(u16))
-	if !strings.HasPrefix(script, "$ProgressPreference='SilentlyContinue'; ") {
-		t.Errorf("encoded script must silence the progress stream first: %q", script)
-	}
-	if !strings.HasSuffix(script, "Get-Date") {
-		t.Errorf("encoded script must end with the caller's script: %q", script)
-	}
-}
-
-// The rotate and debug-key install scripts must share the exact same
-// administrators_authorized_keys ACL fragment — including the icacls
-// exit-code check (icacls failing loudly rather than being swallowed by
-// | Out-Null, the one condition under which a "successful" key append does
-// nothing) — so the ACL fix has exactly one home.
-func TestWindowsAuthorizedKeyScriptsShareACLFragment(t *testing.T) {
-	fragment := psAppendAuthorizedKeyLine("$x")
-	if !strings.Contains(fragment, "if ($LASTEXITCODE -ne 0) { exit 2 }") {
-		t.Errorf("shared ACL fragment must fail loudly on a failed icacls: %q", fragment)
-	}
-	rotate := fmt.Sprintf(rotateScriptWindowsTemplate, "AAAA key", "")
-	debug := fmt.Sprintf(installDebugKeyScriptWindows, "AAAA key", "AAAA key")
-	for _, s := range []struct {
-		name, script string
-	}{{"rotate", rotate}, {"debug key", debug}} {
-		if !strings.Contains(s.script, "if ($LASTEXITCODE -ne 0) { exit 2 }") {
-			t.Errorf("%s script missing the icacls exit-code check:\n%s", s.name, s.script)
-		}
-	}
-}
-
-// The watcher script tails the launcher's log/exit-code contract and exits
-// with the runner's own exit code — the anchor points StartRunner's windows
-// hand-off relies on. Output goes to the raw stdout stream (never re-encoded
-// through [Console]::Out's OEM-codepage TextWriter, which would mangle
-// non-ASCII output and can split a multibyte sequence at a drain boundary).
-// The exit-code read is guarded by a digits-only regex before the cast.
-func TestWatcherScriptWindowsContract(t *testing.T) {
-	if !strings.Contains(watcherScriptWindows, runnerLogPathWindows) {
-		t.Error("watcher script must tail the launcher's log path")
-	}
-	if !strings.Contains(watcherScriptWindows, runnerExitPathWindows) {
-		t.Error("watcher script must watch for the launcher's exit-code file")
-	}
-	if !strings.Contains(watcherScriptWindows, "exit ([int]$code)") {
-		t.Error("watcher script must exit with the runner's own exit code")
-	}
-	if !strings.Contains(watcherScriptWindows, `$code -match '^-?\d+$'`) {
-		t.Error("watcher script must guard the exit-code cast with an integer regex that accepts negative (crashed-process NTSTATUS) codes")
-	}
-	if strings.Contains(watcherScriptWindows, "[Console]::Out.Write") {
-		t.Error("watcher script must not write through [Console]::Out (OEM codepage re-encoding)")
-	}
-	if !strings.Contains(watcherScriptWindows, "OpenStandardOutput()") {
-		t.Error("watcher script must write raw bytes via the standard-output stream")
 	}
 }
 

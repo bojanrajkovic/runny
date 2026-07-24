@@ -911,10 +911,12 @@ func splitPin(ref string) (name, pinHex string) {
 }
 
 // runnerVersionDisplay extracts the semver from an asset filename like
-// "actions-runner-osx-arm64-2.320.0.tar.gz" → "2.320.0". Falls back to the
-// full filename for any shape that doesn't match.
+// "actions-runner-osx-arm64-2.320.0.tar.gz" (darwin/linux) or
+// "actions-runner-win-x64-2.320.0.zip" (windows) → "2.320.0". Falls back to
+// the full filename for any shape that doesn't match.
 func runnerVersionDisplay(assetName string) string {
 	s := strings.TrimSuffix(assetName, ".tar.gz")
+	s = strings.TrimSuffix(s, ".zip")
 	if i := strings.LastIndexByte(s, '-'); i >= 0 {
 		return s[i+1:]
 	}

@@ -90,6 +90,23 @@ func TestRenderStatusShowsBackoffRemaining(t *testing.T) {
 	}
 }
 
+// runnerVersionDisplay strips either runner-asset extension (.tar.gz for
+// darwin/linux, .zip for windows) to show the bare semver; an unrecognized
+// shape falls back to the full filename rather than mangling it.
+func TestRunnerVersionDisplay(t *testing.T) {
+	cases := []struct{ asset, want string }{
+		{"actions-runner-osx-arm64-2.320.0.tar.gz", "2.320.0"},
+		{"actions-runner-linux-amd64-2.320.0.tar.gz", "2.320.0"},
+		{"actions-runner-win-x64-2.334.0.zip", "2.334.0"},
+		{"norunnerversion.tar.gz", "norunnerversion.tar.gz"},
+	}
+	for _, tc := range cases {
+		if got := runnerVersionDisplay(tc.asset); got != tc.want {
+			t.Errorf("runnerVersionDisplay(%q) = %q, want %q", tc.asset, got, tc.want)
+		}
+	}
+}
+
 // The IMAGE cell's one rule: the @hex12 suffix appears iff the wire carried
 // image_digest — iff resolution completed this cycle. In particular a
 // configured digest pin must never be echoed into the cell (the tripwire

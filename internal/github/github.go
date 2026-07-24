@@ -283,7 +283,7 @@ var apiArch = map[string]string{"amd64": "x64", "arm64": "arm64"}
 // The returned sha256 is the service-declared checksum of the tarball (may
 // be empty on older GHES); the downloader verifies it when present.
 func (c *Client) RunnerDownload(ctx bounded.Context, goos, goarch string) (filename, url, sha256 string, err error) {
-	apiOS := map[string]string{"darwin": "osx", "linux": "linux"}[goos]
+	apiOS := map[string]string{"darwin": "osx", "linux": "linux", "windows": "win"}[goos]
 	if apiOS == "" {
 		return "", "", "", fmt.Errorf("unsupported guest os %q", goos)
 	}

@@ -21,20 +21,34 @@ import (
 	"github.com/bojanrajkovic/runny/internal/sshx"
 )
 
-// Unrecognized goos falls through to darwin, not a loud failure — perOS
-// doesn't validate (config.go's validate() already does, upstream).
-func TestPerOSFallsThroughToDarwin(t *testing.T) {
+// perOS is a loud three-way dispatch: darwin/linux/windows each select their
+// own value, and anything else is an error, not a silent darwin fallback —
+// a third guest OS existing makes the old fallthrough a no-silent-failure
+// violation, not a convenience.
+func TestPerOSDispatchesThreeWays(t *testing.T) {
 	cases := []struct {
 		goos string
 		want string
 	}{
-		{home.OSLinux, "linux"},
 		{home.OSDarwin, "darwin"},
-		{"", "darwin"},
+		{home.OSLinux, "linux"},
+		{home.OSWindows, "windows"},
 	}
 	for _, tc := range cases {
-		if got := perOS(tc.goos, "darwin", "linux"); got != tc.want {
+		got, err := perOS(tc.goos, "darwin", "linux", "windows")
+		if err != nil {
+			t.Errorf("perOS(%q, ...) unexpected error: %v", tc.goos, err)
+		}
+		if got != tc.want {
 			t.Errorf("perOS(%q, ...) = %q, want %q", tc.goos, got, tc.want)
+		}
+	}
+}
+
+func TestPerOSUnknownOSIsLoudError(t *testing.T) {
+	for _, goos := range []string{"", "plan9", "freebsd"} {
+		if _, err := perOS(goos, "darwin", "linux", "windows"); err == nil {
+			t.Errorf("perOS(%q, ...) succeeded, want a loud error", goos)
 		}
 	}
 }
@@ -172,6 +186,38 @@ func TestProvisionScriptRejectsBadName(t *testing.T) {
 		if _, err := provisionScript("darwin", bad, nil, nil, false); err == nil {
 			t.Errorf("provisionScript accepted an unsafe tarball name %q", bad)
 		}
+	}
+}
+
+// provisionScript is POSIX-only: a windows guest's launch is StartRunner's
+// startRunnerWindows hand-off, not a single exec'd script, so provisionScript
+// must refuse windows loudly rather than silently render an empty script.
+func TestProvisionScriptRejectsWindows(t *testing.T) {
+	if _, err := provisionScript("windows", "actions-runner-win-x64-2.320.0.zip", nil, nil, true); err == nil {
+		t.Error("provisionScript accepted goos=windows, want a loud refusal")
+	}
+}
+
+// runnerAssetRE selects the tarball charset for darwin/linux and the zip
+// charset for windows; a windows-shaped tarball name and vice versa are both
+// rejected, alongside the usual shell-metacharacter cases.
+func TestRunnerAssetRENamePerOS(t *testing.T) {
+	if !runnerAssetRE("windows").MatchString("actions-runner-win-x64-2.320.0.zip") {
+		t.Error("windows asset regex rejected a well-formed .zip name")
+	}
+	for _, bad := range []string{
+		"actions-runner-win-x64-2.320.0.tar.gz", // tar.gz on windows
+		"actions-runner-win-x64-$(whoami).zip",
+		"actions-runner-win-x64-2.320.0.zip; rm -rf /",
+		"foo bar.zip",
+		"",
+	} {
+		if runnerAssetRE("windows").MatchString(bad) {
+			t.Errorf("windows asset regex accepted unsafe name %q", bad)
+		}
+	}
+	if runnerAssetRE("linux").MatchString("actions-runner-linux-amd64-2.320.0.zip") {
+		t.Error("linux asset regex accepted a .zip name")
 	}
 }
 
@@ -1139,6 +1185,95 @@ func TestInstallDebugKeyUsesLinuxRecorderOnLinuxGuest(t *testing.T) {
 	}
 	if !strings.Contains(script, `-c "$SSH_ORIGINAL_COMMAND" -e`) {
 		t.Errorf("linux guest missing util-linux -c flag form\nscript: %q", script)
+	}
+}
+
+// The windows rotate script must set the administrators_authorized_keys ACL
+// (sshd silently ignores the file otherwise), PREPEND
+// PasswordAuthentication no (sshd_config is first-match-wins, and the stock
+// config ends with a Match Group administrators block an append would land
+// inside), and restart sshd via a DETACHED process (an inline restart would
+// kill the session issuing it).
+func TestRotateScriptWindowsPinsACLPrependAndDetachedRestart(t *testing.T) {
+	script := fmt.Sprintf(rotateScriptWindowsTemplate, "AAAA key", "")
+	if !strings.Contains(script, `icacls 'C:\ProgramData\ssh\administrators_authorized_keys' /inheritance:r /grant "SYSTEM:F" /grant "BUILTIN\Administrators:F"`) {
+		t.Errorf("windows rotate script missing the administrators_authorized_keys ACL fix:\n%s", script)
+	}
+	// The new directive must be prepended (built as directive + $existing),
+	// never appended ($existing + directive).
+	if !strings.Contains(script, `"PasswordAuthentication no`) {
+		t.Fatalf("windows rotate script missing the PasswordAuthentication directive:\n%s", script)
+	}
+	if strings.Contains(script, `$existing + "PasswordAuthentication no`) {
+		t.Error("windows rotate script appends PasswordAuthentication no instead of prepending it")
+	}
+	if !strings.Contains(script, `+ $existing)`) {
+		t.Errorf("windows rotate script must prepend the directive before $existing:\n%s", script)
+	}
+	if !strings.Contains(script, "Start-Process") || !strings.Contains(script, "Start-Sleep -Seconds 1; Restart-Service sshd") {
+		t.Errorf("windows rotate script must restart sshd via a detached, delayed process:\n%s", script)
+	}
+	// The restart must not run inline in this exec — that would kill the
+	// session issuing the restart before it could reply.
+	if strings.Contains(script, "\nRestart-Service sshd\n") {
+		t.Error("windows rotate script must not call Restart-Service inline")
+	}
+}
+
+// Plain rotate must never touch the account password; scramble uses
+// Set-LocalUser (net user prompts interactively above 14 chars and would
+// hang the exec).
+func TestRotateScrambleWindowsUsesSetLocalUser(t *testing.T) {
+	if strings.Contains(fmt.Sprintf(scrambleLineWindowsTemplate, "x"), "net user") {
+		t.Error("windows scramble line must not use net user")
+	}
+	if !strings.Contains(scrambleLineWindowsTemplate, "Set-LocalUser") {
+		t.Error("windows scramble line must use Set-LocalUser")
+	}
+	if !strings.Contains(scrambleLineWindowsTemplate, "-Name Administrator") {
+		t.Error("windows scramble line must target the baked Administrator account")
+	}
+}
+
+// The windows stop script matches the listener by --jitconfig in its
+// CommandLine (Get-CimInstance Win32_Process's CommandLine is the windows
+// equivalent of pgrep -f) and proves death by re-checking.
+func TestStopRunnerScriptWindowsShape(t *testing.T) {
+	if !strings.Contains(stopRunnerScriptWindows, "Win32_Process") {
+		t.Error("windows stop script must enumerate processes via Win32_Process")
+	}
+	if !strings.Contains(stopRunnerScriptWindows, "--jitconfig") {
+		t.Error("windows stop script must match on --jitconfig")
+	}
+	if !strings.Contains(stopRunnerScriptWindows, "Stop-Process") {
+		t.Error("windows stop script must kill via Stop-Process")
+	}
+	if !strings.Contains(stopRunnerScriptWindows, "exit 0") || !strings.Contains(stopRunnerScriptWindows, "exit 1") {
+		t.Error("windows stop script must have both a proven-dead and a survived exit path")
+	}
+}
+
+// startRunnerWindows refuses a runner asset name that isn't a well-formed
+// zip basename, the same trust-boundary discipline the POSIX path applies.
+func TestStartRunnerWindowsRejectsBadZipName(t *testing.T) {
+	g := &Guest{goos: home.OSWindows}
+	if _, err := g.startRunnerWindows(t.Context(), "jit", "actions-runner-win-x64-2.320.0.tar.gz"); err == nil {
+		t.Error("startRunnerWindows accepted a non-.zip runner asset name")
+	}
+}
+
+// The watcher script tails the launcher's log/exit-code contract and exits
+// with the runner's own exit code — the anchor points StartRunner's windows
+// hand-off relies on.
+func TestWatcherScriptWindowsContract(t *testing.T) {
+	if !strings.Contains(watcherScriptWindows, runnerLogPathWindows) {
+		t.Error("watcher script must tail the launcher's log path")
+	}
+	if !strings.Contains(watcherScriptWindows, runnerExitPathWindows) {
+		t.Error("watcher script must watch for the launcher's exit-code file")
+	}
+	if !strings.Contains(watcherScriptWindows, "exit ([int]$code)") {
+		t.Error("watcher script must exit with the runner's own exit code")
 	}
 }
 

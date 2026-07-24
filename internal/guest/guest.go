@@ -7,8 +7,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -16,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"golang.org/x/crypto/ssh"
 
@@ -24,6 +28,30 @@ import (
 	"github.com/bojanrajkovic/runny/internal/sshx"
 	"github.com/bojanrajkovic/runny/internal/statemachine"
 )
+
+// windowsPrepTimeout bounds the extract + JIT-delivery steps StartRunner runs
+// on a windows guest before handing off to the watcher Proc. Fixed rather
+// than pool-configurable: measured windows boot-to-SSH is ~6s, and these
+// steps are a local unzip plus two small SSH execs, so a generous fixed
+// bound carries the same margin the rest of the cycle's global deadlines do
+// without adding a new per-OS deadline knob.
+const windowsPrepTimeout = 60 * time.Second
+
+// encodedCommand renders script as a `powershell -EncodedCommand` invocation:
+// UTF-16LE-encode, then base64. This is the only reliable way to hand a
+// multi-line PowerShell script through ssh/cmd.exe/PowerShell 5.1's stacked
+// quoting rules — the target shell for a windows guest's default SSH session
+// is cmd.exe, and anything beyond a trivial one-liner mangles under
+// cmd-then-PS-then-argv quoting. No secret ever goes through this path: the
+// JIT config crosses over stdin, exactly like the POSIX `$(cat)` pattern.
+func encodedCommand(script string) string {
+	u16 := utf16.Encode([]rune(script))
+	buf := make([]byte, len(u16)*2)
+	for i, v := range u16 {
+		binary.LittleEndian.PutUint16(buf[i*2:], v)
+	}
+	return "powershell -NoProfile -NonInteractive -EncodedCommand " + base64.StdEncoding.EncodeToString(buf)
+}
 
 // Dialer implements statemachine.Dialer over sshx.
 type Dialer struct {
@@ -66,12 +94,24 @@ type Guest struct {
 	goos string
 }
 
-// perOS returns darwinVal unless goos is home.OSLinux.
-func perOS(goos, darwinVal, linuxVal string) string {
-	if goos == home.OSLinux {
-		return linuxVal
+// perOS selects darwinVal, linuxVal, or windowsVal for goos. An unrecognized
+// goos is a loud error, never a silent darwin fallback: home.validate()
+// already gates every config-declared pool os, so this only ever fires
+// against a value this package computed itself — a bug, not a config
+// mistake — and with three guest OSes now live, silently treating an
+// unknown one as darwin is exactly the failure mode this project exists to
+// kill.
+func perOS(goos, darwinVal, linuxVal, windowsVal string) (string, error) {
+	switch goos {
+	case home.OSDarwin:
+		return darwinVal, nil
+	case home.OSLinux:
+		return linuxVal, nil
+	case home.OSWindows:
+		return windowsVal, nil
+	default:
+		return "", fmt.Errorf("guest: unknown guest os %q", goos)
 	}
-	return darwinVal
 }
 
 // The rotation scripts install the per-cycle public key and shut password
@@ -134,6 +174,50 @@ const scrambleLineLinux = `printf '%s:%s\n' "$(id -un)" '` + scramblePasswordPla
 const scrambleLineDarwin = `sudo dscl . -passwd "/Users/$(id -un)" '` + scramblePasswordPlaceholder + `'
 `
 
+// captureHostKeysWindowsScript is Windows sshd's equivalent of captureHostKeys:
+// print every host public key so the reconnect can pin the full offered set.
+const captureHostKeysWindowsScript = `Get-ChildItem 'C:\ProgramData\ssh\ssh_host_*_key.pub' | ForEach-Object { Get-Content $_.FullName }`
+
+// rotateScriptWindowsTemplate installs the per-cycle public key into
+// Windows OpenSSH's administrators_authorized_keys, disables password auth,
+// and restarts sshd — the windows equivalent of rotateScriptBase.
+//
+// administrators_authorized_keys is the ONE authorized-keys file Windows
+// OpenSSH honors for a member of the Administrators group (the image's
+// baked Administrator account), and it is silently ignored unless its ACL
+// strips inherited permissions down to SYSTEM and Administrators only —
+// sshd refuses to trust a file any other principal can write, and doesn't
+// say why the key never worked.
+//
+// PasswordAuthentication no is PREPENDED, not appended: sshd_config is
+// first-match-wins, and the stock Windows sshd_config ends with a
+// `+"`Match Group administrators`"+` block — appending after it would land
+// inside that block and lose to whatever precedes it, or worse, silently
+// apply only to a subset of matches. Prepending guarantees the directive is
+// the first one sshd reads, for every connection.
+//
+// Restarting sshd from inside the session that is issuing the restart would
+// kill this very session — Windows sshd connections are children of the
+// service process, unlike systemd's per-connection reload on Linux. The
+// restart is handed to a DETACHED process that sleeps briefly before
+// restarting the service, so this script's own exit status (and the
+// session carrying it) survives to be read back.
+const rotateScriptWindowsTemplate = `$pub = '%s'
+Add-Content -Path 'C:\ProgramData\ssh\administrators_authorized_keys' -Value $pub
+icacls 'C:\ProgramData\ssh\administrators_authorized_keys' /inheritance:r /grant "SYSTEM:F" /grant "BUILTIN\Administrators:F" | Out-Null
+$cfgPath = 'C:\ProgramData\ssh\sshd_config'
+$existing = Get-Content -Path $cfgPath -Raw
+Set-Content -Path $cfgPath -Value ("PasswordAuthentication no` + "`r`n" + `" + $existing) -NoNewline
+%sStart-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 1; Restart-Service sshd' | Out-Null
+`
+
+// scrambleLineWindowsTemplate randomizes the baked Administrator account's
+// password (ssh_hardening: scramble). Set-LocalUser, not `+"`net user`"+`: net
+// user prompts interactively for any password over 14 characters instead of
+// accepting one on the command line, which would hang the exec forever.
+const scrambleLineWindowsTemplate = `Set-LocalUser -Name Administrator -Password (ConvertTo-SecureString '%s' -AsPlainText -Force)
+`
+
 // captureHostKeys reads every host public key the guest may present during
 // key exchange. All of them: the host-key algorithm is negotiated per
 // connection, so the pin set must cover whatever sshd offers
@@ -187,6 +271,10 @@ func (d Dialer) Rotate(ctx bounded.Context, addr string, g statemachine.Guest, g
 		return nil, fmt.Errorf("rotate: cycle key signer: %w", err)
 	}
 
+	if goos == home.OSWindows {
+		return d.rotateWindows(ctx, addr, pg, signer)
+	}
+
 	out, code, err := pg.c.Output(ctx, captureHostKeys)
 	if err != nil {
 		return nil, fmt.Errorf("rotate: capturing host keys: %w", err)
@@ -199,7 +287,10 @@ func (d Dialer) Rotate(ctx bounded.Context, addr string, g statemachine.Guest, g
 		return nil, fmt.Errorf("rotate: %w", err)
 	}
 
-	script := perOS(goos, rotateScriptDarwin, rotateScriptLinux)
+	script, err := perOS(goos, rotateScriptDarwin, rotateScriptLinux, "")
+	if err != nil {
+		return nil, fmt.Errorf("rotate: %w", err)
+	}
 	pubLine := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
 	full := fmt.Sprintf(script, pubLine)
 
@@ -211,7 +302,10 @@ func (d Dialer) Rotate(ctx bounded.Context, addr string, g statemachine.Guest, g
 	if d.Hardening.Scrambles() {
 		pw := rand.Text()
 		verifyPW = pw
-		scrambleLine := perOS(goos, scrambleLineDarwin, scrambleLineLinux)
+		scrambleLine, err := perOS(goos, scrambleLineDarwin, scrambleLineLinux, "")
+		if err != nil {
+			return nil, fmt.Errorf("rotate: %w", err)
+		}
 		full += strings.ReplaceAll(scrambleLine, scramblePasswordPlaceholder, pw)
 	}
 	out, code, err = pg.c.Output(ctx, full)
@@ -247,6 +341,73 @@ func (d Dialer) Rotate(ctx bounded.Context, addr string, g statemachine.Guest, g
 	// HostKeys work against the hardened session (issue #39).
 	_ = pg.c.Close()
 	return &Guest{c: c, addr: addr, cfg: cfg, interval: d.interval(), goos: goos}, nil
+}
+
+// rotateWindows is Rotate's windows branch: same mint → capture → install →
+// reconnect → prove-the-negative choreography as the POSIX path, but every
+// step is a PowerShell script against Windows OpenSSH's own config surface
+// (administrators_authorized_keys, sshd_config, the sshd service) instead of
+// a POSIX one-liner. See rotateScriptWindowsTemplate's doc comment for the
+// ACL and prepend traps, and the detached-restart doc comment there for why
+// the service restart can't run inline.
+func (d Dialer) rotateWindows(ctx bounded.Context, addr string, pg *Guest, signer ssh.Signer) (statemachine.Guest, error) {
+	out, code, err := pg.c.Output(ctx, encodedCommand(captureHostKeysWindowsScript))
+	if err != nil {
+		return nil, fmt.Errorf("rotate: capturing host keys: %w", err)
+	}
+	if code != 0 {
+		return nil, fmt.Errorf("rotate: capturing host keys: exit %d: %s", code, out)
+	}
+	hostKeys, err := parseHostKeys(out)
+	if err != nil {
+		return nil, fmt.Errorf("rotate: %w", err)
+	}
+
+	pubLine := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
+	// The pubkey/password values below are PowerShell single-quoted string
+	// literals; the only PS metacharacter a single-quoted literal cares about
+	// is the quote itself, doubled to escape (PS1's own convention, distinct
+	// from POSIX's backslash-quote).
+	pubEsc := strings.ReplaceAll(pubLine, "'", "''")
+
+	verifyPW := d.SSH.Password
+	scramble := ""
+	if d.Hardening.Scrambles() {
+		pw := rand.Text()
+		verifyPW = pw
+		scramble = fmt.Sprintf(scrambleLineWindowsTemplate, strings.ReplaceAll(pw, "'", "''"))
+	}
+	script := fmt.Sprintf(rotateScriptWindowsTemplate, pubEsc, scramble)
+
+	out, code, err = pg.c.Output(ctx, encodedCommand(script))
+	if err != nil {
+		return nil, fmt.Errorf("rotate: installing cycle key: %w", err)
+	}
+	if code != 0 {
+		return nil, fmt.Errorf("rotate: installing cycle key: exit %d: %s", code, out)
+	}
+
+	cfg := d.SSH
+	cfg.Signer = signer
+	cfg.HostKeys = hostKeys
+	// The restart is async (a detached process sleeping 1s before
+	// Restart-Service): the old sshd may still be answering when this dials,
+	// so WaitFor's own retry loop is what carries the reconnect across the
+	// flip, exactly as it does for the POSIX reload/socket-activation cases.
+	c, err := sshx.WaitFor(ctx, addr, cfg, d.interval())
+	if err != nil {
+		return nil, fmt.Errorf("rotate: reconnecting with cycle key: %w", err)
+	}
+
+	verifyCfg := d.SSH
+	verifyCfg.Password = verifyPW
+	if err := verifyPasswordAuthDead(ctx, addr, verifyCfg); err != nil {
+		_ = c.Close()
+		return nil, err
+	}
+
+	_ = pg.c.Close()
+	return &Guest{c: c, addr: addr, cfg: cfg, interval: d.interval(), goos: home.OSWindows}, nil
 }
 
 // verifyPasswordAuthDead attempts password auth and requires ErrAuthRejected.
@@ -398,14 +559,22 @@ const runnerPushCacheDir = "runny-cache"
 const linuxCachePushed = `CACHE="$HOME/` + runnerPushCacheDir + `"
 `
 
-// provisionScriptLinuxPushed: the pushed-cache variant (windows, see
-// hcsMachine.NeedsRunnerPush).
+// provisionScriptLinuxPushed: the pushed-cache variant (windows HOST, bare
+// compute Linux guest — see hcsMachine.NeedsRunnerPush).
 const provisionScriptLinuxPushed = linuxProvisionPrelude + linuxCachePushed + linuxProvisionBody
 
-// PushRunnerTarball streams localPath's content to
-// $HOME/runny-cache/<basename> on the guest via `cat >`, over the same
-// already-hardened SSH session StartRunner will use next. Only called when
-// vm.Machine.NeedsRunnerPush is true (windows): darwin's virtiofs share is
+// runnerCacheDirWindows is where PushRunnerTarball stages the runner zip on a
+// windows GUEST, and where StartRunner's extract step reads it from — always
+// pushed (a windows guest only ever boots on the HCS host, whose
+// NeedsRunnerPush is unconditionally true), so there is no live-share
+// variant to keep in sync with, unlike the linux push/mount split above.
+const runnerCacheDirWindows = `C:\runny-cache`
+
+// PushRunnerTarball streams localPath's content to the guest's own
+// runner-cache location — $HOME/runny-cache/<basename> (linux, cat >) or
+// C:\runny-cache\<basename> (windows, a PowerShell stdin→file copy) — over
+// the same already-hardened SSH session StartRunner will use next. Only
+// called when vm.Machine.NeedsRunnerPush is true: darwin's virtiofs share is
 // already live by the time PROVISION runs, so nothing needs pushing there.
 func (g *Guest) PushRunnerTarball(ctx bounded.Context, localPath string) error {
 	f, err := os.Open(localPath)
@@ -414,14 +583,29 @@ func (g *Guest) PushRunnerTarball(ctx bounded.Context, localPath string) error {
 	}
 	defer f.Close()
 
-	// base crosses into a shell command string below — reuse the same
-	// trust-boundary guard provisionScript applies to the tarball name
-	// (charset carries no shell metacharacter and no `/`) rather than assume
-	// every caller already validated it.
+	// base crosses into a shell/PowerShell command string below — reuse the
+	// same trust-boundary guard provisionScript/StartRunner apply to the
+	// tarball name (the charset carries no shell metacharacter and no `/`)
+	// rather than assume every caller already validated it.
 	base := filepath.Base(localPath)
-	if !runnerTarballRE.MatchString(base) {
-		return fmt.Errorf("refusing to push runner tarball with an unexpected name %q", base)
+	if !runnerAssetRE(g.goos).MatchString(base) {
+		return fmt.Errorf("refusing to push runner asset with an unexpected name %q", base)
 	}
+
+	if g.goos == home.OSWindows {
+		dest := runnerCacheDirWindows + `\` + base
+		script := fmt.Sprintf(`New-Item -Force -ItemType Directory -Path '%s' | Out-Null
+$in=[Console]::OpenStandardInput(); $f=[IO.File]::Create('%s'); $in.CopyTo($f); $f.Close()`, runnerCacheDirWindows, dest)
+		out, code, err := g.c.RunWithInput(ctx, encodedCommand(script), f)
+		if err != nil {
+			return fmt.Errorf("pushing runner zip: %w", err)
+		}
+		if code != 0 {
+			return fmt.Errorf("pushing runner zip: exit %d: %s", code, out)
+		}
+		return nil
+	}
+
 	cmd := fmt.Sprintf(`mkdir -p "$HOME/%s" && cat > "$HOME/%s/%s"`, runnerPushCacheDir, runnerPushCacheDir, base)
 	out, code, err := g.c.RunWithInput(ctx, cmd, f)
 	if err != nil {
@@ -450,6 +634,9 @@ func (g *Guest) PushRunnerTarball(ctx bounded.Context, localPath string) error {
 // for system-level configuration guest_env can't express — same not-for-secrets
 // caveat.
 func (g *Guest) StartRunner(ctx context.Context, jit, goos, runnerTarball string, env map[string]string, setup []string, needsPush bool) (statemachine.Proc, error) {
+	if goos == home.OSWindows {
+		return g.startRunnerWindows(ctx, jit, runnerTarball)
+	}
 	script, err := provisionScript(goos, runnerTarball, env, setup, needsPush)
 	if err != nil {
 		return nil, err
@@ -457,6 +644,114 @@ func (g *Guest) StartRunner(ctx context.Context, jit, goos, runnerTarball string
 	p, err := g.c.Start(ctx, script, strings.NewReader(jit))
 	if err != nil {
 		return nil, fmt.Errorf("starting runner: %w", err)
+	}
+	return proc{p}, nil
+}
+
+// runnerDirWindows is where the runner zip is extracted to on a windows
+// guest — the fixed layout the image's launcher polls (jitPathWindows) and
+// runs the listener out of.
+const runnerDirWindows = `C:\actions-runner`
+
+// jitPendingPathWindows / jitPathWindows: the JIT config lands at the
+// .tmp path first, then is renamed into place — write-then-rename so the
+// image's launcher (polling jitPathWindows) can never observe a partial
+// file, the windows equivalent of the POSIX path's atomic `$(cat)` handoff.
+const (
+	jitPendingPathWindows = runnerDirWindows + `\.jitconfig.tmp`
+	jitPathWindows        = runnerDirWindows + `\.jitconfig`
+)
+
+// runnerLogPathWindows / runnerExitPathWindows are the launcher's own
+// contract (baked into the published image): it redirects the runner's
+// output to the log path and writes the runner's exit code to the exit path
+// once it exits. watcherScriptWindows tails the former and exits with the
+// latter.
+const (
+	runnerLogPathWindows  = `C:\runny\runner.log`
+	runnerExitPathWindows = `C:\runny\runner-exit.txt`
+)
+
+// watcherScriptWindows is the windows equivalent of run.sh: not a launch,
+// but a watch. The image's own scheduled-task launcher (in the AutoLogon
+// desktop session) is what actually starts the runner once .jitconfig
+// appears — this script polls the launcher's log/exit-code contract and
+// streams it back as the returned Proc's Lines(), so the FSM's
+// "Listening for Jobs" watch and job/exit tracking work unchanged. It
+// tolerates the log file not existing yet (the launcher may not have picked
+// up .jitconfig at the moment this starts) by simply continuing to poll —
+// PROVISION's own deadline is what bounds a launcher that never starts.
+const watcherScriptWindows = `$log = '` + runnerLogPathWindows + `'
+$exitFile = '` + runnerExitPathWindows + `'
+$pos = 0
+function Drain {
+  if (Test-Path $log) {
+    $len = (Get-Item $log).Length
+    if ($len -gt $script:pos) {
+      $fs = [IO.File]::Open($log, 'Open', 'Read', 'ReadWrite')
+      $fs.Seek($script:pos, 'Begin') | Out-Null
+      $buf = New-Object byte[] ($len - $script:pos)
+      $fs.Read($buf, 0, $buf.Length) | Out-Null
+      $fs.Close()
+      [Console]::Out.Write([Text.Encoding]::UTF8.GetString($buf))
+      $script:pos = $len
+    }
+  }
+}
+while ($true) {
+  Drain
+  if (Test-Path $exitFile) {
+    Start-Sleep -Milliseconds 250
+    Drain
+    $code = (Get-Content -Path $exitFile -Raw).Trim()
+    exit ([int]$code)
+  }
+  Start-Sleep -Milliseconds 500
+}
+`
+
+// startRunnerWindows hands the runner off to the image's launcher and
+// starts the watcher session that becomes the returned Proc: extract the
+// pushed zip, deliver the JIT config over stdin (never the command string —
+// same secrecy rule StartRunner's doc comment states for the POSIX path),
+// commit it with an atomic rename, then start watcherScriptWindows.
+func (g *Guest) startRunnerWindows(ctx context.Context, jit, runnerTarball string) (statemachine.Proc, error) {
+	if !runnerZipRE.MatchString(runnerTarball) {
+		return nil, fmt.Errorf("refusing to stage runner zip with an unexpected name %q", runnerTarball)
+	}
+	prep, cancel := bounded.WithTimeout(ctx, windowsPrepTimeout)
+	defer cancel()
+
+	extract := fmt.Sprintf(`if (!(Test-Path '%s')) { New-Item -ItemType Directory -Path '%s' | Out-Null }
+tar -xf '%s\%s' -C '%s'`, runnerDirWindows, runnerDirWindows, runnerCacheDirWindows, runnerTarball, runnerDirWindows)
+	out, code, err := g.c.Output(prep, encodedCommand(extract))
+	if err != nil {
+		return nil, fmt.Errorf("extracting runner zip: %w", err)
+	}
+	if code != 0 {
+		return nil, fmt.Errorf("extracting runner zip: exit %d: %s", code, out)
+	}
+
+	copyJIT := fmt.Sprintf(`$in=[Console]::OpenStandardInput(); $f=[IO.File]::Create('%s'); $in.CopyTo($f); $f.Close()`, jitPendingPathWindows)
+	out, code, err = g.c.RunWithInput(prep, encodedCommand(copyJIT), strings.NewReader(jit))
+	if err != nil {
+		return nil, fmt.Errorf("delivering JIT config: %w", err)
+	}
+	if code != 0 {
+		return nil, fmt.Errorf("delivering JIT config: exit %d: %s", code, out)
+	}
+
+	out, code, err = g.c.Output(prep, fmt.Sprintf(`move /Y "%s" "%s"`, jitPendingPathWindows, jitPathWindows))
+	if err != nil {
+		return nil, fmt.Errorf("committing JIT config: %w", err)
+	}
+	if code != 0 {
+		return nil, fmt.Errorf("committing JIT config: exit %d: %s", code, out)
+	}
+
+	p, err := g.c.Start(ctx, encodedCommand(watcherScriptWindows), nil)
+	if err != nil {
+		return nil, fmt.Errorf("starting runner watcher: %w", err)
 	}
 	return proc{p}, nil
 }
@@ -511,18 +806,42 @@ func guestSetupBlock(cmds []string) string {
 	return b.String()
 }
 
-// runnerTarballRE constrains the tarball basename the daemon substitutes into
-// the provision script. The name is daemon-resolved (GitHub's asset filename),
-// not client input, but it crosses into a shell command string, so this is a
-// trust-boundary guard: the charset carries no shell metacharacter and no `/`,
-// so the validated name is inert inside the script's double-quoted "$CACHE/…".
+// runnerTarballRE constrains the POSIX tarball basename the daemon
+// substitutes into the provision script. The name is daemon-resolved
+// (GitHub's asset filename), not client input, but it crosses into a shell
+// command string, so this is a trust-boundary guard: the charset carries no
+// shell metacharacter and no `/`, so the validated name is inert inside the
+// script's double-quoted "$CACHE/…".
 var runnerTarballRE = regexp.MustCompile(`^[A-Za-z0-9._-]+\.tar\.gz$`)
 
-// provisionScript renders the per-OS provision script for the exact tarball
-// this cycle resolved. It refuses a name that does not match runnerTarballRE
-// rather than risk staging a glob (silent wrong-version) or interpolating an
-// unexpected string into the command — fail the cycle loudly instead.
+// runnerZipRE is runnerTarballRE's windows counterpart: same charset
+// rationale (the name crosses into a PowerShell command string), matching
+// GitHub's actions-runner-win-<arch>-<ver>.zip asset shape instead of
+// .tar.gz.
+var runnerZipRE = regexp.MustCompile(`^[A-Za-z0-9._-]+\.zip$`)
+
+// runnerAssetRE picks the trust-boundary guard for the guest's runner-asset
+// basename: the tarball pattern for darwin/linux, the zip pattern for
+// windows.
+func runnerAssetRE(goos string) *regexp.Regexp {
+	if goos == home.OSWindows {
+		return runnerZipRE
+	}
+	return runnerTarballRE
+}
+
+// provisionScript renders the POSIX (darwin/linux) provision script for the
+// exact tarball this cycle resolved. It refuses a name that does not match
+// runnerTarballRE rather than risk staging a glob (silent wrong-version) or
+// interpolating an unexpected string into the command — fail the cycle
+// loudly instead. Never called for a windows guest: StartRunner dispatches
+// windows to startRunnerWindows before reaching here, since the windows
+// launch is a launcher hand-off plus a watcher session, not a single
+// exec'd script.
 func provisionScript(goos, runnerTarball string, env map[string]string, setup []string, needsPush bool) (string, error) {
+	if goos == home.OSWindows {
+		return "", errors.New("provisionScript: windows guests never take the POSIX provision path (see StartRunner)")
+	}
 	if !runnerTarballRE.MatchString(runnerTarball) {
 		return "", fmt.Errorf("refusing to stage runner tarball with an unexpected name %q", runnerTarball)
 	}
@@ -534,7 +853,10 @@ func provisionScript(goos, runnerTarball string, env map[string]string, setup []
 	if needsPush {
 		linuxScript = provisionScriptLinuxPushed
 	}
-	script := perOS(goos, provisionScriptDarwin, linuxScript)
+	script, err := perOS(goos, provisionScriptDarwin, linuxScript, "")
+	if err != nil {
+		return "", err
+	}
 	script = strings.ReplaceAll(script, runnerTarballPlaceholder, runnerTarball)
 	// Prepend the pool's guest_env exports, then its guest_setup commands, to
 	// the runner launch: run.sh and every job step inherit the env, and setup
@@ -547,11 +869,26 @@ func provisionScript(goos, runnerTarball string, env map[string]string, setup []
 	return script, nil
 }
 
+// pullDiagScriptWindows mirrors the POSIX PullDiag shape (a "==> name <=="
+// header per file, each tailed to the same 32KiB bound) over
+// C:\actions-runner\_diag instead of $HOME/runny-runner/_diag.
+const pullDiagScriptWindows = `Get-ChildItem -Path '` + runnerDirWindows + `\_diag' -Filter *.log -ErrorAction SilentlyContinue | ForEach-Object {
+  Write-Output "==> $($_.FullName) <=="
+  $bytes = [IO.File]::ReadAllBytes($_.FullName)
+  if ($bytes.Length -gt 32768) { $bytes = $bytes[($bytes.Length - 32768)..($bytes.Length - 1)] }
+  [Console]::Out.Write([Text.Encoding]::UTF8.GetString($bytes))
+  Write-Output ""
+}
+`
+
 // PullDiag fetches the tail of the runner's diagnostic logs — the
 // post-mortem material TEARDOWN collects before destroying the guest.
 func (g *Guest) PullDiag(ctx bounded.Context) ([]byte, error) {
-	out, _, err := g.c.Output(ctx,
-		`for f in $HOME/runny-runner/_diag/*.log; do echo "==> $f <=="; tail -c 32768 "$f"; done 2>/dev/null`)
+	script := `for f in $HOME/runny-runner/_diag/*.log; do echo "==> $f <=="; tail -c 32768 "$f"; done 2>/dev/null`
+	if g.goos == home.OSWindows {
+		script = encodedCommand(pullDiagScriptWindows)
+	}
+	out, _, err := g.c.Output(ctx, script)
 	if err != nil {
 		return nil, err
 	}
@@ -562,12 +899,21 @@ func (g *Guest) PullDiag(ctx bounded.Context) ([]byte, error) {
 // Empty output (operator never connected) is returned as nil — the caller
 // skips the artifact.
 //
+// Windows guests return nil unconditionally (v1): no recorder mechanism is
+// wired for Windows — the POSIX recorder is a script(1) wrapper installed
+// alongside the debug key (installDebugKeyScript/debugRecorderDarwin/Linux),
+// and Windows has no script(1) equivalent; recording there needs a
+// forced-command transcription wrapper that doesn't exist yet.
+//
 // Uses a fresh connection for the same reason InstallAuthorizedKey does: the
 // supervision client g.c carries the live runner Proc, and newSession sets a
 // deadline on the SHARED net.Conn. Pulling over g.c during a forced teardown
 // (stuck job, proc still alive) would fire that deadline on the runner's
 // channel before proc.Kill() in step 2.
 func (g *Guest) PullDebugSession(ctx bounded.Context) ([]byte, error) {
+	if g.goos == home.OSWindows {
+		return nil, nil
+	}
 	c, err := sshx.WaitFor(ctx, g.addr, g.cfg, g.interval)
 	if err != nil {
 		return nil, fmt.Errorf("debug session pull: %w: %w", statemachine.ErrGuestUnreachable, err)
@@ -665,11 +1011,39 @@ printf '%%s\n' 'command="exec /tmp/runny-record",restrict,pty %s' >> "$HOME/.ssh
 grep -qF -- 'command="exec /tmp/runny-record",restrict,pty %s' "$HOME/.ssh/authorized_keys"
 `
 
+// stopRunnerScriptWindows is the windows equivalent of stopRunnerScript:
+// find the listener tree by its --jitconfig argv (Get-CimInstance
+// Win32_Process exposes CommandLine, pgrep/pkill's role here), kill it, and
+// prove it dead by re-checking. Excluding this powershell process's own
+// PID/parent PID is defense in depth mirroring the POSIX [-]-jitconfig
+// trick, though the risk it guards against doesn't actually exist here:
+// this script's own commandline is `powershell -EncodedCommand <base64>`,
+// which never contains the literal text "--jitconfig" to self-match against.
+// Exit 0 = proven dead; 1 = survived Stop-Process.
+const stopRunnerScriptWindows = `$pat = '--jitconfig'
+$self = $PID
+function Alive {
+  Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*$pat*" -and $_.ProcessId -ne $self -and $_.ParentProcessId -ne $self }
+}
+Alive | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+$i = 0
+while (Alive) {
+  $i++
+  if ($i -gt 24) { Write-Error 'runny: runner still alive after Stop-Process'; exit 1 }
+  Start-Sleep -Milliseconds 250
+}
+exit 0
+`
+
 // StopRunner kills the runner listener tree and PROVES it dead (issue #39).
 // Any nonzero exit or exec error = death unproven; the caller refuses the
 // freeze/hold and fails into teardown.
 func (g *Guest) StopRunner(ctx bounded.Context) error {
-	out, code, err := g.c.Output(ctx, stopRunnerScript)
+	script := stopRunnerScript
+	if g.goos == home.OSWindows {
+		script = encodedCommand(stopRunnerScriptWindows)
+	}
+	out, code, err := g.c.Output(ctx, script)
 	if err != nil {
 		return fmt.Errorf("stopping runner: %w", err)
 	}
@@ -678,6 +1052,19 @@ func (g *Guest) StopRunner(ctx bounded.Context) error {
 	}
 	return nil
 }
+
+// installDebugKeyScriptWindows appends the operator's key to
+// administrators_authorized_keys and fixes its ACL (the same
+// icacls call rotateScriptWindowsTemplate uses — sshd silently ignores this
+// file unless its ACL is stripped to SYSTEM+Administrators only), then
+// proves the line landed via a read-back. No command= recording wrapper: see
+// PullDebugSession's doc comment for why Windows debug sessions aren't
+// recorded in v1.
+const installDebugKeyScriptWindows = `$line = '%s'
+Add-Content -Path 'C:\ProgramData\ssh\administrators_authorized_keys' -Value $line
+icacls 'C:\ProgramData\ssh\administrators_authorized_keys' /inheritance:r /grant "SYSTEM:F" /grant "BUILTIN\Administrators:F" | Out-Null
+if (-not (Select-String -Path 'C:\ProgramData\ssh\administrators_authorized_keys' -SimpleMatch '%s' -Quiet)) { exit 1 }
+`
 
 // InstallAuthorizedKey appends one authorized_keys line and proves it landed
 // (issue #39). line must be a server-canonicalized "type base64" form. A
@@ -698,9 +1085,27 @@ func (g *Guest) InstallAuthorizedKey(ctx bounded.Context, line string) error {
 		return fmt.Errorf("installing debug key: %w: %w", statemachine.ErrGuestUnreachable, err)
 	}
 	defer func() { _ = c.Close() }()
-	recorder := perOS(g.goos, debugRecorderDarwin, debugRecorderLinux)
-	script := fmt.Sprintf(installDebugKeyScript, recorder, line, line)
-	out, code, err := c.Output(ctx, script)
+
+	var (
+		out  []byte
+		code int
+	)
+	if g.goos == home.OSWindows {
+		// No recorder is wired for Windows guests (v1) — see
+		// PullDebugSession's doc comment for the technical reason. Log loudly
+		// rather than silently hand out an unrecorded operator session.
+		slog.Warn("windows debug session: transcript capture is unsupported, the operator's session will not be recorded")
+		lineEsc := strings.ReplaceAll(line, "'", "''")
+		script := fmt.Sprintf(installDebugKeyScriptWindows, lineEsc, lineEsc)
+		out, code, err = c.Output(ctx, encodedCommand(script))
+	} else {
+		recorder, rErr := perOS(g.goos, debugRecorderDarwin, debugRecorderLinux, "")
+		if rErr != nil {
+			return fmt.Errorf("installing debug key: %w", rErr)
+		}
+		script := fmt.Sprintf(installDebugKeyScript, recorder, line, line)
+		out, code, err = c.Output(ctx, script)
+	}
 	if err != nil {
 		if errors.Is(err, sshx.ErrSessionOpen) {
 			return fmt.Errorf("installing debug key: %w: %w", statemachine.ErrGuestUnreachable, err)

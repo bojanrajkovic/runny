@@ -1,4 +1,9 @@
-// Package oci pulls tart-format VM images from OCI registries.
+// Package oci pulls tart-format VM images from OCI registries, and (pack.go)
+// writes them: WriteImage produces the same layout PullTo consumes, so the
+// two stay honest against each other by construction rather than by two
+// independent implementations of the format silently drifting apart --
+// see pack_test.go's round-trip and layout-conformance tests.
+//
 // tart's layout is deliberately non-standard: the bundle's three files ride
 // as layers with cirruslabs media types, disk.img split across many
 // Apple-LZ4-framed layers that concatenate by uncompressed size. Cilicon

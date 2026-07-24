@@ -3,7 +3,6 @@ package oci
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,16 +15,16 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/pierrec/lz4/v4"
-
 	"github.com/bojanrajkovic/runny/internal/bounded"
 	"github.com/bojanrajkovic/runny/internal/obs"
+	"github.com/bojanrajkovic/runny/internal/tart"
 )
 
 // testCtx satisfies the bounded.Context the pull API demands.
@@ -36,39 +35,22 @@ func testCtx(t *testing.T) bounded.Context {
 	return ctx
 }
 
-// appleLZ4Encode is a test-only encoder for Apple's LZ4 block framing,
-// mirroring what tart's Compression-framework output looks like.
-func appleLZ4Encode(t *testing.T, data []byte, blockSize int) []byte {
+// appleLZ4EncodeForTest wraps the production appleLZ4Encode (applelz4.go) for
+// callers that just want the bytes and a t.Fatal on failure, mirroring what
+// tart's Compression-framework output looks like.
+func appleLZ4EncodeForTest(t *testing.T, data []byte, blockSize int) []byte {
 	t.Helper()
 	var out bytes.Buffer
-	for off := 0; off < len(data); off += blockSize {
-		end := min(off+blockSize, len(data))
-		chunk := data[off:end]
-		comp := make([]byte, lz4.CompressBlockBound(len(chunk)))
-		n, err := lz4.CompressBlock(chunk, comp, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if n == 0 || n >= len(chunk) {
-			// Incompressible: raw block.
-			out.Write([]byte("bv4-"))
-			_ = binary.Write(&out, binary.LittleEndian, uint32(len(chunk)))
-			out.Write(chunk)
-			continue
-		}
-		out.Write([]byte("bv41"))
-		_ = binary.Write(&out, binary.LittleEndian, uint32(len(chunk)))
-		_ = binary.Write(&out, binary.LittleEndian, uint32(n))
-		out.Write(comp[:n])
+	if err := appleLZ4Encode(&out, data, blockSize); err != nil {
+		t.Fatal(err)
 	}
-	out.Write([]byte("bv4$"))
 	return out.Bytes()
 }
 
 func TestAppleLZ4RoundTrip(t *testing.T) {
 	// Compressible data (repeated) + incompressible (random) across blocks.
 	data := append(bytes.Repeat([]byte("runny runny runny "), 10_000), randomBytes(64*1024)...)
-	enc := appleLZ4Encode(t, data, 32*1024)
+	enc := appleLZ4EncodeForTest(t, data, 32*1024)
 	var dec bytes.Buffer
 	n, err := appleLZ4Decode(&dec, bytes.NewReader(enc))
 	if err != nil {
@@ -152,7 +134,7 @@ func newFakeRegistry(t *testing.T, config, nvram, disk []byte) *fakeRegistry {
 
 	// Two disk layers, split mid-stream, each Apple-LZ4 encoded.
 	half := len(disk) / 2
-	l1, l2 := appleLZ4Encode(t, disk[:half], 16*1024), appleLZ4Encode(t, disk[half:], 16*1024)
+	l1, l2 := appleLZ4EncodeForTest(t, disk[:half], 16*1024), appleLZ4EncodeForTest(t, disk[half:], 16*1024)
 
 	m := manifest{
 		Layers: []descriptor{
@@ -261,6 +243,136 @@ func TestPullToAssemblesBundle(t *testing.T) {
 	digest2, err := c.PullTo(testCtx(t), ref, dest)
 	if err != nil || digest2 != digest {
 		t.Errorf("idempotent PullTo: %s, %v", digest2, err)
+	}
+}
+
+// newFakeRegistryFromPackedImage serves exactly what WriteImage wrote at
+// packed.Dir -- the round-trip test's registry stand-in, so packing and
+// pulling exercise the identical manifest/blob shapes real registry traffic
+// would, with no separate hand-built fixture to drift from the writer.
+func newFakeRegistryFromPackedImage(t *testing.T, packed PackedImage) *fakeRegistry {
+	t.Helper()
+	f := &fakeRegistry{t: t, blobs: map[string][]byte{}}
+	blobsDir := filepath.Join(packed.Dir, "blobs", "sha256")
+	entries, err := os.ReadDir(blobsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		b, err := os.ReadFile(filepath.Join(blobsDir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.blobs["sha256:"+e.Name()] = b
+	}
+	f.manifest = f.blobs[packed.Digest]
+	f.digest = packed.Digest
+	return f
+}
+
+// TestPackThenPullRoundTrips is the writer/reader consistency guarantee: a
+// disk packed by WriteImage, served by a registry, and pulled back by the
+// existing Client must reproduce the original bytes exactly and land in a
+// bundle the rest of runny already accepts (tart.Bundle.Verify/LoadConfig) --
+// so WriteImage and the pull path can never independently drift on the wire
+// format.
+func TestPackThenPullRoundTrips(t *testing.T) {
+	disk := append(bytes.Repeat([]byte("WINDOWSDISK "), 60_000), randomBytes(200_000)...)
+	cfg := tart.Config{OS: "windows", Arch: "amd64", CPUCount: 4, MemorySize: 8 << 30}
+
+	packed, err := WriteImage(t.TempDir(), cfg, bytes.NewReader(disk), []byte{0})
+	if err != nil {
+		t.Fatalf("WriteImage: %v", err)
+	}
+
+	f := newFakeRegistryFromPackedImage(t, packed)
+	_, ref := f.start()
+
+	dest := filepath.Join(t.TempDir(), "bundle")
+	digest, err := NewClient().PullTo(testCtx(t), ref, dest)
+	if err != nil {
+		t.Fatalf("PullTo: %v", err)
+	}
+	if digest != packed.Digest {
+		t.Errorf("digest = %s, want %s", digest, packed.Digest)
+	}
+
+	gotDisk, err := os.ReadFile(filepath.Join(dest, "disk.img"))
+	if err != nil || !bytes.Equal(gotDisk, disk) {
+		t.Fatalf("disk.img mismatch: %d bytes vs %d, err %v", len(gotDisk), len(disk), err)
+	}
+
+	bundle := tart.Bundle(dest)
+	if err := bundle.Verify(); err != nil {
+		t.Errorf("pulled bundle failed Verify: %v", err)
+	}
+	loaded, err := bundle.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if loaded.OS != "windows" || loaded.Arch != "amd64" {
+		t.Errorf("LoadConfig = %+v, want windows/amd64", loaded)
+	}
+}
+
+// TestPackThenPullRoundTripsMultipleDiskLayers forces WriteImage to split
+// the disk across more than one layer (packDiskLayerSize is 512 MiB; this
+// test can't afford that much data, so it drives putDiskLayers directly at
+// a tiny layer size instead of going through WriteImage's fixed constant).
+func TestPackThenPullRoundTripsMultipleDiskLayers(t *testing.T) {
+	disk := append(bytes.Repeat([]byte("MULTILAYER "), 20_000), randomBytes(50_000)...)
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "blobs", "sha256"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w := &blobWriter{dir: dir}
+	const tinyLayerSize = 32 * 1024
+	orig := disk
+	var diskDescs []descriptor
+	for off := 0; off < len(orig); off += tinyLayerSize {
+		end := min(off+tinyLayerSize, len(orig))
+		var enc bytes.Buffer
+		if err := appleLZ4Encode(&enc, orig[off:end], lz4BlockSize); err != nil {
+			t.Fatal(err)
+		}
+		desc, err := w.put(mediaTypeDiskV2, enc.Bytes())
+		if err != nil {
+			t.Fatal(err)
+		}
+		desc.Annotations = map[string]string{annotationUncompressedSize: strconv.Itoa(end - off)}
+		diskDescs = append(diskDescs, desc)
+	}
+	if len(diskDescs) < 2 {
+		t.Fatalf("test setup: want >1 disk layer, got %d", len(diskDescs))
+	}
+	configDesc, err := w.put(mediaTypeConfig, []byte(`{"os":"windows","arch":"amd64","cpuCount":4,"memorySize":8589934592,"diskFormat":"raw"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nvramDesc, err := w.put(mediaTypeNVRAM, []byte{0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestBytes, err := json.Marshal(manifest{Layers: append(append([]descriptor{configDesc}, diskDescs...), nvramDesc)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestDesc, err := w.put(manifestAccept, manifestBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	packed := PackedImage{Dir: dir, Digest: manifestDesc.Digest}
+	f := newFakeRegistryFromPackedImage(t, packed)
+	_, ref := f.start()
+
+	dest := filepath.Join(t.TempDir(), "bundle")
+	if _, err := NewClient().PullTo(testCtx(t), ref, dest); err != nil {
+		t.Fatalf("PullTo: %v", err)
+	}
+	gotDisk, err := os.ReadFile(filepath.Join(dest, "disk.img"))
+	if err != nil || !bytes.Equal(gotDisk, disk) {
+		t.Fatalf("disk.img mismatch across %d layers: %d bytes vs %d, err %v", len(diskDescs), len(gotDisk), len(disk), err)
 	}
 }
 

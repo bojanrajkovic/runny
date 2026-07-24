@@ -7,6 +7,7 @@ go_library(
         "headroom_other.go",
         "headroom_windows.go",
         "oci.go",
+        "pack.go",
     ],
     importpath = "github.com/bojanrajkovic/runny/internal/oci",
     visibility = ["//:__subpackages__"],
@@ -25,12 +26,13 @@ go_test(
     srcs = [
         "applelz4_test.go",
         "oci_test.go",
+        "pack_test.go",
     ],
     data = glob(["testdata/**"]),
     embed = [":oci"],
     deps = [
         "//internal/bounded",
         "//internal/obs",
-        "@com_github_pierrec_lz4_v4//:lz4",
+        "//internal/tart",
     ],
 )

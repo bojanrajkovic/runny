@@ -1,5 +1,7 @@
 package vm
 
+import "slices"
+
 // The IP-neighbor-table selection logic WaitIP (hcs_windows.go) runs is pure
 // -- it decides which row to trust given a MAC and a snapshot of rows -- so it
 // lives here, untagged, tested on any host, apart from the windows-only
@@ -134,12 +136,9 @@ func learnedLeaseIP(entries []neighborEntry, mac string) (string, bool) {
 // lexicographically smallest IP is the same deterministic stand-in
 // learnedLeaseIP uses — neighborEntry carries no recency signal.
 func permanentLeaseIP(entries []neighborEntry, mac string) (string, bool) {
-	var ip string
-	var found bool
-	for _, e := range permanentIPs(entries, mac) {
-		if !found || e < ip {
-			ip, found = e, true
-		}
+	ips := permanentIPs(entries, mac)
+	if len(ips) == 0 {
+		return "", false
 	}
-	return ip, found
+	return slices.Min(ips), true
 }

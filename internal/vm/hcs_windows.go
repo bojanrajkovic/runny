@@ -127,6 +127,14 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 		return nil, fmt.Errorf("cpu_cores %d exceeds the maximum HCS can express", cpu)
 	}
 
+	// The Secure Boot template is the one field in the compute-system
+	// document below that differs by guest OS -- everything else is
+	// guest-OS-agnostic.
+	secureBootTemplate := secureBootTemplateID
+	if cfg.OS == "windows" {
+		secureBootTemplate = windowsSecureBootTemplateID
+	}
+
 	doc := &hcsschema.ComputeSystem{
 		Owner:         "runny",
 		SchemaVersion: &hcsschema.Version{Major: 2, Minor: 1},
@@ -134,7 +142,7 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 			Chipset: &hcsschema.Chipset{
 				Uefi: &hcsschema.Uefi{
 					ApplySecureBootTemplate: "Apply",
-					SecureBootTemplateId:    secureBootTemplateFor(cfg.OS),
+					SecureBootTemplateId:    secureBootTemplate,
 					// BootThis deliberately OMITTED: UEFI firmware
 					// auto-discovers the ESP on the SCSI-attached disk. The
 					// documented ScsiDrive/File DeviceType values are
@@ -229,18 +237,6 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 		sshUser:     opts.SSHUser,
 		sshPassword: opts.SSHPassword,
 	}, nil
-}
-
-// secureBootTemplateFor picks the Secure Boot template GUID by guest OS --
-// the one part of the compute-system document that differs between a Linux
-// and a Windows guest (Boot's own doc comment). Anything other than
-// "windows" gets the Linux-shim template; Boot's own OS gate above has
-// already rejected every other value.
-func secureBootTemplateFor(os string) string {
-	if os == "windows" {
-		return windowsSecureBootTemplateID
-	}
-	return secureBootTemplateID
 }
 
 // consolePipeName is per-system so concurrent slots never collide on the

@@ -199,9 +199,19 @@ const maxDiskLayerWorkers = 4
 // layerSize is a parameter (WriteImage always passes packDiskLayerSize)
 // rather than reading the package constant directly so tests can exercise
 // many concurrent layers without packing gigabytes of data.
+//
+// sem gates the make+copy below, not just g.Go: errgroup's own SetLimit
+// only blocks inside Go() itself, by which point this loop has already
+// allocated and copied the next layerSize chunk regardless of whether a
+// worker is free -- a second Codex review on this PR caught that as a real
+// "+1 layer" overshoot on the documented maxDiskLayerWorkers bound. Acquiring
+// sem before the copy means at most maxDiskLayerWorkers chunks exist at
+// once, full stop; buf itself is reused every iteration (not a per-layer
+// allocation), so reading ahead into it while waiting for a slot costs
+// nothing extra.
 func (w *blobWriter) putDiskLayers(disk io.Reader, layerSize int) ([]descriptor, error) {
 	var g errgroup.Group
-	g.SetLimit(maxDiskLayerWorkers)
+	sem := make(chan struct{}, maxDiskLayerWorkers)
 	var mu sync.Mutex
 	var descs []descriptor
 
@@ -214,6 +224,7 @@ func (w *blobWriter) putDiskLayers(disk io.Reader, layerSize int) ([]descriptor,
 		if n == 0 {
 			break
 		}
+		sem <- struct{}{} // blocks here, before allocating this layer's chunk, once maxDiskLayerWorkers are already in flight
 		chunk := make([]byte, n)
 		copy(chunk, buf[:n]) // buf is reused by the next read while this chunk compresses concurrently
 
@@ -223,6 +234,7 @@ func (w *blobWriter) putDiskLayers(disk io.Reader, layerSize int) ([]descriptor,
 		mu.Unlock()
 
 		g.Go(func() error {
+			defer func() { <-sem }()
 			desc, putErr := w.putDiskLayerStream(chunk)
 			if putErr != nil {
 				return putErr

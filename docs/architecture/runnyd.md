@@ -326,12 +326,15 @@ the published image and watches for it to finish.
   the runner zip always lands via `PushRunnerTarball` at
   `C:\runny-cache\<basename>` before `StartRunner` extracts it — there is no
   live-share variant to keep in sync with.
-- **Every windows guest command goes through `-EncodedCommand`.** The
-  default SSH shell is cmd.exe and the scripting target is PowerShell 5.1
-  (no PS7-isms); anything beyond a trivial cmd one-liner is
-  UTF-16LE-encoded, base64'd, and run as
-  `powershell -NoProfile -NonInteractive -EncodedCommand <b64>` — the only
-  pattern that survives ssh → cmd.exe → PowerShell's stacked quoting rules.
+- **Every windows guest command goes through `-EncodedCommand`, with no
+  exceptions.** The default SSH shell is cmd.exe and the scripting target is
+  PowerShell 5.1 (no PS7-isms); every script is UTF-16LE-encoded, base64'd,
+  and run as `powershell -NoProfile -NonInteractive -EncodedCommand <b64>` —
+  the only pattern that survives ssh → cmd.exe → PowerShell's stacked
+  quoting rules. The JIT-config delivery folds its stdin→`.tmp`-file copy and
+  the atomic rename into `.jitconfig` into that same single script/session
+  (`Move-Item -ErrorAction Stop`, since `Move-Item`'s own errors are
+  non-terminating by default), rather than a separate plain-cmd `move`.
 - **SECURE_SSH's windows rotation** targets Windows OpenSSH's own
   config surface instead of a drop-in: the cycle key lands in
   `C:\ProgramData\ssh\administrators_authorized_keys` (with its ACL fixed via

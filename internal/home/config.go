@@ -37,7 +37,7 @@ type GitHubConfig struct {
 type PoolConfig struct {
 	// Name becomes the slot prefix: <name>-1, <name>-2, ...
 	Name string `yaml:"name"`
-	// OS of the guest image: "darwin" or "linux". Declared (not inferred)
+	// OS of the guest image: "darwin", "linux", or "windows". Declared (not inferred)
 	// because the macOS guest-cap check and tarball priming run pre-pull.
 	OS    string `yaml:"os"`
 	Image string `yaml:"image"`

@@ -9,28 +9,37 @@ edges only.
 
 ## Sharp edges
 
-- **`perOS` is a loud three-way dispatch, not a convenience default.** It
-  returns an error for anything other than `home.OSDarwin`/`OSLinux`/
-  `OSWindows` — no silent fallback to darwin. `home.validate()` already gates
+- **`perOS` picks only between the two POSIX scripts (darwin/linux), and
+  errors on anything else — windows included.** Every windows call site
+  (`StartRunner`, `Rotate`, `PushRunnerTarball`, `StopRunner`, `PullDiag`,
+  `InstallAuthorizedKey`, `PullDebugSession`) branches to its own
+  windows-specific path on `goos == home.OSWindows` *before* any `perOS`
+  call, so `perOS` never needs a third value. `home.validate()` already gates
   every config-declared pool `os`, so a `perOS` error can only mean this
   package computed a bad `goos` itself; treat it as a bug to fix, not a case
-  to swallow.
-- **Windows commands beyond a trivial cmd one-liner MUST go through
-  `encodedCommand` (`-EncodedCommand`), never inline quoting.** The guest's
-  default SSH shell is cmd.exe and the scripting target is PowerShell 5.1;
-  stacking ssh → cmd.exe → PowerShell quoting rules mangles anything with
-  embedded quotes or newlines. `encodedCommand` UTF-16LE-encodes the script
-  and base64's it — empirically the only reliable pattern. `move /Y` and the
-  extract's `tar -xf` stay plain cmd one-liners (no embedded quoting to
-  mangle); everything else (rotate, stop, diag pull, the watcher, key
-  install) goes through it.
-- **`administrators_authorized_keys`' ACL is load-bearing, not optional.**
-  Windows OpenSSH silently ignores that file for an Administrators-group
-  account unless its ACL is stripped to `SYSTEM:F` + `BUILTIN\Administrators:F`
-  (`icacls ... /inheritance:r /grant ...`) right after writing it. Skipping
-  the `icacls` call doesn't error anywhere — the key install "succeeds" and
-  the key silently never authenticates. Both `rotateScriptWindowsTemplate`
-  and `installDebugKeyScriptWindows` carry it; don't drop it from either.
+  to swallow — including by reflexively adding a windows branch back into
+  `perOS` instead of dispatching earlier.
+- **Every windows guest command goes through `encodedCommand`
+  (`-EncodedCommand`) — no exceptions, not even a "trivial" one.** The
+  guest's default SSH shell is cmd.exe and the scripting target is
+  PowerShell 5.1; stacking ssh → cmd.exe → PowerShell quoting rules mangles
+  anything with embedded quotes or newlines. `encodedCommand`
+  UTF-16LE-encodes the script and base64's it — empirically the only
+  reliable pattern. An earlier version of this code ran the JIT-config
+  rename as a separate plain `move /Y` exec; it's now folded into the same
+  `-EncodedCommand` script that copies stdin to the `.tmp` path
+  (`deliverJITConfigScript`), both to cut an SSH round-trip and so there is
+  no plain-cmd carve-out left to accidentally widen.
+- **`administrators_authorized_keys`' ACL is load-bearing, not optional, and
+  has exactly one home: `psAppendAuthorizedKeyLine`.** Windows OpenSSH
+  silently ignores that file for an Administrators-group account unless its
+  ACL is stripped to `SYSTEM:F` + `BUILTIN\Administrators:F`
+  (`icacls ... /inheritance:r /grant ...`) right after writing it — and
+  icacls itself can fail, so the fragment also checks `$LASTEXITCODE` and
+  exits loud (2) rather than trusting `| Out-Null`'d success. Both
+  `rotateScriptWindowsTemplate` (the cycle key) and
+  `installDebugKeyScriptWindows` (the operator's debug key) embed this same
+  fragment; don't fork a second copy of the ACL logic into either.
 - **`PasswordAuthentication no` is PREPENDED to `sshd_config`, never
   appended.** sshd_config is first-match-wins, and the stock Windows
   `sshd_config` ends with a `Match Group administrators` block; appending
@@ -66,6 +75,16 @@ edges only.
   (the launcher may not have picked up `.jitconfig` at the moment the watcher
   starts); PROVISION's own deadline is what bounds a launcher that never
   starts, not the watcher itself.
+- **The watcher writes RAW bytes to the stdout stream, never through
+  `[Console]::Out`.** `[Console]::Out` is a `TextWriter` bound to the
+  console's OEM codepage — re-encoding the runner's log through it mangles
+  non-ASCII output, and a drain boundary landing mid-multibyte-sequence
+  corrupts it further. `[Console]::OpenStandardOutput()` + a raw byte
+  `Write` sidesteps both; decoding is left to the host side, the same as
+  every POSIX `Proc`'s output. The exit-code read is guarded by a
+  digits-only regex (`$code -match '^\d+$'`) before the `[int]` cast —
+  defense in depth, since the 250ms settle-then-redrain before reading it
+  already makes an empty/partial read practically unreachable.
 - **Windows debug sessions are not recorded (v1).** `InstallAuthorizedKey`'s
   windows branch installs the key with the ACL fix but no `command=`
   transcription wrapper — the POSIX recorder (`debugRecorderDarwin`/`Linux`)

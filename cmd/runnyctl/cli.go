@@ -37,6 +37,7 @@ type CLI struct {
 	EditConfig      EditConfigCmd      `cmd:"" name:"edit-config" help:"edit the resolved home's config.yaml, validate it, then reload"`
 	InstallDaemon   InstallDaemonCmd   `cmd:"" name:"install-daemon" help:"install runnyd as a non-root system LaunchDaemon (requires root; macOS only)"`
 	UninstallDaemon UninstallDaemonCmd `cmd:"" name:"uninstall-daemon" help:"remove the system LaunchDaemon AND its home (config, key, artifacts)"`
+	Image           ImageCmd           `cmd:"" help:"build tart-format OCI images"`
 }
 
 type VersionCmd struct{}
@@ -195,3 +196,36 @@ func (i *InstallDaemonCmd) Run() error { return installDaemon(i.Operator, i.Conf
 type UninstallDaemonCmd struct{}
 
 func (UninstallDaemonCmd) Run() error { return uninstallDaemon() }
+
+// ImageCmd is runnyctl's other command group (OperatorCmd above is the
+// first) — pack is the one verb today, but "build tart-format OCI images"
+// is a cohesive noun the same way operator grant/revoke/list is.
+type ImageCmd struct {
+	Pack ImagePackCmd `cmd:"" help:"pack a disk image into a tart-format OCI Image Layout directory"`
+}
+
+// ImagePackCmd never dials the daemon — see main.go's early-return switch —
+// so its Run takes neither *ctl nor a context.Context, matching
+// InstallDaemonCmd/UninstallDaemonCmd above.
+//
+// OS deliberately excludes "darwin" (a Codex review on this PR caught it):
+// tart.Bundle.LoadConfig requires hardwareModel/ecid for a darwin config,
+// this command has no flags to supply either, and WriteImage's own
+// validation (see pack.go) means a darwin pack would always fail, not
+// sometimes -- so kong refuses it up front with a clear error instead of
+// advertising a guest OS this command can never actually produce. Darwin
+// support (accepting or generating that metadata) is a separate, later
+// change, not a narrower version of this one.
+type ImagePackCmd struct {
+	Disk       string `arg:"" name:"disk" help:"path to the disk image (raw or VHDX -- packed through unchanged)"`
+	OCILayout  string `name:"oci-layout" default:"./out" help:"output OCI Image Layout directory"`
+	OS         string `required:"" enum:"linux,windows" help:"guest OS (linux or windows; darwin isn't supported by this command yet)"`
+	Arch       string `required:"" help:"guest architecture (arm64 or amd64)"`
+	CPUCount   uint   `name:"cpu-count" required:"" help:"guest vCPU count"`
+	MemorySize uint64 `name:"memory-size" required:"" help:"guest memory size in bytes"`
+	NVRAM      string `name:"nvram" help:"path to nvram bytes to embed (windows: default is a minimal placeholder, HCS never reads it; darwin/linux: required, VZ parses this file as real firmware state)"`
+}
+
+func (p *ImagePackCmd) Run() error {
+	return imagePack(p.Disk, p.OCILayout, p.OS, p.Arch, p.CPUCount, p.MemorySize, p.NVRAM)
+}

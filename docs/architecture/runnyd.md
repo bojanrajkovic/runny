@@ -115,7 +115,7 @@ race-free without a careful never-touch rule.
 | `internal/clonefile` | the APFS clonefile(2) wrapper: single-file copy-on-write clone (darwin); home of the darwin/non-darwin split both clone callers share |
 | `internal/vhdx` | VHDX differencing-disk clone and raw-to-fixed conversion (windows); the parent-locator reader is cross-platform (prune's dependency check) |
 | `internal/tart` | tart bundle format: config.json parse, validation; bundle clone per-file via `internal/clonefile` (darwin) or `CloneVHDX` via `internal/vhdx` (windows) |
-| `internal/oci` | tart-format image pull: registry auth, manifest, Apple-LZ4 disk assembly; declared sizes enforced on every blob and decode |
+| `internal/oci` | tart-format image pull (what runnyd itself uses): registry auth, manifest, Apple-LZ4 disk assembly; declared sizes enforced on every blob and decode. The package also writes the format (`WriteImage`) — runnyd never calls it; `runnyctl image pack` does, as an offline build-tooling verb with no daemon involved |
 | `internal/winhcs` | vendored HCS/HNS binding (trimmed `Microsoft/hcsshim`, windows-only) — the boot-path core and endpoint management `internal/vm`'s Hyper-V backend drives |
 | `internal/sshx` | the only constructor of SSH clients (deadline recipe) |
 | `internal/guest` | what to *do* over SSH: stage runner from the per-slot virtiofs share (darwin) or an SSH-pushed copy (windows), run.sh, diag pull |

@@ -14,6 +14,7 @@ go_library(
         "execssh_unix.go",
         "execssh_windows.go",
         "follow.go",
+        "image.go",
         "installdaemon.go",
         "installdaemon_unix.go",
         "installdaemon_windows.go",
@@ -30,6 +31,7 @@ go_library(
         "//internal/launchd",
         "//internal/oci",
         "//internal/sysdaemon",
+        "//internal/tart",
         "//internal/testconfig",
         "//internal/versioncore",
         "//proto/runny/v1:runny",
@@ -130,6 +132,7 @@ go_test(
     srcs = [
         "dial_windows_test.go",
         "follow_test.go",
+        "image_test.go",
         "installdaemon_test.go",
         "installdaemon_windows_test.go",
         "main_test.go",

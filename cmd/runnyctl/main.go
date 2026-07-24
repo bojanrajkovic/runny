@@ -72,13 +72,17 @@ func run() error {
 		return err
 	}
 
-	// Local privileged commands create/destroy the system daemon: they run as
-	// root (sudo), never dial a daemon, and must branch before the client home +
-	// gRPC setup below (which a not-yet-installed daemon has nothing to answer).
-	// kong.Command() is the bare command name for these (no positional args), so
-	// the two-case gate matches exactly.
+	// Local commands that never need a daemon branch before the client home +
+	// gRPC setup below (which a not-yet-installed daemon has nothing to
+	// answer): install-daemon/uninstall-daemon create/destroy the system
+	// daemon and run as root (sudo); image pack is a pure offline file
+	// transform (VHDX/raw disk -> OCI Image Layout dir) that must work on a
+	// host that has never installed runnyd at all, e.g. a Packer build
+	// machine. kong.Command() renders positional args as <name>, so image
+	// pack's one positional arg (see ImagePackCmd.Disk) makes the match
+	// "image pack <disk>", not "image pack".
 	switch kctx.Command() {
-	case "install-daemon", "uninstall-daemon":
+	case "install-daemon", "uninstall-daemon", "image pack <disk>":
 		return kctx.Run()
 	}
 

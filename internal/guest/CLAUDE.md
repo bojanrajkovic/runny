@@ -95,10 +95,13 @@ edges only.
   non-ASCII output, and a drain boundary landing mid-multibyte-sequence
   corrupts it further. `[Console]::OpenStandardOutput()` + a raw byte
   `Write` sidesteps both; decoding is left to the host side, the same as
-  every POSIX `Proc`'s output. The exit-code read is guarded by a
-  digits-only regex (`$code -match '^\d+$'`) before the `[int]` cast —
-  defense in depth, since the 250ms settle-then-redrain before reading it
-  already makes an empty/partial read practically unreachable.
+  every POSIX `Proc`'s output. The exit-code read is guarded by an
+  integer regex (`$code -match '^-?\d+$'`) before the `[int]` cast — the
+  sign matters (a crashed process reports a negative NTSTATUS exit code;
+  digits-only would loop forever on exactly the exits that most need
+  reporting), and the guard is defense in depth, since the 250ms
+  settle-then-redrain before reading already makes an empty/partial read
+  practically unreachable.
 - **Windows debug sessions are not recorded.** `InstallAuthorizedKey`'s
   windows branch installs the key with the ACL fix but no `command=`
   transcription wrapper — the POSIX recorder (`debugRecorderDarwin`/`Linux`)

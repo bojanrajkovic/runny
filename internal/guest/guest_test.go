@@ -3,6 +3,7 @@ package guest
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	"golang.org/x/crypto/ssh"
 
@@ -1280,17 +1282,61 @@ func TestExtractRunnerZipScriptPropagatesExitCode(t *testing.T) {
 	}
 }
 
-// deliverJITConfigScript copies stdin to the .tmp path and renames it into
-// place in ONE script — no separate move exec — with -ErrorAction Stop on
-// the Move-Item so a failed rename (Move-Item's own errors are
-// non-terminating by default) doesn't silently exit 0.
-func TestDeliverJITConfigScriptCommitsAtomically(t *testing.T) {
-	script := deliverJITConfigScript()
-	if !strings.Contains(script, "[IO.File]::Create('"+jitPendingPathWindows+"')") {
-		t.Errorf("script must copy stdin to the .tmp path first:\n%s", script)
-	}
+// The JIT blob is scp-streamed to the .tmp path and committed by a separate
+// Move-Item exec with -ErrorAction Stop (Move-Item's own errors are
+// non-terminating by default; without it a failed rename silently exits 0).
+// The rename staying a single same-volume Move-Item is what keeps the
+// launcher from ever reading a half-written blob.
+func TestCommitJITConfigScriptRenamesAtomically(t *testing.T) {
+	script := commitJITConfigScript()
 	if !strings.Contains(script, "Move-Item -Force -Path '"+jitPendingPathWindows+"' -Destination '"+jitPathWindows+"' -ErrorAction Stop") {
 		t.Errorf("script must rename into place with -ErrorAction Stop:\n%s", script)
+	}
+	if strings.Contains(script, "OpenStandardInput") {
+		t.Errorf("JIT commit must not read stdin through the PowerShell host:\n%s", script)
+	}
+}
+
+// File transfers speak SCP to the guest's native scp.exe sink — never a
+// PowerShell stdin read, which the PS 5.1 console-less host wedges or kills
+// (hardware-proven on the published image). The framing is one C-record:
+// header, bytes, NUL.
+func TestScpSourceFraming(t *testing.T) {
+	got, err := io.ReadAll(scpSource("x.bin", 3, strings.NewReader("abc")))
+	if err != nil {
+		t.Fatalf("reading scp source stream: %v", err)
+	}
+	want := "C0644 3 x.bin\nabc\x00"
+	if string(got) != want {
+		t.Errorf("scp framing = %q, want %q", got, want)
+	}
+	if cmd := scpSinkCommand(`C:\runny-cache\x.bin`); cmd != `scp -t C:\runny-cache\x.bin` {
+		t.Errorf("scp sink command = %q", cmd)
+	}
+}
+
+// Every EncodedCommand script runs with the progress stream silenced: PS
+// 5.1's console-less host otherwise serializes progress records (module
+// autoload's "Preparing modules for first use") as a #< CLIXML blob on
+// stderr, polluting parsed output — the rotate's host-key capture hit
+// exactly this on the published image.
+func TestEncodedCommandSilencesProgressStream(t *testing.T) {
+	cmd := encodedCommand("Get-Date")
+	b64 := strings.TrimPrefix(cmd, "powershell -NoProfile -NonInteractive -EncodedCommand ")
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		t.Fatalf("decoding encoded command: %v", err)
+	}
+	u16 := make([]uint16, len(raw)/2)
+	for i := range u16 {
+		u16[i] = uint16(raw[2*i]) | uint16(raw[2*i+1])<<8
+	}
+	script := string(utf16.Decode(u16))
+	if !strings.HasPrefix(script, "$ProgressPreference='SilentlyContinue'; ") {
+		t.Errorf("encoded script must silence the progress stream first: %q", script)
+	}
+	if !strings.HasSuffix(script, "Get-Date") {
+		t.Errorf("encoded script must end with the caller's script: %q", script)
 	}
 }
 

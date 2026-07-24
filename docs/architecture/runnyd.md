@@ -313,8 +313,8 @@ the published image and watches for it to finish.
   listener directly with `--jitconfig <blob>` in argv, redirecting all output
   to `C:\runny\runner.log` and writing the runner's exit code to
   `C:\runny\runner-exit.txt` on exit. `StartRunner`'s windows branch extracts
-  the pushed runner zip to `C:\actions-runner`, delivers the JIT config over
-  stdin to a `.tmp` path and atomically renames it into place (never through
+  the pushed runner zip to `C:\actions-runner`, scp-streams the JIT config
+  to a `.tmp` path and atomically renames it into place (never through
   a command string — the same secrecy rule the POSIX `$(cat)` handoff
   documents), then starts a **watcher session** that is the returned `Proc`:
   it tails the log file and exits with the runner's own exit code once the
@@ -326,15 +326,20 @@ the published image and watches for it to finish.
   the runner zip always lands via `PushRunnerTarball` at
   `C:\runny-cache\<basename>` before `StartRunner` extracts it — there is no
   live-share variant to keep in sync with.
-- **Every windows guest command goes through `-EncodedCommand`, with no
-  exceptions.** The default SSH shell is cmd.exe and the scripting target is
-  PowerShell 5.1 (no PS7-isms); every script is UTF-16LE-encoded, base64'd,
-  and run as `powershell -NoProfile -NonInteractive -EncodedCommand <b64>` —
-  the only pattern that survives ssh → cmd.exe → PowerShell's stacked
-  quoting rules. The JIT-config delivery folds its stdin→`.tmp`-file copy and
-  the atomic rename into `.jitconfig` into that same single script/session
-  (`Move-Item -ErrorAction Stop`, since `Move-Item`'s own errors are
-  non-terminating by default), rather than a separate plain-cmd `move`.
+- **Every windows guest command goes through `-EncodedCommand`; every file
+  transfer speaks SCP to the guest's native `scp.exe`.** Commands: the
+  default SSH shell is cmd.exe and the scripting target is PowerShell 5.1
+  (no PS7-isms); every script is UTF-16LE-encoded, base64'd, run as
+  `powershell -NoProfile -NonInteractive -EncodedCommand <b64>` with the
+  progress stream silenced — the only pattern that survives ssh → cmd.exe →
+  PowerShell's stacked quoting rules without the console-less host's
+  `#< CLIXML` stderr noise. Transfers (the runner zip, the JIT blob): a
+  blind single-file SCP stream into `scp -t`, exit-code-checked — PowerShell
+  cannot be in the byte path, because its host interferes with redirected
+  stdin (wedged sessions and killed connections on the real image). The
+  JIT commit stays a separate `Move-Item -Force -ErrorAction Stop` exec:
+  scp only writes, and the single same-volume rename is what keeps the
+  launcher from ever reading a partial blob.
 - **SECURE_SSH's windows rotation** targets Windows OpenSSH's own
   config surface instead of a drop-in: the cycle key lands in
   `C:\ProgramData\ssh\administrators_authorized_keys` (with its ACL fixed via

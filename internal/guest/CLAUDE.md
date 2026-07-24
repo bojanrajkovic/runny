@@ -19,17 +19,22 @@ edges only.
   package computed a bad `goos` itself; treat it as a bug to fix, not a case
   to swallow — including by reflexively adding a windows branch back into
   `perOS` instead of dispatching earlier.
-- **Every windows guest command goes through `encodedCommand`
-  (`-EncodedCommand`) — no exceptions, not even a "trivial" one.** The
+- **Every windows guest *command* goes through `encodedCommand`
+  (`-EncodedCommand`); every windows *file transfer* goes through scp-sink
+  framing (`scpSinkCommand`/`scpSource`). Nothing else.** Commands: the
   guest's default SSH shell is cmd.exe and the scripting target is
   PowerShell 5.1; stacking ssh → cmd.exe → PowerShell quoting rules mangles
-  anything with embedded quotes or newlines. `encodedCommand`
-  UTF-16LE-encodes the script and base64's it — empirically the only
-  reliable pattern. An earlier version of this code ran the JIT-config
-  rename as a separate plain `move /Y` exec; it's now folded into the same
-  `-EncodedCommand` script that copies stdin to the `.tmp` path
-  (`deliverJITConfigScript`), both to cut an SSH round-trip and so there is
-  no plain-cmd carve-out left to accidentally widen.
+  anything with embedded quotes or newlines, and `encodedCommand`
+  (UTF-16LE + base64) is empirically the only reliable pattern. It also
+  prepends `$ProgressPreference='SilentlyContinue'` — PS 5.1's console-less
+  host serializes progress records (e.g. module autoload's "Preparing
+  modules for first use") as `#< CLIXML` blobs on stderr, which broke
+  host-key parsing on the real image. Transfers: never stream bytes into a
+  PowerShell stdin read (`[Console]::OpenStandardInput()`); the PS host
+  interposes on redirected stdin and, hardware-proven, either wedges the
+  session until the state deadline or gets the connection killed. `scp -t`
+  against the guest's native scp.exe is the byte channel — a blind
+  single-file stream whose exit code is the failure signal.
 - **`administrators_authorized_keys`' ACL is load-bearing, not optional, and
   has exactly one home: `psAppendAuthorizedKeyLine`.** Windows OpenSSH
   silently ignores that file for an Administrators-group account unless its

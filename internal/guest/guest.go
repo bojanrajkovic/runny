@@ -4,6 +4,7 @@
 package guest
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -11,6 +12,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -44,8 +46,16 @@ const windowsPrepTimeout = 60 * time.Second
 // is cmd.exe, and anything beyond a trivial one-liner mangles under
 // cmd-then-PS-then-argv quoting. No secret ever goes through this path: the
 // JIT config crosses over stdin, exactly like the POSIX `$(cat)` pattern.
+//
+// The $ProgressPreference prefix is hardware-earned: PowerShell 5.1's
+// console-less host serializes its progress stream as a `#< CLIXML` blob on
+// stderr (module autoload emits "Preparing modules for first use" on a fresh
+// guest), which pollutes any output a caller parses. Silencing progress for
+// every guest script at this one seam kills the whole class. Real errors
+// still arrive CLIXML-wrapped on stderr — ugly but loud; exit codes stay the
+// failure signal.
 func encodedCommand(script string) string {
-	u16 := utf16.Encode([]rune(script))
+	u16 := utf16.Encode([]rune("$ProgressPreference='SilentlyContinue'; " + script))
 	buf := make([]byte, len(u16)*2)
 	for i, v := range u16 {
 		binary.LittleEndian.PutUint16(buf[i*2:], v)
@@ -146,12 +156,26 @@ if ($LASTEXITCODE -ne 0) { exit 2 }
 `, administratorsAuthorizedKeysPath, valueExpr, administratorsAuthorizedKeysPath)
 }
 
-// psCopyStdinToFile renders the PS fragment that copies stdin's bytes
-// verbatim to path — the windows equivalent of `cat > path`, and the only
-// shape used everywhere host bytes are streamed into a guest file (the
-// runner-zip push, the JIT-config delivery). Binary-safe; no scp protocol.
-func psCopyStdinToFile(path string) string {
-	return fmt.Sprintf(`$in=[Console]::OpenStandardInput(); $f=[IO.File]::Create('%s'); $in.CopyTo($f); $f.Close()`, path)
+// scpSinkCommand is the exec command for streaming one file into the guest:
+// Windows OpenSSH ships scp.exe, and its sink mode is the one byte channel
+// with no shell or PowerShell host in the path. A PowerShell stdin-copy
+// ([Console]::OpenStandardInput) does NOT work here — hardware-proven: the
+// PS 5.1 console-less host interposes on redirected stdin, and streaming
+// binary through it either wedges the session until the state deadline or
+// gets the connection killed by the guest. scp.exe is a native binary, so
+// the command survives any DefaultShell (cmd or powershell) unchanged.
+func scpSinkCommand(remotePath string) string {
+	return "scp -t " + remotePath
+}
+
+// scpSource frames r as a single-file SCP source stream for scpSinkCommand:
+// the C-record header, the bytes, and the NUL terminator. The sink's acks
+// are deliberately not read — this is a blind single-file stream, and the
+// session's exit code is the success signal (scp -t exits nonzero with a
+// message on stderr for a short write, a bad path, or a framing error).
+func scpSource(name string, size int64, r io.Reader) io.Reader {
+	header := fmt.Sprintf("C0644 %d %s\n", size, name)
+	return io.MultiReader(strings.NewReader(header), r, bytes.NewReader([]byte{0}))
 }
 
 // The rotation scripts install the per-cycle public key and shut password
@@ -627,10 +651,21 @@ func (g *Guest) PushRunnerTarball(ctx bounded.Context, localPath string) error {
 	}
 
 	if g.goos == home.OSWindows {
+		// scp's sink writes into an existing directory only; create it in a
+		// separate quick exec first.
+		out, code, err := g.c.Output(ctx, encodedCommand(fmt.Sprintf(`New-Item -Force -ItemType Directory -Path '%s' | Out-Null`, runnerCacheDirWindows)))
+		if err != nil {
+			return fmt.Errorf("creating runner cache dir: %w", err)
+		}
+		if code != 0 {
+			return fmt.Errorf("creating runner cache dir: exit %d: %s", code, out)
+		}
+		st, err := f.Stat()
+		if err != nil {
+			return fmt.Errorf("pushing runner zip: %w", err)
+		}
 		dest := runnerCacheDirWindows + `\` + base
-		script := fmt.Sprintf(`New-Item -Force -ItemType Directory -Path '%s' | Out-Null
-`, runnerCacheDirWindows) + psCopyStdinToFile(dest)
-		out, code, err := g.c.RunWithInput(ctx, encodedCommand(script), f)
+		out, code, err = g.c.RunWithInput(ctx, scpSinkCommand(dest), scpSource(base, st.Size(), f))
 		if err != nil {
 			return fmt.Errorf("pushing runner zip: %w", err)
 		}
@@ -774,17 +809,16 @@ tar -xf '%s\%s' -C '%s'
 exit $LASTEXITCODE`, runnerDirWindows, runnerDirWindows, runnerCacheDirWindows, runnerTarball, runnerDirWindows)
 }
 
-// deliverJITConfigScript copies stdin to the .tmp path, then renames it into
-// place, in one script/session — one SSH round-trip instead of two, and
-// every windows guest command now goes through -EncodedCommand with no
-// plain-cmd exception. -ErrorAction Stop is load-bearing on the Move-Item:
-// its own errors are non-terminating by default, so without it a failed
-// rename would still exit 0. Write-then-rename atomicity is unaffected — the
-// launcher only ever observes jitPathWindows, and it's still written by a
-// single Move-Item, never partially.
-func deliverJITConfigScript() string {
-	return psCopyStdinToFile(jitPendingPathWindows) + fmt.Sprintf(`
-Move-Item -Force -Path '%s' -Destination '%s' -ErrorAction Stop`, jitPendingPathWindows, jitPathWindows)
+// commitJITConfigScript renames the scp-delivered .tmp blob into the
+// launcher's watched path. The rename is a separate exec from the scp
+// stream (scp can only write, not rename), which is exactly what preserves
+// the write-then-rename atomicity: the launcher only ever observes
+// jitPathWindows, written by a single same-volume Move-Item, never
+// partially. -ErrorAction Stop is load-bearing: Move-Item's own errors are
+// non-terminating by default, so without it a failed rename would still
+// exit 0.
+func commitJITConfigScript() string {
+	return fmt.Sprintf(`Move-Item -Force -Path '%s' -Destination '%s' -ErrorAction Stop`, jitPendingPathWindows, jitPathWindows)
 }
 
 // startRunnerWindows hands the runner off to the image's launcher and
@@ -807,12 +841,23 @@ func (g *Guest) startRunnerWindows(ctx context.Context, jit, runnerTarball strin
 		return nil, fmt.Errorf("extracting runner zip: exit %d: %s", code, out)
 	}
 
-	out, code, err = g.c.RunWithInput(prep, encodedCommand(deliverJITConfigScript()), strings.NewReader(jit))
+	// The header name is advisory (the sink target is a full file path, not a
+	// directory); a literal avoids filepath.Base's host-OS separator rules.
+	out, code, err = g.c.RunWithInput(prep, scpSinkCommand(jitPendingPathWindows),
+		scpSource(".jitconfig.tmp", int64(len(jit)), strings.NewReader(jit)))
 	if err != nil {
 		return nil, fmt.Errorf("delivering JIT config: %w", err)
 	}
 	if code != 0 {
 		return nil, fmt.Errorf("delivering JIT config: exit %d: %s", code, out)
+	}
+
+	out, code, err = g.c.Output(prep, encodedCommand(commitJITConfigScript()))
+	if err != nil {
+		return nil, fmt.Errorf("committing JIT config: %w", err)
+	}
+	if code != 0 {
+		return nil, fmt.Errorf("committing JIT config: exit %d: %s", code, out)
 	}
 
 	p, err := g.c.Start(ctx, encodedCommand(watcherScriptWindows), nil)

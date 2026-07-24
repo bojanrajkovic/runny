@@ -143,7 +143,11 @@ func TestLoadConfigWindowsPoolDefaultLabels(t *testing.T) {
 		t.Fatalf("LoadConfig: %v", err)
 	}
 	win := c.Pools[1]
-	want := []string{"self-hosted", "windows", "x64"}
+	arch := "ARM64"
+	if runtime.GOARCH == "amd64" {
+		arch = "X64"
+	}
+	want := []string{"self-hosted", "Windows", arch}
 	if len(win.Labels) != len(want) {
 		t.Fatalf("windows label default: %v, want %v", win.Labels, want)
 	}

@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -417,13 +418,24 @@ func (c *Config) applyDefaults() {
 			p.SSHHardening = SSHHardeningRotate
 		}
 		if len(p.Labels) == 0 {
+			// The arch label comes from the host arch: guests always run the
+			// host's architecture (no emulation), and the runner asset is
+			// resolved with runtime.GOARCH too, so label and binary can never
+			// disagree. A hardcoded arch here would silently advertise the
+			// wrong capability the day the daemon runs on a different host
+			// (Linux pools on an x64 Windows host were already mislabeled
+			// ARM64 by the previous hardcode).
+			arch := "ARM64"
+			if runtime.GOARCH == "amd64" {
+				arch = "X64"
+			}
 			switch p.OS {
 			case OSDarwin:
-				p.Labels = []string{"self-hosted", "macOS", "ARM64"}
+				p.Labels = []string{"self-hosted", "macOS", arch}
 			case OSLinux:
-				p.Labels = []string{"self-hosted", "Linux", "ARM64"}
+				p.Labels = []string{"self-hosted", "Linux", arch}
 			case OSWindows:
-				p.Labels = []string{"self-hosted", "windows", "x64"}
+				p.Labels = []string{"self-hosted", "Windows", arch}
 			}
 		}
 	}

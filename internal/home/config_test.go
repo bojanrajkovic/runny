@@ -134,6 +134,26 @@ func TestLoadConfigMixedPools(t *testing.T) {
 	}
 }
 
+// A windows pool with no declared labels defaults to the same
+// self-hosted/os/arch shape darwin and linux get.
+func TestLoadConfigWindowsPoolDefaultLabels(t *testing.T) {
+	c, err := LoadConfig(writeConfig(t, minimalConfig+
+		"  - name: win\n    os: windows\n    image: ghcr.io/example/win:1\n    target: {org: example-org}\n    github:\n      app_id: 999\n      private_key_path: /tmp/win-key.pem\n"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	win := c.Pools[1]
+	want := []string{"self-hosted", "windows", "x64"}
+	if len(win.Labels) != len(want) {
+		t.Fatalf("windows label default: %v, want %v", win.Labels, want)
+	}
+	for i := range want {
+		if win.Labels[i] != want[i] {
+			t.Errorf("windows label default: %v, want %v", win.Labels, want)
+		}
+	}
+}
+
 func TestSSHHardeningModePredicates(t *testing.T) {
 	cases := []struct {
 		mode      SSHHardeningMode
@@ -210,7 +230,9 @@ func TestLoadConfigValidation(t *testing.T) {
 	}{
 		{"no pools", "retention:\n  cycles_per_slot: 5\n", "at least one pool"},
 		{"pool missing github", "pools:\n  - name: x\n    os: linux\n    image: i\n    target: {org: a}\n", "github.app_id is required"},
-		{"bad os", minimalConfig + "  - name: w\n    os: windows\n    image: x\n    target: {org: a}\n", "os must be darwin or linux"},
+		{"bad os", minimalConfig + "  - name: w\n    os: plan9\n    image: x\n    target: {org: a}\n", "os must be darwin, linux, or windows"},
+		{"windows guest_env rejected", minimalConfig + "  - name: w\n    os: windows\n    image: x\n    target: {org: a}\n    github:\n      app_id: 1\n      private_key_path: /tmp/k.pem\n    guest_env:\n      FOO: bar\n", "guest_env and guest_setup are not supported for windows pools"},
+		{"windows guest_setup rejected", minimalConfig + "  - name: w\n    os: windows\n    image: x\n    target: {org: a}\n    github:\n      app_id: 1\n      private_key_path: /tmp/k.pem\n    guest_setup:\n      - echo hi\n", "guest_env and guest_setup are not supported for windows pools"},
 		{"both targets", minimalConfig + "  - name: b\n    os: linux\n    image: x\n    target: {org: a, owner: b, repo: c}\n", "not both"},
 		{"half repo target", minimalConfig + "  - name: h\n    os: linux\n    image: x\n    target: {owner: b}\n", "org, or both owner and repo"},
 		{"dup names", minimalConfig + "  - name: mac\n    os: linux\n    image: x\n    target: {org: a}\n", "duplicate pool name"},

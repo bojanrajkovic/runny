@@ -135,8 +135,9 @@ func (m SSHHardeningMode) Scrambles() bool {
 // (tools/configschema) constrains the same set validate() enforces, rather than
 // re-typing the literals.
 const (
-	OSDarwin = "darwin"
-	OSLinux  = "linux"
+	OSDarwin  = "darwin"
+	OSLinux   = "linux"
+	OSWindows = "windows"
 )
 
 // TargetConfig holds exactly one of: Org, or Owner+Repo.
@@ -421,6 +422,8 @@ func (c *Config) applyDefaults() {
 				p.Labels = []string{"self-hosted", "macOS", "ARM64"}
 			case OSLinux:
 				p.Labels = []string{"self-hosted", "Linux", "ARM64"}
+			case OSWindows:
+				p.Labels = []string{"self-hosted", "windows", "x64"}
 			}
 		}
 	}
@@ -484,8 +487,18 @@ func (c *Config) validate() error {
 			errs = append(errs, fmt.Errorf("%s: duplicate pool name %q", at, p.Name))
 		}
 		seen[p.Name] = true
-		if p.OS != OSDarwin && p.OS != OSLinux {
-			errs = append(errs, fmt.Errorf("%s: os must be %s or %s, got %q", at, OSDarwin, OSLinux, p.OS))
+		if p.OS != OSDarwin && p.OS != OSLinux && p.OS != OSWindows {
+			errs = append(errs, fmt.Errorf("%s: os must be %s, %s, or %s, got %q", at, OSDarwin, OSLinux, OSWindows, p.OS))
+		}
+		// A windows pool's runner is launched by the image's own baked
+		// scheduled-task launcher (see internal/guest's windows StartRunner),
+		// not by injecting shell into the launch script the way guest_env's
+		// exports and guest_setup's commands do on darwin/linux — there is no
+		// launch script for either to land in on windows, so a configured
+		// value would silently never reach the runner. Reject it at load
+		// rather than accept config that can never take effect.
+		if p.OS == OSWindows && (len(p.GuestEnv) > 0 || len(p.GuestSetup) > 0) {
+			errs = append(errs, fmt.Errorf("%s: guest_env and guest_setup are not supported for windows pools (the runner launches via the image's own launcher, not an injectable shell script)", at))
 		}
 		if p.Image == "" {
 			errs = append(errs, fmt.Errorf("%s: image is required", at))

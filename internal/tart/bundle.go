@@ -112,10 +112,10 @@ func (c *Config) ECID() ([]byte, error) {
 // it does not let VZ boot an amd64 kernel), so "can THIS host actually boot
 // THIS arch" is a separate, host-capability check each platform's own
 // Manager.Boot makes against its own runtime.GOARCH — not something this
-// portable check can know. windows/arm64 is accepted on the same reasoning
-// ADR-0026 already applied to linux/arm64: an arm64 Windows host is a real
-// (if currently unvalidated) Hyper-V target, and hardcoding Windows guests to
-// amd64 here would be a second, needless host-arch opinion this check
+// portable check can know. windows/arm64 is accepted for the same reason
+// linux/arm64 is: an arm64 Windows host running Hyper-V is a real (if
+// currently unvalidated) target, and hardcoding Windows guests to amd64 here
+// would be a second, needless host-arch opinion this check
 // deliberately doesn't hold for any other OS.
 func (b Bundle) LoadConfig() (*Config, error) {
 	raw, err := os.ReadFile(b.ConfigPath())

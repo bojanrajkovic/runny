@@ -200,15 +200,16 @@ const maxDiskLayerWorkers = 4
 // rather than reading the package constant directly so tests can exercise
 // many concurrent layers without packing gigabytes of data.
 //
-// sem gates the make+copy below, not just g.Go: errgroup's own SetLimit
-// only blocks inside Go() itself, by which point this loop has already
-// allocated and copied the next layerSize chunk regardless of whether a
-// worker is free -- a second Codex review on this PR caught that as a real
-// "+1 layer" overshoot on the documented maxDiskLayerWorkers bound. Acquiring
-// sem before the copy means at most maxDiskLayerWorkers chunks exist at
-// once, full stop; buf itself is reused every iteration (not a per-layer
-// allocation), so reading ahead into it while waiting for a slot costs
-// nothing extra.
+// sem gates the read into buf, not just the chunk copy: a third Codex
+// review on this PR caught that gating only the copy still let this loop
+// read the NEXT layer into the shared buf while all maxDiskLayerWorkers
+// were already busy -- one extra layerSize sitting in buf, not bounded by
+// the same limit the workers are. Acquiring sem before the read means the
+// loop can't get ahead of the workers at all: nothing (in buf or in a
+// dispatched chunk) exceeds maxDiskLayerWorkers layers' worth of memory at
+// once. The two early-exit paths (a real read error, or a clean EOF with no
+// bytes left) release the slot immediately since neither reaches g.Go's own
+// deferred release.
 func (w *blobWriter) putDiskLayers(disk io.Reader, layerSize int) ([]descriptor, error) {
 	var g errgroup.Group
 	sem := make(chan struct{}, maxDiskLayerWorkers)
@@ -217,16 +218,18 @@ func (w *blobWriter) putDiskLayers(disk io.Reader, layerSize int) ([]descriptor,
 
 	buf := make([]byte, layerSize)
 	for {
+		sem <- struct{}{}
 		n, err := io.ReadFull(disk, buf)
 		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+			<-sem
 			return nil, fmt.Errorf("reading disk chunk: %w", err)
 		}
 		if n == 0 {
+			<-sem
 			break
 		}
-		sem <- struct{}{} // blocks here, before allocating this layer's chunk, once maxDiskLayerWorkers are already in flight
 		chunk := make([]byte, n)
-		copy(chunk, buf[:n]) // buf is reused by the next read while this chunk compresses concurrently
+		copy(chunk, buf[:n]) // buf is reused by the next read once this chunk's own copy is safely in hand
 
 		mu.Lock()
 		idx := len(descs)

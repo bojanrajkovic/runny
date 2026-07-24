@@ -166,6 +166,22 @@ func TestWriteImageRejectsEmptyNVRAM(t *testing.T) {
 	}
 }
 
+// TestPutDiskLayersRejectsEmptyDisk exercises putDiskLayers' n==0 early-exit
+// path directly -- the one that must release its semaphore slot immediately
+// rather than relying on a dispatched goroutine's deferred release, since no
+// goroutine is ever spawned for an empty disk. A hang here (t.Fatal never
+// reached) would mean that release is missing.
+func TestPutDiskLayersRejectsEmptyDisk(t *testing.T) {
+	w := &blobWriter{dir: t.TempDir()}
+	if err := os.MkdirAll(filepath.Join(w.dir, "blobs", "sha256"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := w.putDiskLayers(bytes.NewReader(nil), 1024)
+	if err == nil {
+		t.Fatal("want an error for an empty disk, got nil")
+	}
+}
+
 // TestWriteImageRejectsConfigsLoadConfigWouldReject covers the gap a
 // code-review found: WriteImage used to happily pack any tart.Config,
 // deferring every one of these to a first-pull-time (or worse, first-boot)

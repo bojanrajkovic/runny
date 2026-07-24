@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"sync"
 
 	"golang.org/x/sync/errgroup"
 
@@ -47,12 +46,17 @@ type PackedImage struct {
 	Digest string // the manifest's own digest, "sha256:..."
 }
 
-// WriteImage packs disk plus cfg and nvram into a tart-format OCI Image
-// Layout at dir (created if absent). It is guest-OS-agnostic: disk rides
-// through as opaque bytes, so it works whether the caller hands it a raw
-// disk image or, for a windows guest, VHDX bytes directly -- WriteImage
-// doesn't need to know which (the pull side, internal/images'
-// prepareBundleDisk, is what tells them apart).
+// WriteImage packs disk (diskSize bytes) plus cfg and nvram into a
+// tart-format OCI Image Layout at dir (created if absent). It is
+// guest-OS-agnostic: disk rides through as opaque bytes, so it works
+// whether the caller hands it a raw disk image or, for a windows guest,
+// VHDX bytes directly -- WriteImage doesn't need to know which (the pull
+// side, internal/images' prepareBundleDisk, is what tells them apart).
+//
+// disk is io.ReaderAt, not io.Reader: disk layers compress concurrently
+// (see putDiskLayers), each reading its own byte range independently, with
+// no shared read-ahead state to reason about. *os.File and bytes.Reader
+// (what every caller here actually hands in) both already implement it.
 //
 // cfg.DiskFormat is forced to "raw" regardless of what the caller set:
 // tart.Bundle.LoadConfig rejects every other value (see bundle.go), and for
@@ -69,7 +73,7 @@ type PackedImage struct {
 // bad --cpu-count/--memory-size/--os/--arch, or a darwin config missing
 // HardwareModelB64/ECIDB64, packs "successfully" and only fails the first
 // time anything tries to boot the image.
-func WriteImage(dir string, cfg tart.Config, disk io.Reader, nvram []byte) (PackedImage, error) {
+func WriteImage(dir string, cfg tart.Config, disk io.ReaderAt, diskSize int64, nvram []byte) (PackedImage, error) {
 	if len(nvram) == 0 {
 		return PackedImage{}, errors.New("packing image: nvram must be non-empty (tart.Bundle.Verify requires it)")
 	}
@@ -91,7 +95,7 @@ func WriteImage(dir string, cfg tart.Config, disk io.Reader, nvram []byte) (Pack
 	if err != nil {
 		return PackedImage{}, err
 	}
-	diskDescs, err := w.putDiskLayers(disk, packDiskLayerSize)
+	diskDescs, err := w.putDiskLayers(disk, diskSize, packDiskLayerSize)
 	if err != nil {
 		return PackedImage{}, err
 	}
@@ -178,86 +182,73 @@ func (w *blobWriter) put(mediaType string, b []byte) (descriptor, error) {
 // Client.pull's own disk-layer fan-out cap (oci.go), chosen there for
 // throughput but doing double duty here as a memory bound: each worker holds
 // one uncompressed chunk (up to layerSize) while it compresses, so the cap
-// times layerSize is this function's rough peak footprint. A Codex review on
-// this PR caught runtime.NumCPU() alone as unbounded on a high-core-count
-// host -- e.g. 64 cores x 512MiB chunks is 32GiB before a single byte of
-// compressed output exists.
+// times layerSize is this function's rough peak footprint.
 const maxDiskLayerWorkers = 4
 
-// putDiskLayers reads disk in layerSize chunks, sequentially (disk is a
-// single io.Reader -- reads can't run out of order), and Apple-LZ4-frames
-// and writes each chunk as its own blob CONCURRENTLY, up to maxDiskLayerWorkers
-// at once: appleLZ4Encode's blocks are self-contained (see applelz4.go), so
-// nothing about compressing one layer depends on another, and the read side
-// already parallelizes the identical per-layer codec work the same way
-// (Client.pull's errgroup). Layer order is load-bearing -- diskLayerSizes
-// (oci.go) derives each layer's offset in disk.img from its position in the
-// manifest -- so results land in a pre-indexed slot (idx) rather than being
-// appended as they finish, and mu guards every access to descs (including
-// the sequential-loop's own append) since a concurrent index-write must
-// never race a later append's possible backing-array reallocation.
+// putDiskLayers Apple-LZ4-compresses and writes disk (diskSize bytes) as
+// however many layerSize layers it takes, one independent task per layer
+// index, dispatched CONCURRENTLY up to maxDiskLayerWorkers at once via
+// errgroup.SetLimit: appleLZ4Encode's blocks are self-contained (see
+// applelz4.go), so nothing about compressing one layer depends on another,
+// and the read side already parallelizes the identical per-layer codec work
+// the same way (Client.pull's errgroup).
+//
+// Reading disk through io.ReaderAt rather than a single sequential
+// io.Reader is deliberate, not incidental: an earlier version of this
+// function read sequentially into one shared buffer ahead of a
+// hand-rolled semaphore, and across several rounds of review kept
+// surfacing a new edge of the same problem -- an unbounded worker count,
+// then a chunk allocated before its worker slot was confirmed free, then
+// the shared read buffer refilled before its slot was confirmed free, then
+// early-return-on-read-error orphaning already-dispatched workers. Every
+// one of those was a consequence of coordinating a single ordered read
+// stream across concurrent consumers by hand. With io.ReaderAt, each task
+// reads its own [offset, offset+n) range independently -- no shared
+// buffer, no ordering dependency between layers, and no path where a task
+// starts before errgroup itself has confirmed a worker slot is free.
+// g.Wait() is unconditional (no early return skips it), so a read error in
+// one task can never leave siblings dispatched-but-unwaited-for.
+//
+// Layer order is still load-bearing -- diskLayerSizes (oci.go) derives each
+// layer's offset in disk.img from its position in the manifest -- but
+// descs is sized up front from diskSize, so each task writes to its own
+// pre-existing index with no append, no reallocation, and no mutex: index i
+// is touched by exactly one goroutine, and g.Wait() is what establishes
+// happens-before for this function's own read of the finished slice.
+//
 // layerSize is a parameter (WriteImage always passes packDiskLayerSize)
 // rather than reading the package constant directly so tests can exercise
-// many concurrent layers without packing gigabytes of data.
-//
-// sem gates the read into buf, not just the chunk copy: a third Codex
-// review on this PR caught that gating only the copy still let this loop
-// read the NEXT layer into the shared buf while all maxDiskLayerWorkers
-// were already busy -- one extra layerSize sitting in buf, not bounded by
-// the same limit the workers are. Acquiring sem before the read means the
-// loop can't get ahead of the workers at all: nothing (in buf or in a
-// dispatched chunk) exceeds maxDiskLayerWorkers layers' worth of memory at
-// once. The two early-exit paths (a real read error, or a clean EOF with no
-// bytes left) release the slot immediately since neither reaches g.Go's own
-// deferred release.
-func (w *blobWriter) putDiskLayers(disk io.Reader, layerSize int) ([]descriptor, error) {
+// many layers without packing gigabytes of data.
+func (w *blobWriter) putDiskLayers(disk io.ReaderAt, diskSize int64, layerSize int) ([]descriptor, error) {
+	if diskSize == 0 {
+		return nil, errors.New("packing image: disk is empty")
+	}
+	layerCount := int((diskSize + int64(layerSize) - 1) / int64(layerSize))
+	descs := make([]descriptor, layerCount)
+
 	var g errgroup.Group
-	sem := make(chan struct{}, maxDiskLayerWorkers)
-	var mu sync.Mutex
-	var descs []descriptor
-
-	buf := make([]byte, layerSize)
-	for {
-		sem <- struct{}{}
-		n, err := io.ReadFull(disk, buf)
-		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-			<-sem
-			return nil, fmt.Errorf("reading disk chunk: %w", err)
+	g.SetLimit(maxDiskLayerWorkers)
+	for i := range layerCount {
+		offset := int64(i) * int64(layerSize)
+		n := int64(layerSize)
+		if remaining := diskSize - offset; remaining < n {
+			n = remaining
 		}
-		if n == 0 {
-			<-sem
-			break
-		}
-		chunk := make([]byte, n)
-		copy(chunk, buf[:n]) // buf is reused by the next read once this chunk's own copy is safely in hand
-
-		mu.Lock()
-		idx := len(descs)
-		descs = append(descs, descriptor{})
-		mu.Unlock()
-
 		g.Go(func() error {
-			defer func() { <-sem }()
-			desc, putErr := w.putDiskLayerStream(chunk)
-			if putErr != nil {
-				return putErr
+			chunk := make([]byte, n)
+			if _, err := disk.ReadAt(chunk, offset); err != nil {
+				return fmt.Errorf("reading disk layer at offset %d: %w", offset, err)
 			}
-			mu.Lock()
-			descs[idx] = desc
-			mu.Unlock()
+			desc, err := w.putDiskLayerStream(chunk)
+			if err != nil {
+				return err
+			}
+			descs[i] = desc
 			return nil
 		})
-
-		atEOF := errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
-		if atEOF {
-			break
-		}
 	}
 	if err := g.Wait(); err != nil {
 		return nil, err
-	}
-	if len(descs) == 0 {
-		return nil, errors.New("packing image: disk is empty")
 	}
 	return descs, nil
 }

@@ -30,6 +30,10 @@ func imagePack(diskPath, layoutDir, guestOS, arch string, cpuCount uint, memoryS
 		return fmt.Errorf("opening %s: %w", diskPath, err)
 	}
 	defer disk.Close()
+	diskInfo, err := disk.Stat()
+	if err != nil {
+		return fmt.Errorf("stating %s: %w", diskPath, err)
+	}
 
 	nvram := imagePlaceholderNVRAM
 	switch {
@@ -50,7 +54,7 @@ func imagePack(diskPath, layoutDir, guestOS, arch string, cpuCount uint, memoryS
 		CPUCount:   cpuCount,
 		MemorySize: memorySize,
 	}
-	packed, err := oci.WriteImage(layoutDir, cfg, disk, nvram)
+	packed, err := oci.WriteImage(layoutDir, cfg, disk, diskInfo.Size(), nvram)
 	if err != nil {
 		return fmt.Errorf("packing %s: %w", diskPath, err)
 	}

@@ -279,7 +279,7 @@ func TestPackThenPullRoundTrips(t *testing.T) {
 	disk := append(bytes.Repeat([]byte("WINDOWSDISK "), 60_000), randomBytes(200_000)...)
 	cfg := tart.Config{OS: "windows", Arch: "amd64", CPUCount: 4, MemorySize: 8 << 30}
 
-	packed, err := WriteImage(t.TempDir(), cfg, bytes.NewReader(disk), []byte{0})
+	packed, err := WriteImage(t.TempDir(), cfg, bytes.NewReader(disk), int64(len(disk)), []byte{0})
 	if err != nil {
 		t.Fatalf("WriteImage: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestPackThenPullRoundTripsMultipleDiskLayers(t *testing.T) {
 	}
 	w := &blobWriter{dir: dir}
 	const tinyLayerSize = 4 * 1024
-	diskDescs, err := w.putDiskLayers(bytes.NewReader(disk), tinyLayerSize)
+	diskDescs, err := w.putDiskLayers(bytes.NewReader(disk), int64(len(disk)), tinyLayerSize)
 	if err != nil {
 		t.Fatal(err)
 	}

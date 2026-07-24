@@ -24,7 +24,7 @@ import (
 func TestWriteImageProducesAWellFormedOCILayout(t *testing.T) {
 	cfg := tart.Config{OS: "windows", Arch: "amd64", CPUCount: 2, MemorySize: 4 << 30}
 	disk := bytes.Repeat([]byte("OCILAYOUT"), 10_000)
-	packed, err := WriteImage(t.TempDir(), cfg, bytes.NewReader(disk), []byte{0})
+	packed, err := WriteImage(t.TempDir(), cfg, bytes.NewReader(disk), int64(len(disk)), []byte{0})
 	if err != nil {
 		t.Fatalf("WriteImage: %v", err)
 	}
@@ -160,23 +160,20 @@ func TestWriteImageProducesAWellFormedOCILayout(t *testing.T) {
 // mistake WriteImage must catch at pack time, not leave for pull time.
 func TestWriteImageRejectsEmptyNVRAM(t *testing.T) {
 	cfg := tart.Config{OS: "windows", Arch: "amd64", CPUCount: 1, MemorySize: 1 << 30}
-	_, err := WriteImage(t.TempDir(), cfg, bytes.NewReader([]byte("disk")), nil)
+	disk := []byte("disk")
+	_, err := WriteImage(t.TempDir(), cfg, bytes.NewReader(disk), int64(len(disk)), nil)
 	if err == nil {
 		t.Fatal("want an error for empty nvram, got nil")
 	}
 }
 
-// TestPutDiskLayersRejectsEmptyDisk exercises putDiskLayers' n==0 early-exit
-// path directly -- the one that must release its semaphore slot immediately
-// rather than relying on a dispatched goroutine's deferred release, since no
-// goroutine is ever spawned for an empty disk. A hang here (t.Fatal never
-// reached) would mean that release is missing.
+// TestPutDiskLayersRejectsEmptyDisk covers diskSize == 0.
 func TestPutDiskLayersRejectsEmptyDisk(t *testing.T) {
 	w := &blobWriter{dir: t.TempDir()}
 	if err := os.MkdirAll(filepath.Join(w.dir, "blobs", "sha256"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, err := w.putDiskLayers(bytes.NewReader(nil), 1024)
+	_, err := w.putDiskLayers(bytes.NewReader(nil), 0, 1024)
 	if err == nil {
 		t.Fatal("want an error for an empty disk, got nil")
 	}
@@ -195,9 +192,10 @@ func TestWriteImageRejectsConfigsLoadConfigWouldReject(t *testing.T) {
 		"unsupported guest":                 {OS: "solaris", Arch: "sparc", CPUCount: 1, MemorySize: 1 << 30},
 		"darwin missing hardwareModel/ecid": {OS: "darwin", Arch: "arm64", CPUCount: 1, MemorySize: 1 << 30},
 	}
+	disk := []byte("disk")
 	for name, cfg := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := WriteImage(t.TempDir(), cfg, bytes.NewReader([]byte("disk")), []byte{0})
+			_, err := WriteImage(t.TempDir(), cfg, bytes.NewReader(disk), int64(len(disk)), []byte{0})
 			if err == nil {
 				t.Fatal("want an error, got nil -- WriteImage packed a config LoadConfig would reject")
 			}

@@ -1,14 +1,13 @@
 package oci
 
 import (
-	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"sync"
 
@@ -175,24 +174,34 @@ func (w *blobWriter) put(mediaType string, b []byte) (descriptor, error) {
 	return descriptor{MediaType: mediaType, Digest: digest, Size: int64(len(b))}, nil
 }
 
+// maxDiskLayerWorkers caps putDiskLayers' concurrency -- matching
+// Client.pull's own disk-layer fan-out cap (oci.go), chosen there for
+// throughput but doing double duty here as a memory bound: each worker holds
+// one uncompressed chunk (up to layerSize) while it compresses, so the cap
+// times layerSize is this function's rough peak footprint. A Codex review on
+// this PR caught runtime.NumCPU() alone as unbounded on a high-core-count
+// host -- e.g. 64 cores x 512MiB chunks is 32GiB before a single byte of
+// compressed output exists.
+const maxDiskLayerWorkers = 4
+
 // putDiskLayers reads disk in layerSize chunks, sequentially (disk is a
 // single io.Reader -- reads can't run out of order), and Apple-LZ4-frames
-// and writes each chunk as its own blob CONCURRENTLY, up to one per CPU:
-// appleLZ4Encode's blocks are self-contained (see applelz4.go), so nothing
-// about compressing one layer depends on another, and the read side already
-// parallelizes the identical per-layer codec work the same way (Client.pull's
-// errgroup). Layer order is load-bearing -- diskLayerSizes (oci.go) derives
-// each layer's offset in disk.img from its position in the manifest -- so
-// results land in a pre-indexed slot (idx) rather than being appended as
-// they finish, and mu guards every access to descs (including the
-// sequential-loop's own append) since a concurrent index-write must never
-// race a later append's possible backing-array reallocation. layerSize is a
-// parameter (WriteImage always passes packDiskLayerSize) rather than reading
-// the package constant directly so tests can exercise many concurrent layers
-// without packing gigabytes of data.
+// and writes each chunk as its own blob CONCURRENTLY, up to maxDiskLayerWorkers
+// at once: appleLZ4Encode's blocks are self-contained (see applelz4.go), so
+// nothing about compressing one layer depends on another, and the read side
+// already parallelizes the identical per-layer codec work the same way
+// (Client.pull's errgroup). Layer order is load-bearing -- diskLayerSizes
+// (oci.go) derives each layer's offset in disk.img from its position in the
+// manifest -- so results land in a pre-indexed slot (idx) rather than being
+// appended as they finish, and mu guards every access to descs (including
+// the sequential-loop's own append) since a concurrent index-write must
+// never race a later append's possible backing-array reallocation.
+// layerSize is a parameter (WriteImage always passes packDiskLayerSize)
+// rather than reading the package constant directly so tests can exercise
+// many concurrent layers without packing gigabytes of data.
 func (w *blobWriter) putDiskLayers(disk io.Reader, layerSize int) ([]descriptor, error) {
 	var g errgroup.Group
-	g.SetLimit(runtime.NumCPU())
+	g.SetLimit(maxDiskLayerWorkers)
 	var mu sync.Mutex
 	var descs []descriptor
 
@@ -214,15 +223,10 @@ func (w *blobWriter) putDiskLayers(disk io.Reader, layerSize int) ([]descriptor,
 		mu.Unlock()
 
 		g.Go(func() error {
-			var enc bytes.Buffer
-			if encErr := appleLZ4Encode(&enc, chunk, lz4BlockSize); encErr != nil {
-				return fmt.Errorf("compressing disk chunk: %w", encErr)
-			}
-			desc, putErr := w.put(mediaTypeDiskV2, enc.Bytes())
+			desc, putErr := w.putDiskLayerStream(chunk)
 			if putErr != nil {
 				return putErr
 			}
-			desc.Annotations = map[string]string{annotationUncompressedSize: strconv.Itoa(len(chunk))}
 			mu.Lock()
 			descs[idx] = desc
 			mu.Unlock()
@@ -241,6 +245,58 @@ func (w *blobWriter) putDiskLayers(disk io.Reader, layerSize int) ([]descriptor,
 		return nil, errors.New("packing image: disk is empty")
 	}
 	return descs, nil
+}
+
+// putDiskLayerStream Apple-LZ4-compresses chunk directly into a temp file
+// under blobs/sha256, hashing as it writes, then renames the temp file to
+// its content-addressed final name -- unlike blobWriter.put, it never
+// buffers the full compressed layer in memory. Disk layers are the one blob
+// large enough (up to layerSize, worst case incompressible) that buffering
+// the whole compressed output in memory alongside the raw chunk would
+// roughly double each concurrent worker's footprint; a Codex review on this
+// PR flagged that doubling, multiplied across maxDiskLayerWorkers, as a real
+// OOM risk on a multi-GB pack.
+func (w *blobWriter) putDiskLayerStream(chunk []byte) (descriptor, error) {
+	blobDir := filepath.Join(w.dir, "blobs", "sha256")
+	tmp, err := os.CreateTemp(blobDir, ".tmp-*")
+	if err != nil {
+		return descriptor{}, fmt.Errorf("creating temp blob: %w", err)
+	}
+	tmpPath := tmp.Name()
+	renamed := false
+	defer func() {
+		if !renamed {
+			os.Remove(tmpPath)
+		}
+	}()
+
+	h := sha256.New()
+	if err := appleLZ4Encode(io.MultiWriter(tmp, h), chunk, lz4BlockSize); err != nil {
+		tmp.Close()
+		return descriptor{}, fmt.Errorf("compressing disk chunk: %w", err)
+	}
+	info, err := tmp.Stat()
+	if err != nil {
+		tmp.Close()
+		return descriptor{}, fmt.Errorf("stating temp blob: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return descriptor{}, fmt.Errorf("flushing temp blob: %w", err)
+	}
+
+	digest := formatDigest(h.Sum(nil))
+	finalPath := filepath.Join(blobDir, digest[len("sha256:"):])
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		return descriptor{}, fmt.Errorf("renaming temp blob to %s: %w", digest, err)
+	}
+	renamed = true
+
+	return descriptor{
+		MediaType:   mediaTypeDiskV2,
+		Digest:      digest,
+		Size:        info.Size(),
+		Annotations: map[string]string{annotationUncompressedSize: strconv.Itoa(len(chunk))},
+	}, nil
 }
 
 func writeJSONFile(path string, v any) error {

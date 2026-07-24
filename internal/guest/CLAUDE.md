@@ -85,7 +85,7 @@ edges only.
   digits-only regex (`$code -match '^\d+$'`) before the `[int]` cast —
   defense in depth, since the 250ms settle-then-redrain before reading it
   already makes an empty/partial read practically unreachable.
-- **Windows debug sessions are not recorded (v1).** `InstallAuthorizedKey`'s
+- **Windows debug sessions are not recorded.** `InstallAuthorizedKey`'s
   windows branch installs the key with the ACL fix but no `command=`
   transcription wrapper — the POSIX recorder (`debugRecorderDarwin`/`Linux`)
   is a `script(1)` wrapper, and Windows has no `script(1)`. It logs loudly at

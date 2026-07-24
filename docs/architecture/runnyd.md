@@ -345,7 +345,7 @@ the published image and watches for it to finish.
   session issuing it survives to read back its own exit status. Scramble
   mode uses `Set-LocalUser` against the baked `Administrator` account
   (`net user` prompts interactively above 14 characters and would hang).
-- **Debug session recording is not implemented for windows guests (v1).**
+- **Debug session recording is not implemented for windows guests.**
   `InstallAuthorizedKey`'s windows branch appends the key with the same ACL
   fix but installs no `command=` recording wrapper — the POSIX recorder is a
   `script(1)` wrapper with no windows equivalent, and building one needs a

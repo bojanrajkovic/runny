@@ -965,7 +965,7 @@ func (g *Guest) PullDiag(ctx bounded.Context) ([]byte, error) {
 // Empty output (operator never connected) is returned as nil — the caller
 // skips the artifact.
 //
-// Windows guests return nil unconditionally (v1): no recorder mechanism is
+// Windows guests return nil unconditionally: no recorder mechanism is
 // wired for Windows — the POSIX recorder is a script(1) wrapper installed
 // alongside the debug key (installDebugKeyScript/debugRecorderDarwin/Linux),
 // and Windows has no script(1) equivalent; recording there needs a
@@ -1124,7 +1124,7 @@ func (g *Guest) StopRunner(ctx bounded.Context) error {
 // the same fragment rotateScriptWindowsTemplate uses, so the ACL fix has
 // exactly one home — then proves the line landed via a read-back. No
 // command= recording wrapper: see PullDebugSession's doc comment for why
-// Windows debug sessions aren't recorded in v1.
+// Windows debug sessions aren't recorded.
 var installDebugKeyScriptWindows = `$line = '%s'
 ` + psAppendAuthorizedKeyLine("$line") + `if (-not (Select-String -Path '` + administratorsAuthorizedKeysPath + `' -SimpleMatch '%s' -Quiet)) { exit 1 }
 `
@@ -1154,7 +1154,7 @@ func (g *Guest) InstallAuthorizedKey(ctx bounded.Context, line string) error {
 		code int
 	)
 	if g.goos == home.OSWindows {
-		// No recorder is wired for Windows guests (v1) — see
+		// No recorder is wired for Windows guests — see
 		// PullDebugSession's doc comment for the technical reason. Log loudly
 		// rather than silently hand out an unrecorded operator session.
 		slog.Warn("windows debug session: transcript capture is unsupported, the operator's session will not be recorded")

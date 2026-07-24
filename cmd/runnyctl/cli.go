@@ -207,10 +207,19 @@ type ImageCmd struct {
 // ImagePackCmd never dials the daemon — see main.go's early-return switch —
 // so its Run takes neither *ctl nor a context.Context, matching
 // InstallDaemonCmd/UninstallDaemonCmd above.
+//
+// OS deliberately excludes "darwin" (a Codex review on this PR caught it):
+// tart.Bundle.LoadConfig requires hardwareModel/ecid for a darwin config,
+// this command has no flags to supply either, and WriteImage's own
+// validation (see pack.go) means a darwin pack would always fail, not
+// sometimes -- so kong refuses it up front with a clear error instead of
+// advertising a guest OS this command can never actually produce. Darwin
+// support (accepting or generating that metadata) is a separate, later
+// change, not a narrower version of this one.
 type ImagePackCmd struct {
 	Disk       string `arg:"" name:"disk" help:"path to the disk image (raw or VHDX -- packed through unchanged)"`
 	OCILayout  string `name:"oci-layout" default:"./out" help:"output OCI Image Layout directory"`
-	OS         string `required:"" help:"guest OS (darwin, linux, or windows)"`
+	OS         string `required:"" enum:"linux,windows" help:"guest OS (linux or windows; darwin isn't supported by this command yet)"`
 	Arch       string `required:"" help:"guest architecture (arm64 or amd64)"`
 	CPUCount   uint   `name:"cpu-count" required:"" help:"guest vCPU count"`
 	MemorySize uint64 `name:"memory-size" required:"" help:"guest memory size in bytes"`

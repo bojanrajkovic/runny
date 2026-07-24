@@ -68,7 +68,13 @@ func TestImagePackCmdRun(t *testing.T) {
 // finding: the nvram placeholder is only safe for windows guests (HCS never
 // reads NVRAMPath; VZ, which darwin/linux boot through, parses it as real
 // EFI/aux-storage firmware state), so imagePack must refuse to silently
-// reuse it for the other two guest OSes.
+// reuse it for the other two guest OSes. Only "linux" goes through the CLI
+// (a later fix, also from Codex review on this PR, makes kong itself reject
+// --os darwin via an enum constraint -- see ImagePackCmd.OS -- since this
+// command has no way to supply the hardwareModel/ecid a darwin config
+// needs); "darwin" is exercised by calling imagePack directly instead, so
+// this function's own defense stays covered independent of what the CLI
+// currently exposes.
 func TestImagePackRequiresNVRAMForNonWindows(t *testing.T) {
 	dir := t.TempDir()
 	diskPath := filepath.Join(dir, "disk.img")
@@ -76,18 +82,23 @@ func TestImagePackRequiresNVRAMForNonWindows(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, guestOS := range []string{"linux", "darwin"} {
-		t.Run(guestOS, func(t *testing.T) {
-			c := &ctl{out: io.Discard, err: io.Discard}
-			err := runArgs(t, c,
-				"image", "pack", diskPath,
-				"--oci-layout", filepath.Join(dir, "out-"+guestOS),
-				"--os", guestOS, "--arch", "amd64",
-				"--cpu-count", "2", "--memory-size", "4294967296",
-			)
-			if err == nil {
-				t.Fatalf("want an error requiring --nvram for --os %s, got nil", guestOS)
-			}
-		})
-	}
+	t.Run("linux via CLI", func(t *testing.T) {
+		c := &ctl{out: io.Discard, err: io.Discard}
+		err := runArgs(t, c,
+			"image", "pack", diskPath,
+			"--oci-layout", filepath.Join(dir, "out-linux"),
+			"--os", "linux", "--arch", "amd64",
+			"--cpu-count", "2", "--memory-size", "4294967296",
+		)
+		if err == nil {
+			t.Fatal("want an error requiring --nvram for --os linux, got nil")
+		}
+	})
+
+	t.Run("darwin via imagePack directly", func(t *testing.T) {
+		err := imagePack(diskPath, filepath.Join(dir, "out-darwin"), "darwin", "arm64", 2, 4294967296, "")
+		if err == nil {
+			t.Fatal("want an error requiring --nvram for darwin, got nil")
+		}
+	})
 }

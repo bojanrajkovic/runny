@@ -105,7 +105,14 @@ repo via `vedantmgoyal9/winget-releaser`, gated on the
 `WINGET_PACKAGE_IDENTIFIER` repo variable and `WINGET_TOKEN` secret (same
 graceful-no-op-until-configured shape as the Homebrew tap), and skipped on
 pre-releases (winget has no beta-channel concept, so a beta tag must never
-overwrite the stable manifest). **Rejected:** a self-hosted winget source,
+overwrite the stable manifest). `WINGET_TOKEN` — a classic PAT scoped
+`public_repo`, able to open a PR against any public repo the account can
+fork — lives in its own `winget` environment restricted to `v*` tags, the
+same restriction the `release` environment already applies to the
+signing/notary secrets; it does not share `releaser-app`'s environment,
+since that credential's blast radius (an installation token scoped to
+`homebrew-tap` alone) is deliberately narrower. **Rejected:** a self-hosted
+winget source,
 which needs a REST index service (no static-file equivalent of a brew tap
 exists for winget) — disproportionate infrastructure for the reach gained.
 This path has a one-time manual prerequisite the workflow cannot do for you:

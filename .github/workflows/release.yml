@@ -62,6 +62,12 @@ jobs:
       - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
           cache: false
+      # dotnet pack (below) takes a bare .nuspec directly as of .NET 10 — no
+      # placeholder .csproj needed. Pinned independently of mise since it's
+      # the one non-Bazel, non-mise tool this job needs.
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.x"
 
       # Import the Developer ID cert into a short-lived keychain. Skipped
       # (and the keychain cleanup step no-ops) when the secret is absent.
@@ -170,17 +176,38 @@ jobs:
             shasum -a 256 "runny_${VERSION}_windows_${arch}.zip" > "runny_${VERSION}_windows_${arch}.zip.sha256"
           done
 
+      # Chocolatey, release-asset-only for now (ADR-0010 amendment): no
+      # self-hosted feed yet, so there's no `choco source add` — users
+      # `choco install <downloaded-path>`. Built from the windows/amd64 exes
+      # staged above; Chocolatey has no meaningful arm64 story to target yet.
+      - name: package (chocolatey)
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          mkdir -p choco/tools
+          cp dist-windows-amd64/runnyd.exe dist-windows-amd64/runnyctl.exe choco/tools/
+          RUNNYD_SHA256=$(shasum -a 256 choco/tools/runnyd.exe | cut -d' ' -f1)
+          RUNNYCTL_SHA256=$(shasum -a 256 choco/tools/runnyctl.exe | cut -d' ' -f1)
+          export VERSION RUNNYD_SHA256 RUNNYCTL_SHA256
+          envsubst '${VERSION} ${RUNNYD_SHA256} ${RUNNYCTL_SHA256}' \
+            < tools/deploy/runny.nuspec.tmpl > choco/runny.nuspec
+          envsubst '${VERSION} ${RUNNYD_SHA256} ${RUNNYCTL_SHA256}' \
+            < tools/deploy/VERIFICATION.txt.tmpl > choco/tools/VERIFICATION.txt
+          dotnet pack choco/runny.nuspec -o .
+          shasum -a 256 "runny.${VERSION}.nupkg" > "runny.${VERSION}.nupkg.sha256"
+
       - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: |
             runny_*.tar.gz
             runny_*.zip
+            runny.*.nupkg
             Runny_*.dmg
       - name: attach to release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" runny_*.tar.gz runny_*.sha256 runny_*.zip Runny_*.dmg Runny_*.dmg.sha256
+        run: gh release upload "$TAG" runny_*.tar.gz runny_*.sha256 runny_*.zip runny.*.nupkg runny.*.nupkg.sha256 Runny_*.dmg Runny_*.dmg.sha256
 
   homebrew:
     name: update tap formula

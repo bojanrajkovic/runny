@@ -99,3 +99,15 @@ already proven by `ci.yml`) and attaches
 tarball — checksummed and attested, no signing (`codesign_binary`/
 `notarize_binary` are `target_compatible_with` macOS only, so these ship the
 bare `stamped_go_binary` outputs).
+
+**Chocolatey** ships as a release-asset-only `.nupkg`
+(`runny.<version>.nupkg`, built with `dotnet pack` directly against
+`tools/deploy/runny.nuspec.tmpl` — no placeholder `.csproj` needed as of
+.NET 10) — install via `choco install <downloaded-path>`. **Rejected for
+now:** a self-hosted feed via Sleet (a serverless static NuGet v3 feed
+generator that can target S3/GitHub Pages, no server component) — mechanically
+sound but needs a Sleet/dotnet publish step in CI and an unvalidated
+GitHub-Pages-as-NuGet-v3-host spike; revisit once that's been proven out.
+**Rejected:** pushing to the moderated `chocolatey.org` community repository
+— an API key plus a review queue (days on first submission) for a channel
+Homebrew's self-hosted-tap precedent argues against defaulting to.

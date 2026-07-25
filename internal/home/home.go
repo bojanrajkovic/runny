@@ -92,6 +92,17 @@ func (d Dir) ImagesDir() string  { return filepath.Join(string(d), "images") }
 func (d Dir) VMsDir() string     { return filepath.Join(string(d), "vms") }
 func (d Dir) CyclesDir() string  { return filepath.Join(string(d), "cycles") }
 
+// DockerConfigDir is where the daemon looks for registry credentials: a
+// DOCKER_CONFIG directory (so it holds config.json, the standard name), not a
+// file. The system daemon runs as a service account whose home is /var/empty,
+// so the default ~/.docker/config.json is both absent and unwritable by the
+// operator; pointing DOCKER_CONFIG here puts the credential somewhere the
+// operator can author (the home's inheriting ACL) and the daemon can read.
+// Deliberately NOT a copy of the operator's own credential — a copy goes stale
+// on rotation with nothing to notice; the file here is the one source, re-read
+// on every pull attempt.
+func (d Dir) DockerConfigDir() string { return filepath.Join(string(d), "docker") }
+
 // RunnerCacheDir is the shared download store for actions-runner tarballs: the
 // download happens once per version, not once per cycle, and fails fast before a
 // boot. It is NOT mounted into a guest — each cycle CoW-clones its resolved

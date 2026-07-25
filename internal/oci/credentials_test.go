@@ -3,11 +3,13 @@ package oci
 import (
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -103,6 +105,63 @@ func TestCredentialsForHelperNonZeroExit(t *testing.T) {
 
 	if _, _, ok := credentialsFor(t.Context(), "registry.example.com"); ok {
 		t.Fatal("expected no credentials when the helper exits non-zero")
+	}
+}
+
+// A keychain-backed `docker login` leaves an auths ENTRY for the host with no
+// "auth" field -- the secret lives in the store, and the map is just an index
+// of which hosts have one. That stub must not short-circuit the lookup as
+// "found"; it has to fall through to the configured helper.
+func TestCredentialsForStubAuthEntryFallsThroughToHelper(t *testing.T) {
+	writeDockerConfig(t, `{"auths":{"registry.example.com":{}},"credsStore":"stub"}`)
+	stubCredentialHelper(t, "stub", `echo '{"Username":"bob","Secret":"s3cr3t"}'`)
+
+	user, pass, ok := credentialsFor(t.Context(), "registry.example.com")
+	if !ok || user != "bob" || pass != "s3cr3t" {
+		t.Fatalf("credentialsFor() = %q, %q, %v; want bob, s3cr3t, true", user, pass, ok)
+	}
+}
+
+// captureWarnings swaps in a slog handler recording WARN-level messages, so
+// the noisy-vs-quiet split below is asserted rather than assumed.
+func captureWarnings(t *testing.T) *strings.Builder {
+	t.Helper()
+	var buf strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// A helper answering "credentials not found" is the normal reply for any host
+// it holds nothing for -- which is every public image pulled on a machine with
+// a global credsStore. That path must stay silent or the warning fires on
+// nearly every pull.
+func TestCredentialsForHelperNotFoundIsQuiet(t *testing.T) {
+	writeDockerConfig(t, `{"credsStore":"stub"}`)
+	stubCredentialHelper(t, "stub", `echo "credentials not found in native keychain" >&2; exit 1`)
+	logs := captureWarnings(t)
+
+	if _, _, ok := credentialsFor(t.Context(), "registry.example.com"); ok {
+		t.Fatal("expected no credentials when the helper has none for the host")
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("expected no warning for a not-found helper reply, got: %s", logs.String())
+	}
+}
+
+// A helper that is missing or broken IS worth a warning: the operator
+// configured it, and a silent downgrade to anonymous surfaces later as a bare
+// 401 with no trace of the real cause.
+func TestCredentialsForBrokenHelperWarns(t *testing.T) {
+	writeDockerConfig(t, `{"credHelpers":{"registry.example.com":"does-not-exist"}}`)
+	logs := captureWarnings(t)
+
+	if _, _, ok := credentialsFor(t.Context(), "registry.example.com"); ok {
+		t.Fatal("expected no credentials when the helper binary is missing")
+	}
+	if !strings.Contains(logs.String(), "docker-credential-does-not-exist") {
+		t.Fatalf("expected a warning naming the missing helper, got: %s", logs.String())
 	}
 }
 

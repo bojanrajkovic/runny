@@ -308,12 +308,35 @@ is single-use.
 docker/oras/skopeo config file (`$DOCKER_CONFIG/config.json`, default
 `~/.docker/config.json`): a static `auths` entry, or a `credHelpers`/`credsStore`
 helper binary invoked via the standard `docker-credential-<name> get`
-protocol. runny never writes to this file and has no credential format or
-login command of its own — an operator who already authenticated with
-`docker login` or `oras login` gets pull auth for free. A missing config
-file, no matching host entry, or a helper that can't produce credentials is
-treated as no credentials, not an error — the same anonymous pull runny has
-always attempted for a public image.
+protocol. **runny only ever reads.** It never writes the file, never copies a
+credential out of it, and has no credential format or login command of its
+own. A missing config file, no matching host entry, or a helper holding
+nothing for that host is treated as no credentials, not an error — the same
+anonymous pull runny has always attempted for a public image. A helper that
+is *configured but broken* (missing binary, denied store, unusable reply) is
+logged, because a private pull that silently downgrades to anonymous
+resurfaces later as a bare 401 with no trace of the cause.
+
+**The system daemon does not inherit the operator's login.** It runs as a
+service account whose home is `/var/empty`, so `~/.docker/config.json` is
+neither present for it nor writable by the operator. `runnyd` therefore
+defaults `DOCKER_CONFIG` to `<home>/docker` (an operator-set value still
+wins), which the home's inheriting ACL makes operator-writable and
+daemon-readable without `sudo`.
+
+**A keychain-backed login cannot be shared with the daemon, by design.** On
+macOS `docker login`/`oras login` default to `credsStore: "osxkeychain"`,
+which leaves the `auths` entry a bare stub and the secret in the operator's
+*login keychain* — a store the service account has no access to (different
+uid, no login keychain, no session to unlock one). The headless deployment
+therefore uses a credential of its own, scoped to pulling: a registry robot
+account or token written as a static `auths` entry under `<home>/docker`,
+never a copy of an operator's interactive login. This is deliberate on two
+counts — the daemon holds a pull-scoped identity rather than a human's
+broader one, and there is exactly **one** copy of that credential, so
+rotating it is editing one file rather than re-syncing a snapshot that would
+otherwise go stale silently. The file is re-read on every pull attempt, so a
+rotation takes effect on the next pull with no restart or reload.
 
 ## Observability (OTLP egress)
 

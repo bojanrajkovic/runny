@@ -103,6 +103,42 @@ org-or-owner/repo target. The **semantic** rules it can't cleanly express
 daemon: `runnyd -doctor` and the load-time validation remain authoritative, and
 a config that passes the schema can still be refused there with a precise error.
 
+### Pulling from a private registry
+
+Pulls authenticate from the standard docker/oras/skopeo config file, so a
+public image needs nothing here. For a private one, runny reads
+`$DOCKER_CONFIG/config.json` — a static `auths` entry, or a
+`credHelpers`/`credsStore` helper. It only ever reads: there is no
+`runnyctl login`, and runny never writes or copies a credential.
+
+Per-user agent: your existing `docker login` / `oras login` already works,
+including a keychain-backed one.
+
+**Headless system daemon: give it a credential of its own.** The daemon runs
+as a service account whose home is `/var/empty`, and — on macOS — cannot read
+your login keychain, where `docker login` puts the actual secret (the `auths`
+entry it leaves behind is only a stub). So `runnyd` looks in
+`<home>/docker/config.json`, which you can write without `sudo` via the home's
+inheriting ACL. Put a pull-scoped robot account or token there:
+
+```console
+$ mkdir -p "/Library/Application Support/runny/docker"
+$ printf '{"auths":{"registry.example.com":{"auth":"%s"}}}' \
+    "$(printf 'robot$runny:TOKEN' | base64)" \
+    > "/Library/Application Support/runny/docker/config.json"
+$ chmod 600 "/Library/Application Support/runny/docker/config.json"
+```
+
+**Rotating it is editing that file** — the credential is read fresh on every
+pull attempt, so a new token takes effect on the next pull with no restart and
+no `runnyctl reload`. Keep it a credential issued *to the daemon*, not a copy
+of your own: a copy has a second place to go stale, and it grants the daemon
+whatever your account can do.
+
+If a helper you configured is missing or broken, the daemon logs it and falls
+back to an anonymous pull rather than failing — check the log when a private
+pull 401s unexpectedly.
+
 ### Enabling OTLP telemetry
 
 `observability` is opt-in and absent by default: with no block, runnyd emits

@@ -103,6 +103,15 @@ func run(parent context.Context) error {
 	if err := dir.Ensure(); err != nil {
 		return err
 	}
+	// Point registry-credential lookup at the home. Without this the system
+	// daemon resolves the default ~/.docker/config.json against its service
+	// account's /var/empty home and finds nothing, so a private-registry pull
+	// can never authenticate. An operator-set DOCKER_CONFIG still wins.
+	if os.Getenv("DOCKER_CONFIG") == "" {
+		if err := os.Setenv("DOCKER_CONFIG", dir.DockerConfigDir()); err != nil {
+			return err
+		}
+	}
 	configPath := *configFlag
 	if configPath == "" {
 		configPath = dir.ConfigPath()

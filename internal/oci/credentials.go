@@ -1,9 +1,12 @@
 package oci
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -82,18 +85,35 @@ func decodeAuth(auth string) (username, password string, ok bool) {
 }
 
 // runCredentialHelper speaks the standard docker-credential-<name> "get"
-// protocol: the host on stdin, {"Username","Secret"} JSON on stdout. A
-// missing binary or non-zero exit just means this helper has no creds for
-// host, not an error.
+// protocol: the host on stdin, {"Username","Secret"} JSON on stdout. It is
+// only reached when the config NAMED a helper, so anything other than
+// "this helper holds nothing for that host" is a misconfiguration the
+// operator needs told about — a private pull that silently downgrades to
+// anonymous surfaces later as a bare 401 with no trace of the real cause.
+//
+// The one quiet case is load-bearing: a helper exits non-zero with
+// "credentials not found" for any host it has no entry for, which is the
+// normal answer every time a PUBLIC image is pulled on a machine with a
+// global credsStore. Warning there would fire on nearly every pull, and a
+// warning that always fires is one nobody reads.
 func runCredentialHelper(ctx context.Context, name, host string) (username, password string, ok bool) {
-	cmd := exec.CommandContext(ctx, "docker-credential-"+name, "get")
+	bin := "docker-credential-" + name
+	cmd := exec.CommandContext(ctx, bin, "get")
 	cmd.Stdin = strings.NewReader(host)
 	out, err := cmd.Output()
 	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && bytes.Contains(bytes.ToLower(ee.Stderr), []byte("not found")) {
+			return "", "", false
+		}
+		slog.Warn("registry credential helper failed; falling back to an anonymous pull",
+			"helper", bin, "host", host, "err", err)
 		return "", "", false
 	}
 	var resp struct{ Username, Secret string }
 	if err := json.Unmarshal(out, &resp); err != nil || resp.Username == "" || resp.Secret == "" {
+		slog.Warn("registry credential helper returned no usable credentials; falling back to an anonymous pull",
+			"helper", bin, "host", host)
 		return "", "", false
 	}
 	return resp.Username, resp.Secret, true

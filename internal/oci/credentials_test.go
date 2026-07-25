@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -22,20 +21,24 @@ func writeDockerConfig(t *testing.T, contents string) {
 	t.Setenv("DOCKER_CONFIG", dir)
 }
 
+// captureWarnings swaps in a slog handler recording WARN-level messages, so
+// the noisy-vs-quiet split below is asserted rather than assumed.
+func captureWarnings(t *testing.T) *strings.Builder {
+	t.Helper()
+	var buf strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
 func TestCredentialsForStaticAuth(t *testing.T) {
 	auth := base64.StdEncoding.EncodeToString([]byte("alice:hunter2"))
 	writeDockerConfig(t, fmt.Sprintf(`{"auths":{"registry.example.com":{"auth":%q}}}`, auth))
 
-	user, pass, ok := credentialsFor(t.Context(), "registry.example.com")
+	user, pass, ok := credentialsFor("registry.example.com")
 	if !ok || user != "alice" || pass != "hunter2" {
 		t.Fatalf("credentialsFor() = %q, %q, %v; want alice, hunter2, true", user, pass, ok)
-	}
-}
-
-func TestCredentialsForNoConfigFile(t *testing.T) {
-	t.Setenv("DOCKER_CONFIG", t.TempDir()) // dir exists, config.json does not
-	if _, _, ok := credentialsFor(t.Context(), "registry.example.com"); ok {
-		t.Fatal("expected no credentials without a config file")
 	}
 }
 
@@ -43,8 +46,22 @@ func TestCredentialsForUnknownHost(t *testing.T) {
 	auth := base64.StdEncoding.EncodeToString([]byte("alice:hunter2"))
 	writeDockerConfig(t, fmt.Sprintf(`{"auths":{"registry.example.com":{"auth":%q}}}`, auth))
 
-	if _, _, ok := credentialsFor(t.Context(), "other.example.com"); ok {
+	if _, _, ok := credentialsFor("other.example.com"); ok {
 		t.Fatal("expected no credentials for an unconfigured host")
+	}
+}
+
+// An ABSENT config file is the overwhelmingly common case (every public pull
+// on a host that never logged in anywhere) and must stay silent.
+func TestCredentialsForNoConfigFileIsQuiet(t *testing.T) {
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	logs := captureWarnings(t)
+
+	if _, _, ok := credentialsFor("registry.example.com"); ok {
+		t.Fatal("expected no credentials without a config file")
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("expected no warning for an absent config file, got: %s", logs.String())
 	}
 }
 
@@ -55,7 +72,7 @@ func TestCredentialsForMalformedConfigWarns(t *testing.T) {
 	writeDockerConfig(t, `not json`)
 	logs := captureWarnings(t)
 
-	if _, _, ok := credentialsFor(t.Context(), "registry.example.com"); ok {
+	if _, _, ok := credentialsFor("registry.example.com"); ok {
 		t.Fatal("expected no credentials from a malformed config file")
 	}
 	if !strings.Contains(logs.String(), "config.json") {
@@ -79,7 +96,7 @@ func TestCredentialsForUnreadableConfigWarns(t *testing.T) {
 	t.Setenv("DOCKER_CONFIG", dir)
 	logs := captureWarnings(t)
 
-	if _, _, ok := credentialsFor(t.Context(), "registry.example.com"); ok {
+	if _, _, ok := credentialsFor("registry.example.com"); ok {
 		t.Fatal("expected no credentials from an unreadable config file")
 	}
 	if !strings.Contains(logs.String(), "config.json") {
@@ -87,136 +104,49 @@ func TestCredentialsForUnreadableConfigWarns(t *testing.T) {
 	}
 }
 
-// An ABSENT config file is the overwhelmingly common case (every public pull
-// on a host that never logged in anywhere) and must stay silent.
-func TestCredentialsForNoConfigFileIsQuiet(t *testing.T) {
-	t.Setenv("DOCKER_CONFIG", t.TempDir())
+// The shape a keychain-backed `docker login` actually leaves behind: an auths
+// entry for the host with no "auth" field, next to a global credsStore. The
+// operator's config LOOKS like it holds this credential, so runny must say
+// why it doesn't rather than pulling anonymously in silence.
+func TestCredentialsForKeychainBackedEntryWarns(t *testing.T) {
+	writeDockerConfig(t, `{"auths":{"registry.example.com":{}},"credsStore":"osxkeychain"}`)
 	logs := captureWarnings(t)
 
-	if _, _, ok := credentialsFor(t.Context(), "registry.example.com"); ok {
-		t.Fatal("expected no credentials without a config file")
+	if _, _, ok := credentialsFor("registry.example.com"); ok {
+		t.Fatal("expected no credentials from a helper-backed entry")
+	}
+	if !strings.Contains(logs.String(), "credential helper") {
+		t.Fatalf("expected a warning about the credential helper, got: %s", logs.String())
+	}
+}
+
+// An explicit per-host helper is an equally clear statement of intent, even
+// with no auths entry alongside it.
+func TestCredentialsForPerHostHelperWarns(t *testing.T) {
+	writeDockerConfig(t, `{"credHelpers":{"registry.example.com":"osxkeychain"}}`)
+	logs := captureWarnings(t)
+
+	if _, _, ok := credentialsFor("registry.example.com"); ok {
+		t.Fatal("expected no credentials from a per-host helper")
+	}
+	if !strings.Contains(logs.String(), "credential helper") {
+		t.Fatalf("expected a warning about the credential helper, got: %s", logs.String())
+	}
+}
+
+// A bare global credsStore with no entry for this host is set on most macOS
+// machines and says nothing about THIS registry — warning there would fire on
+// every public image pulled, and a warning that always fires is one nobody
+// reads.
+func TestCredentialsForGlobalCredsStoreAloneIsQuiet(t *testing.T) {
+	writeDockerConfig(t, `{"auths":{"other.example.com":{}},"credsStore":"osxkeychain"}`)
+	logs := captureWarnings(t)
+
+	if _, _, ok := credentialsFor("registry.example.com"); ok {
+		t.Fatal("expected no credentials for a host absent from the config")
 	}
 	if logs.Len() != 0 {
-		t.Fatalf("expected no warning for an absent config file, got: %s", logs.String())
-	}
-}
-
-// stubCredentialHelper writes a docker-credential-<name> script onto PATH
-// that echoes fixed JSON, standing in for the real helper protocol (host on
-// stdin, {"Username","Secret"} JSON on stdout) without touching a real
-// credential store.
-func stubCredentialHelper(t *testing.T, name, body string) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("stub helper script is a POSIX shell script")
-	}
-	dir := t.TempDir()
-	script := filepath.Join(dir, "docker-credential-"+name)
-	if err := os.WriteFile(script, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
-func TestCredentialsForHelper(t *testing.T) {
-	writeDockerConfig(t, `{"credHelpers":{"registry.example.com":"stub"}}`)
-	stubCredentialHelper(t, "stub", `echo '{"Username":"bob","Secret":"s3cr3t"}'`)
-
-	user, pass, ok := credentialsFor(t.Context(), "registry.example.com")
-	if !ok || user != "bob" || pass != "s3cr3t" {
-		t.Fatalf("credentialsFor() = %q, %q, %v; want bob, s3cr3t, true", user, pass, ok)
-	}
-}
-
-func TestCredentialsForCredsStoreFallback(t *testing.T) {
-	writeDockerConfig(t, `{"credsStore":"stub"}`)
-	stubCredentialHelper(t, "stub", `echo '{"Username":"bob","Secret":"s3cr3t"}'`)
-
-	user, pass, ok := credentialsFor(t.Context(), "registry.example.com")
-	if !ok || user != "bob" || pass != "s3cr3t" {
-		t.Fatalf("credentialsFor() = %q, %q, %v; want bob, s3cr3t, true", user, pass, ok)
-	}
-}
-
-func TestCredentialsForHelperMissingBinary(t *testing.T) {
-	writeDockerConfig(t, `{"credHelpers":{"registry.example.com":"does-not-exist"}}`)
-	if _, _, ok := credentialsFor(t.Context(), "registry.example.com"); ok {
-		t.Fatal("expected no credentials when the helper binary is missing")
-	}
-}
-
-func TestCredentialsForHelperNonZeroExit(t *testing.T) {
-	writeDockerConfig(t, `{"credHelpers":{"registry.example.com":"stub"}}`)
-	stubCredentialHelper(t, "stub", `exit 1`)
-
-	if _, _, ok := credentialsFor(t.Context(), "registry.example.com"); ok {
-		t.Fatal("expected no credentials when the helper exits non-zero")
-	}
-}
-
-// A keychain-backed `docker login` leaves an auths ENTRY for the host with no
-// "auth" field -- the secret lives in the store, and the map is just an index
-// of which hosts have one. That stub must not short-circuit the lookup as
-// "found"; it has to fall through to the configured helper.
-func TestCredentialsForStubAuthEntryFallsThroughToHelper(t *testing.T) {
-	writeDockerConfig(t, `{"auths":{"registry.example.com":{}},"credsStore":"stub"}`)
-	stubCredentialHelper(t, "stub", `echo '{"Username":"bob","Secret":"s3cr3t"}'`)
-
-	user, pass, ok := credentialsFor(t.Context(), "registry.example.com")
-	if !ok || user != "bob" || pass != "s3cr3t" {
-		t.Fatalf("credentialsFor() = %q, %q, %v; want bob, s3cr3t, true", user, pass, ok)
-	}
-}
-
-// captureWarnings swaps in a slog handler recording WARN-level messages, so
-// the noisy-vs-quiet split below is asserted rather than assumed.
-func captureWarnings(t *testing.T) *strings.Builder {
-	t.Helper()
-	var buf strings.Builder
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	return &buf
-}
-
-// A helper answering "credentials not found" is the normal reply for any host
-// it holds nothing for -- which is every public image pulled on a machine with
-// a global credsStore. That path must stay silent or the warning fires on
-// nearly every pull.
-func TestCredentialsForHelperNotFoundIsQuiet(t *testing.T) {
-	writeDockerConfig(t, `{"credsStore":"stub"}`)
-	stubCredentialHelper(t, "stub", `echo "credentials not found in native keychain" >&2; exit 1`)
-	logs := captureWarnings(t)
-
-	if _, _, ok := credentialsFor(t.Context(), "registry.example.com"); ok {
-		t.Fatal("expected no credentials when the helper has none for the host")
-	}
-	if logs.Len() != 0 {
-		t.Fatalf("expected no warning for a not-found helper reply, got: %s", logs.String())
-	}
-}
-
-// A helper that is missing or broken IS worth a warning: the operator
-// configured it, and a silent downgrade to anonymous surfaces later as a bare
-// 401 with no trace of the real cause.
-func TestCredentialsForBrokenHelperWarns(t *testing.T) {
-	writeDockerConfig(t, `{"credHelpers":{"registry.example.com":"does-not-exist"}}`)
-	logs := captureWarnings(t)
-
-	if _, _, ok := credentialsFor(t.Context(), "registry.example.com"); ok {
-		t.Fatal("expected no credentials when the helper binary is missing")
-	}
-	if !strings.Contains(logs.String(), "docker-credential-does-not-exist") {
-		t.Fatalf("expected a warning naming the missing helper, got: %s", logs.String())
-	}
-}
-
-func TestCredentialsForHelperEmptySecret(t *testing.T) {
-	writeDockerConfig(t, `{"credHelpers":{"registry.example.com":"stub"}}`)
-	stubCredentialHelper(t, "stub", `echo '{"Username":"bob","Secret":""}'`)
-
-	if _, _, ok := credentialsFor(t.Context(), "registry.example.com"); ok {
-		t.Fatal("expected no credentials when the helper returns an empty secret")
+		t.Fatalf("expected no warning for an unrelated global credsStore, got: %s", logs.String())
 	}
 }
 

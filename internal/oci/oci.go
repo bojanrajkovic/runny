@@ -604,7 +604,7 @@ func (c *Client) fetchToken(ctx context.Context, ref Ref, challenge string) erro
 	if err != nil {
 		return err
 	}
-	if user, pass, ok := credentialsFor(ctx, ref.Host); ok {
+	if user, pass, ok := credentialsFor(ref.Host); ok {
 		req.SetBasicAuth(user, pass)
 	}
 	resp, err := c.hc.Do(req)

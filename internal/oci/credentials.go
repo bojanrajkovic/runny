@@ -1,22 +1,19 @@
 package oci
 
 import (
-	"bytes"
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
 
-// dockerConfig is the subset of docker/oras/skopeo's config.json this
-// package reads. Static credentials live in Auths; CredHelpers (falling
-// back to CredsStore) name a docker-credential-<name> helper binary on
-// PATH.
+// dockerConfig is the subset of docker/oras/skopeo's config.json this package
+// reads. Only Auths carries a usable credential; CredHelpers and CredsStore
+// are parsed solely to DIAGNOSE a config that delegates to a helper (see
+// credentialsFor) -- runny never runs one.
 type dockerConfig struct {
 	Auths       map[string]struct{ Auth string } `json:"auths"`
 	CredHelpers map[string]string                `json:"credHelpers"`
@@ -36,15 +33,24 @@ func dockerConfigPath() (string, error) {
 	return filepath.Join(home, ".docker", "config.json"), nil
 }
 
-// credentialsFor resolves (username, password) for host from the
-// docker/oras/skopeo config file: a static auths[host].auth entry, or a
-// credHelpers[host] (falling back to credsStore) helper binary. ok=false
-// covers every "no creds configured for this host" case -- no config file,
-// unparseable config, no matching entry, no helper binary, or a helper that
-// exited non-zero -- so a caller never has to distinguish "not configured"
-// from "misconfigured"; both just mean the pull proceeds anonymous, as it
-// always has.
-func credentialsFor(ctx context.Context, host string) (username, password string, ok bool) {
+// credentialsFor resolves (username, password) for host from a static
+// auths[host].auth entry in the docker/oras/skopeo config file.
+//
+// Credential HELPERS are deliberately not supported. The deployment that
+// needs private pulls is the system daemon, which runs as a service account
+// that cannot reach the operator's login keychain at all -- so on macOS,
+// where `docker login` defaults to credsStore: "osxkeychain", a helper could
+// never produce a credential for it no matter where the config file lives.
+// Supporting helpers therefore only ever served an operator at a terminal,
+// while dragging in a subprocess, a PATH that launchd does not supply, and
+// docker's helper-vs-inline precedence rules. A static entry is what the
+// daemon needs regardless; that is the whole feature.
+//
+// ok=false means "pull anonymously", exactly as this package always has. The
+// quiet cases are the normal ones -- no config file, no entry for this host.
+// A config that is present but unusable, or one that delegates THIS host to a
+// helper, warns instead: the alternative is a bare 401 with no trace of why.
+func credentialsFor(host string) (username, password string, ok bool) {
 	path, err := dockerConfigPath()
 	if err != nil {
 		return "", "", false
@@ -69,19 +75,23 @@ func credentialsFor(ctx context.Context, host string) (username, password string
 			"path", path, "err", err)
 		return "", "", false
 	}
-	if a, ok := cfg.Auths[host]; ok {
-		if user, pass, ok := decodeAuth(a.Auth); ok {
+	entry, hasEntry := cfg.Auths[host]
+	if hasEntry {
+		if user, pass, ok := decodeAuth(entry.Auth); ok {
 			return user, pass, true
 		}
 	}
-	helper := cfg.CredHelpers[host]
-	if helper == "" {
-		helper = cfg.CredsStore
+	// A keychain-backed `docker login` leaves an auths entry for the host with
+	// no "auth" field -- the secret went to the store. Say so, because the
+	// operator's config LOOKS like it holds this credential. Scoped to hosts
+	// the operator actually addressed (a stub entry, or an explicit
+	// per-host helper): a bare global credsStore is set on most macOS
+	// machines, and warning on it would fire for every public image pulled.
+	if helper := cfg.CredHelpers[host]; helper != "" || (hasEntry && cfg.CredsStore != "") {
+		slog.Warn("registry credentials for this host are held by a credential helper, which runny does not use; write a static auths entry instead (see docs/deploy.md)",
+			"host", host, "path", path)
 	}
-	if helper == "" {
-		return "", "", false
-	}
-	return runCredentialHelper(ctx, helper, host)
+	return "", "", false
 }
 
 func decodeAuth(auth string) (username, password string, ok bool) {
@@ -94,39 +104,4 @@ func decodeAuth(auth string) (username, password string, ok bool) {
 		return "", "", false
 	}
 	return user, pass, true
-}
-
-// runCredentialHelper speaks the standard docker-credential-<name> "get"
-// protocol: the host on stdin, {"Username","Secret"} JSON on stdout. It is
-// only reached when the config NAMED a helper, so anything other than
-// "this helper holds nothing for that host" is a misconfiguration the
-// operator needs told about — a private pull that silently downgrades to
-// anonymous surfaces later as a bare 401 with no trace of the real cause.
-//
-// The one quiet case is load-bearing: a helper exits non-zero with
-// "credentials not found" for any host it has no entry for, which is the
-// normal answer every time a PUBLIC image is pulled on a machine with a
-// global credsStore. Warning there would fire on nearly every pull, and a
-// warning that always fires is one nobody reads.
-func runCredentialHelper(ctx context.Context, name, host string) (username, password string, ok bool) {
-	bin := "docker-credential-" + name
-	cmd := exec.CommandContext(ctx, bin, "get")
-	cmd.Stdin = strings.NewReader(host)
-	out, err := cmd.Output()
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) && bytes.Contains(bytes.ToLower(ee.Stderr), []byte("not found")) {
-			return "", "", false
-		}
-		slog.Warn("registry credential helper failed; falling back to an anonymous pull",
-			"helper", bin, "host", host, "err", err)
-		return "", "", false
-	}
-	var resp struct{ Username, Secret string }
-	if err := json.Unmarshal(out, &resp); err != nil || resp.Username == "" || resp.Secret == "" {
-		slog.Warn("registry credential helper returned no usable credentials; falling back to an anonymous pull",
-			"helper", bin, "host", host)
-		return "", "", false
-	}
-	return resp.Username, resp.Secret, true
 }

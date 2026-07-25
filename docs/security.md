@@ -304,18 +304,28 @@ is single-use.
 
 ## Registry authentication
 
-`internal/oci`'s registry pulls read credentials from the standard
-docker/oras/skopeo config file (`$DOCKER_CONFIG/config.json`, default
-`~/.docker/config.json`): a static `auths` entry, or a `credHelpers`/`credsStore`
-helper binary invoked via the standard `docker-credential-<name> get`
-protocol. **runny only ever reads.** It never writes the file, never copies a
-credential out of it, and has no credential format or login command of its
-own. A missing config file, no matching host entry, or a helper holding
-nothing for that host is treated as no credentials, not an error — the same
-anonymous pull runny has always attempted for a public image. A helper that
-is *configured but broken* (missing binary, denied store, unusable reply) is
-logged, because a private pull that silently downgrades to anonymous
-resurfaces later as a bare 401 with no trace of the cause.
+`internal/oci`'s registry pulls read credentials from a static `auths` entry
+in the standard docker/oras/skopeo config file (`$DOCKER_CONFIG/config.json`,
+default `~/.docker/config.json`). **runny only ever reads.** It never writes
+the file, never copies a credential out of it, and has no credential format or
+login command of its own. A missing config file or no matching host entry is
+treated as no credentials, not an error — the same anonymous pull runny has
+always attempted for a public image.
+
+**Credential helpers are deliberately unsupported**, and runny never executes
+one. Supporting them would mean spawning a `docker-credential-*` subprocess
+from the daemon for a credential the daemon cannot obtain that way anyway (see
+below), so the attack surface buys nothing: no helper binary is resolved, no
+subprocess is spawned, and `credsStore`/`credHelpers` are parsed only to
+recognize such a config and report it.
+
+Config states that are *unusable rather than absent* are logged instead of
+silently downgrading the pull: a `config.json` that cannot be read (for the
+system daemon, usually the home's inheriting ACL not granting the service
+account read), one that cannot be parsed, and one holding the host's
+credential in a helper. Each still falls back to an anonymous pull, but a
+private pull that quietly goes anonymous otherwise resurfaces as a bare 401
+with no trace of the cause.
 
 **The system daemon does not inherit the operator's login.** It runs as a
 service account whose home is `/var/empty`, so `~/.docker/config.json` is
@@ -326,19 +336,24 @@ daemon-readable without `sudo`. A per-user agent is left on the standard
 `~/.docker` path: its home *is* the operator's, so redirecting it would hide
 the very credentials it is meant to use.
 
-**A keychain-backed login cannot be shared with the daemon, by design.** On
-macOS `docker login`/`oras login` default to `credsStore: "osxkeychain"`,
-which leaves the `auths` entry a bare stub and the secret in the operator's
-*login keychain* — a store the service account has no access to (different
-uid, no login keychain, no session to unlock one). The headless deployment
-therefore uses a credential of its own, scoped to pulling: a registry robot
-account or token written as a static `auths` entry under `<home>/docker`,
-never a copy of an operator's interactive login. This is deliberate on two
-counts — the daemon holds a pull-scoped identity rather than a human's
-broader one, and there is exactly **one** copy of that credential, so
-rotating it is editing one file rather than re-syncing a snapshot that would
-otherwise go stale silently. The file is re-read on every pull attempt, so a
-rotation takes effect on the next pull with no restart or reload.
+**A keychain-backed login cannot be shared with the daemon, by design** — and
+this is why helpers are unsupported rather than merely unimplemented. On macOS
+`docker login`/`oras login` default to `credsStore: "osxkeychain"`, which
+leaves the `auths` entry a bare stub and the secret in the operator's *login
+keychain* — a store the service account has no access to (different uid, no
+login keychain, no session to unlock one). No placement of the config file
+changes that, so a helper could never serve the deployment that needs private
+pulls.
+
+The headless deployment therefore uses a credential of its own, scoped to
+pulling: a registry robot account or token written as a static `auths` entry
+under `<home>/docker`, never a copy of an operator's interactive login. This
+is deliberate on two counts — the daemon holds a pull-scoped identity rather
+than a human's broader one, and there is exactly **one** copy of that
+credential, so rotating it is editing one file rather than re-syncing a
+snapshot that would otherwise go stale silently. The file is re-read on every
+pull attempt, so a rotation takes effect on the next pull with no restart or
+reload (a pull already in flight finishes on the credential it started with).
 
 ## Observability (OTLP egress)
 

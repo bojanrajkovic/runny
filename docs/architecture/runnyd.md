@@ -136,7 +136,9 @@ their job).
    delete `vms/*` — *before* validation, because teardown retains a wedged
    guest's clone (ADR-0012) and its divergence must not fail `disk-headroom`
    ahead of the sweep that would free it (ADR-0014). The sweep runs only on
-   the real-startup path under the lock; `-doctor` stays read-only.
+   the real-startup path under the lock; `-doctor` stays read-only, and an
+   explicit `-doctor -config <path>` diagnoses *that* deployment's home
+   (`cmd/runnyd`'s `doctorHome`), not the invoker's own.
 2. **Validate**: the doctor suite (the check inventory lives in
    `cmd/runnyd`'s `makeDoctor`; `runnyd -doctor` prints it, and it includes
    a `config-drift` check against the running config, and a Darwin-only

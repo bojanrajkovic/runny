@@ -17,12 +17,22 @@ import (
 )
 
 // The windows rotate script must set the administrators_authorized_keys ACL
-// (sshd silently ignores the file otherwise), PREPEND
-// PasswordAuthentication no (sshd_config is first-match-wins, and the stock
-// config ends with a Match Group administrators block an append would land
-// inside), and restart sshd via a DETACHED process (an inline restart would
-// kill the session issuing it).
-func TestRotateScriptWindowsPinsACLPrependAndDetachedRestart(t *testing.T) {
+// (sshd silently ignores the file otherwise), PREPEND PasswordAuthentication
+// no (sshd_config is first-match-wins, and the stock config ends with a
+// Match Group administrators block an append would land inside), and
+// restart sshd INLINE, directly, not through a detached Start-Process.
+//
+// A detached restart was tried first on the theory that an inline restart
+// would kill the session issuing it (Windows sshd connections are children
+// of the service process) — hardware-proven wrong against the real image:
+// the detached Start-Process child never actually reached Restart-Service
+// (same service PID before and after, twice), while a direct inline
+// Restart-Service produced a new PID immediately and left the issuing
+// session alive to report its own exit status. It also doesn't matter if a
+// future image's sshd DOES drop the session here: rotateWindows discards
+// this connection either way and reconnects fresh with the new key
+// (sshx.WaitFor), so there's nothing on this session's survival to protect.
+func TestRotateScriptWindowsPinsACLPrependAndInlineRestart(t *testing.T) {
 	script := fmt.Sprintf(rotateScriptWindowsTemplate, "AAAA key", "")
 	if !strings.Contains(script, `icacls 'C:\ProgramData\ssh\administrators_authorized_keys' /inheritance:r /grant "SYSTEM:F" /grant "BUILTIN\Administrators:F"`) {
 		t.Errorf("windows rotate script missing the administrators_authorized_keys ACL fix:\n%s", script)
@@ -41,13 +51,11 @@ func TestRotateScriptWindowsPinsACLPrependAndDetachedRestart(t *testing.T) {
 	if !strings.Contains(script, `+ $existing)`) {
 		t.Errorf("windows rotate script must prepend the directive before $existing:\n%s", script)
 	}
-	if !strings.Contains(script, "Start-Process") || !strings.Contains(script, "Start-Sleep -Seconds 1; Restart-Service sshd") {
-		t.Errorf("windows rotate script must restart sshd via a detached, delayed process:\n%s", script)
+	if !strings.Contains(script, "\nRestart-Service sshd -ErrorAction Stop") {
+		t.Errorf("windows rotate script must restart sshd directly, inline, aborting loudly on failure:\n%s", script)
 	}
-	// The restart must not run inline in this exec — that would kill the
-	// session issuing the restart before it could reply.
-	if strings.Contains(script, "\nRestart-Service sshd\n") {
-		t.Error("windows rotate script must not call Restart-Service inline")
+	if strings.Contains(script, "Start-Process") {
+		t.Errorf("windows rotate script must not detach the restart via Start-Process:\n%s", script)
 	}
 }
 
@@ -69,6 +77,45 @@ func TestRotateScrambleWindowsUsesSetLocalUser(t *testing.T) {
 	}
 	if !strings.Contains(scrambleLineWindowsTemplate, "-ErrorAction Stop") {
 		t.Error("windows scramble line must abort on a failed Set-LocalUser (-ErrorAction Stop)")
+	}
+}
+
+// crypto/rand.Text's alphabet (uppercase + digits 2-7 only) satisfies at most 2
+// of the 4 classes Windows' default password complexity policy scores against
+// (it requires >=3 of 4), so Set-LocalUser rejects every password it produces
+// with InvalidPasswordException on a guest enforcing that policy — hardware-
+// proven against the real image, not theoretical. windowsScramblePassword must
+// GUARANTEE all four classes present, not just probably include them.
+func TestWindowsScramblePasswordSatisfiesComplexity(t *testing.T) {
+	classes := []struct {
+		name string
+		has  func(byte) bool
+	}{
+		{"upper", func(b byte) bool { return b >= 'A' && b <= 'Z' }},
+		{"lower", func(b byte) bool { return b >= 'a' && b <= 'z' }},
+		{"digit", func(b byte) bool { return b >= '0' && b <= '9' }},
+		{"special", func(b byte) bool { return strings.ContainsRune("!@#$%^&*()-_=+", rune(b)) }},
+	}
+	for i := 0; i < 100; i++ {
+		pw := windowsScramblePassword()
+		if len(pw) < 12 {
+			t.Fatalf("password too short for a real complexity margin: %q (%d chars)", pw, len(pw))
+		}
+		if strings.ContainsRune(pw, '\'') {
+			t.Fatalf("password must not contain a single quote (breaks the PS single-quoted literal): %q", pw)
+		}
+		for _, c := range classes {
+			found := false
+			for j := 0; j < len(pw); j++ {
+				if c.has(pw[j]) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("iteration %d: password %q missing required class %q", i, pw, c.name)
+			}
+		}
 	}
 }
 

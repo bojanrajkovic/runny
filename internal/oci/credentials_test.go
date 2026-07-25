@@ -80,17 +80,16 @@ func TestCredentialsForMalformedConfigWarns(t *testing.T) {
 	}
 }
 
-// The headless deployment depends on the home's inheriting ACL granting the
-// service account read. If that ACL is wrong the read fails with EACCES and
-// the pull silently downgrades to anonymous — the operator sees a file they
-// can read perfectly well themselves and no trace of the real cause.
+// A config that is PRESENT but unreadable must warn, unlike an absent one.
+// In production this is the home's inheriting ACL failing to grant the service
+// account read: the pull silently downgrades to anonymous while the operator
+// sees a file they can read perfectly well themselves. Reproduced here with a
+// directory standing in for the file, which fails the read on every platform —
+// chmod 0o000 does not, since Windows maps mode bits only to the read-only
+// attribute and would leave the file readable.
 func TestCredentialsForUnreadableConfigWarns(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses the permission bits this test relies on")
-	}
 	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(path, []byte(`{"auths":{}}`), 0o000); err != nil {
+	if err := os.Mkdir(filepath.Join(dir, "config.json"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("DOCKER_CONFIG", dir)

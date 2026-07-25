@@ -176,7 +176,7 @@ type fakeGuest struct {
 	diagErr    error
 	diagBlock  bool // PullDiag blocks until ctx expires (a wedged guest)
 	pulled     bool
-	goos       string
+	startCalls int               // StartRunner call count, e.g. to prove which guest a rotation launched the runner over
 	runnerTar  string            // the tarball basename StartRunner was handed
 	guestEnv   map[string]string // the guest_env StartRunner was handed
 	guestSetup []string          // the guest_setup StartRunner was handed
@@ -215,12 +215,12 @@ func (g *fakeGuest) PushRunnerTarball(ctx bounded.Context, localPath string) err
 	return g.pushErr
 }
 
-func (g *fakeGuest) StartRunner(ctx context.Context, jit, goos, runnerTarball string, env map[string]string, setup []string, needsPush bool) (Proc, error) {
+func (g *fakeGuest) StartRunner(ctx context.Context, jit, runnerTarball string, env map[string]string, setup []string, needsPush bool) (Proc, error) {
 	if g.startErr != nil {
 		return nil, g.startErr
 	}
 	g.mu.Lock()
-	g.goos = goos
+	g.startCalls++
 	g.runnerTar = runnerTarball
 	g.guestEnv = env
 	g.guestSetup = setup
@@ -1854,10 +1854,9 @@ func TestRunnerTarballClonedIntoPerSlotMount(t *testing.T) {
 }
 
 // A windows pool reaches LISTENING and completes a job exactly like a
-// darwin/linux pool: the FSM wiring is goos-agnostic (the fakes already
-// thread goos through every seam), and a windows guest's very different
-// provisioning shape (launcher hand-off + watcher session) is entirely
-// internal to internal/guest, invisible above the Guest interface.
+// darwin/linux pool: the FSM wiring above the Guest interface is goos-agnostic,
+// and a windows guest's very different provisioning shape (launcher hand-off +
+// watcher session) is entirely internal to internal/guest, invisible here.
 func TestWindowsPoolCycleThroughJob(t *testing.T) {
 	h := newHarnessPool(t, nil, func(p *home.PoolConfig) {
 		p.OS = home.OSWindows
@@ -1870,13 +1869,6 @@ func TestWindowsPoolCycleThroughJob(t *testing.T) {
 	h.proc.say("√ Connected to GitHub")
 	h.proc.say(markerListening)
 	h.waitState(t, StateListening)
-
-	h.guest.mu.Lock()
-	goos := h.guest.goos
-	h.guest.mu.Unlock()
-	if goos != home.OSWindows {
-		t.Errorf("StartRunner got goos = %q, want %q", goos, home.OSWindows)
-	}
 
 	h.proc.say("Running job: build (windows, self-hosted)")
 	h.waitState(t, StateJob)
@@ -2142,17 +2134,17 @@ func TestSecureSSHRotatesGuest(t *testing.T) {
 	cancel()
 	<-h.runDone
 
-	// The runner was staged over the rotated session, with the pool's OS.
+	// The runner was staged over the rotated session, never the password one.
 	rotated.mu.Lock()
-	rotatedGoos := rotated.goos
+	rotatedCalls := rotated.startCalls
 	rotated.mu.Unlock()
-	if rotatedGoos != "darwin" {
-		t.Errorf("rotated guest goos = %q; runner did not launch over the rotated session", rotatedGoos)
+	if rotatedCalls != 1 {
+		t.Errorf("rotated guest StartRunner calls = %d, want 1", rotatedCalls)
 	}
 	h.guest.mu.Lock()
-	originalGoos := h.guest.goos
+	originalCalls := h.guest.startCalls
 	h.guest.mu.Unlock()
-	if originalGoos != "" {
+	if originalCalls != 0 {
 		t.Error("runner launched over the password session despite rotation")
 	}
 	if got := h.dialer.rotations(); got < 1 {

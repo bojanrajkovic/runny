@@ -115,7 +115,9 @@ type Proc interface {
 // Guest is an authenticated session into a booted VM.
 type Guest interface {
 	// StartRunner stages the actions runner from the cache share and launches
-	// run.sh with the JIT config; goos selects the per-OS provision path and
+	// run.sh with the JIT config; the guest OS was already stamped onto the
+	// implementation at WaitFor/Rotate time (the same dispatch key every
+	// sibling method here uses), so it selects its own per-OS provision path.
 	// runnerTarball is the exact tarball basename to stage (this cycle's
 	// resolved RunnerVersion), not a glob. needsPush is the boot backend's own
 	// vm.Machine.NeedsRunnerPush() value, threaded through by the caller (the
@@ -130,7 +132,7 @@ type Guest interface {
 	// launches so the runner and its job steps inherit it. setup is the pool's
 	// guest_setup, run after the env exports for system-level configuration
 	// env vars can't express.
-	StartRunner(ctx context.Context, jit, goos, runnerTarball string, env map[string]string, setup []string, needsPush bool) (Proc, error)
+	StartRunner(ctx context.Context, jit, runnerTarball string, env map[string]string, setup []string, needsPush bool) (Proc, error)
 	// PushRunnerTarball streams the local runner tarball at localPath to the
 	// guest's own runner-cache location, for a boot backend that couldn't
 	// attach RunnerShareDir as a live share (see vm.Machine.NeedsRunnerPush).

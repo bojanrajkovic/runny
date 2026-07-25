@@ -350,11 +350,11 @@ func (g *Guest) PushRunnerTarball(ctx bounded.Context, localPath string) error {
 // setup is the pool's guest_setup: shell commands run after the env exports,
 // for system-level configuration guest_env can't express — same not-for-secrets
 // caveat.
-func (g *Guest) StartRunner(ctx context.Context, jit, goos, runnerTarball string, env map[string]string, setup []string, needsPush bool) (statemachine.Proc, error) {
-	if goos == home.OSWindows {
+func (g *Guest) StartRunner(ctx context.Context, jit, runnerTarball string, env map[string]string, setup []string, needsPush bool) (statemachine.Proc, error) {
+	if g.goos == home.OSWindows {
 		return g.startRunnerWindows(ctx, jit, runnerTarball)
 	}
-	script, err := provisionScript(goos, runnerTarball, env, setup, needsPush)
+	script, err := provisionScript(g.goos, runnerTarball, env, setup, needsPush)
 	if err != nil {
 		return nil, err
 	}

@@ -16,6 +16,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math/big"
 	"regexp"
 	"strings"
 	"time"
@@ -167,6 +168,57 @@ Set-Content -Path $cfgPath -Value ("PasswordAuthentication no` + "`r`n" + `" + $
 const scrambleLineWindowsTemplate = `Set-LocalUser -Name $env:USERNAME -Password (ConvertTo-SecureString '%s' -AsPlainText -Force) -ErrorAction Stop
 `
 
+// windowsPasswordClasses are the four character classes Windows' default
+// password complexity policy scores against (it requires at least 3 of 4
+// present). crypto/rand.Text's alphabet (uppercase + digits 2-7 only) can
+// satisfy at most 2, so Set-LocalUser rejects every password it produces
+// with InvalidPasswordException on any guest enforcing that policy —
+// hardware-proven against the real image, not theoretical.
+// windowsScramblePassword guarantees at least one character from every
+// class instead of merely a likely majority.
+var windowsPasswordClasses = [...]string{
+	"ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+	"abcdefghijklmnopqrstuvwxyz",
+	"0123456789",
+	"!@#$%^&*()-_=+",
+}
+
+// windowsScramblePasswordLength is arbitrary but ample: Set-LocalUser accepts
+// up to 127 characters, well past what's needed here once one character from
+// every class above is already guaranteed.
+const windowsScramblePasswordLength = 24
+
+// windowsScramblePassword generates the Windows account scramble password:
+// one character from every windowsPasswordClasses entry, then the rest drawn
+// from their union, Fisher-Yates shuffled so the guaranteed picks aren't in
+// fixed positions.
+func windowsScramblePassword() string {
+	all := strings.Join(windowsPasswordClasses[:], "")
+	pw := make([]byte, windowsScramblePasswordLength)
+	for i, class := range windowsPasswordClasses {
+		pw[i] = class[randIndex(len(class))]
+	}
+	for i := len(windowsPasswordClasses); i < len(pw); i++ {
+		pw[i] = all[randIndex(len(all))]
+	}
+	for i := len(pw) - 1; i > 0; i-- {
+		j := randIndex(i + 1)
+		pw[i], pw[j] = pw[j], pw[i]
+	}
+	return string(pw)
+}
+
+// randIndex returns a cryptographically random int in [0, n). crypto/rand.Reader
+// failing means a broken host, not a recoverable condition — same contract
+// rand.Text itself panics under.
+func randIndex(n int) int {
+	i, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
+	if err != nil {
+		panic(err)
+	}
+	return int(i.Int64())
+}
+
 // rotateWindows is Rotate's windows branch: same mint → capture → install →
 // reconnect → prove-the-negative choreography as the POSIX path, but every
 // step is a PowerShell script against Windows OpenSSH's own config surface
@@ -190,7 +242,7 @@ func (d Dialer) rotateWindows(ctx bounded.Context, addr string, pg *Guest, signe
 	verifyPW := d.SSH.Password
 	scramble := ""
 	if d.Hardening.Scrambles() {
-		pw := rand.Text()
+		pw := windowsScramblePassword()
 		verifyPW = pw
 		scramble = fmt.Sprintf(scrambleLineWindowsTemplate, psQuote(pw))
 	}

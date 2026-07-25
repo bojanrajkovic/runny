@@ -1452,8 +1452,11 @@ func (c *run) teardown(ctx context.Context) bool {
 
 	// 1b. Debug session recording (if a debug key landed this cycle).
 	// Gated on debug key landing, not on failure: a DEBUG hold expiry is benign.
+	// 15s matches PullDiag's budget just above: both are now the identical
+	// shape for a windows guest (fresh dial + a powershell -EncodedCommand
+	// script), and this path no longer short-circuits for windows.
 	if debugKeyLanded && c.guest != nil {
-		pctx, pcancel := bounded.WithTimeout(tctx, 5*time.Second)
+		pctx, pcancel := bounded.WithTimeout(tctx, 15*time.Second)
 		defer pcancel()
 		_ = obs.Action(ctx, obs.ActionDebugSessionPull, func(context.Context) error {
 			session, err := c.guest.PullDebugSession(pctx)

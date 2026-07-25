@@ -188,7 +188,7 @@ func TestWindowsAuthorizedKeyScriptsShareACLFragment(t *testing.T) {
 		t.Errorf("shared ACL fragment must fail loudly on a failed icacls: %q", fragment)
 	}
 	rotate := fmt.Sprintf(rotateScriptWindowsTemplate, "AAAA key", "")
-	debug := fmt.Sprintf(installDebugKeyScriptWindows, "AAAA key", "AAAA key")
+	debug := fmt.Sprintf(installDebugKeyScriptWindows, "AAAA key", debugRecorderScriptWindows)
 	for _, s := range []struct {
 		name, script string
 	}{{"rotate", rotate}, {"debug key", debug}} {
@@ -240,5 +240,87 @@ func TestWatcherScriptWindowsContract(t *testing.T) {
 	}
 	if !strings.Contains(watcherScriptWindows, `$avail -= ($avail % 2)`) {
 		t.Error("watcher script must align a two-byte-encoding drain window to whole code units")
+	}
+}
+
+// The windows debug recorder needs two different mechanisms, one per SSH
+// usage shape (issue #344): Tee-Object for a one-shot SSH_ORIGINAL_COMMAND
+// exec (proven to capture a piped child process's output where
+// Start-Transcript does not), and an unpiped, nested Start-Transcript session
+// for an interactive shell (proven to capture the prompt and typed input,
+// which piping would sever from the operator's own stdin).
+func TestDebugRecorderScriptWindowsShape(t *testing.T) {
+	if !strings.Contains(debugRecorderScriptWindows, "if ($env:SSH_ORIGINAL_COMMAND)") {
+		t.Error("windows recorder must branch on SSH_ORIGINAL_COMMAND")
+	}
+	if !strings.Contains(debugRecorderScriptWindows, `& $env:ComSpec /c $env:SSH_ORIGINAL_COMMAND 2>&1 | Tee-Object -FilePath $log -Append`) {
+		t.Error("windows recorder's one-shot branch must pipe the child's combined output through Tee-Object")
+	}
+	if !strings.Contains(debugRecorderScriptWindows, `Start-Transcript -Path '`+debugSessionLogFileWindows+`' -Append`) {
+		t.Error("windows recorder's interactive branch must run Start-Transcript")
+	}
+	// The interactive branch must NOT pipe the nested shell — piping would
+	// sever the operator's stdin from it, losing the prompt and everything
+	// they type.
+	if strings.Contains(debugRecorderScriptWindows, `-NoExit -Command "Start-Transcript -Path '`+debugSessionLogFileWindows+`' -Append | Out-Null" |`) {
+		t.Error("windows recorder's interactive branch must not pipe the nested Start-Transcript session")
+	}
+	if !strings.Contains(debugRecorderScriptWindows, "exit $LASTEXITCODE") {
+		t.Error("windows recorder must propagate the executed branch's own exit code")
+	}
+}
+
+// installDebugKeyScriptWindows must write the recorder to
+// debugRecorderScriptPathWindows, wrap the authorized_keys line with a
+// command= forced-command pointing at it (restrict,pty, mirroring the POSIX
+// line's own options), and read back the FULL wrapped line — not just the
+// bare key — to prove the wrapper itself landed.
+func TestInstallDebugKeyScriptWindowsWrapsForcedCommand(t *testing.T) {
+	script := fmt.Sprintf(installDebugKeyScriptWindows, "AAAA key", debugRecorderScriptWindows)
+	if !strings.Contains(script, `Set-Content -Path '`+debugRecorderScriptPathWindows+`' -Value @'`) {
+		t.Errorf("install script must write the recorder to %s:\n%s", debugRecorderScriptPathWindows, script)
+	}
+	if !strings.Contains(script, debugRecorderScriptWindows) {
+		t.Errorf("install script must embed the recorder script verbatim:\n%s", script)
+	}
+	if !strings.Contains(script, "'@ -ErrorAction Stop") {
+		t.Errorf("install script must fail loudly if writing the recorder fails, not fall through to a passing readback:\n%s", script)
+	}
+	wantWrapper := `command="powershell -NoProfile -File ` + debugRecorderScriptPathWindows + `",restrict,pty `
+	if !strings.Contains(script, wantWrapper) {
+		t.Errorf("install script missing forced-command wrapper %q:\n%s", wantWrapper, script)
+	}
+	// The read-back must prove the WRAPPED line landed, not just the bare key —
+	// otherwise a sshd that silently ignored the command= prefix would still
+	// read back "successful".
+	if !strings.Contains(script, "-SimpleMatch $line") {
+		t.Errorf("install script must read back the full wrapped $line, not the bare key:\n%s", script)
+	}
+}
+
+// pullDebugSessionScriptWindows cannot assume UTF-8: Tee-Object/Out-File's
+// default windows PowerShell 5.1 encoding is UTF-16LE with a BOM, measured
+// directly off a real recorded session. It must detect the BOM via
+// StreamReader's own detection (not a hand-rolled sniff) and write through
+// the raw stdout stream, never the OEM-codepage [Console]::Out TextWriter.
+func TestPullDebugSessionScriptWindowsDecodesBOM(t *testing.T) {
+	if !strings.Contains(pullDebugSessionScriptWindows, "New-Object IO.StreamReader($fs, [Text.Encoding]::UTF8, $true)") {
+		t.Error("pull script must read via StreamReader with BOM detection enabled")
+	}
+	// ReadWrite sharing: this read can race a still-live operator session
+	// (Start-Transcript's handle still open) — a default-shared open would
+	// throw on a sharing violation instead of returning what was captured
+	// so far.
+	if !strings.Contains(pullDebugSessionScriptWindows, `[IO.File]::Open($log, 'Open', 'Read', 'ReadWrite')`) {
+		t.Error("pull script must open the log with explicit ReadWrite sharing to tolerate a still-live recorder")
+	}
+	if !strings.Contains(pullDebugSessionScriptWindows, "OpenStandardOutput()") {
+		t.Error("pull script must write to the standard-output stream")
+	}
+	if strings.Contains(pullDebugSessionScriptWindows, "[Console]::Out.Write") {
+		t.Error("pull script must not write through [Console]::Out (OEM codepage re-encoding)")
+	}
+	if !strings.Contains(pullDebugSessionScriptWindows, "if (-not (Test-Path $log)) { exit 0 }") {
+		t.Error("pull script must exit cleanly when no session was ever recorded")
 	}
 }

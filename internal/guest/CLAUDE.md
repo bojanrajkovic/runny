@@ -112,9 +112,19 @@ edges only.
   reporting), and the guard is defense in depth, since the 250ms
   settle-then-redrain before reading already makes an empty/partial read
   practically unreachable.
-- **Windows debug sessions are not recorded.** `InstallAuthorizedKey`'s
-  windows branch installs the key with the ACL fix but no `command=`
-  transcription wrapper — the POSIX recorder (`debugRecorderDarwin`/`Linux`)
-  is a `script(1)` wrapper, and Windows has no `script(1)`. It logs loudly at
-  install time rather than silently handing out an unrecorded session;
-  `PullDebugSession` returns `nil, nil` for a windows guest without dialing.
+- **Windows debug session recording needs two mechanisms, not one, because
+  no single windows mechanism covers both SSH usage shapes.**
+  `debugRecorderScriptWindows`'s doc comment has the full rationale; the
+  short version: `Tee-Object` piping a `cmd.exe` child captures a one-shot
+  `SSH_ORIGINAL_COMMAND` exec's output (proven where `Start-Transcript`
+  silently drops it), but piping would sever an interactive session's stdin,
+  so the interactive branch instead spawns an unpiped nested
+  `powershell -NoExit` with `Start-Transcript` already running inside it.
+  `Start-Transcript` itself doesn't capture a native program's console
+  output (`WriteConsole` bypasses the `.NET Console.Out` hook it relies on)
+  — proven on a real Windows OpenSSH host, not assumed — so an interactive
+  session's build-tool output isn't guaranteed to land; don't "fix" this by
+  merging the two branches into one mechanism, there isn't one that does
+  both. `PullDebugSession`'s windows read decodes the log via
+  `StreamReader`'s own BOM detection (`Tee-Object`/`Out-File` default to
+  UTF-16LE on PS 5.1), never assumes UTF-8.

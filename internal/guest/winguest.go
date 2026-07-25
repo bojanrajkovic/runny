@@ -456,12 +456,109 @@ while (Alive) {
 exit 0
 `
 
-// installDebugKeyScriptWindows appends the operator's key to
-// administrators_authorized_keys and fixes its ACL — psAppendAuthorizedKeyLine,
-// the same fragment rotateScriptWindowsTemplate uses, so the ACL fix has
-// exactly one home — then proves the line landed via a read-back. No
-// command= recording wrapper: see PullDebugSession's doc comment for why
-// Windows debug sessions aren't recorded.
-var installDebugKeyScriptWindows = `$line = '%s'
-` + psAppendAuthorizedKeyLine("$line") + `if (-not (Select-String -Path '` + administratorsAuthorizedKeysPath + `' -SimpleMatch '%s' -Quiet)) { exit 1 }
+// debugSessionLogFileWindows is where the recorder writes and
+// PullDebugSession reads back the operator's windows session log — the
+// windows counterpart of debugSessionLogFile.
+const debugSessionLogFileWindows = `C:\ProgramData\ssh\runny-debug-session.log`
+
+// debugRecorderScriptPathWindows is where installDebugKeyScriptWindows writes
+// debugRecorderScriptWindows — the windows counterpart of POSIX's
+// /tmp/runny-record path.
+const debugRecorderScriptPathWindows = `C:\ProgramData\ssh\runny-record.ps1`
+
+// debugRecorderScriptWindows is forced on every use of the operator's debug
+// key via authorized_keys' command= option — the windows counterpart of
+// debugRecorderDarwin/Linux's /tmp/runny-record. It is a static, argument-free
+// script with no embedded quoting hazard, so the forced command that invokes
+// it is a plain -File call, not encodedCommand: encodedCommand exists for
+// scripts the daemon composes at runtime with templated or multi-line content
+// over a live SSH session (internal/guest/CLAUDE.md); this script is neither.
+//
+// Unlike POSIX, no single windows mechanism records both SSH usage shapes —
+// hardware-proven against a real Windows OpenSSH host (issue #344):
+//
+//   - SSH_ORIGINAL_COMMAND set (a one-shot `ssh host "cmd"` exec): the
+//     command runs as a cmd.exe child, its combined output piped through
+//     Tee-Object. Tee-Object operates on the pipeline's own object stream,
+//     not console rendering, so it captures a native process's output
+//     whether or not a pty is attached — proven where Start-Transcript is
+//     proven NOT to: Start-Transcript silently drops a child process's
+//     console output in this exact shape, no error, nothing.
+//   - SSH_ORIGINAL_COMMAND unset (an interactive `ssh -t host` shell): a
+//     nested interactive powershell -NoExit is spawned UNPIPED — piping would
+//     sever the operator's own stdin from it, losing the prompt and
+//     everything they type — with Start-Transcript already running inside
+//     it. Start-Transcript hooks .NET Console.Out, which typed commands and
+//     PowerShell-native cmdlet output flow through, and is proven to capture
+//     the prompt, input, and cmdlet output faithfully. It does NOT capture a
+//     native/external program's output in this branch (WriteConsole bypasses
+//     the Console.Out hook entirely) — a Windows PowerShell 5.1 ConsoleHost
+//     limitation proven on the real thing, with no workaround short of
+//     owning the ConPTY layer, which sshd does, not this script. An operator
+//     who needs guaranteed capture of a build tool's output should run it
+//     non-interactively instead.
+const debugRecorderScriptWindows = `$log = '` + debugSessionLogFileWindows + `'
+if ($env:SSH_ORIGINAL_COMMAND) {
+  & $env:ComSpec /c $env:SSH_ORIGINAL_COMMAND 2>&1 | Tee-Object -FilePath $log -Append
+} else {
+  & powershell.exe -NoProfile -NoExit -Command "Start-Transcript -Path '` + debugSessionLogFileWindows + `' -Append | Out-Null"
+}
+exit $LASTEXITCODE
+`
+
+// installDebugKeyScriptWindows writes debugRecorderScriptWindows to
+// debugRecorderScriptPathWindows (-ErrorAction Stop: Set-Content's own errors
+// are non-terminating by default, so without it a failed write would still
+// fall through to a "successful" readback that only proves the
+// authorized_keys line landed, not that the recorder file exists), then
+// appends a command=-wrapped authorized_keys line via
+// psAppendAuthorizedKeyLine (the one ACL-fix home, shared with rotate) and
+// reads back the FULL wrapped line — not just the bare key — to prove the
+// command= wrapper itself landed, the same guarantee installDebugKeyScript's
+// grep already proves on the POSIX side. restrict,pty mirrors the POSIX
+// line's own options: restrict denies forwarding/agent/X11, pty re-grants
+// the PTY restrict would otherwise deny.
+//
+// debugRecorderScriptWindows is passed as a %s Sprintf ARGUMENT, not spliced
+// into this format string via +, the same discipline installDebugKeyScript
+// uses for its own recorder content: Sprintf treats any literal % in the
+// FORMAT STRING as a verb, so splicing free-form script content directly in
+// would be a latent corruption landmine the moment that content gained one
+// (e.g. a %TEMP%-style reference) — passing it as an argument is immune by
+// construction, regardless of its content.
+//
+// Format args: the canonicalized "type base64" key line, debugRecorderScriptWindows.
+var installDebugKeyScriptWindows = `$line = 'command="powershell -NoProfile -File ` + debugRecorderScriptPathWindows + `",restrict,pty %s'
+Set-Content -Path '` + debugRecorderScriptPathWindows + `' -Value @'
+%s
+'@ -ErrorAction Stop
+` + psAppendAuthorizedKeyLine("$line") + `if (-not (Select-String -Path '` + administratorsAuthorizedKeysPath + `' -SimpleMatch $line -Quiet)) { exit 1 }
+`
+
+// pullDebugSessionScriptWindows reads debugSessionLogFileWindows back for
+// PullDebugSession. It cannot assume UTF-8 like pullDiagScriptWindows does:
+// Tee-Object/Out-File's default encoding on Windows PowerShell 5.1 is
+// UTF-16LE with a BOM — measured directly off a real recorded session, not
+// assumed — so the read goes through StreamReader's own BOM detection
+// (detectEncodingFromByteOrderMarks: true falls back to the passed UTF8
+// default when no BOM is present) rather than a hand-rolled sniff, and
+// re-emits UTF-8 over the raw stdout stream (never the OEM-codepage
+// [Console]::Out TextWriter, the same reason watcherScriptWindows avoids
+// it). The file is opened with explicit ReadWrite sharing, the same reason
+// watcherScriptWindows's own Detect/ReadFully open with it: this read can
+// race a still-live operator session (recycle -force or hold-expiry while
+// the operator is connected is a primary use case, not an edge case), and a
+// default-shared read would throw on a sharing violation against
+// Start-Transcript's still-open handle instead of returning whatever was
+// captured so far. No session this cycle (the log never existing) is
+// silent success, mirroring PullDebugSession's POSIX `cat ... || true`.
+const pullDebugSessionScriptWindows = `$log = '` + debugSessionLogFileWindows + `'
+if (-not (Test-Path $log)) { exit 0 }
+$fs = [IO.File]::Open($log, 'Open', 'Read', 'ReadWrite')
+$sr = New-Object IO.StreamReader($fs, [Text.Encoding]::UTF8, $true)
+$out = [Text.Encoding]::UTF8.GetBytes($sr.ReadToEnd())
+$sr.Close()
+$stdout = [Console]::OpenStandardOutput()
+$stdout.Write($out, 0, $out.Length)
+$stdout.Flush()
 `

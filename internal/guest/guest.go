@@ -393,11 +393,8 @@ func (g *Guest) PullDiag(ctx bounded.Context) ([]byte, error) {
 // Empty output (operator never connected) is returned as nil — the caller
 // skips the artifact.
 //
-// Windows guests return nil unconditionally: no recorder mechanism is
-// wired for Windows — the POSIX recorder is a script(1) wrapper installed
-// alongside the debug key (installDebugKeyScript/debugRecorderDarwin/Linux),
-// and Windows has no script(1) equivalent; recording there needs a
-// forced-command transcription wrapper that doesn't exist yet.
+// Windows guests: see debugRecorderScriptWindows's doc comment for the two
+// recording mechanisms (one per SSH usage shape) and their proven limits.
 //
 // Uses a fresh connection for the same reason InstallAuthorizedKey does: the
 // supervision client g.c carries the live runner Proc, and newSession sets a
@@ -405,15 +402,16 @@ func (g *Guest) PullDiag(ctx bounded.Context) ([]byte, error) {
 // (stuck job, proc still alive) would fire that deadline on the runner's
 // channel before proc.Kill() in step 2.
 func (g *Guest) PullDebugSession(ctx bounded.Context) ([]byte, error) {
-	if g.goos == home.OSWindows {
-		return nil, nil
-	}
 	c, err := sshx.WaitFor(ctx, g.addr, g.cfg, g.interval)
 	if err != nil {
 		return nil, fmt.Errorf("debug session pull: %w: %w", statemachine.ErrGuestUnreachable, err)
 	}
 	defer func() { _ = c.Close() }()
-	out, _, err := c.Output(ctx, "cat "+debugSessionLogFile+" 2>/dev/null || true")
+	script := "cat " + debugSessionLogFile + " 2>/dev/null || true"
+	if g.goos == home.OSWindows {
+		script = encodedCommand(pullDebugSessionScriptWindows)
+	}
+	out, _, err := c.Output(ctx, script)
 	if err != nil {
 		return nil, err
 	}
@@ -456,12 +454,15 @@ func (g *Guest) InstallAuthorizedKey(ctx bounded.Context, line string) error {
 		code int
 	)
 	if g.goos == home.OSWindows {
-		// No recorder is wired for Windows guests — see
-		// PullDebugSession's doc comment for the technical reason. Log loudly
-		// rather than silently hand out an unrecorded operator session.
-		slog.Warn("windows debug session: transcript capture is unsupported, the operator's session will not be recorded")
+		// Not Warn: this fires on every windows debug key install, and it's a
+		// known, documented capability boundary (debugRecorderScriptWindows's
+		// doc comment), not a fault — Warn-per-install would be cry-wolf noise
+		// that dilutes real anomalies. Info keeps it discoverable in the
+		// daemon's own logs for an operator later wondering why a build tool's
+		// output is missing from an interactive session's transcript.
+		slog.Info("windows debug session: interactive-branch recording does not capture native/external program output; run non-interactively for guaranteed capture")
 		lineEsc := psQuote(line)
-		script := fmt.Sprintf(installDebugKeyScriptWindows, lineEsc, lineEsc)
+		script := fmt.Sprintf(installDebugKeyScriptWindows, lineEsc, debugRecorderScriptWindows)
 		out, code, err = c.Output(ctx, encodedCommand(script))
 	} else {
 		recorder, rErr := perOS(g.goos, debugRecorderDarwin, debugRecorderLinux)

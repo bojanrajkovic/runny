@@ -17,6 +17,17 @@ is transitive trust, not a new gate, and the daemon (which owns its home)
 performs the grant unprivileged. See `docs/security.md`'s "Operator debug
 keys" section for the current behavior.
 
+**Amended:** 2026-07-25 — windows guests now record the operator's debug
+session too (issue #344), via two mechanisms instead of POSIX's one, because
+no single windows mechanism covers both SSH usage shapes: a one-shot
+`SSH_ORIGINAL_COMMAND` exec is captured by piping the child process through
+`Tee-Object`, and an interactive shell by an unpiped nested
+`Start-Transcript` session. See `internal/guest/winguest.go`'s
+`debugRecorderScriptWindows` doc comment for the full rationale and its
+proven limits (native/external program output is not guaranteed to land in
+the interactive branch). No change to this ADR's authorization or audit
+model — this only extends *which OS* the recording half of DEBUG covers.
+
 ## Context
 
 When a runner VM misbehaves — a wedged provision, a hung job, a guest that

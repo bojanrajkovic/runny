@@ -2,7 +2,11 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "guest",
-    srcs = ["guest.go"],
+    srcs = [
+        "guest.go",
+        "guest_posix.go",
+        "winguest.go",
+    ],
     importpath = "github.com/bojanrajkovic/runny/internal/guest",
     visibility = ["//:__subpackages__"],
     deps = [
@@ -19,6 +23,7 @@ go_test(
     srcs = [
         "guest_test.go",
         "stop_runner_shell_test.go",
+        "winguest_test.go",
     ],
     embed = [":guest"],
     deps = [

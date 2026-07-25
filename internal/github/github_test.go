@@ -97,6 +97,7 @@ func (f *fakeGitHub) handler() http.Handler {
 			{"os": "osx", "architecture": "arm64", "filename": "actions-runner-osx-arm64-2.334.0.tar.gz", "download_url": "https://example/osx", "sha256_checksum": "ab12cd34"},
 			{"os": "linux", "architecture": "arm64", "filename": "actions-runner-linux-arm64-2.334.0.tar.gz", "download_url": "https://example/linux"},
 			{"os": "linux", "architecture": "x64", "filename": "actions-runner-linux-x64-2.334.0.tar.gz", "download_url": "https://example/x64"},
+			{"os": "win", "architecture": "x64", "filename": "actions-runner-win-x64-2.334.0.zip", "download_url": "https://example/win"},
 		})
 	}
 	mux.HandleFunc("GET /repos/o/r/actions/runners/downloads", downloads)
@@ -248,8 +249,11 @@ func TestRunnerDownloadPerOS(t *testing.T) {
 	if err != nil || !strings.Contains(name, "linux-arm64") || url != "https://example/linux" {
 		t.Errorf("linux/arm64: %s %s %v", name, url, err)
 	}
-	if _, _, _, err := c.RunnerDownload(testCtx(t), "windows", "arm64"); err == nil {
-		t.Error("windows should be rejected")
+	// GitHub's downloads endpoint spells windows "win", not "windows" — the
+	// same kind of translation apiOS already does for darwin -> "osx".
+	name, url, _, err = c.RunnerDownload(testCtx(t), "windows", "amd64")
+	if err != nil || !strings.Contains(name, "win-x64") || url != "https://example/win" {
+		t.Errorf("windows/amd64: %s %s %v", name, url, err)
 	}
 }
 

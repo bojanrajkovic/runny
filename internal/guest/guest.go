@@ -1,6 +1,13 @@
 // Package guest adapts sshx sessions to the state machine's Guest interface:
 // it knows how a cirruslabs guest stages the actions runner from the virtiofs
 // cache share and launches run.sh with a JIT config.
+//
+// This file holds the shared machinery: the Guest/Dialer/proc types, perOS,
+// WaitFor, and the dispatcher methods (Rotate, StartRunner, PushRunnerTarball,
+// StopRunner, PullDiag, PullDebugSession, InstallAuthorizedKey) that contain
+// both the POSIX and windows dialects inline. The dialect-specific scripts and
+// helpers live in guest_posix.go (darwin/linux) and winguest.go (windows) —
+// see internal/guest/CLAUDE.md for the split's rationale.
 package guest
 
 import (
@@ -9,11 +16,11 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -66,82 +73,26 @@ type Guest struct {
 	goos string
 }
 
-// perOS returns darwinVal unless goos is home.OSLinux.
-func perOS(goos, darwinVal, linuxVal string) string {
-	if goos == home.OSLinux {
-		return linuxVal
+// perOS selects darwinVal or linuxVal for goos, erroring on anything else —
+// including "windows": every windows call site dispatches to its own
+// windows-specific path before perOS ever runs (StartRunner, Rotate,
+// PushRunnerTarball, StopRunner, PullDiag, InstallAuthorizedKey, PullDebugSession
+// all branch on goos == home.OSWindows first), so perOS itself only ever
+// needs to pick between the two POSIX scripts. An unrecognized goos reaching
+// it — windows included — is a loud error, never a silent darwin fallback:
+// home.validate() already gates every config-declared pool os, so this only
+// ever fires against a value this package computed itself, a bug to fix, not
+// a case to swallow.
+func perOS(goos, darwinVal, linuxVal string) (string, error) {
+	switch goos {
+	case home.OSDarwin:
+		return darwinVal, nil
+	case home.OSLinux:
+		return linuxVal, nil
+	default:
+		return "", fmt.Errorf("guest: unknown guest os %q", goos)
 	}
-	return darwinVal
 }
-
-// The rotation scripts install the per-cycle public key and shut password
-// auth off. They rely on the image contract the provision scripts
-// already demand — passwordless sudo, an sshd_config that includes
-// sshd_config.d, sshd recent enough for KbdInteractiveAuthentication (8.7+).
-// An image missing any of these fails the exec or the post-flip verification
-// loudly, by design.
-//
-// The drop-in must sort FIRST in sshd_config.d: sshd takes the first
-// obtained value per keyword, and Include globs expand in lexical order —
-// stock images ship later-sorting drop-ins that would win over a 99- name
-// (ubuntu cloud images: 50-cloud-init.conf with "PasswordAuthentication
-// yes"; macOS: 100-macos.conf). 00- beats both; verifyPasswordAuthDead
-// catches any image where even that loses.
-const rotateScriptBase = `set -e
-umask 077
-mkdir -p "$HOME/.ssh"
-echo '%s' >> "$HOME/.ssh/authorized_keys"
-printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' | sudo tee /etc/ssh/sshd_config.d/00-runny.conf >/dev/null
-`
-
-// linux: reload, NOT restart — reload keeps the established session (this
-// one) and the listener alive while re-reading config. Debian-family units
-// are named ssh, RHEL-family sshd; try both.
-const rotateScriptLinux = rotateScriptBase + `sudo systemctl reload ssh || sudo systemctl reload sshd
-`
-
-// darwin: no reload — launchd socket-activates sshd per connection, so each
-// connection's sshd reads the config fresh at spawn.
-const rotateScriptDarwin = rotateScriptBase
-
-// scramblePasswordPlaceholder is substituted via strings.ReplaceAll, not a
-// fmt verb — a plain substring swap needs no escaping discipline, matching
-// provisionScript's __RUNNER_TARBALL__ placeholder below.
-const scramblePasswordPlaceholder = "__RUNNY_SCRAMBLE_PASSWORD__"
-
-// scrambleLineLinux / scrambleLineDarwin set a fresh, never-disclosed
-// password for the just-authenticated account (ssh_hardening: scramble,
-// issue #210), appended to the rotate script so it lands in the same exec as
-// the key install — one round-trip, one set -e failure path. A scramble
-// failure aborts after PasswordAuthentication is already off, so it degrades
-// to plain "rotate" behavior rather than a worse state.
-//
-// The username comes from `id -un` on the guest, not a Go-level value
-// substituted in: the only thing interpolated into either line is the
-// random password, so there is nothing here for a misconfigured SSHUser to
-// inject into.
-//
-// Residual, both OSes: the whole rotate script — this line included — is
-// delivered as one SSH exec, which sshd runs as `<shell> -c "<script>"`, so
-// the password is live in that shell's argv (`ps`/`/proc/<pid>/cmdline`) for
-// the exec's full duration, not just chpasswd's own process. Same residual
-// class the JIT config already accepts on the guest side (StartRunner's
-// comment, below) — accepted here because this runs during SECURE_SSH,
-// before any operator debug key could exist to read it.
-const scrambleLineLinux = `printf '%s:%s\n' "$(id -un)" '` + scramblePasswordPlaceholder + `' | sudo chpasswd
-`
-
-const scrambleLineDarwin = `sudo dscl . -passwd "/Users/$(id -un)" '` + scramblePasswordPlaceholder + `'
-`
-
-// captureHostKeys reads every host public key the guest may present during
-// key exchange. All of them: the host-key algorithm is negotiated per
-// connection, so the pin set must cover whatever sshd offers
-// (sshx.Config.HostKeys). The .pub files are world-readable; no sudo.
-// awk 1, not cat: cat concatenates, so a .pub missing its trailing newline
-// would merge two keys into one line and one pin would silently vanish
-// (ParseAuthorizedKey reads the second key as the first one's comment).
-const captureHostKeys = `awk 1 /etc/ssh/ssh_host_*_key.pub`
 
 // Rotate hardens an authenticated session: mint an in-memory
 // per-cycle ed25519 key, capture the guest's host keys, install the key and
@@ -187,6 +138,10 @@ func (d Dialer) Rotate(ctx bounded.Context, addr string, g statemachine.Guest, g
 		return nil, fmt.Errorf("rotate: cycle key signer: %w", err)
 	}
 
+	if goos == home.OSWindows {
+		return d.rotateWindows(ctx, addr, pg, signer)
+	}
+
 	out, code, err := pg.c.Output(ctx, captureHostKeys)
 	if err != nil {
 		return nil, fmt.Errorf("rotate: capturing host keys: %w", err)
@@ -199,7 +154,10 @@ func (d Dialer) Rotate(ctx bounded.Context, addr string, g statemachine.Guest, g
 		return nil, fmt.Errorf("rotate: %w", err)
 	}
 
-	script := perOS(goos, rotateScriptDarwin, rotateScriptLinux)
+	script, err := perOS(goos, rotateScriptDarwin, rotateScriptLinux)
+	if err != nil {
+		return nil, fmt.Errorf("rotate: %w", err)
+	}
 	pubLine := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
 	full := fmt.Sprintf(script, pubLine)
 
@@ -211,7 +169,10 @@ func (d Dialer) Rotate(ctx bounded.Context, addr string, g statemachine.Guest, g
 	if d.Hardening.Scrambles() {
 		pw := rand.Text()
 		verifyPW = pw
-		scrambleLine := perOS(goos, scrambleLineDarwin, scrambleLineLinux)
+		scrambleLine, err := perOS(goos, scrambleLineDarwin, scrambleLineLinux)
+		if err != nil {
+			return nil, fmt.Errorf("rotate: %w", err)
+		}
 		full += strings.ReplaceAll(scrambleLine, scramblePasswordPlaceholder, pw)
 	}
 	out, code, err = pg.c.Output(ctx, full)
@@ -303,109 +264,11 @@ func parseHostKeys(out []byte) ([]ssh.PublicKey, error) {
 	return keys, nil
 }
 
-// The provision scripts stage the runner and exec run.sh, per guest OS.
-//
-// The runner ALWAYS comes from our cache share, into a runny-owned dir —
-// cirruslabs images ship a preinstalled ~/actions-runner whose version rots
-// (a bundled v2.332.0 got "deprecated and cannot receive messages" from the
-// broker), and JIT runners cannot self-update. Never trust the image's copy.
-//
-// The share is this cycle's own per-slot mount, holding exactly the one tarball
-// it cloned before boot. The script still stages that EXACT tarball by basename
-// (substituted for __RUNNER_TARBALL__), not a `ls | head -1` glob: defense in
-// depth that keeps the on-disk record honest (the staged version matches the
-// RunnerVersion recorded for the cycle) and the cache-miss diagnostic precise,
-// rather than a lexical pick.
-//
-// Exit 78 (EX_CONFIG) = the mount is missing this tarball — a host-side
-// problem the post-mortem will show verbatim.
-
-// darwin: the share appears at the automount path (macOS automounts tagged
-// virtiofs shares) or gets mounted explicitly by tag; handle both.
-//
-// An SSH exec is a non-login shell, so macOS hands it a minimal PATH
-// (/usr/bin:/bin:/usr/sbin:/sbin) with /etc/zprofile (and path_helper) never
-// sourced — which drops /usr/local/bin, where pkg installers like the AWS CLI
-// symlink, and Homebrew. The runner inherits this PATH and passes it to every
-// job step, so a step that installs a tool into /usr/local/bin then can't run
-// it ("aws: command not found" right after a successful install). Rebuild the
-// PATH a normal login session has, once, before launching the runner.
-const provisionScriptDarwin = `set -e
-eval "$(/usr/libexec/path_helper -s)"
-[ -x /opt/homebrew/bin/brew ] && eval "$(/opt/homebrew/bin/brew shellenv)" || true
-# Surface the guest clock: a stale RTC breaks runner registration with an
-# opaque expired-token error.
-echo "runny: provision-clock $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-CACHE="/Volumes/My Shared Files"
-if [ ! -d "$CACHE" ]; then
-  sudo mkdir -p /Volumes/runny-cache 2>/dev/null || true
-  sudo mount_virtiofs runny-cache /Volumes/runny-cache 2>/dev/null || true
-  CACHE="/Volumes/runny-cache"
-fi
-TARBALL="$CACHE/__RUNNER_TARBALL__"
-if [ ! -f "$TARBALL" ]; then echo "runny: runner tarball __RUNNER_TARBALL__ not in cache share $CACHE" >&2; exit 78; fi
-RUNNER_DIR="$HOME/runny-runner"
-rm -rf "$RUNNER_DIR" && mkdir -p "$RUNNER_DIR" && cd "$RUNNER_DIR"
-tar -xzf "$TARBALL"
-exec ./run.sh --jitconfig "$(cat)"
-`
-
-// linuxProvisionPrelude is the clock tripwire shared by every linux variant
-// (same reasoning as the darwin script's own copy).
-const linuxProvisionPrelude = `set -e
-echo "runny: provision-clock $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-`
-
-// linuxProvisionBody is shared by every linux variant once CACHE is set:
-// stage the exact tarball, extract it, and exec run.sh. Only how CACHE gets
-// populated differs between variants (linuxCacheMount / linuxCachePushed
-// below) — kept as the one thing that varies so the two variants can't drift
-// out of sync on everything else, the way their error-message wording once did.
-const linuxProvisionBody = `TARBALL="$CACHE/__RUNNER_TARBALL__"
-if [ ! -f "$TARBALL" ]; then echo "runny: runner tarball __RUNNER_TARBALL__ not in cache $CACHE" >&2; exit 78; fi
-RUNNER_DIR="$HOME/runny-runner"
-rm -rf "$RUNNER_DIR" && mkdir -p "$RUNNER_DIR" && cd "$RUNNER_DIR"
-tar -xzf "$TARBALL"
-sudo ./bin/installdependencies.sh >/dev/null 2>&1 || true
-exec ./run.sh --jitconfig "$(cat)"
-`
-
-// linuxCacheMount: explicit virtiofs mount; installdependencies.sh (in
-// linuxProvisionBody) covers images missing libicu et al (idempotent,
-// tolerated offline when deps exist).
-const linuxCacheMount = `CACHE=/mnt/runny-cache
-sudo mkdir -p "$CACHE"
-mountpoint -q "$CACHE" || sudo mount -t virtiofs runny-cache "$CACHE"
-`
-
-// provisionScriptLinux: the live-share variant (darwin's virtiofs-equivalent
-// on the guest side).
-const provisionScriptLinux = linuxProvisionPrelude + linuxCacheMount + linuxProvisionBody
-
-// runnerPushCacheDir is where PushRunnerTarball stages the tarball, relative
-// to $HOME, when the boot backend has no live share device (windows host —
-// see hcs_windows.go's NeedsRunnerPush doc comment for why). Under $HOME
-// rather than /mnt like linuxCacheMount's CACHE: the push runs over the
-// already-established SSH session as the same non-root user that owns its
-// own home dir, so no sudo is needed to create it. linuxCachePushed derives
-// its CACHE line from this constant rather than restating it, so the two
-// can't drift the way they briefly could when both were separate literals.
-const runnerPushCacheDir = "runny-cache"
-
-// linuxCachePushed: no virtiofs-equivalent share device works from a bare
-// compute system -- PushRunnerTarball stages the tarball at $HOME/runny-cache
-// before this script runs, so there is no mount step here.
-const linuxCachePushed = `CACHE="$HOME/` + runnerPushCacheDir + `"
-`
-
-// provisionScriptLinuxPushed: the pushed-cache variant (windows, see
-// hcsMachine.NeedsRunnerPush).
-const provisionScriptLinuxPushed = linuxProvisionPrelude + linuxCachePushed + linuxProvisionBody
-
-// PushRunnerTarball streams localPath's content to
-// $HOME/runny-cache/<basename> on the guest via `cat >`, over the same
-// already-hardened SSH session StartRunner will use next. Only called when
-// vm.Machine.NeedsRunnerPush is true (windows): darwin's virtiofs share is
+// PushRunnerTarball streams localPath's content to the guest's own
+// runner-cache location — $HOME/runny-cache/<basename> (linux, cat >) or
+// C:\runny-cache\<basename> (windows, a PowerShell stdin→file copy) — over
+// the same already-hardened SSH session StartRunner will use next. Only
+// called when vm.Machine.NeedsRunnerPush is true: darwin's virtiofs share is
 // already live by the time PROVISION runs, so nothing needs pushing there.
 func (g *Guest) PushRunnerTarball(ctx bounded.Context, localPath string) error {
 	f, err := os.Open(localPath)
@@ -414,14 +277,40 @@ func (g *Guest) PushRunnerTarball(ctx bounded.Context, localPath string) error {
 	}
 	defer f.Close()
 
-	// base crosses into a shell command string below — reuse the same
-	// trust-boundary guard provisionScript applies to the tarball name
-	// (charset carries no shell metacharacter and no `/`) rather than assume
-	// every caller already validated it.
+	// base crosses into a shell/PowerShell command string below — reuse the
+	// same trust-boundary guard provisionScript/StartRunner apply to the
+	// tarball name (the charset carries no shell metacharacter and no `/`)
+	// rather than assume every caller already validated it.
 	base := filepath.Base(localPath)
-	if !runnerTarballRE.MatchString(base) {
-		return fmt.Errorf("refusing to push runner tarball with an unexpected name %q", base)
+	if !runnerAssetRE(g.goos).MatchString(base) {
+		return fmt.Errorf("refusing to push runner asset with an unexpected name %q", base)
 	}
+
+	if g.goos == home.OSWindows {
+		// scp's sink writes into an existing directory only; create it in a
+		// separate quick exec first.
+		out, code, err := g.c.Output(ctx, encodedCommand(fmt.Sprintf(`New-Item -Force -ItemType Directory -Path '%s' | Out-Null`, runnerCacheDirWindows)))
+		if err != nil {
+			return fmt.Errorf("creating runner cache dir: %w", err)
+		}
+		if code != 0 {
+			return fmt.Errorf("creating runner cache dir: exit %d: %s", code, out)
+		}
+		st, err := f.Stat()
+		if err != nil {
+			return fmt.Errorf("pushing runner zip: %w", err)
+		}
+		dest := runnerCacheDirWindows + `\` + base
+		out, code, err = g.c.RunWithInput(ctx, scpSinkCommand(dest), scpSource(base, st.Size(), f))
+		if err != nil {
+			return fmt.Errorf("pushing runner zip: %w", err)
+		}
+		if code != 0 {
+			return fmt.Errorf("pushing runner zip: exit %d: %s", code, out)
+		}
+		return nil
+	}
+
 	cmd := fmt.Sprintf(`mkdir -p "$HOME/%s" && cat > "$HOME/%s/%s"`, runnerPushCacheDir, runnerPushCacheDir, base)
 	out, code, err := g.c.RunWithInput(ctx, cmd, f)
 	if err != nil {
@@ -450,6 +339,9 @@ func (g *Guest) PushRunnerTarball(ctx bounded.Context, localPath string) error {
 // for system-level configuration guest_env can't express — same not-for-secrets
 // caveat.
 func (g *Guest) StartRunner(ctx context.Context, jit, goos, runnerTarball string, env map[string]string, setup []string, needsPush bool) (statemachine.Proc, error) {
+	if goos == home.OSWindows {
+		return g.startRunnerWindows(ctx, jit, runnerTarball)
+	}
 	script, err := provisionScript(goos, runnerTarball, env, setup, needsPush)
 	if err != nil {
 		return nil, err
@@ -461,97 +353,24 @@ func (g *Guest) StartRunner(ctx context.Context, jit, goos, runnerTarball string
 	return proc{p}, nil
 }
 
-const runnerTarballPlaceholder = "__RUNNER_TARBALL__"
-
-// runStartMarker is the line that launches the runner. It is the anchor guest
-// env `export`s and guest_setup commands are injected before, so run.sh
-// inherits them; pinned by TestProvisionScriptsPinRunMarker so a refactor
-// can't silently move it.
-const runStartMarker = "exec ./run.sh"
-
-// guestEnvExports renders a pool's guest_env as shell `export` lines to prepend
-// to the runner launch, so run.sh and every job step it spawns inherit them.
-// Keys are emitted sorted (deterministic script bytes; they are already
-// validated as env-var names at config load). Values are POSIX single-quote
-// escaped — wrapped in '...' with each embedded ' rewritten as '\” — so any
-// value (quotes, spaces, $) is inert in the shell. Empty input renders nothing,
-// keeping provisioning byte-identical for a pool without guest_env.
-func guestEnvExports(env map[string]string) string {
-	if len(env) == 0 {
-		return ""
+// runnerAssetRE picks the trust-boundary guard for the guest's runner-asset
+// basename: the tarball pattern for darwin/linux, the zip pattern for
+// windows.
+func runnerAssetRE(goos string) *regexp.Regexp {
+	if goos == home.OSWindows {
+		return runnerZipRE
 	}
-	keys := make([]string, 0, len(env))
-	for k := range env {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var b strings.Builder
-	for _, k := range keys {
-		esc := strings.ReplaceAll(env[k], "'", `'\''`)
-		fmt.Fprintf(&b, "export %s='%s'\n", k, esc)
-	}
-	return b.String()
-}
-
-// guestSetupBlock renders a pool's guest_setup as newline-joined shell
-// commands to run after the guest_env exports and before the runner launches.
-// Entries are injected verbatim — they are commands, not identifiers, so
-// (unlike guest_env keys) their content can't be validated beyond the
-// non-empty check already done at config load. Empty input renders nothing,
-// keeping provisioning byte-identical for a pool without guest_setup.
-func guestSetupBlock(cmds []string) string {
-	if len(cmds) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	for _, cmd := range cmds {
-		b.WriteString(cmd)
-		b.WriteString("\n")
-	}
-	return b.String()
-}
-
-// runnerTarballRE constrains the tarball basename the daemon substitutes into
-// the provision script. The name is daemon-resolved (GitHub's asset filename),
-// not client input, but it crosses into a shell command string, so this is a
-// trust-boundary guard: the charset carries no shell metacharacter and no `/`,
-// so the validated name is inert inside the script's double-quoted "$CACHE/…".
-var runnerTarballRE = regexp.MustCompile(`^[A-Za-z0-9._-]+\.tar\.gz$`)
-
-// provisionScript renders the per-OS provision script for the exact tarball
-// this cycle resolved. It refuses a name that does not match runnerTarballRE
-// rather than risk staging a glob (silent wrong-version) or interpolating an
-// unexpected string into the command — fail the cycle loudly instead.
-func provisionScript(goos, runnerTarball string, env map[string]string, setup []string, needsPush bool) (string, error) {
-	if !runnerTarballRE.MatchString(runnerTarball) {
-		return "", fmt.Errorf("refusing to stage runner tarball with an unexpected name %q", runnerTarball)
-	}
-	// needsPush is the caller's vm.Machine.NeedsRunnerPush() value (true on
-	// windows, see hcs_windows.go's doc comment): the same signal that gated
-	// whether PushRunnerTarball ran before this script, so the tarball's
-	// actual location and the script that looks for it can never disagree.
-	linuxScript := provisionScriptLinux
-	if needsPush {
-		linuxScript = provisionScriptLinuxPushed
-	}
-	script := perOS(goos, provisionScriptDarwin, linuxScript)
-	script = strings.ReplaceAll(script, runnerTarballPlaceholder, runnerTarball)
-	// Prepend the pool's guest_env exports, then its guest_setup commands, to
-	// the runner launch: run.sh and every job step inherit the env, and setup
-	// runs with it already in scope. Empty env/setup is a no-op (block == ""),
-	// leaving the script byte-identical.
-	block := guestEnvExports(env) + guestSetupBlock(setup)
-	if block != "" {
-		script = strings.Replace(script, runStartMarker, block+runStartMarker, 1)
-	}
-	return script, nil
+	return runnerTarballRE
 }
 
 // PullDiag fetches the tail of the runner's diagnostic logs — the
 // post-mortem material TEARDOWN collects before destroying the guest.
 func (g *Guest) PullDiag(ctx bounded.Context) ([]byte, error) {
-	out, _, err := g.c.Output(ctx,
-		`for f in $HOME/runny-runner/_diag/*.log; do echo "==> $f <=="; tail -c 32768 "$f"; done 2>/dev/null`)
+	script := `for f in $HOME/runny-runner/_diag/*.log; do echo "==> $f <=="; tail -c 32768 "$f"; done 2>/dev/null`
+	if g.goos == home.OSWindows {
+		script = encodedCommand(pullDiagScriptWindows)
+	}
+	out, _, err := g.c.Output(ctx, script)
 	if err != nil {
 		return nil, err
 	}
@@ -562,12 +381,21 @@ func (g *Guest) PullDiag(ctx bounded.Context) ([]byte, error) {
 // Empty output (operator never connected) is returned as nil — the caller
 // skips the artifact.
 //
+// Windows guests return nil unconditionally: no recorder mechanism is
+// wired for Windows — the POSIX recorder is a script(1) wrapper installed
+// alongside the debug key (installDebugKeyScript/debugRecorderDarwin/Linux),
+// and Windows has no script(1) equivalent; recording there needs a
+// forced-command transcription wrapper that doesn't exist yet.
+//
 // Uses a fresh connection for the same reason InstallAuthorizedKey does: the
 // supervision client g.c carries the live runner Proc, and newSession sets a
 // deadline on the SHARED net.Conn. Pulling over g.c during a forced teardown
 // (stuck job, proc still alive) would fire that deadline on the runner's
 // channel before proc.Kill() in step 2.
 func (g *Guest) PullDebugSession(ctx bounded.Context) ([]byte, error) {
+	if g.goos == home.OSWindows {
+		return nil, nil
+	}
 	c, err := sshx.WaitFor(ctx, g.addr, g.cfg, g.interval)
 	if err != nil {
 		return nil, fmt.Errorf("debug session pull: %w: %w", statemachine.ErrGuestUnreachable, err)
@@ -580,96 +408,15 @@ func (g *Guest) PullDebugSession(ctx bounded.Context) ([]byte, error) {
 	return out, nil
 }
 
-// stopRunnerScript kills the runner LISTENER tree and proves it dead. Every
-// process in that tree carries "--jitconfig <blob>" in argv; the [-]-bracket
-// makes the ERE match "--jitconfig" without matching the pattern's own literal
-// text. Exit 0 = proven dead; 1 = survived SIGKILL; 2 = verification tool
-// failure. TERM→KILL at 3s, hard bound ~6s — inside secure_ssh (15s).
-//
-// Scope: the proof targets the listener (the job-eligibility surface).
-// Runner.Worker and job-step processes do not reliably carry --jitconfig and
-// may survive the pkill; a dead listener plus single-use JIT is the
-// no-new-jobs guarantee. pkill/pgrep ship on both guest OSes.
-const stopRunnerScript = `PAT='[-]-jitconfig'
-alive() {
-  pgrep -f "$PAT" >/dev/null 2>&1
-  case $? in
-    0) return 0 ;;
-    1) return 1 ;;
-    *) echo "runny: pgrep failed; cannot verify runner death" >&2; exit 2 ;;
-  esac
-}
-pkill -TERM -f "$PAT" 2>/dev/null
-i=0
-while alive; do
-  i=$((i+1))
-  [ "$i" -eq 12 ] && pkill -KILL -f "$PAT" 2>/dev/null
-  if [ "$i" -gt 24 ]; then echo "runny: runner still alive after SIGKILL" >&2; exit 1; fi
-  sleep 0.25
-done
-`
-
-// debugSessionLogFile is the path on the guest where the recorder writes and
-// teardown reads back the operator's session log. A single constant keeps the
-// recorder scripts and PullDebugSession in sync.
-const debugSessionLogFile = "/tmp/runny-debug-session.log"
-
-// debugRecorderDarwin / debugRecorderLinux are the /tmp/runny-record wrapper
-// scripts written alongside an operator debug key. The wrapper forces every
-// use of that key (interactive shell, non-interactive command, and direct
-// reconnects after runnyctl debug exits) through script(1), appending all
-// output to debugSessionLogFile for teardown to pull.
-//
-// The split mirrors provisionScriptDarwin / provisionScriptLinux: BSD script(1)
-// uses a positional command form; util-linux uses -c. The fallback ensures an
-// operator is never locked out when script is absent — record nothing rather
-// than deny access.
-const debugRecorderDarwin = "#!/bin/sh\n" +
-	"if ! command -v script >/dev/null 2>&1; then\n" +
-	"  if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then exec \"${SHELL:-/bin/sh}\" -c \"$SSH_ORIGINAL_COMMAND\"; fi\n" +
-	"  exec \"${SHELL:-/bin/sh}\"\n" +
-	"fi\n" +
-	"if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then\n" +
-	"  exec script -q -F -a " + debugSessionLogFile + " /bin/sh -c \"$SSH_ORIGINAL_COMMAND\"\n" +
-	"else\n" +
-	"  exec script -q -F -a " + debugSessionLogFile + "\n" +
-	"fi\n"
-
-const debugRecorderLinux = "#!/bin/sh\n" +
-	"if ! command -v script >/dev/null 2>&1; then\n" +
-	"  if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then exec \"${SHELL:-/bin/sh}\" -c \"$SSH_ORIGINAL_COMMAND\"; fi\n" +
-	"  exec \"${SHELL:-/bin/sh}\"\n" +
-	"fi\n" +
-	"if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then\n" +
-	"  exec script -q -f -a -c \"$SSH_ORIGINAL_COMMAND\" -e " + debugSessionLogFile + "\n" +
-	"else\n" +
-	"  exec script -q -f -a " + debugSessionLogFile + "\n" +
-	"fi\n"
-
-// installDebugKeyScript writes the per-OS session recorder to /tmp/runny-record,
-// then appends a command=-wrapped authorized_keys line and greps back the full
-// wrapped line to prove the command= wrapper landed (not just the bare key).
-// The command= option forces every operator SSH session through the recorder
-// regardless of what the client requests. restrict denies forwarding/X11/agent;
-// pty re-grants the PTY restrict would otherwise deny (which script(1) needs).
-// The daemon's own cycle key is a separate, unwrapped line, so daemon
-// operations are unaffected.
-//
-// Format args: recorder-script-content, key-line, key-line.
-const installDebugKeyScript = `set -e
-umask 077
-mkdir -p "$HOME/.ssh"
-printf '%%s' '%s' > /tmp/runny-record
-chmod 0755 /tmp/runny-record
-printf '%%s\n' 'command="exec /tmp/runny-record",restrict,pty %s' >> "$HOME/.ssh/authorized_keys"
-grep -qF -- 'command="exec /tmp/runny-record",restrict,pty %s' "$HOME/.ssh/authorized_keys"
-`
-
 // StopRunner kills the runner listener tree and PROVES it dead (issue #39).
 // Any nonzero exit or exec error = death unproven; the caller refuses the
 // freeze/hold and fails into teardown.
 func (g *Guest) StopRunner(ctx bounded.Context) error {
-	out, code, err := g.c.Output(ctx, stopRunnerScript)
+	script := stopRunnerScript
+	if g.goos == home.OSWindows {
+		script = encodedCommand(stopRunnerScriptWindows)
+	}
+	out, code, err := g.c.Output(ctx, script)
 	if err != nil {
 		return fmt.Errorf("stopping runner: %w", err)
 	}
@@ -698,9 +445,27 @@ func (g *Guest) InstallAuthorizedKey(ctx bounded.Context, line string) error {
 		return fmt.Errorf("installing debug key: %w: %w", statemachine.ErrGuestUnreachable, err)
 	}
 	defer func() { _ = c.Close() }()
-	recorder := perOS(g.goos, debugRecorderDarwin, debugRecorderLinux)
-	script := fmt.Sprintf(installDebugKeyScript, recorder, line, line)
-	out, code, err := c.Output(ctx, script)
+
+	var (
+		out  []byte
+		code int
+	)
+	if g.goos == home.OSWindows {
+		// No recorder is wired for Windows guests — see
+		// PullDebugSession's doc comment for the technical reason. Log loudly
+		// rather than silently hand out an unrecorded operator session.
+		slog.Warn("windows debug session: transcript capture is unsupported, the operator's session will not be recorded")
+		lineEsc := psQuote(line)
+		script := fmt.Sprintf(installDebugKeyScriptWindows, lineEsc, lineEsc)
+		out, code, err = c.Output(ctx, encodedCommand(script))
+	} else {
+		recorder, rErr := perOS(g.goos, debugRecorderDarwin, debugRecorderLinux)
+		if rErr != nil {
+			return fmt.Errorf("installing debug key: %w", rErr)
+		}
+		script := fmt.Sprintf(installDebugKeyScript, recorder, line, line)
+		out, code, err = c.Output(ctx, script)
+	}
 	if err != nil {
 		if errors.Is(err, sshx.ErrSessionOpen) {
 			return fmt.Errorf("installing debug key: %w: %w", statemachine.ErrGuestUnreachable, err)

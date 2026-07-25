@@ -1853,6 +1853,80 @@ func TestRunnerTarballClonedIntoPerSlotMount(t *testing.T) {
 	}
 }
 
+// A windows pool reaches LISTENING and completes a job exactly like a
+// darwin/linux pool: the FSM wiring is goos-agnostic (the fakes already
+// thread goos through every seam), and a windows guest's very different
+// provisioning shape (launcher hand-off + watcher session) is entirely
+// internal to internal/guest, invisible above the Guest interface.
+func TestWindowsPoolCycleThroughJob(t *testing.T) {
+	h := newHarnessPool(t, nil, func(p *home.PoolConfig) {
+		p.OS = home.OSWindows
+	})
+	h.vmF.machine.needsPush = true // a windows guest only ever boots on the HCS host
+	cancel := h.start(t)
+	_ = cancel
+
+	h.waitState(t, StateProvision)
+	h.proc.say("√ Connected to GitHub")
+	h.proc.say(markerListening)
+	h.waitState(t, StateListening)
+
+	h.guest.mu.Lock()
+	goos := h.guest.goos
+	h.guest.mu.Unlock()
+	if goos != home.OSWindows {
+		t.Errorf("StartRunner got goos = %q, want %q", goos, home.OSWindows)
+	}
+
+	h.proc.say("Running job: build (windows, self-hosted)")
+	h.waitState(t, StateJob)
+
+	h.proc.say("Job build completed with result: Succeeded")
+	h.proc.exit(0)
+	h.waitState(t, StateTeardown)
+	st := h.waitState(t, StateBackoff)
+	if st.ConsecutiveFailures != 0 {
+		t.Error("failures should reset after success")
+	}
+	cancel()
+	<-h.runDone
+
+	recs := h.records(t)
+	var rec *cycle.Record
+	for _, r := range recs {
+		if r.Result == cycle.ResultSuccess {
+			rec = r
+		}
+	}
+	if rec == nil {
+		t.Fatalf("no success record in %d records", len(recs))
+	}
+}
+
+// A windows guest whose runner exits before reaching "Listening for Jobs"
+// (the launcher's own runner failed to start, say) fails PROVISION exactly
+// like the POSIX case — the watcher Proc dying satisfies the same Proc
+// contract the FSM already watches.
+func TestWindowsPoolRunnerExitBeforeListeningFails(t *testing.T) {
+	h := newHarnessPool(t, nil, func(p *home.PoolConfig) {
+		p.OS = home.OSWindows
+	})
+	h.vmF.machine.needsPush = true
+	cancel := h.start(t)
+	_ = cancel
+
+	h.waitState(t, StateProvision)
+	h.proc.exit(1)
+	h.waitState(t, StateTeardown)
+	h.waitState(t, StateBackoff)
+	cancel()
+
+	recs := h.records(t)
+	if len(recs) == 0 || !strings.Contains(recs[0].Failure.Error, "exited") {
+		t.Errorf("failure record = %+v", recs[0].Failure)
+	}
+}
+
 // A boot backend with no live share device (windows; NeedsRunnerPush) never
 // got the tarball into the guest at BOOT -- PROVISION must push it itself,
 // over the same guest session StartRunner reuses next.

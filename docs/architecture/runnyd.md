@@ -118,7 +118,7 @@ race-free without a careful never-touch rule.
 | `internal/oci` | tart-format image pull (what runnyd itself uses): registry auth, manifest, Apple-LZ4 disk assembly; declared sizes enforced on every blob and decode. The package also writes the format (`WriteImage`) — runnyd never calls it; `runnyctl image pack` does, as an offline build-tooling verb with no daemon involved |
 | `internal/winhcs` | vendored HCS/HNS binding (trimmed `Microsoft/hcsshim`, windows-only) — the boot-path core and endpoint management `internal/vm`'s Hyper-V backend drives |
 | `internal/sshx` | the only constructor of SSH clients (deadline recipe) |
-| `internal/guest` | what to *do* over SSH: stage runner from the per-slot virtiofs share (darwin) or an SSH-pushed copy (windows), run.sh, diag pull |
+| `internal/guest` | what to *do* over SSH: stage runner from the per-slot virtiofs share (darwin) or an SSH-pushed copy (linux/windows hosts), run.sh (darwin/linux) or the image's launcher hand-off + watcher session (windows guest), diag pull |
 | `internal/github` | App JWT → installation token → JIT config; list/delete for reconcile |
 | `internal/vm` | guest boot + IP resolution: Virtualization.framework + dhcpd-lease parsing (darwin), bare HCS compute systems + host neighbor-table polling (windows, ADR-0026) |
 | `internal/statemachine` | the FSM; depends only on the seams above |
@@ -298,6 +298,65 @@ that can hold a guest services it (ADR-0015):
   (`go run ./tools/seedpull <ref> <dir>` — pure Go, runs on Linux); rsync the
   bundle to the host's `images/` and the next ENSURE_IMAGE cache-hits.
   Pause the slot during the copy so a concurrent pull's rename doesn't race.
+
+## Windows guests
+
+A windows guest's provisioning shape differs from darwin/linux everywhere
+above `internal/vm` (the boot layer itself — `hcs_windows.go` — is unchanged
+by this): the guest is never handed a shell script to `exec`. Instead,
+`internal/guest`'s windows path hands off to a launcher already baked into
+the published image and watches for it to finish.
+
+- **Launcher hand-off, not a launch.** The image runs a scheduled task in the
+  AutoLogon desktop session that polls `C:\actions-runner\.jitconfig`; once
+  present, it reads and deletes the file and starts the Actions runner
+  listener directly with `--jitconfig <blob>` in argv, redirecting all output
+  to `C:\runny\runner.log` and writing the runner's exit code to
+  `C:\runny\runner-exit.txt` on exit. `StartRunner`'s windows branch extracts
+  the pushed runner zip to `C:\actions-runner`, scp-streams the JIT config
+  to a `.tmp` path and atomically renames it into place (never through
+  a command string — the same secrecy rule the POSIX `$(cat)` handoff
+  documents), then starts a **watcher session** that is the returned `Proc`:
+  it tails the log file and exits with the runner's own exit code once the
+  exit-code file appears. The FSM's "Listening for Jobs" watch and job/exit
+  tracking run against that watcher unchanged — PROVISION, LISTENING, and JOB
+  have no windows-specific code above `internal/guest`.
+- **A windows guest always pushes.** `hcsMachine.NeedsRunnerPush()` is
+  unconditionally true (a windows guest only ever boots on the HCS host), so
+  the runner zip always lands via `PushRunnerTarball` at
+  `C:\runny-cache\<basename>` before `StartRunner` extracts it — there is no
+  live-share variant to keep in sync with.
+- **Every windows guest command goes through `-EncodedCommand`; every file
+  transfer speaks SCP to the guest's native `scp.exe`.** Commands: the
+  default SSH shell is cmd.exe and the scripting target is PowerShell 5.1
+  (no PS7-isms); every script is UTF-16LE-encoded, base64'd, run as
+  `powershell -NoProfile -NonInteractive -EncodedCommand <b64>` with the
+  progress stream silenced — the only pattern that survives ssh → cmd.exe →
+  PowerShell's stacked quoting rules without the console-less host's
+  `#< CLIXML` stderr noise. Transfers (the runner zip, the JIT blob): a
+  blind single-file SCP stream into `scp -t`, exit-code-checked — PowerShell
+  cannot be in the byte path, because its host interferes with redirected
+  stdin (wedged sessions and killed connections on the real image). The
+  JIT commit stays a separate `Move-Item -Force -ErrorAction Stop` exec:
+  scp only writes, and the single same-volume rename is what keeps the
+  launcher from ever reading a partial blob.
+- **SECURE_SSH's windows rotation** targets Windows OpenSSH's own
+  config surface instead of a drop-in: the cycle key lands in
+  `C:\ProgramData\ssh\administrators_authorized_keys` (with its ACL fixed via
+  `icacls`, or sshd ignores the file silently), `PasswordAuthentication no`
+  is prepended to the top of `sshd_config` (first-match-wins, and the stock
+  config ends with a `Match Group administrators` block an append would land
+  inside), and the service restart runs detached with a short delay so the
+  session issuing it survives to read back its own exit status. Scramble
+  mode uses `Set-LocalUser` against the baked `Administrator` account
+  (`net user` prompts interactively above 14 characters and would hang).
+- **Debug session recording is not implemented for windows guests.**
+  `InstallAuthorizedKey`'s windows branch appends the key with the same ACL
+  fix but installs no `command=` recording wrapper — the POSIX recorder is a
+  `script(1)` wrapper with no windows equivalent, and building one needs a
+  forced-command transcription wrapper that doesn't exist yet. A windows
+  debug session is logged loudly at install time; `PullDebugSession` returns
+  nothing for a windows guest.
 
 ## Validated against real infrastructure
 

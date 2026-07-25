@@ -1,3 +1,8 @@
+// Tests for the shared machinery (guest.go) and the POSIX dialect
+// (guest_posix.go): the rotateServer SSH test harness, the dispatcher
+// methods exercised over it, and the POSIX script-content assertions.
+// Windows-dialect-only tests that don't need this harness live in
+// winguest_test.go.
 package guest
 
 import (
@@ -21,20 +26,36 @@ import (
 	"github.com/bojanrajkovic/runny/internal/sshx"
 )
 
-// Unrecognized goos falls through to darwin, not a loud failure — perOS
-// doesn't validate (config.go's validate() already does, upstream).
-func TestPerOSFallsThroughToDarwin(t *testing.T) {
+// perOS picks between darwinVal and linuxVal — the only two POSIX provision
+// shapes — and errors on anything else, not a silent darwin fallback: a
+// third guest OS existing makes the old fallthrough a no-silent-failure
+// violation, not a convenience.
+func TestPerOSDispatchesTwoWays(t *testing.T) {
 	cases := []struct {
 		goos string
 		want string
 	}{
-		{home.OSLinux, "linux"},
 		{home.OSDarwin, "darwin"},
-		{"", "darwin"},
+		{home.OSLinux, "linux"},
 	}
 	for _, tc := range cases {
-		if got := perOS(tc.goos, "darwin", "linux"); got != tc.want {
+		got, err := perOS(tc.goos, "darwin", "linux")
+		if err != nil {
+			t.Errorf("perOS(%q, ...) unexpected error: %v", tc.goos, err)
+		}
+		if got != tc.want {
 			t.Errorf("perOS(%q, ...) = %q, want %q", tc.goos, got, tc.want)
+		}
+	}
+}
+
+// Every windows call site dispatches to its own windows path before perOS
+// ever runs, so perOS itself doesn't know a windows value — an OS name
+// reaching it that isn't darwin or linux (windows included) is a loud error.
+func TestPerOSUnknownOSIsLoudError(t *testing.T) {
+	for _, goos := range []string{"", "plan9", "freebsd", home.OSWindows} {
+		if _, err := perOS(goos, "darwin", "linux"); err == nil {
+			t.Errorf("perOS(%q, ...) succeeded, want a loud error", goos)
 		}
 	}
 }
@@ -172,6 +193,38 @@ func TestProvisionScriptRejectsBadName(t *testing.T) {
 		if _, err := provisionScript("darwin", bad, nil, nil, false); err == nil {
 			t.Errorf("provisionScript accepted an unsafe tarball name %q", bad)
 		}
+	}
+}
+
+// provisionScript is POSIX-only: a windows guest's launch is StartRunner's
+// startRunnerWindows hand-off, not a single exec'd script, so provisionScript
+// must refuse windows loudly rather than silently render an empty script.
+func TestProvisionScriptRejectsWindows(t *testing.T) {
+	if _, err := provisionScript("windows", "actions-runner-win-x64-2.320.0.zip", nil, nil, true); err == nil {
+		t.Error("provisionScript accepted goos=windows, want a loud refusal")
+	}
+}
+
+// runnerAssetRE selects the tarball charset for darwin/linux and the zip
+// charset for windows; a windows-shaped tarball name and vice versa are both
+// rejected, alongside the usual shell-metacharacter cases.
+func TestRunnerAssetRENamePerOS(t *testing.T) {
+	if !runnerAssetRE("windows").MatchString("actions-runner-win-x64-2.320.0.zip") {
+		t.Error("windows asset regex rejected a well-formed .zip name")
+	}
+	for _, bad := range []string{
+		"actions-runner-win-x64-2.320.0.tar.gz", // tar.gz on windows
+		"actions-runner-win-x64-$(whoami).zip",
+		"actions-runner-win-x64-2.320.0.zip; rm -rf /",
+		"foo bar.zip",
+		"",
+	} {
+		if runnerAssetRE("windows").MatchString(bad) {
+			t.Errorf("windows asset regex accepted unsafe name %q", bad)
+		}
+	}
+	if runnerAssetRE("linux").MatchString("actions-runner-linux-amd64-2.320.0.zip") {
+		t.Error("linux asset regex accepted a .zip name")
 	}
 }
 

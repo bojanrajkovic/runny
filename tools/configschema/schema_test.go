@@ -78,8 +78,8 @@ func TestGeneratedSchemaShape(t *testing.T) {
 	}
 
 	// Enums mirror validate()'s allowed sets.
-	if got := strs(t, obj(t, poolProps, "os"), "enum"); !reflect.DeepEqual(got, []string{"darwin", "linux"}) {
-		t.Errorf("os.enum = %v, want [darwin linux]", got)
+	if got := strs(t, obj(t, poolProps, "os"), "enum"); !reflect.DeepEqual(got, []string{"darwin", "linux", "windows"}) {
+		t.Errorf("os.enum = %v, want [darwin linux windows]", got)
 	}
 	if got := strs(t, obj(t, poolProps, "ssh_hardening"), "enum"); !reflect.DeepEqual(got, []string{"off", "rotate", "scramble"}) {
 		t.Errorf("ssh_hardening.enum = %v, want [off rotate scramble]", got)

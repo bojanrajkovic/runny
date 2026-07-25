@@ -196,23 +196,27 @@ func (d Dialer) rotateWindows(ctx bounded.Context, addr string, pg *Guest, signe
 		return nil, fmt.Errorf("rotate: installing cycle key: exit %d: %s", code, out)
 	}
 
-	cfg := d.SSH
-	cfg.Signer = signer
-	cfg.HostKeys = hostKeys
-	// The restart is async (a detached process sleeping 1s before
-	// Restart-Service): the old sshd may still be answering when this dials,
-	// so WaitFor's own retry loop is what carries the reconnect across the
-	// flip, exactly as it does for the POSIX reload/socket-activation cases.
-	c, err := sshx.WaitFor(ctx, addr, cfg, d.interval())
-	if err != nil {
-		return nil, fmt.Errorf("rotate: reconnecting with cycle key: %w", err)
-	}
-
+	// Prove password auth is dead BEFORE dialing the supervision client. The
+	// restart is async (a detached process sleeps ~1s, then Restart-Service),
+	// and unlike Linux's connection-preserving SIGHUP reload a Windows sshd
+	// restart drops every session. Password auth is off only on the
+	// post-restart sshd, so verifyPasswordAuthDead — which retries until it
+	// sees a rejection — both proves the flip and gates on the restart having
+	// landed. Dialing the client first could bind it to the pre-restart sshd
+	// (the cycle key is already installed there too), which the restart would
+	// then kill, handing back a dead client for the rest of the cycle.
 	verifyCfg := d.SSH
 	verifyCfg.Password = verifyPW
 	if err := verifyPasswordAuthDead(ctx, addr, verifyCfg); err != nil {
-		_ = c.Close()
 		return nil, err
+	}
+
+	cfg := d.SSH
+	cfg.Signer = signer
+	cfg.HostKeys = hostKeys
+	c, err := sshx.WaitFor(ctx, addr, cfg, d.interval())
+	if err != nil {
+		return nil, fmt.Errorf("rotate: reconnecting with cycle key: %w", err)
 	}
 
 	_ = pg.c.Close()
@@ -290,10 +294,19 @@ $pos = 0
 $enc = $null
 $utf8 = New-Object Text.UTF8Encoding($false)
 $stdout = [Console]::OpenStandardOutput()
+function ReadFully($fs, $buf, $count) {
+  $off = 0
+  while ($off -lt $count) {
+    $n = $fs.Read($buf, $off, $count - $off)
+    if ($n -le 0) { break }
+    $off += $n
+  }
+  return $off
+}
 function Detect {
   $fs = [IO.File]::Open($log, 'Open', 'Read', 'ReadWrite')
   $h = New-Object byte[] ([Math]::Min(3, $fs.Length))
-  $fs.Read($h, 0, $h.Length) | Out-Null
+  ReadFully $fs $h $h.Length | Out-Null
   $fs.Close()
   if ($h.Length -ge 2 -and $h[0] -eq 0xFF -and $h[1] -eq 0xFE) { $script:enc = [Text.Encoding]::Unicode; $script:pos = 2 }
   elseif ($h.Length -ge 2 -and $h[0] -eq 0xFE -and $h[1] -eq 0xFF) { $script:enc = [Text.Encoding]::BigEndianUnicode; $script:pos = 2 }
@@ -314,7 +327,7 @@ function Drain {
   $fs = [IO.File]::Open($log, 'Open', 'Read', 'ReadWrite')
   $fs.Seek($script:pos, 'Begin') | Out-Null
   $buf = New-Object byte[] $avail
-  $r = $fs.Read($buf, 0, $avail)
+  $r = ReadFully $fs $buf $avail
   $fs.Close()
   if ($r -le 0) { return }
   $b = $script:utf8.GetBytes($script:enc.GetString($buf, 0, $r))

@@ -103,6 +103,72 @@ org-or-owner/repo target. The **semantic** rules it can't cleanly express
 daemon: `runnyd -doctor` and the load-time validation remain authoritative, and
 a config that passes the schema can still be refused there with a precise error.
 
+### Pulling from a private registry
+
+Pulls authenticate from the standard docker/oras/skopeo config file
+(`$DOCKER_CONFIG/config.json`), so a public image needs nothing here. runny
+only ever **reads**, and only reads a **static `auths` entry**: there is no
+`runnyctl login`, and runny never writes or copies a credential.
+
+**Credential helpers are not supported** — no `credsStore`, no `credHelpers`.
+On macOS `docker login` defaults to `credsStore: "osxkeychain"`, which puts
+the secret in your *login keychain* and leaves the `auths` entry an empty
+stub. The system daemon runs as a service account that cannot open your
+keychain at all, so a helper could never produce a credential for it no matter
+where the config file lives. Rather than half-support a path that cannot work
+in the deployment that needs it, runny reads the static entry only — and says
+so in the log when it finds a config that delegates to a helper, instead of
+pulling anonymously in silence.
+
+Both registry challenge forms are handled: the Bearer token exchange most
+hosted registries use, and plain `Basic` (a bare Distribution behind htpasswd),
+where the credentials go straight back to the registry with no token endpoint
+involved. Credentials only ever travel over HTTPS — the sole exception is a
+loopback registry, matching the convention container tooling already uses.
+
+**Where to put it.** A per-user agent uses the standard
+`~/.docker/config.json`. The system daemon's own home is `/var/empty`, so it
+defaults `DOCKER_CONFIG` to `<home>/docker`, which you can write without
+`sudo` via the home's inheriting ACL.
+
+`auth` is base64 of `username:password`:
+
+```json
+{
+  "auths": {
+    "registry.example.com": {
+      "auth": "cm9ib3QkcnVubnk6VE9LRU4="
+    }
+  }
+}
+```
+
+The host key must match the image ref's registry host exactly — the
+`registry.example.com` in `image: registry.example.com/org/image:tag`. Port
+included if the ref has one; no scheme, no trailing slash.
+
+```console
+$ D="/Library/Application Support/runny/docker"
+$ mkdir -p "$D"
+$ printf '{"auths":{"registry.example.com":{"auth":"%s"}}}\n' \
+    "$(printf 'runny-puller:TOKEN' | base64)" > "$D/config.json"
+$ chmod 600 "$D/config.json"
+```
+
+**Rotating it is editing that file** — the credential is read fresh on every
+pull attempt, so a new token takes effect on the next pull with no restart and
+no `runnyctl reload` (a pull already in flight finishes on the credential it
+started with). Keep it a credential issued *to the daemon* (a pull-scoped
+robot account), not a copy of your own: a copy is a second place to go stale,
+and it grants the daemon everything your account can do.
+
+Failures that are *misconfigurations* are logged rather than swallowed — a
+`config.json` that is unreadable (a wrong ACL on the file is the usual cause)
+or unparseable, and a config that holds this host's credential in a helper
+rather than a static entry. Each falls back to an anonymous pull, so check the
+daemon log when a private pull 401s unexpectedly. A genuinely absent config or
+an unmatched host stays quiet — those are the normal public-image cases.
+
 ### Enabling OTLP telemetry
 
 `observability` is opt-in and absent by default: with no block, runnyd emits

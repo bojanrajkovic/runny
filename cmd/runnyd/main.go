@@ -103,6 +103,11 @@ func run(parent context.Context) error {
 	if err := dir.Ensure(); err != nil {
 		return err
 	}
+	if d := dockerConfigDefault(isSystemDaemon, dir, os.Getenv("DOCKER_CONFIG")); d != "" {
+		if err := os.Setenv("DOCKER_CONFIG", d); err != nil {
+			return err
+		}
+	}
 	configPath := *configFlag
 	if configPath == "" {
 		configPath = dir.ConfigPath()
@@ -1155,7 +1160,12 @@ func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*gi
 				if cached {
 					cacheNote = " (cached)"
 				}
-				add(name, true, fmt.Sprintf("%s → sha256:%s (%s uncompressed%s)", ref, oci.ShortDigest(digest), oci.HumanBytes(diskBytes), cacheNote))
+				// Name the credential file this check consulted: run as an
+				// operator rather than the service account, `runnyd -doctor`
+				// resolves the invoker's home, so the credentials here can
+				// differ from the ones the daemon will pull with.
+				add(name, true, fmt.Sprintf("%s → sha256:%s (%s uncompressed%s) [credentials: %s]",
+					ref, oci.ShortDigest(digest), oci.HumanBytes(diskBytes), cacheNote, oci.CredentialConfigPath()))
 				if !cached && diskBytes > maxImageBytes {
 					maxImageBytes = diskBytes
 				}

@@ -13,6 +13,7 @@ package oci
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -141,7 +142,9 @@ func (d descriptor) uncompressedSize() (int64, error) {
 
 // Client pulls tart-format images. Auth is the standard registry token
 // dance: 401 challenge → token endpoint → bearer (anonymous pull works for
-// public images).
+// public images). If the token request needs credentials, they come from
+// the docker/oras/skopeo config file (credentials.go) -- no runny-specific
+// login step.
 type Client struct {
 	hc *http.Client
 	// Progress, when set, receives byte deltas as layer data arrives — the
@@ -153,13 +156,39 @@ type Client struct {
 	// progress aggregator and a bounded.Stall, both safe under concurrency.
 	Progress func(bytes int64)
 
-	mu     sync.Mutex
-	tokens map[string]string // host -> bearer token
+	mu sync.Mutex
+	// auth maps host -> the ready-to-send Authorization value, "Bearer <tok>"
+	// or "Basic <b64>". One map for both schemes: the caller only ever wants
+	// "what do I send to this host", and caching the Basic case matters as
+	// much as the Bearer one — an image is hundreds of layer requests, and
+	// re-handshaking each would mean hundreds of deliberate 401s against a
+	// registry that may well be behind rate limiting or fail2ban.
+	auth map[string]string
 }
+
+// maxRedirects matches net/http's own default cap, which setting CheckRedirect
+// replaces rather than augments.
+const maxRedirects = 10
 
 func NewClient() *Client {
 	// No global timeout: pulls are long; ctx bounds them.
-	return &Client{hc: &http.Client{Timeout: 0, Transport: &obs.HTTPTransport{}}, tokens: map[string]string{}}
+	hc := &http.Client{Timeout: 0, Transport: &obs.HTTPTransport{}}
+	// Go copies Authorization across a redirect whenever the HOST matches,
+	// comparing hostnames only and never schemes — so a registry answering
+	// https with a 302 to http on the same host would have the client re-send
+	// the credential in the clear. That leaks a static registry password, not
+	// merely a scoped token. Refuse the downgrade instead; cross-host HTTPS
+	// redirects (blobs handed off to a CDN) are untouched.
+	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= maxRedirects {
+			return fmt.Errorf("stopped after %d redirects", maxRedirects)
+		}
+		if req.URL.Scheme != "https" && !isLoopbackHost(req.URL.Host) {
+			return fmt.Errorf("refusing redirect to plaintext %s: credentials would be sent in the clear", req.URL.Redacted())
+		}
+		return nil
+	}
+	return &Client{hc: hc, auth: map[string]string{}}
 }
 
 // Resolve returns the manifest digest for a ref (tag → digest, or the pinned
@@ -535,9 +564,13 @@ func (b *boundedWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// get performs one GET with bearer auth, handling the 401 token challenge.
-// Every caller states the round trip's class here — a new call site cannot
-// compile without one.
+// get performs one GET, handling the 401 challenge in either of the two forms
+// registries use. Bearer (ghcr, most hosted registries) is the token dance:
+// exchange credentials at the challenge realm for a token, retry with it.
+// Basic (a bare Distribution behind htpasswd) has no token endpoint at all —
+// the credentials go straight back to the registry on the retry. Every caller
+// states the round trip's class here — a new call site cannot compile without
+// one.
 func (c *Client) get(ctx context.Context, class obs.HTTPClass, ref Ref, u, accept string) (*http.Response, error) {
 	for attempt := 0; ; attempt++ {
 		req, err := http.NewRequestWithContext(obs.WithHTTPClass(ctx, class), http.MethodGet, u, nil)
@@ -548,8 +581,8 @@ func (c *Client) get(ctx context.Context, class obs.HTTPClass, ref Ref, u, accep
 			req.Header.Set("Accept", accept)
 		}
 		c.mu.Lock()
-		if tok := c.tokens[ref.Host]; tok != "" {
-			req.Header.Set("Authorization", "Bearer "+tok)
+		if v := c.auth[ref.Host]; v != "" {
+			req.Header.Set("Authorization", v)
 		}
 		c.mu.Unlock()
 		resp, err := c.hc.Do(req)
@@ -559,6 +592,17 @@ func (c *Client) get(ctx context.Context, class obs.HTTPClass, ref Ref, u, accep
 		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
 			challenge := resp.Header.Get("WWW-Authenticate")
 			_ = resp.Body.Close()
+			if isBasicChallenge(challenge) {
+				user, pass, ok := credentialsFor(ref.Host)
+				if !ok {
+					return nil, fmt.Errorf("GET %s: registry requires Basic authentication and no credentials are configured for %s (expected an auths entry keyed exactly %q in %s)",
+						u, ref.Host, ref.Host, CredentialConfigPath())
+				}
+				c.mu.Lock()
+				c.auth[ref.Host] = "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
+				c.mu.Unlock()
+				continue
+			}
 			if err := c.fetchToken(ctx, ref, challenge); err != nil {
 				return nil, err
 			}
@@ -567,6 +611,14 @@ func (c *Client) get(ctx context.Context, class obs.HTTPClass, ref Ref, u, accep
 		if resp.StatusCode != http.StatusOK {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 			_ = resp.Body.Close()
+			// A 401 that survived the challenge dance is nearly always a
+			// missing or mis-keyed credential, and the docs promise the log
+			// says so. Name the exact file and key rather than leaving the
+			// operator a bare status code.
+			if resp.StatusCode == http.StatusUnauthorized {
+				return nil, fmt.Errorf("GET %s: HTTP %d: %s (if this image is private, check for an auths entry keyed exactly %q in %s)",
+					u, resp.StatusCode, b, ref.Host, CredentialConfigPath())
+			}
 			return nil, fmt.Errorf("GET %s: HTTP %d: %s", u, resp.StatusCode, b)
 		}
 		return resp, nil
@@ -602,6 +654,9 @@ func (c *Client) fetchToken(ctx context.Context, ref Ref, challenge string) erro
 	if err != nil {
 		return err
 	}
+	if user, pass, ok := credentialsFor(ref.Host); ok {
+		req.SetBasicAuth(user, pass)
+	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return fmt.Errorf("fetching registry token: %w", err)
@@ -614,9 +669,17 @@ func (c *Client) fetchToken(ctx context.Context, ref Ref, challenge string) erro
 		return fmt.Errorf("registry token response unusable (HTTP %d): %v", resp.StatusCode, err)
 	}
 	c.mu.Lock()
-	c.tokens[ref.Host] = tok.Token
+	c.auth[ref.Host] = "Bearer " + tok.Token
 	c.mu.Unlock()
 	return nil
+}
+
+// isBasicChallenge reports whether the challenge selects HTTP Basic instead of
+// the token dance. parseChallenge only understands the Bearer form, so a Basic
+// challenge has to be recognized before it, not after — its `realm` is a human
+// label ("Registry Realm"), not a token endpoint to fetch.
+func isBasicChallenge(h string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(h)), "basic")
 }
 
 func parseChallenge(h string) map[string]string {

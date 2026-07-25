@@ -8,6 +8,7 @@ go_library(
     name = "runnyd_lib",
     srcs = [
         "competing.go",
+        "dockerconfig.go",
         "drain.go",
         "fileowner_unix.go",
         "fileowner_windows.go",
@@ -157,6 +158,7 @@ go_test(
     name = "runnyd_test",
     srcs = [
         "competing_test.go",
+        "dockerconfig_test.go",
         "drain_test.go",
         "installassert_test.go",
         "launchcontext_test.go",

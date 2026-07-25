@@ -48,10 +48,56 @@ func TestCredentialsForUnknownHost(t *testing.T) {
 	}
 }
 
-func TestCredentialsForMalformedConfig(t *testing.T) {
+// A config file that exists but cannot be parsed is a misconfiguration, not an
+// absence: staying quiet leaves the operator with a bare 401 and no hint that
+// the credential file they wrote is unreadable.
+func TestCredentialsForMalformedConfigWarns(t *testing.T) {
 	writeDockerConfig(t, `not json`)
+	logs := captureWarnings(t)
+
 	if _, _, ok := credentialsFor(t.Context(), "registry.example.com"); ok {
 		t.Fatal("expected no credentials from a malformed config file")
+	}
+	if !strings.Contains(logs.String(), "config.json") {
+		t.Fatalf("expected a warning naming the unparseable config, got: %s", logs.String())
+	}
+}
+
+// The headless deployment depends on the home's inheriting ACL granting the
+// service account read. If that ACL is wrong the read fails with EACCES and
+// the pull silently downgrades to anonymous — the operator sees a file they
+// can read perfectly well themselves and no trace of the real cause.
+func TestCredentialsForUnreadableConfigWarns(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the permission bits this test relies on")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"auths":{}}`), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_CONFIG", dir)
+	logs := captureWarnings(t)
+
+	if _, _, ok := credentialsFor(t.Context(), "registry.example.com"); ok {
+		t.Fatal("expected no credentials from an unreadable config file")
+	}
+	if !strings.Contains(logs.String(), "config.json") {
+		t.Fatalf("expected a warning naming the unreadable config, got: %s", logs.String())
+	}
+}
+
+// An ABSENT config file is the overwhelmingly common case (every public pull
+// on a host that never logged in anywhere) and must stay silent.
+func TestCredentialsForNoConfigFileIsQuiet(t *testing.T) {
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	logs := captureWarnings(t)
+
+	if _, _, ok := credentialsFor(t.Context(), "registry.example.com"); ok {
+		t.Fatal("expected no credentials without a config file")
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("expected no warning for an absent config file, got: %s", logs.String())
 	}
 }
 

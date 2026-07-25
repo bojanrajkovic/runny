@@ -111,33 +111,57 @@ public image needs nothing here. For a private one, runny reads
 `credHelpers`/`credsStore` helper. It only ever reads: there is no
 `runnyctl login`, and runny never writes or copies a credential.
 
-Per-user agent: your existing `docker login` / `oras login` already works,
-including a keychain-backed one.
+**Per-user agent: nothing to do.** Its home is yours, so your existing
+`docker login` / `oras login` is already on the standard path — including a
+keychain-backed one, since the agent runs as you and can reach your keychain.
 
 **Headless system daemon: give it a credential of its own.** The daemon runs
 as a service account whose home is `/var/empty`, and — on macOS — cannot read
-your login keychain, where `docker login` puts the actual secret (the `auths`
-entry it leaves behind is only a stub). So `runnyd` looks in
-`<home>/docker/config.json`, which you can write without `sudo` via the home's
-inheriting ACL. Put a pull-scoped robot account or token there:
+your login keychain, which is where `docker login` puts the actual secret (the
+`auths` entry it leaves behind is only a stub, so *copying your config file
+across accomplishes nothing*). The system daemon therefore defaults
+`DOCKER_CONFIG` to `<home>/docker`, which you can write without `sudo` via the
+home's inheriting ACL.
+
+Write a `config.json` there with a **static `auths` entry**. `auth` is
+base64 of `username:password` — the daemon needs the secret itself, so a
+config carrying only `credsStore`/`credHelpers` will not work for it:
+
+```json
+{
+  "auths": {
+    "registry.example.com": {
+      "auth": "cm9ib3QkcnVubnk6VE9LRU4="
+    }
+  }
+}
+```
+
+The host key must match the image ref's registry host exactly — the
+`registry.example.com` in `image: registry.example.com/org/image:tag`. Port
+included if the ref has one; no scheme, no trailing slash.
 
 ```console
-$ mkdir -p "/Library/Application Support/runny/docker"
-$ printf '{"auths":{"registry.example.com":{"auth":"%s"}}}' \
-    "$(printf 'robot$runny:TOKEN' | base64)" \
-    > "/Library/Application Support/runny/docker/config.json"
-$ chmod 600 "/Library/Application Support/runny/docker/config.json"
+$ D="/Library/Application Support/runny/docker"
+$ mkdir -p "$D"
+$ printf '{"auths":{"registry.example.com":{"auth":"%s"}}}\n' \
+    "$(printf 'robot$runny:TOKEN' | base64)" > "$D/config.json"
+$ chmod 600 "$D/config.json"
 ```
 
 **Rotating it is editing that file** — the credential is read fresh on every
 pull attempt, so a new token takes effect on the next pull with no restart and
-no `runnyctl reload`. Keep it a credential issued *to the daemon*, not a copy
-of your own: a copy has a second place to go stale, and it grants the daemon
-whatever your account can do.
+no `runnyctl reload`. Keep it a credential issued *to the daemon* (a
+pull-scoped robot account), not a copy of your own: a copy is a second place to
+go stale, and it grants the daemon everything your account can do.
 
-If a helper you configured is missing or broken, the daemon logs it and falls
-back to an anonymous pull rather than failing — check the log when a private
-pull 401s unexpectedly.
+Failures that are *misconfigurations* are logged rather than swallowed — an
+unreadable or unparseable `config.json` (a wrong ACL on the file is the usual
+cause), or a `credHelpers`/`credsStore` helper that is missing or broken. Each
+falls back to an anonymous pull, so check the daemon log when a private pull
+401s unexpectedly. A genuinely absent config, an unmatched host, or a helper
+reporting it holds nothing for that host stay quiet — those are the normal
+public-image cases.
 
 ### Enabling OTLP telemetry
 

@@ -319,10 +319,12 @@ resurfaces later as a bare 401 with no trace of the cause.
 
 **The system daemon does not inherit the operator's login.** It runs as a
 service account whose home is `/var/empty`, so `~/.docker/config.json` is
-neither present for it nor writable by the operator. `runnyd` therefore
-defaults `DOCKER_CONFIG` to `<home>/docker` (an operator-set value still
-wins), which the home's inheriting ACL makes operator-writable and
-daemon-readable without `sudo`.
+neither present for it nor writable by the operator. The **system daemon
+only** therefore defaults `DOCKER_CONFIG` to `<home>/docker` (an operator-set
+value still wins), which the home's inheriting ACL makes operator-writable and
+daemon-readable without `sudo`. A per-user agent is left on the standard
+`~/.docker` path: its home *is* the operator's, so redirecting it would hide
+the very credentials it is meant to use.
 
 **A keychain-backed login cannot be shared with the daemon, by design.** On
 macOS `docker login`/`oras login` default to `credsStore: "osxkeychain"`,

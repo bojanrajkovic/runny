@@ -352,13 +352,22 @@ the published image and watches for it to finish.
   session issuing it survives to read back its own exit status. Scramble
   mode uses `Set-LocalUser` against the baked `Administrator` account
   (`net user` prompts interactively above 14 characters and would hang).
-- **Debug session recording is not implemented for windows guests.**
-  `InstallAuthorizedKey`'s windows branch appends the key with the same ACL
-  fix but installs no `command=` recording wrapper — the POSIX recorder is a
-  `script(1)` wrapper with no windows equivalent, and building one needs a
-  forced-command transcription wrapper that doesn't exist yet. A windows
-  debug session is logged loudly at install time; `PullDebugSession` returns
-  nothing for a windows guest.
+- **Windows debug session recording uses two mechanisms, one per SSH usage
+  shape, because no single windows mechanism covers both.** The forced
+  command (`command=` in `administrators_authorized_keys`, same ACL fix as
+  rotation) always runs `runny-record.ps1`, which branches on
+  `SSH_ORIGINAL_COMMAND`: a one-shot exec (`ssh host "cmd"`) runs the command
+  as a `cmd.exe` child piped through `Tee-Object`, which captures the
+  child's output regardless of whether a pty is attached; an interactive
+  shell (`ssh -t host`) spawns a nested, unpiped `powershell -NoExit` with
+  `Start-Transcript` already running inside it, capturing the prompt and
+  typed input — piping that session instead would sever the operator's own
+  stdin from it. `Start-Transcript` does not capture a native program's
+  console output (`WriteConsole` bypasses the `.NET Console.Out` hook it
+  relies on), so an interactive session's build-tool output is not
+  guaranteed to land; the one-shot form is the one with guaranteed capture.
+  `PullDebugSession` reads the log via `StreamReader`'s own BOM detection
+  (`Tee-Object`/`Out-File` default to UTF-16LE on Windows PowerShell 5.1).
 
 ## Validated against real infrastructure
 

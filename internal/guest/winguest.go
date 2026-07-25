@@ -175,12 +175,9 @@ const scrambleLineWindowsTemplate = `Set-LocalUser -Name $env:USERNAME -Password
 // ACL and prepend traps, and the detached-restart doc comment there for why
 // the service restart can't run inline.
 func (d Dialer) rotateWindows(ctx bounded.Context, addr string, pg *Guest, signer ssh.Signer) (statemachine.Guest, error) {
-	out, code, err := pg.c.Output(ctx, encodedCommand(captureHostKeysWindowsScript))
+	out, err := pg.runStepOutput(ctx, "rotate: capturing host keys", encodedCommand(captureHostKeysWindowsScript), nil)
 	if err != nil {
-		return nil, fmt.Errorf("rotate: capturing host keys: %w", err)
-	}
-	if code != 0 {
-		return nil, fmt.Errorf("rotate: capturing host keys: exit %d: %s", code, out)
+		return nil, err
 	}
 	hostKeys, err := parseHostKeys(out)
 	if err != nil {
@@ -199,12 +196,8 @@ func (d Dialer) rotateWindows(ctx bounded.Context, addr string, pg *Guest, signe
 	}
 	script := fmt.Sprintf(rotateScriptWindowsTemplate, pubEsc, scramble)
 
-	out, code, err = pg.c.Output(ctx, encodedCommand(script))
-	if err != nil {
-		return nil, fmt.Errorf("rotate: installing cycle key: %w", err)
-	}
-	if code != 0 {
-		return nil, fmt.Errorf("rotate: installing cycle key: exit %d: %s", code, out)
+	if err := pg.runStep(ctx, "rotate: installing cycle key", encodedCommand(script), nil); err != nil {
+		return nil, err
 	}
 
 	// Prove password auth is dead BEFORE dialing the supervision client. The
@@ -394,31 +387,19 @@ func (g *Guest) startRunnerWindows(ctx context.Context, jit, runnerTarball strin
 	prep, cancel := bounded.WithTimeout(ctx, windowsPrepTimeout)
 	defer cancel()
 
-	out, code, err := g.c.Output(prep, encodedCommand(extractRunnerZipScript(runnerTarball)))
-	if err != nil {
-		return nil, fmt.Errorf("extracting runner zip: %w", err)
-	}
-	if code != 0 {
-		return nil, fmt.Errorf("extracting runner zip: exit %d: %s", code, out)
+	if err := g.runStep(prep, "extracting runner zip", encodedCommand(extractRunnerZipScript(runnerTarball)), nil); err != nil {
+		return nil, err
 	}
 
 	// The header name is advisory (the sink target is a full file path, not a
 	// directory); a literal avoids filepath.Base's host-OS separator rules.
-	out, code, err = g.c.RunWithInput(prep, scpSinkCommand(jitPendingPathWindows),
-		scpSource(".jitconfig.tmp", int64(len(jit)), strings.NewReader(jit)))
-	if err != nil {
-		return nil, fmt.Errorf("delivering JIT config: %w", err)
-	}
-	if code != 0 {
-		return nil, fmt.Errorf("delivering JIT config: exit %d: %s", code, out)
+	jitInput := scpSource(".jitconfig.tmp", int64(len(jit)), strings.NewReader(jit))
+	if err := g.runStep(prep, "delivering JIT config", scpSinkCommand(jitPendingPathWindows), jitInput); err != nil {
+		return nil, err
 	}
 
-	out, code, err = g.c.Output(prep, encodedCommand(commitJITConfigScript()))
-	if err != nil {
-		return nil, fmt.Errorf("committing JIT config: %w", err)
-	}
-	if code != 0 {
-		return nil, fmt.Errorf("committing JIT config: exit %d: %s", code, out)
+	if err := g.runStep(prep, "committing JIT config", encodedCommand(commitJITConfigScript()), nil); err != nil {
+		return nil, err
 	}
 
 	p, err := g.c.Start(ctx, encodedCommand(watcherScriptWindows), nil)

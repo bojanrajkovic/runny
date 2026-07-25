@@ -16,6 +16,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -94,6 +95,41 @@ func perOS(goos, darwinVal, linuxVal string) (string, error) {
 	}
 }
 
+// runStep runs cmd on the guest and collapses the exec-error/nonzero-exit
+// check every discarded-output call site otherwise repeats inline. input nil
+// runs cmd via Output; non-nil runs it via RunWithInput (a byte-stream push).
+func (g *Guest) runStep(ctx bounded.Context, what, cmd string, input io.Reader) error {
+	_, err := g.runStepOutput(ctx, what, cmd, input)
+	return err
+}
+
+// runStepOutput is runStep for a step whose stdout the caller still needs on
+// success — capture-host-keys parses it. Not for PullDiag/PullDebugSession
+// (both discard the exit code entirely; they're best-effort tails, not a
+// step that fails on a nonzero exit) or InstallAuthorizedKey (runs over its
+// own short-lived connection, not g.c, and reclassifies a session-open exec
+// error into ErrGuestUnreachable — a distinction this generic exit-code
+// check can't express).
+func (g *Guest) runStepOutput(ctx bounded.Context, what, cmd string, input io.Reader) ([]byte, error) {
+	var (
+		out  []byte
+		code int
+		err  error
+	)
+	if input != nil {
+		out, code, err = g.c.RunWithInput(ctx, cmd, input)
+	} else {
+		out, code, err = g.c.Output(ctx, cmd)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", what, err)
+	}
+	if code != 0 {
+		return nil, fmt.Errorf("%s: exit %d: %s", what, code, out)
+	}
+	return out, nil
+}
+
 // Rotate hardens an authenticated session: mint an in-memory
 // per-cycle ed25519 key, capture the guest's host keys, install the key and
 // disable password auth over the existing password session, reconnect
@@ -142,12 +178,9 @@ func (d Dialer) Rotate(ctx bounded.Context, addr string, g statemachine.Guest, g
 		return d.rotateWindows(ctx, addr, pg, signer)
 	}
 
-	out, code, err := pg.c.Output(ctx, captureHostKeys)
+	out, err := pg.runStepOutput(ctx, "rotate: capturing host keys", captureHostKeys, nil)
 	if err != nil {
-		return nil, fmt.Errorf("rotate: capturing host keys: %w", err)
-	}
-	if code != 0 {
-		return nil, fmt.Errorf("rotate: capturing host keys: exit %d: %s", code, out)
+		return nil, err
 	}
 	hostKeys, err := parseHostKeys(out)
 	if err != nil {
@@ -175,12 +208,8 @@ func (d Dialer) Rotate(ctx bounded.Context, addr string, g statemachine.Guest, g
 		}
 		full += strings.ReplaceAll(scrambleLine, scramblePasswordPlaceholder, pw)
 	}
-	out, code, err = pg.c.Output(ctx, full)
-	if err != nil {
-		return nil, fmt.Errorf("rotate: installing cycle key: %w", err)
-	}
-	if code != 0 {
-		return nil, fmt.Errorf("rotate: installing cycle key: exit %d: %s", code, out)
+	if err := pg.runStep(ctx, "rotate: installing cycle key", full, nil); err != nil {
+		return nil, err
 	}
 
 	cfg := d.SSH
@@ -289,37 +318,20 @@ func (g *Guest) PushRunnerTarball(ctx bounded.Context, localPath string) error {
 	if g.goos == home.OSWindows {
 		// scp's sink writes into an existing directory only; create it in a
 		// separate quick exec first.
-		out, code, err := g.c.Output(ctx, encodedCommand(fmt.Sprintf(`New-Item -Force -ItemType Directory -Path '%s' | Out-Null`, runnerCacheDirWindows)))
-		if err != nil {
-			return fmt.Errorf("creating runner cache dir: %w", err)
-		}
-		if code != 0 {
-			return fmt.Errorf("creating runner cache dir: exit %d: %s", code, out)
+		mkdirCmd := encodedCommand(fmt.Sprintf(`New-Item -Force -ItemType Directory -Path '%s' | Out-Null`, runnerCacheDirWindows))
+		if err := g.runStep(ctx, "creating runner cache dir", mkdirCmd, nil); err != nil {
+			return err
 		}
 		st, err := f.Stat()
 		if err != nil {
 			return fmt.Errorf("pushing runner zip: %w", err)
 		}
 		dest := runnerCacheDirWindows + `\` + base
-		out, code, err = g.c.RunWithInput(ctx, scpSinkCommand(dest), scpSource(base, st.Size(), f))
-		if err != nil {
-			return fmt.Errorf("pushing runner zip: %w", err)
-		}
-		if code != 0 {
-			return fmt.Errorf("pushing runner zip: exit %d: %s", code, out)
-		}
-		return nil
+		return g.runStep(ctx, "pushing runner zip", scpSinkCommand(dest), scpSource(base, st.Size(), f))
 	}
 
 	cmd := fmt.Sprintf(`mkdir -p "$HOME/%s" && cat > "$HOME/%s/%s"`, runnerPushCacheDir, runnerPushCacheDir, base)
-	out, code, err := g.c.RunWithInput(ctx, cmd, f)
-	if err != nil {
-		return fmt.Errorf("pushing runner tarball: %w", err)
-	}
-	if code != 0 {
-		return fmt.Errorf("pushing runner tarball: exit %d: %s", code, out)
-	}
-	return nil
+	return g.runStep(ctx, "pushing runner tarball", cmd, f)
 }
 
 // StartRunner stages and launches the runner for the pool's guest OS. The JIT
@@ -416,14 +428,7 @@ func (g *Guest) StopRunner(ctx bounded.Context) error {
 	if g.goos == home.OSWindows {
 		script = encodedCommand(stopRunnerScriptWindows)
 	}
-	out, code, err := g.c.Output(ctx, script)
-	if err != nil {
-		return fmt.Errorf("stopping runner: %w", err)
-	}
-	if code != 0 {
-		return fmt.Errorf("stopping runner: kill unproven (exit %d): %s", code, strings.TrimSpace(string(out)))
-	}
-	return nil
+	return g.runStep(ctx, "stopping runner: kill unproven", script, nil)
 }
 
 // InstallAuthorizedKey appends one authorized_keys line and proves it landed

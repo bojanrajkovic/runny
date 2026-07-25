@@ -100,6 +100,20 @@ tarball — checksummed and attested, no signing (`codesign_binary`/
 `notarize_binary` are `target_compatible_with` macOS only, so these ship the
 bare `stamped_go_binary` outputs).
 
+**winget** manifests are submitted to the community `microsoft/winget-pkgs`
+repo via `vedantmgoyal9/winget-releaser`, gated on the
+`WINGET_PACKAGE_IDENTIFIER` repo variable and `WINGET_TOKEN` secret (same
+graceful-no-op-until-configured shape as the Homebrew tap), and skipped on
+pre-releases (winget has no beta-channel concept, so a beta tag must never
+overwrite the stable manifest). **Rejected:** a self-hosted winget source,
+which needs a REST index service (no static-file equivalent of a brew tap
+exists for winget) — disproportionate infrastructure for the reach gained.
+This path has a one-time manual prerequisite the workflow cannot do for you:
+fork `microsoft/winget-pkgs` under the same account, mint a classic PAT with
+`public_repo` scope as `WINGET_TOKEN`, and submit the *first* manifest
+version by hand (via `wingetcreate new`) — `winget-releaser` can only update
+a manifest that already exists upstream.
+
 **Chocolatey** ships as a release-asset-only `.nupkg`
 (`runny.<version>.nupkg`, built with `dotnet pack` directly against
 `tools/deploy/runny.nuspec.tmpl` — no placeholder `.csproj` needed as of

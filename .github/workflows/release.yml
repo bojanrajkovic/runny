@@ -283,3 +283,22 @@ jobs:
           # named 'master', and brew reads the formula from the default branch
           # (main). HEAD:main pushes there regardless of the local name.
           git push origin HEAD:main
+
+  winget:
+    name: submit winget manifest update
+    needs: artifacts
+    runs-on: ubuntu-latest
+    # winget-pkgs has no pre-release concept — a beta tag would overwrite the
+    # stable manifest with a beta version, so this only runs for real releases.
+    # Also gracefully no-ops until WINGET_PACKAGE_IDENTIFIER is configured (see
+    # ADR-0010's amendment: the first submission to microsoft/winget-pkgs is a
+    # one-time manual `wingetcreate new`, since this action can only update a
+    # manifest that already exists there).
+    if: ${{ github.event.release.prerelease == false && vars.WINGET_PACKAGE_IDENTIFIER != '' }}
+    permissions: {}
+    steps:
+      - uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
+        with:
+          identifier: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}
+          installers-regex: "_windows_.*\\.zip$"
+          token: ${{ secrets.WINGET_TOKEN }}

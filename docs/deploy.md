@@ -435,6 +435,7 @@ restart and the ADR-0014 reload depend on.
 Get `runnyd`/`runnyctl` onto the host first (ADR-0010), any one of:
 
 ```powershell
+winget install BojanRajkovic.Runny      # once published (see ADR-0010)
 choco install .\runny.<version>.nupkg   # downloaded from the release
 # or extract runny_<version>_windows_{amd64,arm64}.zip anywhere on PATH
 ```

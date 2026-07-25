@@ -306,7 +306,11 @@ is single-use.
 
 `internal/oci`'s registry pulls read credentials from a static `auths` entry
 in the standard docker/oras/skopeo config file (`$DOCKER_CONFIG/config.json`,
-default `~/.docker/config.json`). **runny only ever reads.** It never writes
+default `~/.docker/config.json`). They are presented for either challenge form
+— exchanged at the realm for a token under `Bearer`, or sent to the registry
+itself under `Basic` — and in both cases only over HTTPS, since request URLs
+and challenge realms are both refused in plaintext outside loopback.
+**runny only ever reads.** It never writes
 the file, never copies a credential out of it, and has no credential format or
 login command of its own. A missing config file or no matching host entry is
 treated as no credentials, not an error — the same anonymous pull runny has

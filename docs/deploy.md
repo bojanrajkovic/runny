@@ -120,6 +120,12 @@ in the deployment that needs it, runny reads the static entry only — and says
 so in the log when it finds a config that delegates to a helper, instead of
 pulling anonymously in silence.
 
+Both registry challenge forms are handled: the Bearer token exchange most
+hosted registries use, and plain `Basic` (a bare Distribution behind htpasswd),
+where the credentials go straight back to the registry with no token endpoint
+involved. Credentials only ever travel over HTTPS — the sole exception is a
+loopback registry, matching the convention container tooling already uses.
+
 **Where to put it.** A per-user agent uses the standard
 `~/.docker/config.json`. The system daemon's own home is `/var/empty`, so it
 defaults `DOCKER_CONFIG` to `<home>/docker`, which you can write without

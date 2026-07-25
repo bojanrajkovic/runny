@@ -150,6 +150,56 @@ func TestCredentialsForGlobalCredsStoreAloneIsQuiet(t *testing.T) {
 	}
 }
 
+// basicOnlyRegistry answers every request with a Basic challenge until the
+// right credentials arrive — a bare Distribution behind htpasswd, which has no
+// token endpoint at all.
+func basicOnlyRegistry(t *testing.T, wantUser, wantPass string) (*httptest.Server, Ref) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != wantUser || pass != wantPass {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Registry Realm"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"layers":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+	host := strings.TrimPrefix(srv.URL, "http://")
+	return srv, Ref{Host: host, Name: "test/image", Tag: "latest"}
+}
+
+// A Basic challenge must send the credentials straight back to the registry.
+// Routing it through the token dance fails: its realm is a human label, not a
+// token endpoint.
+func TestGetRetriesBasicChallengeAgainstRegistry(t *testing.T) {
+	_, ref := basicOnlyRegistry(t, "alice", "hunter2")
+	auth := base64.StdEncoding.EncodeToString([]byte("alice:hunter2"))
+	writeDockerConfig(t, fmt.Sprintf(`{"auths":{%q:{"auth":%q}}}`, ref.Host, auth))
+
+	c := NewClient()
+	if _, _, _, err := c.fetchManifest(t.Context(), ref); err != nil {
+		t.Fatalf("fetchManifest against a Basic-only registry: %v", err)
+	}
+}
+
+// With no credentials configured, a Basic challenge must fail with a message
+// naming the cause -- not the token flow's "missing realm", which describes
+// nothing an operator can act on.
+func TestGetBasicChallengeWithoutCredentialsIsLegible(t *testing.T) {
+	_, ref := basicOnlyRegistry(t, "alice", "hunter2")
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
+
+	c := NewClient()
+	_, _, _, err := c.fetchManifest(t.Context(), ref)
+	if err == nil {
+		t.Fatal("expected an error with no credentials configured")
+	}
+	if !strings.Contains(err.Error(), "Basic authentication") {
+		t.Fatalf("error should name Basic auth as the cause, got: %v", err)
+	}
+}
+
 // TestFetchTokenSendsBasicAuth checks fetchToken's wiring directly: when a
 // matching DOCKER_CONFIG entry exists for the challenge's registry host, the
 // token request must carry it as Basic auth.

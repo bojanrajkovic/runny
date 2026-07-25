@@ -537,10 +537,16 @@ func (b *boundedWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// get performs one GET with bearer auth, handling the 401 token challenge.
-// Every caller states the round trip's class here — a new call site cannot
-// compile without one.
+// get performs one GET, handling the 401 challenge in either of the two forms
+// registries use. Bearer (ghcr, most hosted registries) is the token dance:
+// exchange credentials at the challenge realm for a token, retry with it.
+// Basic (a bare Distribution behind htpasswd) has no token endpoint at all —
+// the credentials go straight back to the registry on the retry. Every caller
+// states the round trip's class here — a new call site cannot compile without
+// one.
 func (c *Client) get(ctx context.Context, class obs.HTTPClass, ref Ref, u, accept string) (*http.Response, error) {
+	var basicUser, basicPass string
+	var useBasic bool
 	for attempt := 0; ; attempt++ {
 		req, err := http.NewRequestWithContext(obs.WithHTTPClass(ctx, class), http.MethodGet, u, nil)
 		if err != nil {
@@ -549,11 +555,17 @@ func (c *Client) get(ctx context.Context, class obs.HTTPClass, ref Ref, u, accep
 		if accept != "" {
 			req.Header.Set("Accept", accept)
 		}
-		c.mu.Lock()
-		if tok := c.tokens[ref.Host]; tok != "" {
-			req.Header.Set("Authorization", "Bearer "+tok)
+		if useBasic {
+			// Safe over the wire by construction: u is built with
+			// scheme(ref.Host), which is plain http only for loopback.
+			req.SetBasicAuth(basicUser, basicPass)
+		} else {
+			c.mu.Lock()
+			if tok := c.tokens[ref.Host]; tok != "" {
+				req.Header.Set("Authorization", "Bearer "+tok)
+			}
+			c.mu.Unlock()
 		}
-		c.mu.Unlock()
 		resp, err := c.hc.Do(req)
 		if err != nil {
 			return nil, err
@@ -561,6 +573,14 @@ func (c *Client) get(ctx context.Context, class obs.HTTPClass, ref Ref, u, accep
 		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
 			challenge := resp.Header.Get("WWW-Authenticate")
 			_ = resp.Body.Close()
+			if isBasicChallenge(challenge) {
+				user, pass, ok := credentialsFor(ref.Host)
+				if !ok {
+					return nil, fmt.Errorf("GET %s: registry requires Basic authentication and no credentials are configured for %s", u, ref.Host)
+				}
+				basicUser, basicPass, useBasic = user, pass, true
+				continue
+			}
 			if err := c.fetchToken(ctx, ref, challenge); err != nil {
 				return nil, err
 			}
@@ -622,6 +642,14 @@ func (c *Client) fetchToken(ctx context.Context, ref Ref, challenge string) erro
 	c.tokens[ref.Host] = tok.Token
 	c.mu.Unlock()
 	return nil
+}
+
+// isBasicChallenge reports whether the challenge selects HTTP Basic instead of
+// the token dance. parseChallenge only understands the Bearer form, so a Basic
+// challenge has to be recognized before it, not after — its `realm` is a human
+// label ("Registry Realm"), not a token endpoint to fetch.
+func isBasicChallenge(h string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(h)), "basic")
 }
 
 func parseChallenge(h string) map[string]string {

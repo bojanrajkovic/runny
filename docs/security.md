@@ -302,6 +302,19 @@ long-lived registration token
 ([ADR-0003](architecture-decisions/0003-jit-runner-config.md)). The JIT config
 is single-use.
 
+## Registry authentication
+
+`internal/oci`'s registry pulls read credentials from the standard
+docker/oras/skopeo config file (`$DOCKER_CONFIG/config.json`, default
+`~/.docker/config.json`): a static `auths` entry, or a `credHelpers`/`credsStore`
+helper binary invoked via the standard `docker-credential-<name> get`
+protocol. runny never writes to this file and has no credential format or
+login command of its own — an operator who already authenticated with
+`docker login` or `oras login` gets pull auth for free. A missing config
+file, no matching host entry, or a helper that can't produce credentials is
+treated as no credentials, not an error — the same anonymous pull runny has
+always attempted for a public image.
+
 ## Observability (OTLP egress)
 
 `runnyd` makes outbound OTLP gRPC calls to a collector only when the operator

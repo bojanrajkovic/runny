@@ -141,7 +141,9 @@ func (d descriptor) uncompressedSize() (int64, error) {
 
 // Client pulls tart-format images. Auth is the standard registry token
 // dance: 401 challenge → token endpoint → bearer (anonymous pull works for
-// public images).
+// public images). If the token request needs credentials, they come from
+// the docker/oras/skopeo config file (credentials.go) -- no runny-specific
+// login step.
 type Client struct {
 	hc *http.Client
 	// Progress, when set, receives byte deltas as layer data arrives — the
@@ -601,6 +603,9 @@ func (c *Client) fetchToken(ctx context.Context, ref Ref, challenge string) erro
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, realm+"?"+q.Encode(), nil)
 	if err != nil {
 		return err
+	}
+	if user, pass, ok := credentialsFor(ctx, ref.Host); ok {
+		req.SetBasicAuth(user, pass)
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {

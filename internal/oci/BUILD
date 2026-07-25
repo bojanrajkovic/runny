@@ -4,6 +4,7 @@ go_library(
     name = "oci",
     srcs = [
         "applelz4.go",
+        "credentials.go",
         "headroom_other.go",
         "headroom_windows.go",
         "oci.go",
@@ -25,6 +26,7 @@ go_test(
     name = "oci_test",
     srcs = [
         "applelz4_test.go",
+        "credentials_test.go",
         "oci_test.go",
         "pack_test.go",
     ],

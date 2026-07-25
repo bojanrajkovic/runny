@@ -187,10 +187,12 @@ func TestWindowsAuthorizedKeyScriptsShareACLFragment(t *testing.T) {
 
 // The watcher script tails the launcher's log/exit-code contract and exits
 // with the runner's own exit code — the anchor points StartRunner's windows
-// hand-off relies on. Output goes to the raw stdout stream (never re-encoded
-// through [Console]::Out's OEM-codepage TextWriter, which would mangle
-// non-ASCII output and can split a multibyte sequence at a drain boundary).
-// The exit-code read is guarded by a digits-only regex before the cast.
+// hand-off relies on. It decodes the log by its BOM and re-emits UTF-8 so the
+// FSM's UTF-8 "Listening for Jobs" match fires: the launcher's PowerShell 5.1
+// `*>` redirect writes runner.log as UTF-16LE, and a raw-byte forward would
+// never match. Output still goes to the raw stdout stream (never the
+// OEM-codepage [Console]::Out TextWriter). The exit-code read is guarded by
+// an integer regex before the cast.
 func TestWatcherScriptWindowsContract(t *testing.T) {
 	if !strings.Contains(watcherScriptWindows, runnerLogPathWindows) {
 		t.Error("watcher script must tail the launcher's log path")
@@ -208,6 +210,22 @@ func TestWatcherScriptWindowsContract(t *testing.T) {
 		t.Error("watcher script must not write through [Console]::Out (OEM codepage re-encoding)")
 	}
 	if !strings.Contains(watcherScriptWindows, "OpenStandardOutput()") {
-		t.Error("watcher script must write raw bytes via the standard-output stream")
+		t.Error("watcher script must write to the standard-output stream")
+	}
+	// The load-bearing fix: detect the log's BOM and decode before re-emitting
+	// UTF-8, because the launcher writes runner.log as UTF-16LE. Without this
+	// the "Listening for Jobs" match never fires and every windows cycle dies
+	// at the PROVISION deadline.
+	if !strings.Contains(watcherScriptWindows, "0xFF -and $h[1] -eq 0xFE") {
+		t.Error("watcher script must detect a UTF-16LE BOM")
+	}
+	if !strings.Contains(watcherScriptWindows, "[Text.Encoding]::Unicode") {
+		t.Error("watcher script must decode UTF-16LE via [Text.Encoding]::Unicode")
+	}
+	if !strings.Contains(watcherScriptWindows, "GetString($buf, 0, $r)") {
+		t.Error("watcher script must decode the drained bytes with the detected encoding")
+	}
+	if !strings.Contains(watcherScriptWindows, `$avail -= ($avail % 2)`) {
+		t.Error("watcher script must align a two-byte-encoding drain window to whole code units")
 	}
 }

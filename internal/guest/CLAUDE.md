@@ -89,13 +89,23 @@ edges only.
   (the launcher may not have picked up `.jitconfig` at the moment the watcher
   starts); PROVISION's own deadline is what bounds a launcher that never
   starts, not the watcher itself.
-- **The watcher writes RAW bytes to the stdout stream, never through
-  `[Console]::Out`.** `[Console]::Out` is a `TextWriter` bound to the
-  console's OEM codepage — re-encoding the runner's log through it mangles
-  non-ASCII output, and a drain boundary landing mid-multibyte-sequence
-  corrupts it further. `[Console]::OpenStandardOutput()` + a raw byte
-  `Write` sidesteps both; decoding is left to the host side, the same as
-  every POSIX `Proc`'s output. The exit-code read is guarded by an
+- **The watcher decodes `runner.log` by its BOM and re-emits UTF-8; it does
+  NOT forward raw bytes.** The launcher writes the log via PowerShell 5.1's
+  `*>` redirect, which encodes as UTF-16LE (Windows' native "Unicode") — so
+  the on-disk bytes are `L\0i\0s\0t...`, and the FSM's UTF-8
+  `strings.Contains(line, "Listening for Jobs")` match can never fire against
+  them. This was the bug that made every windows cycle die at the PROVISION
+  deadline with a healthy, listening runner. The watcher detects the BOM
+  (UTF-16LE/BE, UTF-8, or none) once, decodes each drained chunk with that
+  encoding, and writes UTF-8 to `[Console]::OpenStandardOutput()` (still the
+  raw stream, never the OEM-codepage `[Console]::Out` TextWriter). Keyed off
+  the BOM rather than assuming one encoding on purpose: UTF-16LE is the
+  platform default any Windows tool may reach for, and the daemon is the one
+  consumer that must be right regardless of which wrote the file. Two-byte
+  encodings align the drain window to whole code units (`$avail - $avail % 2`)
+  so a poll can't split a UTF-16 unit; a lone surrogate at a boundary (astral
+  chars, absent from runner logs) degrades to U+FFFD. The exit-code read is
+  guarded by an
   integer regex (`$code -match '^-?\d+$'`) before the `[int]` cast — the
   sign matters (a crashed process reports a negative NTSTATUS exit code;
   digits-only would loop forever on exactly the exits that most need

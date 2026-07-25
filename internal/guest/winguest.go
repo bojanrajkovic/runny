@@ -260,12 +260,21 @@ const (
 // up .jitconfig at the moment this starts) by simply continuing to poll —
 // PROVISION's own deadline is what bounds a launcher that never starts.
 //
-// Drain writes the raw log bytes straight to the standard-output stream
-// rather than through [Console]::Out (a TextWriter bound to the console's
-// OEM codepage): re-encoding through it would mangle non-ASCII runner
-// output, and a drain boundary landing mid-multibyte-sequence would corrupt
-// it further. Writing the bytes verbatim leaves decoding to the host side,
-// exactly like every POSIX Proc's output already does.
+// Drain decodes the log with the encoding named by its byte-order mark and
+// re-emits UTF-8 to the standard-output stream, because the FSM matches the
+// "Listening for Jobs" marker as a UTF-8 string. This is load-bearing on
+// Windows, not defensive dressing: the image's launcher writes runner.log
+// via PowerShell 5.1's `*>` redirect, which encodes the file as UTF-16LE
+// (Windows' native "Unicode") — so the raw bytes are `L\0i\0s\0t...`, and a
+// UTF-8 substring match never fires. The decode is keyed off the BOM rather
+// than assuming any single encoding, because UTF-16LE is the platform
+// default any number of Windows tools reach for, and the daemon is the one
+// place that has to be right regardless of which one wrote the file. For a
+// two-byte encoding the drain window is aligned to a whole number of code
+// units ($avail - $avail % 2) so a poll boundary can't split a UTF-16 unit;
+// a lone surrogate at a boundary (astral chars, effectively absent from
+// runner logs) degrades to U+FFFD, the same acceptable loss the old raw path
+// carried for split UTF-8 sequences.
 //
 // The exit-code file's content is guarded by an integer regex before `exit`
 // casts it — defense in depth: the 250ms settle-then-redrain before reading
@@ -278,21 +287,40 @@ const (
 const watcherScriptWindows = `$log = '` + runnerLogPathWindows + `'
 $exitFile = '` + runnerExitPathWindows + `'
 $pos = 0
+$enc = $null
+$utf8 = New-Object Text.UTF8Encoding($false)
 $stdout = [Console]::OpenStandardOutput()
+function Detect {
+  $fs = [IO.File]::Open($log, 'Open', 'Read', 'ReadWrite')
+  $h = New-Object byte[] ([Math]::Min(3, $fs.Length))
+  $fs.Read($h, 0, $h.Length) | Out-Null
+  $fs.Close()
+  if ($h.Length -ge 2 -and $h[0] -eq 0xFF -and $h[1] -eq 0xFE) { $script:enc = [Text.Encoding]::Unicode; $script:pos = 2 }
+  elseif ($h.Length -ge 2 -and $h[0] -eq 0xFE -and $h[1] -eq 0xFF) { $script:enc = [Text.Encoding]::BigEndianUnicode; $script:pos = 2 }
+  elseif ($h.Length -ge 3 -and $h[0] -eq 0xEF -and $h[1] -eq 0xBB -and $h[2] -eq 0xBF) { $script:enc = $script:utf8; $script:pos = 3 }
+  else { $script:enc = $script:utf8; $script:pos = 0 }
+}
 function Drain {
-  if (Test-Path $log) {
-    $len = (Get-Item $log).Length
-    if ($len -gt $script:pos) {
-      $fs = [IO.File]::Open($log, 'Open', 'Read', 'ReadWrite')
-      $fs.Seek($script:pos, 'Begin') | Out-Null
-      $buf = New-Object byte[] ($len - $script:pos)
-      $fs.Read($buf, 0, $buf.Length) | Out-Null
-      $fs.Close()
-      $script:stdout.Write($buf, 0, $buf.Length)
-      $script:stdout.Flush()
-      $script:pos = $len
-    }
+  if (-not (Test-Path $log)) { return }
+  if ($null -eq $script:enc) {
+    if ((Get-Item $log).Length -lt 2) { return }
+    Detect
   }
+  $len = (Get-Item $log).Length
+  if ($len -le $script:pos) { return }
+  $avail = $len - $script:pos
+  if ($script:enc.CodePage -eq 1200 -or $script:enc.CodePage -eq 1201) { $avail -= ($avail % 2) }
+  if ($avail -le 0) { return }
+  $fs = [IO.File]::Open($log, 'Open', 'Read', 'ReadWrite')
+  $fs.Seek($script:pos, 'Begin') | Out-Null
+  $buf = New-Object byte[] $avail
+  $r = $fs.Read($buf, 0, $avail)
+  $fs.Close()
+  if ($r -le 0) { return }
+  $b = $script:utf8.GetBytes($script:enc.GetString($buf, 0, $r))
+  $script:stdout.Write($b, 0, $b.Length)
+  $script:stdout.Flush()
+  $script:pos += $r
 }
 while ($true) {
   Drain

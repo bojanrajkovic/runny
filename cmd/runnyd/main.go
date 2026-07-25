@@ -96,12 +96,18 @@ func run(parent context.Context) error {
 	if err := systemHomeOwnershipError(dir, os.Geteuid(), systemHomeErr == nil); err != nil {
 		return err
 	}
+	dir, diagnosingOtherHome := doctorHome(*checkOnly, *configFlag, dir)
 	// Computed once here rather than re-derived at each of its two other
 	// use sites (the upgrade notice below, and Server.IsSystemDaemon) —
 	// each doing its own dir.String() == home.SystemHomeDir comparison.
 	isSystemDaemon := dir.String() == home.SystemHomeDir
-	if err := dir.Ensure(); err != nil {
-		return err
+	// Skipped when diagnosing another deployment's home (see doctorHome):
+	// -doctor is documented read-only, and scaffolding or chmod'ing a home
+	// that isn't the caller's own would break that promise.
+	if !diagnosingOtherHome {
+		if err := dir.Ensure(); err != nil {
+			return err
+		}
 	}
 	if d := dockerConfigDefault(isSystemDaemon, dir, os.Getenv("DOCKER_CONFIG")); d != "" {
 		if err := os.Setenv("DOCKER_CONFIG", d); err != nil {
@@ -1160,10 +1166,11 @@ func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*gi
 				if cached {
 					cacheNote = " (cached)"
 				}
-				// Name the credential file this check consulted: run as an
-				// operator rather than the service account, `runnyd -doctor`
-				// resolves the invoker's home, so the credentials here can
-				// differ from the ones the daemon will pull with.
+				// Name the credential file this check consulted: a bare
+				// `runnyd -doctor` (no -config) resolves the invoker's own
+				// home, not the daemon's, so the credentials here can still
+				// differ from the ones the daemon will pull with — pass
+				// -config to diagnose a specific deployment's own (#351).
 				add(name, true, fmt.Sprintf("%s → sha256:%s (%s uncompressed%s) [credentials: %s]",
 					ref, oci.ShortDigest(digest), oci.HumanBytes(diskBytes), cacheNote, oci.CredentialConfigPath()))
 				if !cached && diskBytes > maxImageBytes {

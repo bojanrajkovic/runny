@@ -9,6 +9,7 @@ go_library(
     srcs = [
         "competing.go",
         "dockerconfig.go",
+        "doctorhome.go",
         "drain.go",
         "fileowner_unix.go",
         "fileowner_windows.go",
@@ -159,6 +160,7 @@ go_test(
     srcs = [
         "competing_test.go",
         "dockerconfig_test.go",
+        "doctorhome_test.go",
         "drain_test.go",
         "installassert_test.go",
         "launchcontext_test.go",

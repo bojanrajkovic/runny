@@ -149,11 +149,22 @@ Set-Content -Path $cfgPath -Value ("PasswordAuthentication no` + "`r`n" + `" + $
 %sStart-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 1; Restart-Service sshd' | Out-Null
 `
 
-// scrambleLineWindowsTemplate randomizes the baked Administrator account's
-// password (ssh_hardening: scramble). Set-LocalUser, not `+"`net user`"+`: net
-// user prompts interactively for any password over 14 characters instead of
+// scrambleLineWindowsTemplate randomizes the AUTHENTICATED account's password
+// (ssh_hardening: scramble). $env:USERNAME resolves the account the sshd
+// session runs as — the Windows equivalent of the POSIX path's $(id -un) —
+// rather than a hardcoded name: hardcoding "Administrator" would scramble the
+// wrong account whenever the pool's ssh_user is any other administrator, so
+// the real account would keep its well-known password while verification
+// (against the never-installed generated password) still saw a rejection and
+// falsely passed. -ErrorAction Stop is load-bearing: Set-LocalUser's errors
+// are non-terminating by default (e.g. a generated password that violates
+// guest policy), so without it a failed scramble would sail through to the
+// detached restart and return 0, leaving the well-known password live while
+// rotation reports success — the same defensive posture Move-Item and icacls
+// already take in this file. Set-LocalUser, not `+"`net user`"+`: net user
+// prompts interactively for any password over 14 characters instead of
 // accepting one on the command line, which would hang the exec forever.
-const scrambleLineWindowsTemplate = `Set-LocalUser -Name Administrator -Password (ConvertTo-SecureString '%s' -AsPlainText -Force)
+const scrambleLineWindowsTemplate = `Set-LocalUser -Name $env:USERNAME -Password (ConvertTo-SecureString '%s' -AsPlainText -Force) -ErrorAction Stop
 `
 
 // rotateWindows is Rotate's windows branch: same mint → capture → install →

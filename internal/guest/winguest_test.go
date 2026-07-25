@@ -53,7 +53,10 @@ func TestRotateScriptWindowsPinsACLPrependAndDetachedRestart(t *testing.T) {
 
 // Plain rotate must never touch the account password; scramble uses
 // Set-LocalUser (net user prompts interactively above 14 chars and would
-// hang the exec).
+// hang the exec), targets the AUTHENTICATED account ($env:USERNAME, not a
+// hardcoded name — scrambling the wrong account leaves the real one's
+// well-known password live), and aborts loudly on failure (-ErrorAction Stop,
+// since Set-LocalUser errors are non-terminating by default).
 func TestRotateScrambleWindowsUsesSetLocalUser(t *testing.T) {
 	if strings.Contains(fmt.Sprintf(scrambleLineWindowsTemplate, "x"), "net user") {
 		t.Error("windows scramble line must not use net user")
@@ -61,8 +64,11 @@ func TestRotateScrambleWindowsUsesSetLocalUser(t *testing.T) {
 	if !strings.Contains(scrambleLineWindowsTemplate, "Set-LocalUser") {
 		t.Error("windows scramble line must use Set-LocalUser")
 	}
-	if !strings.Contains(scrambleLineWindowsTemplate, "-Name Administrator") {
-		t.Error("windows scramble line must target the baked Administrator account")
+	if !strings.Contains(scrambleLineWindowsTemplate, "-Name $env:USERNAME") {
+		t.Error("windows scramble line must target the authenticated account via $env:USERNAME, not a hardcoded name")
+	}
+	if !strings.Contains(scrambleLineWindowsTemplate, "-ErrorAction Stop") {
+		t.Error("windows scramble line must abort on a failed Set-LocalUser (-ErrorAction Stop)")
 	}
 }
 

@@ -20,6 +20,19 @@ type dockerConfig struct {
 	CredsStore  string                           `json:"credsStore"`
 }
 
+// CredentialConfigPath is the credential file this package reads, resolved the
+// same way credentialsFor resolves it (empty if it cannot be determined).
+// Exported so a caller can NAME the file in a diagnostic -- a 401 on a private
+// image is nearly always a missing or mis-keyed entry in this exact path, and
+// the operator cannot check it without being told which one it is.
+func CredentialConfigPath() string {
+	path, err := dockerConfigPath()
+	if err != nil {
+		return ""
+	}
+	return path
+}
+
 // dockerConfigPath is $DOCKER_CONFIG/config.json, defaulting to
 // ~/.docker/config.json -- the same default docker/oras/skopeo use.
 func dockerConfigPath() (string, error) {
@@ -79,6 +92,16 @@ func credentialsFor(host string) (username, password string, ok bool) {
 	if hasEntry {
 		if user, pass, ok := decodeAuth(entry.Auth); ok {
 			return user, pass, true
+		}
+		// Present but undecodable is a typo, not a delegation -- the docs have
+		// the operator base64 the credential by hand, so a truncated or
+		// mangled string is a likely mistake and must not look identical to
+		// having configured nothing. An EMPTY auth is different: that is the
+		// stub a helper-backed login leaves, diagnosed below.
+		if entry.Auth != "" {
+			slog.Warn("registry credential entry is not decodable as base64 user:pass; falling back to an anonymous pull",
+				"host", host, "path", path)
+			return "", "", false
 		}
 	}
 	// A keychain-backed `docker login` leaves an auths entry for the host with

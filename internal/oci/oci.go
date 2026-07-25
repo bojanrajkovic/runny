@@ -13,6 +13,7 @@ package oci
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -155,13 +156,39 @@ type Client struct {
 	// progress aggregator and a bounded.Stall, both safe under concurrency.
 	Progress func(bytes int64)
 
-	mu     sync.Mutex
-	tokens map[string]string // host -> bearer token
+	mu sync.Mutex
+	// auth maps host -> the ready-to-send Authorization value, "Bearer <tok>"
+	// or "Basic <b64>". One map for both schemes: the caller only ever wants
+	// "what do I send to this host", and caching the Basic case matters as
+	// much as the Bearer one — an image is hundreds of layer requests, and
+	// re-handshaking each would mean hundreds of deliberate 401s against a
+	// registry that may well be behind rate limiting or fail2ban.
+	auth map[string]string
 }
+
+// maxRedirects matches net/http's own default cap, which setting CheckRedirect
+// replaces rather than augments.
+const maxRedirects = 10
 
 func NewClient() *Client {
 	// No global timeout: pulls are long; ctx bounds them.
-	return &Client{hc: &http.Client{Timeout: 0, Transport: &obs.HTTPTransport{}}, tokens: map[string]string{}}
+	hc := &http.Client{Timeout: 0, Transport: &obs.HTTPTransport{}}
+	// Go copies Authorization across a redirect whenever the HOST matches,
+	// comparing hostnames only and never schemes — so a registry answering
+	// https with a 302 to http on the same host would have the client re-send
+	// the credential in the clear. That leaks a static registry password, not
+	// merely a scoped token. Refuse the downgrade instead; cross-host HTTPS
+	// redirects (blobs handed off to a CDN) are untouched.
+	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= maxRedirects {
+			return fmt.Errorf("stopped after %d redirects", maxRedirects)
+		}
+		if req.URL.Scheme != "https" && !isLoopbackHost(req.URL.Host) {
+			return fmt.Errorf("refusing redirect to plaintext %s: credentials would be sent in the clear", req.URL.Redacted())
+		}
+		return nil
+	}
+	return &Client{hc: hc, auth: map[string]string{}}
 }
 
 // Resolve returns the manifest digest for a ref (tag → digest, or the pinned
@@ -545,8 +572,6 @@ func (b *boundedWriter) Write(p []byte) (int, error) {
 // states the round trip's class here — a new call site cannot compile without
 // one.
 func (c *Client) get(ctx context.Context, class obs.HTTPClass, ref Ref, u, accept string) (*http.Response, error) {
-	var basicUser, basicPass string
-	var useBasic bool
 	for attempt := 0; ; attempt++ {
 		req, err := http.NewRequestWithContext(obs.WithHTTPClass(ctx, class), http.MethodGet, u, nil)
 		if err != nil {
@@ -555,17 +580,11 @@ func (c *Client) get(ctx context.Context, class obs.HTTPClass, ref Ref, u, accep
 		if accept != "" {
 			req.Header.Set("Accept", accept)
 		}
-		if useBasic {
-			// Safe over the wire by construction: u is built with
-			// scheme(ref.Host), which is plain http only for loopback.
-			req.SetBasicAuth(basicUser, basicPass)
-		} else {
-			c.mu.Lock()
-			if tok := c.tokens[ref.Host]; tok != "" {
-				req.Header.Set("Authorization", "Bearer "+tok)
-			}
-			c.mu.Unlock()
+		c.mu.Lock()
+		if v := c.auth[ref.Host]; v != "" {
+			req.Header.Set("Authorization", v)
 		}
+		c.mu.Unlock()
 		resp, err := c.hc.Do(req)
 		if err != nil {
 			return nil, err
@@ -576,9 +595,12 @@ func (c *Client) get(ctx context.Context, class obs.HTTPClass, ref Ref, u, accep
 			if isBasicChallenge(challenge) {
 				user, pass, ok := credentialsFor(ref.Host)
 				if !ok {
-					return nil, fmt.Errorf("GET %s: registry requires Basic authentication and no credentials are configured for %s", u, ref.Host)
+					return nil, fmt.Errorf("GET %s: registry requires Basic authentication and no credentials are configured for %s (expected an auths entry keyed exactly %q in %s)",
+						u, ref.Host, ref.Host, CredentialConfigPath())
 				}
-				basicUser, basicPass, useBasic = user, pass, true
+				c.mu.Lock()
+				c.auth[ref.Host] = "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
+				c.mu.Unlock()
 				continue
 			}
 			if err := c.fetchToken(ctx, ref, challenge); err != nil {
@@ -589,6 +611,14 @@ func (c *Client) get(ctx context.Context, class obs.HTTPClass, ref Ref, u, accep
 		if resp.StatusCode != http.StatusOK {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 			_ = resp.Body.Close()
+			// A 401 that survived the challenge dance is nearly always a
+			// missing or mis-keyed credential, and the docs promise the log
+			// says so. Name the exact file and key rather than leaving the
+			// operator a bare status code.
+			if resp.StatusCode == http.StatusUnauthorized {
+				return nil, fmt.Errorf("GET %s: HTTP %d: %s (if this image is private, check for an auths entry keyed exactly %q in %s)",
+					u, resp.StatusCode, b, ref.Host, CredentialConfigPath())
+			}
 			return nil, fmt.Errorf("GET %s: HTTP %d: %s", u, resp.StatusCode, b)
 		}
 		return resp, nil
@@ -639,7 +669,7 @@ func (c *Client) fetchToken(ctx context.Context, ref Ref, challenge string) erro
 		return fmt.Errorf("registry token response unusable (HTTP %d): %v", resp.StatusCode, err)
 	}
 	c.mu.Lock()
-	c.tokens[ref.Host] = tok.Token
+	c.auth[ref.Host] = "Bearer " + tok.Token
 	c.mu.Unlock()
 	return nil
 }

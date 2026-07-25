@@ -103,6 +103,35 @@ func TestCredentialsForUnreadableConfigWarns(t *testing.T) {
 	}
 }
 
+// docs/deploy.md has the operator base64 the credential by hand, so a
+// truncated or mangled string is a likely mistake. It must not look identical
+// to having configured nothing -- that is a bare 401 with no trace of why.
+func TestCredentialsForUndecodableAuthWarns(t *testing.T) {
+	writeDockerConfig(t, `{"auths":{"registry.example.com":{"auth":"!!!not-base64!!!"}}}`)
+	logs := captureWarnings(t)
+
+	if _, _, ok := credentialsFor("registry.example.com"); ok {
+		t.Fatal("expected no credentials from an undecodable auth entry")
+	}
+	if !strings.Contains(logs.String(), "decodable") {
+		t.Fatalf("expected a warning about the undecodable entry, got: %s", logs.String())
+	}
+}
+
+// Valid base64 that does not contain a colon is the same class of typo.
+func TestCredentialsForAuthWithoutColonWarns(t *testing.T) {
+	noColon := base64.StdEncoding.EncodeToString([]byte("alice-no-colon"))
+	writeDockerConfig(t, fmt.Sprintf(`{"auths":{"registry.example.com":{"auth":%q}}}`, noColon))
+	logs := captureWarnings(t)
+
+	if _, _, ok := credentialsFor("registry.example.com"); ok {
+		t.Fatal("expected no credentials from an auth entry with no colon")
+	}
+	if !strings.Contains(logs.String(), "decodable") {
+		t.Fatalf("expected a warning about the malformed entry, got: %s", logs.String())
+	}
+}
+
 // The shape a keychain-backed `docker login` actually leaves behind: an auths
 // entry for the host with no "auth" field, next to a global credsStore. The
 // operator's config LOOKS like it holds this credential, so runny must say
@@ -196,6 +225,58 @@ func TestGetBasicChallengeWithoutCredentialsIsLegible(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Basic authentication") {
 		t.Fatalf("error should name Basic auth as the cause, got: %v", err)
+	}
+}
+
+// Go copies Authorization across a redirect on a hostname match without
+// comparing schemes, so an https registry answering 302 to http on the same
+// host would re-send the credential in the clear -- a static registry
+// password, not a scoped token. The client must refuse the hop.
+func TestClientRefusesPlaintextRedirect(t *testing.T) {
+	var leaked string
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked = r.Header.Get("Authorization")
+	}))
+	t.Cleanup(plain.Close)
+
+	// A non-loopback Host header is what makes this a downgrade rather than
+	// the permitted local-registry case; the request still dials the test
+	// server, but the URL the redirect policy sees is a public-looking http one.
+	target := "http://registry.example.com" + "/v2/"
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target, http.StatusFound)
+	}))
+	t.Cleanup(redirector.Close)
+
+	c := NewClient()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, redirector.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.SetBasicAuth("alice", "hunter2")
+	resp, err := c.hc.Do(req)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("expected the plaintext redirect to be refused")
+	}
+	if !strings.Contains(err.Error(), "plaintext") {
+		t.Fatalf("error should name the plaintext downgrade, got: %v", err)
+	}
+	if leaked != "" {
+		t.Fatalf("credentials leaked over cleartext: %q", leaked)
+	}
+}
+
+// A cross-host HTTPS redirect is legitimate -- registries hand blobs off to a
+// CDN that way -- and must NOT be refused by the downgrade guard.
+func TestClientAllowsCrossHostHTTPSRedirect(t *testing.T) {
+	c := NewClient()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://registry.example.com/v2/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.hc.CheckRedirect(req, nil); err != nil {
+		t.Fatalf("https redirect should be allowed, got: %v", err)
 	}
 }
 

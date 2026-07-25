@@ -88,6 +88,13 @@ func TestStopRunnerScriptWindowsShape(t *testing.T) {
 	if !strings.Contains(stopRunnerScriptWindows, "exit 0") || !strings.Contains(stopRunnerScriptWindows, "exit 1") {
 		t.Error("windows stop script must have both a proven-dead and a survived exit path")
 	}
+	// The verification-tool-failure arm of the 0/1/2 contract: a failed CIM
+	// query must exit 2 ("cannot verify"), never fall through to the empty
+	// result reading as proven-dead — the same arm the POSIX script implements
+	// for a pgrep failure.
+	if !strings.Contains(stopRunnerScriptWindows, "exit 2") || !strings.Contains(stopRunnerScriptWindows, "-ErrorAction Stop") {
+		t.Error("windows stop script must exit 2 when the CIM process query itself fails")
+	}
 }
 
 // startRunnerWindows refuses a runner asset name that isn't a well-formed

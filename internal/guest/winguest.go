@@ -458,7 +458,12 @@ const pullDiagScriptWindows = `Get-ChildItem -Path '` + runnerDirWindows + `\_di
 const stopRunnerScriptWindows = `$pat = '--jitconfig'
 $self = $PID
 function Alive {
-  Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*$pat*" -and $_.ProcessId -ne $self -and $_.ParentProcessId -ne $self }
+  try {
+    Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.CommandLine -like "*$pat*" -and $_.ProcessId -ne $self -and $_.ParentProcessId -ne $self }
+  } catch {
+    Write-Error "runny: CIM process query failed; cannot verify runner death: $_"
+    exit 2
+  }
 }
 Alive | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 $i = 0

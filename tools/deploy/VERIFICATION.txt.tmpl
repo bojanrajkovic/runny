@@ -1,0 +1,21 @@
+VERIFICATION
+
+runnyd.exe and runnyctl.exe in this package are unmodified copies of the
+windows/amd64 binaries built and attested by runny's release workflow
+(ADR-0010) for release ${VERSION}:
+
+  https://github.com/bojanrajkovic/runny/releases/tag/v${VERSION}
+
+Verify the binaries in this package match that release:
+
+  certutil -hashfile tools\runnyd.exe SHA256
+  # expect: ${RUNNYD_SHA256}
+
+  certutil -hashfile tools\runnyctl.exe SHA256
+  # expect: ${RUNNYCTL_SHA256}
+
+The same binaries are attested via GitHub's build provenance
+(actions/attest-build-provenance); verify with:
+
+  gh attestation verify tools\runnyd.exe -R bojanrajkovic/runny
+  gh attestation verify tools\runnyctl.exe -R bojanrajkovic/runny

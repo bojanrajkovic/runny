@@ -62,6 +62,12 @@ jobs:
       - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
           cache: false
+      # dotnet pack (below) takes a bare .nuspec directly as of .NET 10 — no
+      # placeholder .csproj needed. Pinned independently of mise since it's
+      # the one non-Bazel, non-mise tool this job needs.
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.x"
 
       # Import the Developer ID cert into a short-lived keychain. Skipped
       # (and the keychain cleanup step no-ops) when the secret is absent.
@@ -145,16 +151,63 @@ jobs:
           cp bazel-bin/apps/Runny/Runny_notarized_dmg.dmg "Runny_${VERSION}.dmg"
           shasum -a 256 "Runny_${VERSION}.dmg" > "Runny_${VERSION}.dmg.sha256"
           echo "dmg_sha256=$(cut -d' ' -f1 < "Runny_${VERSION}.dmg.sha256")" >> "$GITHUB_OUTPUT"
+
+      # Windows hosts are a runner target too (ADR-0026), and runnyd/runnyctl
+      # already cross-compile clean for both windows/amd64 and windows/arm64 —
+      # CI proves it (ci.yml's linux job). No signing applies off Darwin
+      # (codesign_binary/notarize_binary are target_compatible_with macos
+      # only), so these are the bare stamped_go_binary outputs, zipped like
+      # the darwin tarball. Each `bazel build --platforms=...` call moves
+      # bazel-bin's convenience symlink to that invocation's own output tree,
+      # so every exe is copied out immediately after its own build — never
+      # after a later --platforms call has pointed the symlink elsewhere.
+      - name: cross-build + package (windows)
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          for arch in amd64 arm64; do
+            mise x -- bazel build --config=ci --config=release \
+              --platforms="@rules_go//go/toolchain:windows_$arch" \
+              -- //cmd/runnyd //cmd/runnyctl
+            mkdir -p "dist-windows-$arch"
+            cp "bazel-bin/cmd/runnyd/runnyd_/runnyd.exe" "dist-windows-$arch/runnyd.exe"
+            cp "bazel-bin/cmd/runnyctl/runnyctl_/runnyctl.exe" "dist-windows-$arch/runnyctl.exe"
+            (cd "dist-windows-$arch" && zip "../runny_${VERSION}_windows_${arch}.zip" runnyd.exe runnyctl.exe)
+            shasum -a 256 "runny_${VERSION}_windows_${arch}.zip" > "runny_${VERSION}_windows_${arch}.zip.sha256"
+          done
+
+      # Chocolatey, release-asset-only for now (ADR-0010 amendment): no
+      # self-hosted feed yet, so there's no `choco source add` — users
+      # `choco install <downloaded-path>`. Built from the windows/amd64 exes
+      # staged above; Chocolatey has no meaningful arm64 story to target yet.
+      - name: package (chocolatey)
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          mkdir -p choco/tools
+          cp dist-windows-amd64/runnyd.exe dist-windows-amd64/runnyctl.exe choco/tools/
+          RUNNYD_SHA256=$(shasum -a 256 choco/tools/runnyd.exe | cut -d' ' -f1)
+          RUNNYCTL_SHA256=$(shasum -a 256 choco/tools/runnyctl.exe | cut -d' ' -f1)
+          export VERSION RUNNYD_SHA256 RUNNYCTL_SHA256
+          envsubst '${VERSION} ${RUNNYD_SHA256} ${RUNNYCTL_SHA256}' \
+            < tools/deploy/runny.nuspec.tmpl > choco/runny.nuspec
+          envsubst '${VERSION} ${RUNNYD_SHA256} ${RUNNYCTL_SHA256}' \
+            < tools/deploy/VERIFICATION.txt.tmpl > choco/tools/VERIFICATION.txt
+          dotnet pack choco/runny.nuspec -o .
+          shasum -a 256 "runny.${VERSION}.nupkg" > "runny.${VERSION}.nupkg.sha256"
+
       - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: |
             runny_*.tar.gz
+            runny_*.zip
+            runny.*.nupkg
             Runny_*.dmg
       - name: attach to release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" runny_*.tar.gz runny_*.sha256 Runny_*.dmg Runny_*.dmg.sha256
+        run: gh release upload "$TAG" runny_*.tar.gz runny_*.sha256 runny_*.zip runny.*.nupkg runny.*.nupkg.sha256 Runny_*.dmg Runny_*.dmg.sha256
 
   homebrew:
     name: update tap formula
@@ -230,3 +283,29 @@ jobs:
           # named 'master', and brew reads the formula from the default branch
           # (main). HEAD:main pushes there regardless of the local name.
           git push origin HEAD:main
+
+  winget:
+    name: submit winget manifest update
+    needs: artifacts
+    runs-on: ubuntu-latest
+    # WINGET_TOKEN is a classic PAT scoped public_repo -- it can open a PR
+    # against any public repo you can fork, a broader blast radius than the
+    # installation-token-minting releaser-app credential (scoped to
+    # homebrew-tap alone). It gets its own environment rather than sharing
+    # releaser-app's, restricted to v* tags the same way the `release`
+    # environment restricts the signing/notary secrets.
+    environment: winget
+    # winget-pkgs has no pre-release concept — a beta tag would overwrite the
+    # stable manifest with a beta version, so this only runs for real releases.
+    # Also gracefully no-ops until WINGET_PACKAGE_IDENTIFIER is configured (see
+    # ADR-0010's amendment: the first submission to microsoft/winget-pkgs is a
+    # one-time manual `wingetcreate new`, since this action can only update a
+    # manifest that already exists there).
+    if: ${{ github.event.release.prerelease == false && vars.WINGET_PACKAGE_IDENTIFIER != '' }}
+    permissions: {}
+    steps:
+      - uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
+        with:
+          identifier: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}
+          installers-regex: "_windows_.*\\.zip$"
+          token: ${{ secrets.WINGET_TOKEN }}

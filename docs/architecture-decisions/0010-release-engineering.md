@@ -87,3 +87,48 @@ from conventional commits) + goreleaser (build, package, publish, brew tap).
 - release-please PRs are created with `GITHUB_TOKEN`, whose events do not
   trigger CI; the release PR shows checks only after a manual nudge or a
   PAT upgrade. Acceptable for now.
+
+## Amended: 2026-07-25 — Windows release artifacts
+
+Windows hosts are a runner target (ADR-0026/ADR-0027), and `runnyd`/`runnyctl`
+were being built ad hoc for that deployment rather than pinned to a release.
+The `artifacts` job now also cross-compiles both `windows/amd64` and
+`windows/arm64` (via `--platforms=@rules_go//go/toolchain:windows_{amd64,arm64}`,
+already proven by `ci.yml`) and attaches
+`runny_<version>_windows_{amd64,arm64}.zip` the same way as the darwin
+tarball — checksummed and attested, no signing (`codesign_binary`/
+`notarize_binary` are `target_compatible_with` macOS only, so these ship the
+bare `stamped_go_binary` outputs).
+
+**winget** manifests are submitted to the community `microsoft/winget-pkgs`
+repo via `vedantmgoyal9/winget-releaser`, gated on the
+`WINGET_PACKAGE_IDENTIFIER` repo variable and `WINGET_TOKEN` secret (same
+graceful-no-op-until-configured shape as the Homebrew tap), and skipped on
+pre-releases (winget has no beta-channel concept, so a beta tag must never
+overwrite the stable manifest). `WINGET_TOKEN` — a classic PAT scoped
+`public_repo`, able to open a PR against any public repo the account can
+fork — lives in its own `winget` environment restricted to `v*` tags, the
+same restriction the `release` environment already applies to the
+signing/notary secrets; it does not share `releaser-app`'s environment,
+since that credential's blast radius (an installation token scoped to
+`homebrew-tap` alone) is deliberately narrower. **Rejected:** a self-hosted
+winget source,
+which needs a REST index service (no static-file equivalent of a brew tap
+exists for winget) — disproportionate infrastructure for the reach gained.
+This path has a one-time manual prerequisite the workflow cannot do for you:
+fork `microsoft/winget-pkgs` under the same account, mint a classic PAT with
+`public_repo` scope as `WINGET_TOKEN`, and submit the *first* manifest
+version by hand (via `wingetcreate new`) — `winget-releaser` can only update
+a manifest that already exists upstream.
+
+**Chocolatey** ships as a release-asset-only `.nupkg`
+(`runny.<version>.nupkg`, built with `dotnet pack` directly against
+`tools/deploy/runny.nuspec.tmpl` — no placeholder `.csproj` needed as of
+.NET 10) — install via `choco install <downloaded-path>`. **Rejected for
+now:** a self-hosted feed via Sleet (a serverless static NuGet v3 feed
+generator that can target S3/GitHub Pages, no server component) — mechanically
+sound but needs a Sleet/dotnet publish step in CI and an unvalidated
+GitHub-Pages-as-NuGet-v3-host spike; revisit once that's been proven out.
+**Rejected:** pushing to the moderated `chocolatey.org` community repository
+— an API key plus a review queue (days on first submission) for a channel
+Homebrew's self-hosted-tap precedent argues against defaulting to.

@@ -61,15 +61,20 @@ edges only.
   instead of applying globally. `rotateScriptWindowsTemplate` builds the new
   content as `directive + existing`, not `existing + directive` — keep it
   that way.
-- **The sshd service restart runs DETACHED, never inline.** Windows sshd
-  connections are children of the service process (unlike Linux's
-  per-connection socket activation or systemd reload) — restarting it from
-  inside the session issuing the restart kills that very session before it
-  can report success. `rotateScriptWindowsTemplate`'s last line spawns a
-  separate `Start-Process` that sleeps 1s then calls `Restart-Service sshd`,
-  and the script's own exit lands before the restart does. The reconnect
-  that follows relies on `sshx.WaitFor`'s own retry loop to ride out the gap
-  where the old sshd may still be answering.
+- **The sshd service restart runs INLINE, not detached.** A detached
+  `Start-Process` (sleep, then `Restart-Service sshd`) was tried first, on
+  the theory that an inline restart would kill the session issuing it —
+  hardware-proven wrong against the real image: the detached child never
+  actually reached `Restart-Service` (the service's PID never changed
+  across two separate attempts), while a direct inline `Restart-Service`
+  produced a new PID immediately and left the issuing session alive to
+  report its own exit status. It wouldn't matter even if some other image's
+  sshd DOES drop the session here — `rotateWindows` discards this connection
+  either way and reconnects fresh with the new key (`sshx.WaitFor`), so
+  there is nothing about this session's survival worth protecting. The
+  restart carries `-ErrorAction Stop` so a failure aborts the script loudly
+  instead of leaving the old password/key state live while rotation reports
+  success.
 - **Windows guests only ever push, never mount.** `hcsMachine.NeedsRunnerPush()`
   is unconditionally true for a windows guest (it only ever boots on the HCS
   host — see `internal/vm/CLAUDE.md`), so there is no live-share variant of

@@ -137,17 +137,23 @@ const captureHostKeysWindowsScript = `Get-ChildItem 'C:\ProgramData\ssh\ssh_host
 // apply only to a subset of matches. Prepending guarantees the directive is
 // the first one sshd reads, for every connection.
 //
-// Restarting sshd from inside the session that is issuing the restart would
-// kill this very session — Windows sshd connections are children of the
-// service process, unlike systemd's per-connection reload on Linux. The
-// restart is handed to a DETACHED process that sleeps briefly before
-// restarting the service, so this script's own exit status (and the
-// session carrying it) survives to be read back.
+// The restart runs INLINE, directly — not detached. A detached Start-Process
+// was tried first on the theory that restarting sshd from inside the
+// session issuing the restart would kill that very session (Windows sshd
+// connections are children of the service process, unlike systemd's
+// per-connection reload on Linux). Hardware-proven wrong against the real
+// image: the detached child never actually reached Restart-Service (the
+// service's PID never changed), while a direct inline Restart-Service
+// produced a new PID immediately and left the issuing session alive to
+// report its own exit status. It also wouldn't matter if some other image's
+// sshd DOES drop the session here — rotateWindows discards this connection
+// either way and reconnects fresh with the new key (sshx.WaitFor below), so
+// there is nothing about this session's survival worth protecting.
 var rotateScriptWindowsTemplate = `$pub = '%s'
 ` + psAppendAuthorizedKeyLine("$pub") + `$cfgPath = 'C:\ProgramData\ssh\sshd_config'
 $existing = Get-Content -Path $cfgPath -Raw
 Set-Content -Path $cfgPath -Value ("PasswordAuthentication no` + "`r`n" + `" + $existing) -NoNewline
-%sStart-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 1; Restart-Service sshd' | Out-Null
+%sRestart-Service sshd -ErrorAction Stop
 `
 
 // scrambleLineWindowsTemplate randomizes the AUTHENTICATED account's password
@@ -160,7 +166,7 @@ Set-Content -Path $cfgPath -Value ("PasswordAuthentication no` + "`r`n" + `" + $
 // falsely passed. -ErrorAction Stop is load-bearing: Set-LocalUser's errors
 // are non-terminating by default (e.g. a generated password that violates
 // guest policy), so without it a failed scramble would sail through to the
-// detached restart and return 0, leaving the well-known password live while
+// restart and return 0, leaving the well-known password live while
 // rotation reports success — the same defensive posture Move-Item and icacls
 // already take in this file. Set-LocalUser, not `+"`net user`"+`: net user
 // prompts interactively for any password over 14 characters instead of
@@ -224,8 +230,7 @@ func randIndex(n int) int {
 // step is a PowerShell script against Windows OpenSSH's own config surface
 // (administrators_authorized_keys, sshd_config, the sshd service) instead of
 // a POSIX one-liner. See rotateScriptWindowsTemplate's doc comment for the
-// ACL and prepend traps, and the detached-restart doc comment there for why
-// the service restart can't run inline.
+// ACL, prepend, and inline-restart traps.
 func (d Dialer) rotateWindows(ctx bounded.Context, addr string, pg *Guest, signer ssh.Signer) (statemachine.Guest, error) {
 	out, err := pg.runStepOutput(ctx, "rotate: capturing host keys", encodedCommand(captureHostKeysWindowsScript), nil)
 	if err != nil {
@@ -252,15 +257,15 @@ func (d Dialer) rotateWindows(ctx bounded.Context, addr string, pg *Guest, signe
 		return nil, err
 	}
 
-	// Prove password auth is dead BEFORE dialing the supervision client. The
-	// restart is async (a detached process sleeps ~1s, then Restart-Service),
-	// and unlike Linux's connection-preserving SIGHUP reload a Windows sshd
-	// restart drops every session. Password auth is off only on the
-	// post-restart sshd, so verifyPasswordAuthDead — which retries until it
-	// sees a rejection — both proves the flip and gates on the restart having
-	// landed. Dialing the client first could bind it to the pre-restart sshd
-	// (the cycle key is already installed there too), which the restart would
-	// then kill, handing back a dead client for the rest of the cycle.
+	// Prove password auth is dead BEFORE dialing the supervision client.
+	// Password auth is off only on the post-restart sshd, so
+	// verifyPasswordAuthDead — which retries until it sees a rejection —
+	// both proves the flip and gates on the restart having landed (the
+	// restart's own script exit isn't proof by itself: this session's exit
+	// status can't tell us whether a NEW inbound connection sees the old or
+	// new sshd). Dialing the client first could bind it to the pre-restart
+	// sshd (the cycle key is already installed there too), reporting success
+	// against a config that hasn't actually taken effect yet.
 	verifyCfg := d.SSH
 	verifyCfg.Password = verifyPW
 	if err := verifyPasswordAuthDead(ctx, addr, verifyCfg); err != nil {

@@ -145,16 +145,42 @@ jobs:
           cp bazel-bin/apps/Runny/Runny_notarized_dmg.dmg "Runny_${VERSION}.dmg"
           shasum -a 256 "Runny_${VERSION}.dmg" > "Runny_${VERSION}.dmg.sha256"
           echo "dmg_sha256=$(cut -d' ' -f1 < "Runny_${VERSION}.dmg.sha256")" >> "$GITHUB_OUTPUT"
+
+      # Windows hosts are a runner target too (ADR-0026), and runnyd/runnyctl
+      # already cross-compile clean for both windows/amd64 and windows/arm64 —
+      # CI proves it (ci.yml's linux job). No signing applies off Darwin
+      # (codesign_binary/notarize_binary are target_compatible_with macos
+      # only), so these are the bare stamped_go_binary outputs, zipped like
+      # the darwin tarball. Each `bazel build --platforms=...` call moves
+      # bazel-bin's convenience symlink to that invocation's own output tree,
+      # so every exe is copied out immediately after its own build — never
+      # after a later --platforms call has pointed the symlink elsewhere.
+      - name: cross-build + package (windows)
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          for arch in amd64 arm64; do
+            mise x -- bazel build --config=ci --config=release \
+              --platforms="@rules_go//go/toolchain:windows_$arch" \
+              -- //cmd/runnyd //cmd/runnyctl
+            mkdir -p "dist-windows-$arch"
+            cp "bazel-bin/cmd/runnyd/runnyd_/runnyd.exe" "dist-windows-$arch/runnyd.exe"
+            cp "bazel-bin/cmd/runnyctl/runnyctl_/runnyctl.exe" "dist-windows-$arch/runnyctl.exe"
+            (cd "dist-windows-$arch" && zip "../runny_${VERSION}_windows_${arch}.zip" runnyd.exe runnyctl.exe)
+            shasum -a 256 "runny_${VERSION}_windows_${arch}.zip" > "runny_${VERSION}_windows_${arch}.zip.sha256"
+          done
+
       - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: |
             runny_*.tar.gz
+            runny_*.zip
             Runny_*.dmg
       - name: attach to release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" runny_*.tar.gz runny_*.sha256 Runny_*.dmg Runny_*.dmg.sha256
+        run: gh release upload "$TAG" runny_*.tar.gz runny_*.sha256 runny_*.zip Runny_*.dmg Runny_*.dmg.sha256
 
   homebrew:
     name: update tap formula

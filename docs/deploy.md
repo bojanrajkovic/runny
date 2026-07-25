@@ -432,6 +432,11 @@ restart and the ADR-0014 reload depend on.
 
 ### Windows
 
+Get `runnyd`/`runnyctl` onto the host first (ADR-0010): download
+`runny_<version>_windows_{amd64,arm64}.zip` from the
+[Releases](https://github.com/bojanrajkovic/runny/releases) page and extract
+it anywhere on `PATH`.
+
 `runnyctl install-daemon`/`uninstall-daemon` are the same commands on Windows,
 run from an **elevated** prompt instead of via `sudo`. `--config` behaves the
 same; `--operator` does not — it must name the account running the elevated

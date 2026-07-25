@@ -87,3 +87,15 @@ from conventional commits) + goreleaser (build, package, publish, brew tap).
 - release-please PRs are created with `GITHUB_TOKEN`, whose events do not
   trigger CI; the release PR shows checks only after a manual nudge or a
   PAT upgrade. Acceptable for now.
+
+## Amended: 2026-07-25 — Windows release artifacts
+
+Windows hosts are a runner target (ADR-0026/ADR-0027), and `runnyd`/`runnyctl`
+were being built ad hoc for that deployment rather than pinned to a release.
+The `artifacts` job now also cross-compiles both `windows/amd64` and
+`windows/arm64` (via `--platforms=@rules_go//go/toolchain:windows_{amd64,arm64}`,
+already proven by `ci.yml`) and attaches
+`runny_<version>_windows_{amd64,arm64}.zip` the same way as the darwin
+tarball — checksummed and attested, no signing (`codesign_binary`/
+`notarize_binary` are `target_compatible_with` macOS only, so these ship the
+bare `stamped_go_binary` outputs).

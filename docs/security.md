@@ -37,8 +37,9 @@ The rules a contributor follows to keep this intact live in
 
 ## Guest network isolation
 
-**Concurrent guests cannot reach each other over the network**, by default and
-not configurably.
+**On a macOS host, concurrent guests cannot reach each other over the network**,
+by default and not configurably. **On a Windows host this is not established** —
+see below.
 
 runny attaches every guest with `VZNATNetworkDeviceAttachment`
 (`internal/vm/vz_darwin.go`), which enables vmnet's bridge isolation. Guests
@@ -46,12 +47,23 @@ share the `192.168.64.0/24` NAT subnet, but the bridge drops guest-to-guest
 frames while still allowing each guest to reach the gateway and the host to
 reach each guest. A compromised job cannot pivot to a sibling guest's services
 (e.g. `ssh`) — the packets have no route. Apple exposes no API to disable, or
-further tighten, this; it is a fixed property of the attachment.
+further tighten, this; it is a fixed property of the attachment. This is
+empirical, not assumed: issue #25 tested the pivot directly and disproved it
+(recorded in
+[ADR-0013](architecture-decisions/0013-ephemeral-ssh-keys-in-band-rotation.md)).
+
+**The Hyper-V backend has no equivalent claim.** It attaches each guest to the
+shared HNS Default Switch with a plain endpoint carrying no ACL, VLAN, or
+isolation policy (`internal/vm/hcs_windows.go`), and nobody has run the
+sibling-reachability test there that #25 ran on darwin. Treat guest-to-guest
+reachability on a Windows host as **open** until someone does: assume guests can
+reach each other, and do not rely on network posture as a boundary between
+concurrent jobs on that platform.
 
 **Residual risk.** Bridge isolation does not defend against ARP spoofing (a
 guest poisoning the bridge's ARP table to intercept *host↔guest* traffic) or
 DHCP-pool exhaustion under heavy guest churn. The userspace packet filter
-[softnet](https://github.com/openai/softnet) closes both, but runs as a
+[softnet](https://github.com/cirruslabs/softnet) closes both, but runs as a
 SUID-root helper holding the `com.apple.vm.networking` entitlement — a
 privileged runtime dependency against the no-runtime-binary posture
 ([ADR-0008](architecture-decisions/0008-native-virtualization-framework.md)).
@@ -180,13 +192,18 @@ socket (no restart; the Windows control channel is a pipe with no file to
 stamp, so the home-dir ACE — which the gate reads — is the whole grant) —
 reaching the `GrantOperator`/`RevokeOperator` RPCs at all
 already means the caller is an operator, so granting another is transitive
-trust, not a new gate, the same posture ADR-0014 already established for
+trust, not a new gate, the same posture ADR-0014 (debug-key injection) already established for
 debug-key injection. Grants are attributed in an `operator-grants.jsonl`
 audit trail under the operator-writable home — a good-faith reconstruction
 aid, not a tamper-proof control, exactly like the `injected_keys` trail and
 the guest `authorized_keys` before it. `runnyctl operator revoke` refuses to
-remove the last operator (recoverable only via `sudo runnyctl
-install-daemon`, which resets the ACL to the install-time bootstrap). A root
+remove the last operator. On darwin that is recoverable only via `sudo runnyctl
+install-daemon`, which resets the ACL to the install-time bootstrap. **On
+Windows reinstall does not reset it**: `icacls /inheritance:d` converts and
+keeps existing explicit entries, so a reinstall re-grants the named operator
+while preserving every other live grant
+([ADR-0027](architecture-decisions/0027-windows-operator-identity.md)) —
+revocation, not reinstall, is the removal path there. A root
 peer is refused as a grant target (root already bypasses the socket's
 `0600` mode and needs no ACE). Per-user deployments have a single owner and
 no ACL-managed set, so `operator grant`/`revoke` require the system daemon;

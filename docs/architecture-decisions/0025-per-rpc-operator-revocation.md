@@ -62,7 +62,7 @@ lets a stream slip through unrevoked.
   no better guarantee than the event-driven registry gives for free.
 
 - **Per-handler rechecks scattered across each RPC method.** The
-  ADR-0014-era failure mode this whole change closes: identical logic
+  ADR-0014-era (debug-key injection) failure mode this whole change closes: identical logic
   duplicated per handler, one miss away from silently exempting a new RPC.
 
 ## Consequences

@@ -17,7 +17,7 @@ bug in both branches:
   stale recycle and cancelled a healthy boot that did nothing wrong — the exact
   failure class the watcher's own comment memorializes.
 
-Mid-job injection (ADR-0014) makes servicing commands during JOB a hard
+Mid-job injection (ADR-0014, debug-key injection) makes servicing commands during JOB a hard
 requirement — the operator must be able to install a key into a running job —
 so the latent bug must be fixed rather than worked around.
 
@@ -32,7 +32,7 @@ during JOB, with explicit semantics per kind.**
 | `CmdRecycle` plain | disarms any armed debug hold (audited, live status cleared), logs Warn; the job finishes and tears down as it structurally always does |
 | `CmdPause` | `setPaused(true)` immediately; a paused slot never enters a post-job DEBUG hold, and pausing while armed disarms now (audited) |
 | `CmdResume` | `setPaused(false)` immediately |
-| `CmdDebugKey` | inject-only + arm; the runner is never touched (ADR-0014) |
+| `CmdDebugKey` | inject-only + arm; the runner is never touched (ADR-0014, debug-key injection) |
 
 The asymmetric recycle split exists because "defer the recycle to job end" is a
 **structural no-op**: JOB always exits through TEARDOWN, so a plain recycle's

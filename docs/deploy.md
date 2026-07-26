@@ -428,7 +428,7 @@ stays valid. **Back up `config.yaml` first if you want to keep it.**
 
 Stop the daemon with `sudo launchctl bootout system/com.coderinserepeat.runnyd`,
 never by killing it: KeepAlive respawns it, which is what the ADR-0012 wedge
-restart and the ADR-0014 reload depend on.
+restart and the ADR-0014 (config reload) drain-and-respawn depend on.
 
 ### Windows
 
@@ -516,9 +516,9 @@ the SCM's recovery policy, the same role KeepAlive plays on darwin.
 darwin, nothing is kept for reinstall, since the service account has no uid to
 keep stable.
 
-A configured pool provisions Linux guests (arch matching the host's own —
-`amd64` on the amd64 Windows hosts this has been validated on) via bare
-Hyper-V compute systems (ADR-0026) — no `tart` binary, no classic Hyper-V VM. **A running guest
+A configured pool provisions Linux **or Windows** guests (arch matching the
+host's own — `amd64` on the amd64 Windows hosts both have been validated on)
+via bare Hyper-V compute systems (ADR-0026) — no `tart` binary, no classic Hyper-V VM. **A running guest
 does not show up in `Get-VM` or Hyper-V Manager**: bare compute systems bypass
 `vmms` entirely, so the operator-visible artifact is a `vmwp.exe` worker
 process per guest (`Get-Process vmwp`), not a `VM` object. The Default Switch
@@ -598,7 +598,7 @@ runnyctl reload --reason "why"
 launchctl kill SIGHUP gui/$(id -u)/com.coderinserepeat.runnyd
 ```
 
-What happens (ADR-0014):
+What happens (ADR-0014, config reload):
 
 - **Validation first.** The reload re-runs every startup check against the
   new file (parse, GitHub client construction per pool, the full doctor

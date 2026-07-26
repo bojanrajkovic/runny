@@ -35,8 +35,8 @@ type CLI struct {
 	Prune           PruneCmd           `cmd:"" help:"show (or reclaim) stale image bundles and runner tarballs"`
 	Operator        OperatorCmd        `cmd:"" help:"grant, revoke, or list operators"`
 	EditConfig      EditConfigCmd      `cmd:"" name:"edit-config" help:"edit the resolved home's config.yaml, validate it, then reload"`
-	InstallDaemon   InstallDaemonCmd   `cmd:"" name:"install-daemon" help:"install runnyd as a non-root system LaunchDaemon (requires root; macOS only)"`
-	UninstallDaemon UninstallDaemonCmd `cmd:"" name:"uninstall-daemon" help:"remove the system LaunchDaemon AND its home (config, key, artifacts)"`
+	InstallDaemon   InstallDaemonCmd   `cmd:"" name:"install-daemon" help:"install runnyd as an unprivileged system service (LaunchDaemon on macOS, SCM service on Windows; requires root/elevation)"`
+	UninstallDaemon UninstallDaemonCmd `cmd:"" name:"uninstall-daemon" help:"remove the system service AND its home (config, key, artifacts)"`
 	Image           ImageCmd           `cmd:"" help:"build tart-format OCI images"`
 }
 

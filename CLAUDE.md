@@ -4,20 +4,20 @@
 
 ## Project
 
-**runny** — an observable macOS GitHub Actions runner daemon: ephemeral, destroy-on-failure runner VMs on Virtualization.framework, fully compatible with tart's bundle/OCI image format but with no tart binary at runtime. Three artifacts: `runnyd` (Go daemon), `runnyctl` (Go CLI), `Runny` (SwiftUI app: menu bar + main window). See `docs/architecture/` for the shape and `docs/architecture-decisions/` for the decisions behind it.
+**runny** — an observable GitHub Actions runner daemon: ephemeral, destroy-on-failure runner VMs on Virtualization.framework (macOS hosts; macOS and Linux guests) or bare Hyper-V compute systems (Windows hosts; Linux and Windows guests), fully compatible with tart's bundle/OCI image format but with no tart binary at runtime. Three artifacts: `runnyd` (Go daemon), `runnyctl` (Go CLI), `Runny` (SwiftUI app: menu bar + main window). See `docs/architecture/` for the shape and `docs/architecture-decisions/` for the decisions behind it.
 
 Runny avoids silent failures at all costs: fail loudly, log failures, avoid
 silent outages that leave the operator asking why.
 
 ## Tech stack
 
-Go 1.26 (mise-managed) for daemon + CLI; cgo to Virtualization.framework via `Code-Hex/vz`; SSH via `x/crypto/ssh` only (ADR-0002). Swift/SwiftUI for the app only (ADR-0001). Build: Bazel 9 / bzlmod with gazelle-managed BUILD files (ADR-0005); the `runny.v1` protobuf contract is generated in-graph, never committed (ADR-0006). The full dependency set lives in `go.mod` and `MODULE.bazel` and is not re-listed here.
+Go 1.26 (mise-managed) for daemon + CLI; cgo to Virtualization.framework via `Code-Hex/vz` on macOS, and pure-syscall Hyper-V/HCS via the trimmed binding vendored in-tree at `internal/winhcs` (its README is the vendor authority — do not hand-edit that tree) on Windows; SSH via `x/crypto/ssh` only (ADR-0002). Swift/SwiftUI for the app only (ADR-0001). Build: Bazel 9 / bzlmod with gazelle-managed BUILD files (ADR-0005); the `runny.v1` protobuf contract is generated in-graph, never committed (ADR-0006). The full dependency set lives in `go.mod` and `MODULE.bazel` and is not re-listed here.
 
 ## Commands
 
 `bazel build //...` · `bazel test //...` · `bazel run //tools/format` · `bazel run //:gazelle` (after changing Go imports). Dependency changes follow CONTRIBUTING.md's workflow exactly — its flag and step order are load-bearing. Full reference and dev setup: `CONTRIBUTING.md`.
 
-**Darwin-only targets** (vz cgo, the Runny app) build and test only on Darwin. On other hosts, everything pure-Go still builds and tests; for the cross-host loop see CONTRIBUTING.md.
+**Platform-gated targets build and test only on their own platform.** Darwin-only: the vz cgo backend and the Runny app. Windows-only: `internal/winhcs`, `internal/vm`'s hcs/neighbortable/netfixup/reap files, `internal/vhdx`, the SCM installer, and `cmd/runnyd`'s svc/lock/platform files — pure Go, but they compile only under a Windows toolchain, so a green `bazel test //...` on macOS has **not** exercised the Windows backend. CI covers both (macos-26 and windows-2022 lanes); cross-compile locally with `--platforms=@rules_go//go/toolchain:windows_amd64`. For the cross-host loop see CONTRIBUTING.md.
 
 ## Documentation map
 

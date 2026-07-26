@@ -9,6 +9,11 @@ running, [docs/deploy.md](deploy.md) is the reference for everything this skips
 You need **macOS Sequoia (15.0+)** on **Apple Silicon**. Everything else you
 install below.
 
+**On a Windows host?** This guide is the macOS path. Go to
+[docs/deploy.md](deploy.md)'s "Windows" section instead — it covers the
+Chocolatey feed, `runnyctl install-daemon`, and the Hyper-V prerequisites. The
+GitHub App setup below still applies; the install and daemon steps do not.
+
 ## Pick a shape first
 
 One choice runs through the whole guide. runny installs in one of two shapes,

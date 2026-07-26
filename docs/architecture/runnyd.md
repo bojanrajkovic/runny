@@ -135,7 +135,7 @@ their job).
 1. **Load + sweep clones**: config parse (strict), the instance lock, then
    delete `vms/*` — *before* validation, because teardown retains a wedged
    guest's clone (ADR-0012) and its divergence must not fail `disk-headroom`
-   ahead of the sweep that would free it (ADR-0014). The sweep runs only on
+   ahead of the sweep that would free it (ADR-0014, config reload). The sweep runs only on
    the real-startup path under the lock; `-doctor` stays read-only, and an
    explicit `-doctor -config <path>` diagnoses *that* deployment's home
    (`cmd/runnyd`'s `doctorHome`), not the invoker's own.
@@ -152,7 +152,7 @@ their job).
    the root context; in-flight cycles fail into TEARDOWN (which detaches from
    the root context so cleanup always completes), then the daemon exits.
    SIGHUP triggers a validated config reload instead of killing the process
-   (ADR-0014). Runner tarballs are ensured inside each cycle's ENSURE_IMAGE —
+   (ADR-0014, config reload). Runner tarballs are ensured inside each cycle's ENSURE_IMAGE —
    deliberately not at startup, where an unbounded download once blocked the
    socket. Under the Windows Service Control Manager, an SCM Stop/Shutdown
    command cancels this same root context in place of SIGTERM
@@ -231,7 +231,7 @@ failure cycles; success cycles keep only the record). A cycle that saw an
 operator debug-key attempt also carries `operator-access.json` — the
 write-ahead audit sidecar, written before any byte reaches the guest and
 surfaced in `runnyctl why` even after a daemon crash that left no cycle.json
-(ADR-0014).
+(ADR-0014, debug-key injection).
 
 The whole tree must live on a single APFS volume: cloning is `clonefile(2)`,
 which fails `EXDEV` across volumes, and both the bundle clone (`images/` →
@@ -348,10 +348,16 @@ the published image and watches for it to finish.
   `icacls`, or sshd ignores the file silently), `PasswordAuthentication no`
   is prepended to the top of `sshd_config` (first-match-wins, and the stock
   config ends with a `Match Group administrators` block an append would land
-  inside), and the service restart runs detached with a short delay so the
-  session issuing it survives to read back its own exit status. Scramble
-  mode uses `Set-LocalUser` against the baked `Administrator` account
-  (`net user` prompts interactively above 14 characters and would hang).
+  inside), and the service restart runs **inline** (`Restart-Service sshd
+  -ErrorAction Stop`) — the session issuing it does not need to survive, since
+  rotate reconnects fresh either way. A detached restart was tried first and
+  hardware-disproved: the detached child never reached `Restart-Service` and the
+  service PID never changed. Scramble mode uses `Set-LocalUser` against
+  **`$env:USERNAME`**, the account that authenticated, not a hardcoded
+  `Administrator` — hardcoding scrambles the wrong account whenever a pool's
+  `ssh_user` is some other administrator, letting verification pass while the
+  well-known password stays live (`net user` prompts interactively above 14
+  characters and would hang, hence `Set-LocalUser`).
 - **Windows debug session recording uses two mechanisms, one per SSH usage
   shape, because no single windows mechanism covers both.** The forced
   command (`command=` in `administrators_authorized_keys`, same ACL fix as

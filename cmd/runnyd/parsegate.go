@@ -9,7 +9,6 @@ import (
 	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/respawn"
 	"github.com/bojanrajkovic/runny/internal/socket"
-	"github.com/bojanrajkovic/runny/internal/sysdaemon"
 	"github.com/bojanrajkovic/runny/internal/testconfig"
 )
 
@@ -38,8 +37,10 @@ func execConfigTest(ctx context.Context, targetPath, configPath string) bool {
 	return v.Status == home.VerdictOK || v.Status == home.VerdictWarn
 }
 
-// deferralPlistPath returns the system LaunchDaemon plist to consult for
-// parse-deferral, or "" when the daemon is not the system daemon. Deferral is
+// deferralPlistPath returns the file naming the respawn target to consult for
+// parse-deferral, or "" when there is none to consult -- either because this is
+// not the system daemon, or because the platform has no staged-newer-binary
+// state at all (systemRespawnTargetPath). Deferral is
 // system-daemon-only: a per-user agent respawns from a bundle-relative
 // BundleProgram, not this plist, so consulting it would test the wrong binary
 // (mirrors respawn.TargetVersion's home guard, respawn.go). An empty path is the
@@ -48,7 +49,7 @@ func deferralPlistPath(dir home.Dir) string {
 	if dir.String() != home.SystemHomeDir {
 		return ""
 	}
-	return sysdaemon.PlistPath()
+	return systemRespawnTargetPath()
 }
 
 // parseableByRespawnTarget returns true when the binary launchd would respawn

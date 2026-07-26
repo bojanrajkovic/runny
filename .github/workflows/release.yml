@@ -186,6 +186,9 @@ jobs:
         run: |
           mkdir -p choco/tools
           cp dist-windows-amd64/runnyd.exe dist-windows-amd64/runnyctl.exe choco/tools/
+          # Hooks ship verbatim (no envsubst): they carry no version, and a
+          # stray $var in PowerShell must not be substituted away.
+          cp tools/deploy/chocolateyBeforeModify.ps1 tools/deploy/chocolateyInstall.ps1 choco/tools/
           RUNNYD_SHA256=$(shasum -a 256 choco/tools/runnyd.exe | cut -d' ' -f1)
           RUNNYCTL_SHA256=$(shasum -a 256 choco/tools/runnyctl.exe | cut -d' ' -f1)
           export VERSION RUNNYD_SHA256 RUNNYCTL_SHA256

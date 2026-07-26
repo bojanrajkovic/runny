@@ -38,3 +38,9 @@ func vmPreflight() (bool, string) { return true, "" }
 // backend still reports one, so a fleet's traces/metrics never show an
 // empty/missing value for a host that's simply unsupported.
 func vmBackendName() string { return "unsupported" }
+
+// systemRespawnTargetPath: none on this platform. See the darwin
+// implementation for why an empty path is a statement about the platform, not
+// a missing feature -- a running executable cannot be replaced in place here,
+// so no newer binary can be staged at the path the supervisor would respawn.
+func systemRespawnTargetPath() string { return "" }

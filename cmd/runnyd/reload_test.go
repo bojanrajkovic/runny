@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -376,17 +377,27 @@ func TestParseDeferralCheckNonSystemDaemon(t *testing.T) {
 	}
 }
 
-// deferralPlistPath consults the system LaunchDaemon plist ONLY for the system
-// daemon. A per-user agent (any other home) gets "" so deferral is disabled — it
-// respawns from a bundle-relative BundleProgram, not this plist, and consulting
-// the system plist would test the wrong binary (mirrors respawn.TargetVersion's
-// home guard).
+// deferralPlistPath yields a path to consult ONLY for the system daemon, and
+// only on a platform that has a respawn target at all. A per-user agent (any
+// other home) gets "" because it respawns from a bundle-relative BundleProgram,
+// not this plist, and consulting the system plist would test the wrong binary
+// (mirrors respawn.TargetVersion's home guard). Off darwin every home gets ""
+// because no newer binary can be staged at the respawn path in the first place
+// (systemRespawnTargetPath).
 func TestDeferralPlistPath(t *testing.T) {
-	// The system-daemon path must be the SAME plist respawn.TargetPath then reads;
-	// asserting equality (not just non-empty) catches a drift between the path the
-	// gate hands out and the one launchd actually respawns from.
-	if got, want := deferralPlistPath(home.Dir(home.SystemHomeDir)), sysdaemon.PlistPath(); got != want {
-		t.Errorf("system daemon: deferralPlistPath = %q, want %q", got, want)
+	got := deferralPlistPath(home.Dir(home.SystemHomeDir))
+	if runtime.GOOS == "darwin" {
+		// The system-daemon path must be the SAME plist respawn.TargetPath then
+		// reads; asserting equality (not just non-empty) catches a drift between
+		// the path the gate hands out and the one launchd actually respawns from.
+		if want := sysdaemon.PlistPath(); got != want {
+			t.Errorf("system daemon: deferralPlistPath = %q, want %q", got, want)
+		}
+	} else if got != "" {
+		// The regression assertion for the hang: a non-empty path here is what
+		// drained a Windows fleet and then held the exit forever, re-consulting a
+		// file that could never exist.
+		t.Errorf("system daemon on %s: deferralPlistPath = %q, want empty", runtime.GOOS, got)
 	}
 	if got := deferralPlistPath(home.Dir("/Users/someone/.runny")); got != "" {
 		t.Errorf("per-user agent: deferralPlistPath = %q, want empty", got)
@@ -567,5 +578,28 @@ func TestMakeDoctorConfigDrift(t *testing.T) {
 	write([]byte("pools: [\n"))
 	if c := drift(); c.OK || c.Detail == "" {
 		t.Errorf("broken file not flagged with the parse error: %+v", c)
+	}
+}
+
+// TestSystemRespawnTargetPathIsDarwinOnly pins the platform statement both the
+// parse deferral and the UpgradeReload refusal read. An empty path off darwin
+// is not a missing feature: a running executable cannot be replaced in place
+// there, so no newer binary can be staged at the respawn path. When this
+// returned a darwin plist path unconditionally, an UpgradeReload against a
+// Windows system daemon drained the fleet and then held the exit forever,
+// because the exit gate kept re-consulting a file that could never exist.
+func TestSystemRespawnTargetPathIsDarwinOnly(t *testing.T) {
+	got := systemRespawnTargetPath()
+	if runtime.GOOS == "darwin" {
+		if got == "" {
+			t.Fatal("darwin must name a respawn target; the parse deferral has nothing to consult without it")
+		}
+		if got != sysdaemon.PlistPath() {
+			t.Errorf("systemRespawnTargetPath() = %q, want the LaunchDaemon plist %q", got, sysdaemon.PlistPath())
+		}
+		return
+	}
+	if got != "" {
+		t.Errorf("systemRespawnTargetPath() = %q on %s, want empty — a non-empty path here re-arms the drain-and-hang", got, runtime.GOOS)
 	}
 }

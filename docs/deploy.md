@@ -449,17 +449,46 @@ counterpart to the Homebrew tap, with no server to run (ADR-0010). Chocolatey
 2.4.1 is the floor: earlier versions cannot resolve an explicit `--version`
 against a v3-only feed ([choco#3396](https://github.com/chocolatey/choco/issues/3396)).
 
-**Upgrading the binaries is `choco upgrade runny`, and it is not in-place.**
-Windows locks a running executable, so the service must be stopped before its
-binary is replaced — `runnyctl` cannot drain-and-respawn onto a newer build the
-way `upgrade-daemon` does on darwin, because a newer binary cannot exist at the
-registered path while the daemon runs. Stop the service, upgrade, start it:
+**Upgrading the binaries is `choco upgrade runny`, and the package handles the
+service for you:**
+
+```powershell
+choco upgrade runny
+```
+
+Windows locks the image file of a running process, and `install-daemon`
+registers the service against `lib\runny\tools\runnyd.exe` — inside the very
+directory Chocolatey replaces. So the package's `chocolateyBeforeModify.ps1`
+drains and stops `runnyd` before the swap, and `chocolateyInstall.ps1` starts it
+again if it was running. A drain that overruns ten minutes is escalated to a
+hard stop rather than left to race the file swap.
+
+Before restarting, the upgrade asks the **new** binary whether it accepts the
+config already in place (`runnyd -test-config`, local checks only — no network,
+so it cannot fail on a GitHub or registry blip). A rejection is printed while
+you are still watching the upgrade, instead of surfacing later as a service that
+will not stay up. It is advisory: the service starts either way, so a valid
+config recovers on its own without a second manual step. This is the same
+question darwin asks before an `upgrade-daemon` handover — Windows can only ask
+it after the swap, because the new binary does not exist until then.
+
+That hook ships **inside the package**, and Chocolatey runs the copy belonging
+to the version you are upgrading *from*. Upgrading from a release older than the
+one that introduced it, stop the service yourself first:
 
 ```powershell
 Stop-Service runnyd     # drains; the SCM waits rather than force-killing
 choco upgrade runny
 Start-Service runnyd
 ```
+
+**`runnyctl upgrade-daemon` is darwin-only and refuses here**, before draining
+anything. It exists for Homebrew's shape, where a newer binary sits at a stable
+opt symlink while the old process still runs, so the daemon can drain and
+respawn onto it. No Windows package manager produces that state — a running
+executable cannot be replaced in place — so there is nothing to respawn onto,
+and the honest answer is a refusal pointing here rather than a config reload
+dressed up as a binary upgrade.
 
 There is no winget package. It was tried and dropped (ADR-0010): winget
 installs portable packages under `%LOCALAPPDATA%` — the wrong home for a

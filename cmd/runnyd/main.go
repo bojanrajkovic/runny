@@ -567,6 +567,24 @@ func runReload(ctx context.Context, reloadMu *sync.Mutex, logger *slog.Logger, d
 	reloadMu.Lock()
 	defer reloadMu.Unlock()
 	logger.Info("config reload requested", "source", source, "reason", reason)
+	// Refuse UpgradeReload outright where in-place binary upgrade cannot
+	// happen, BEFORE any drain starts. Accepting it and quietly behaving like a
+	// plain reload would be a silent failure of the worst kind: the operator
+	// believes they upgraded the binary when they only reloaded config. Refusing
+	// early also removes the pre-drain half of the hang this used to cause —
+	// deferralPlistPath returning "" is the other half, and keeps the exit gate
+	// honest for any drain that starts by another route.
+	if deferToRespawnTarget && systemRespawnTargetPath() == "" {
+		detail := "in-place binary upgrade is not possible on this platform: a running executable cannot be replaced, " +
+			"so no newer binary can be staged at the path the service supervisor would respawn. " +
+			"Stop the service, upgrade the package, and start it again — on Windows `choco upgrade runny` does this for you " +
+			"(the package drains and stops runnyd first). See docs/deploy.md."
+		logger.Error("upgrade-daemon refused", "detail", detail)
+		return socket.ReloadResult{
+			FailedChecks: []socket.DoctorCheck{{Name: "upgrade-unsupported", OK: false, Detail: detail}},
+			Draining:     d.Reason(),
+		}
+	}
 	sha, failed, warnings := preflightReload(ctx, dir, configPath)
 	// RPC-gated deferral: on a lone config-parse failure, UpgradeReload may
 	// ask the respawn target whether it accepts the config. If so, clear the

@@ -17,6 +17,13 @@
   Chocolatey 2.4.1+ is required for the feed: v3-only feeds could not resolve
   an explicit --version before that fix (choco#3396).
 
+  Upgrades are graceful: chocolateyBeforeModify.ps1 drains and stops the runnyd
+  service before Chocolatey swaps this package's files (the service is
+  registered against lib\runny\tools\runnyd.exe, and Windows locks a running
+  image), and chocolateyInstall.ps1 starts it again if it was running. The hook
+  runs from the OLD package's copy, so it only governs upgrades FROM a version
+  that ships it.
+
   Both runnyd.exe and runnyctl.exe land in tools/, which Chocolatey auto-shims
   onto PATH (any .exe directly under tools/ gets a shim unless suffixed
   .exe.ignore). `runnyctl install-daemon` resolves runnyd.exe as a sibling of
@@ -41,5 +48,7 @@
     <file src="tools\runnyd.exe" target="tools" />
     <file src="tools\runnyctl.exe" target="tools" />
     <file src="tools\VERIFICATION.txt" target="tools" />
+    <file src="tools\chocolateyBeforeModify.ps1" target="tools" />
+    <file src="tools\chocolateyInstall.ps1" target="tools" />
   </files>
 </package>

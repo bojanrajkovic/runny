@@ -38,8 +38,8 @@ The rules a contributor follows to keep this intact live in
 ## Guest network isolation
 
 **On a macOS host, concurrent guests cannot reach each other over the network**,
-by default and not configurably. **On a Windows host this is not established** —
-see below.
+by default and not configurably. **On a Windows host they can** — measured, and
+bounded by credentials rather than by the network; see below.
 
 runny attaches every guest with `VZNATNetworkDeviceAttachment`
 (`internal/vm/vz_darwin.go`), which enables vmnet's bridge isolation. Guests
@@ -52,13 +52,37 @@ empirical, not assumed: issue #25 tested the pivot directly and disproved it
 (recorded in
 [ADR-0013](architecture-decisions/0013-ephemeral-ssh-keys-in-band-rotation.md)).
 
-**The Hyper-V backend has no equivalent claim.** It attaches each guest to the
-shared HNS Default Switch with a plain endpoint carrying no ACL, VLAN, or
-isolation policy (`internal/vm/hcs_windows.go`), and nobody has run the
-sibling-reachability test there that #25 ran on darwin. Treat guest-to-guest
-reachability on a Windows host as **open** until someone does: assume guests can
-reach each other, and do not rely on network posture as a boundary between
-concurrent jobs on that platform.
+**The Hyper-V backend does not isolate guests, and this is measured.** It
+attaches each guest to the shared HNS Default Switch with a plain endpoint
+carrying no ACL, VLAN, or isolation policy (`internal/vm/hcs_windows.go`).
+Sibling guests answer both ICMP and TCP/22 from each other, confirmed on real
+hardware. **Do not rely on network posture as a boundary between concurrent jobs
+on a Windows host.**
+
+What bounds the exposure there is the SSH posture, not the network. At the
+default hardening (`rotate`, which the SECURE_SSH gate fails *closed* into, so
+an unset value hardens), a guest accepts only the per-cycle key that never
+leaves the daemon, password auth is off, and the host key is per-guest and
+random — a sibling reaches port 22 and cannot authenticate. `scramble` also
+randomizes the account password, closing the non-SSH channels too.
+
+Three things that posture does **not** bound, in descending order of how much
+they should worry you:
+
+- **`ssh_hardening: off` pools.** The image's well-known password stays live for
+  the whole cycle and is now reachable from every sibling guest — a
+  straightforward pivot. That mode is a deliberate opt-out, not a default, but
+  choosing it on a Windows host is a materially different decision than on
+  darwin.
+- **Any non-SSH port a job binds.** A test server, a language runtime's debug
+  port, a container daemon: reachable from siblings, and nothing in the SSH
+  posture touches it.
+- **The window before SECURE_SSH completes.** Between boot and the rotation the
+  image default is still live — seconds per cycle, but a long-running neighbour
+  can poll for it.
+
+Closing this properly means an HNS-level isolation policy on the endpoint, which
+is unexplored and would be ADR-worthy.
 
 **Residual risk.** Bridge isolation does not defend against ARP spoofing (a
 guest poisoning the bridge's ARP table to intercept *host↔guest* traffic) or
@@ -98,9 +122,12 @@ that rejects the cycle key fails the cycle loudly rather than silently
 falling back to the password.
 
 Pools can opt out per pool (`ssh_hardening: off`), which preserves
-password-auth-for-the-whole-cycle behavior; the network posture above is then
-what bounds the password (reachable from the host datapath only, not from
-sibling guests).
+password-auth-for-the-whole-cycle behavior. On a **macOS** host the network
+posture above is then what bounds the password: reachable from the host datapath
+only, not from sibling guests. **On a Windows host nothing bounds it** — siblings
+can reach the port and the password is the image's well-known default, so an
+`off` pool there means any concurrent job can log into any other guest. Prefer
+`rotate` or `scramble` on Windows hosts.
 
 Pools can also opt further **in** (`ssh_hardening: scramble`): the same
 pre-flip exec that installs the cycle key and disables password auth also

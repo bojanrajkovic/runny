@@ -258,6 +258,7 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 		mac:         ep.MacAddress,
 		systemID:    systemID,
 		guestOS:     cfg.OS,
+		spec:        Spec{GuestOS: cfg.OS, Arch: cfg.Arch, CPUCount: cpu, MemoryBytes: mem},
 		consolePipe: consolePipe,
 		sshUser:     opts.SSHUser,
 		sshPassword: opts.SSHPassword,
@@ -336,6 +337,9 @@ type hcsMachine struct {
 	// guestOS is cfg.OS as of Boot -- the dispatch key WaitIP branches on.
 	guestOS string
 
+	// spec is what this guest actually got, resolved at Boot.
+	spec Spec
+
 	// consolePipe is the COM0 pipe name minted for THIS boot (consolePipeName).
 	// Carried rather than recomputed: the random suffix makes it unguessable,
 	// so the value handed to Hyper-V in the compute system document is the only
@@ -350,6 +354,8 @@ type hcsMachine struct {
 }
 
 func (m *hcsMachine) MAC() string { return m.mac }
+
+func (m *hcsMachine) Spec() Spec { return m.spec }
 
 // NeedsRunnerPush is always true here, for two different reasons per guest
 // OS. Linux: schema 2.1's only Linux-guest-capable share device is Plan9,

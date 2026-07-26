@@ -176,6 +176,16 @@ type DetailEvent struct {
 type VMEvent struct {
 	MAC string
 	IP  string
+	// GuestOS/Arch/CPUCount/MemoryBytes are the guest's RESOLVED shape as of
+	// Boot (vm.Machine.Spec): the image's baked values with the pool's
+	// overrides applied. Emitted once, alongside MAC. Neither the pool config
+	// nor the image answers "what did this guest get" alone -- a pool that
+	// overrides nothing runs on the image's values, and an override hides
+	// them -- so the resolved pair is recorded rather than reconstructed.
+	GuestOS     string
+	Arch        string
+	CPUCount    uint
+	MemoryBytes uint64
 }
 
 // ImageEvent carries image identity learned mid-cycle: the resolved

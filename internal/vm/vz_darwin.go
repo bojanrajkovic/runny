@@ -134,7 +134,7 @@ func (VZManager) bootDarwin(ctx context.Context, bundle tart.Bundle, cfg *tart.C
 	gfx.SetDisplays(display)
 	vmc.SetGraphicsDevicesVirtualMachineConfiguration([]vz.GraphicsDeviceConfiguration{gfx})
 
-	return finishBoot(ctx, vmc, bundle, opts)
+	return finishBoot(ctx, vmc, bundle, opts, Spec{GuestOS: cfg.OS, Arch: cfg.Arch, CPUCount: cpu, MemoryBytes: mem})
 }
 
 // bootLinux: EFI boot loader with the bundle's nvram.bin as the variable
@@ -161,7 +161,7 @@ func (VZManager) bootLinux(ctx context.Context, bundle tart.Bundle, cfg *tart.Co
 		return nil, fmt.Errorf("generic platform: %w", err)
 	}
 	vmc.SetPlatformVirtualMachineConfiguration(platform)
-	return finishBoot(ctx, vmc, bundle, opts)
+	return finishBoot(ctx, vmc, bundle, opts, Spec{GuestOS: cfg.OS, Arch: cfg.Arch, CPUCount: cpu, MemoryBytes: mem})
 }
 
 // abandonedStopTimeout bounds the detached best-effort force stop (below) of
@@ -177,7 +177,7 @@ var abandonedStopTimeout = 30 * time.Second
 // indefinitely, and the BOOT state's deadline only works if that is true —
 // Start is an unbounded call into Virtualization.framework, the same
 // framework whose graceful stop often stalls.
-func finishBoot(ctx context.Context, vmc *vz.VirtualMachineConfiguration, bundle tart.Bundle, opts BootOptions) (Machine, error) {
+func finishBoot(ctx context.Context, vmc *vz.VirtualMachineConfiguration, bundle tart.Bundle, opts BootOptions, spec Spec) (Machine, error) {
 	diskAtt, err := vz.NewDiskImageStorageDeviceAttachment(bundle.DiskPath(), false)
 	if err != nil {
 		return nil, fmt.Errorf("disk attachment: %w", err)
@@ -283,7 +283,12 @@ func finishBoot(ctx context.Context, vmc *vz.VirtualMachineConfiguration, bundle
 		return nil, fmt.Errorf("vm start: %w", context.Cause(ctx))
 	}
 
-	m := &vzMachine{vm: machine, mac: mac.String(), done: make(chan struct{})}
+	m := &vzMachine{
+		vm:   machine,
+		mac:  mac.String(),
+		done: make(chan struct{}),
+		spec: spec,
+	}
 	go m.watchState()
 	return m, nil
 }
@@ -292,9 +297,13 @@ type vzMachine struct {
 	vm   *vz.VirtualMachine
 	mac  string
 	done chan struct{}
+	// spec is what this guest actually got, resolved at Boot.
+	spec Spec
 }
 
 func (m *vzMachine) MAC() string { return m.mac }
+
+func (m *vzMachine) Spec() Spec { return m.spec }
 
 // NeedsRunnerPush is always false here: Boot already attached RunnerShareDir
 // as a live read-only virtiofs device (see finishBoot), so the tarball is

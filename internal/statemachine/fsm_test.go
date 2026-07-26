@@ -70,11 +70,14 @@ type fakeMachine struct {
 	stopErr   error
 	stopped   bool
 	needsPush bool
+	spec      vm.Spec
 	mu        sync.Mutex
 }
 
 func (m *fakeMachine) MAC() string           { return m.mac }
 func (m *fakeMachine) NeedsRunnerPush() bool { return m.needsPush }
+
+func (m *fakeMachine) Spec() vm.Spec { return m.spec }
 func (m *fakeMachine) WaitIP(ctx bounded.Context) (string, error) {
 	if m.ipErr != nil {
 		return "", m.ipErr
@@ -3749,4 +3752,52 @@ func TestObsEventsJobEndedCarriesOperatorKeys(t *testing.T) {
 		return
 	}
 	t.Fatal("no JobEnded event in the cycle's stream")
+}
+
+// A cycle records what the guest ACTUALLY got, not what was asked for. The
+// resolved shape (vm.Machine.Spec) is the only place the image's baked values
+// and the pool's overrides are reconciled, so if it does not reach the record
+// and the telemetry, "how big was this guest" is unanswerable afterwards --
+// exactly the question that goes begging when a pool sets no sizing and the
+// image's baked values are silently in force.
+func TestCycleRecordsAndPublishesTheResolvedGuestSpec(t *testing.T) {
+	want := vm.Spec{GuestOS: "windows", Arch: "amd64", CPUCount: 4, MemoryBytes: 12 << 30}
+	h := newHarness(t, nil)
+	h.vmF.machine.spec = want
+	cancel := h.start(t)
+
+	h.waitState(t, StateProvision)
+	h.proc.say("Listening for Jobs")
+	h.waitState(t, StateListening)
+	cancel()
+	<-h.runDone
+
+	recs := h.records(t)
+	if len(recs) == 0 {
+		t.Fatal("no cycle records")
+	}
+	got := recs[len(recs)-1].VM
+	if got.GuestOS != want.GuestOS || got.Arch != want.Arch {
+		t.Errorf("record guest identity = %q/%q, want %q/%q", got.GuestOS, got.Arch, want.GuestOS, want.Arch)
+	}
+	if got.CPUCount != want.CPUCount || got.MemoryBytes != want.MemoryBytes {
+		t.Errorf("record sizing = %d cpu / %d bytes, want %d / %d",
+			got.CPUCount, got.MemoryBytes, want.CPUCount, want.MemoryBytes)
+	}
+
+	// The record alone is not enough: the telemetry attributes are what make
+	// this queryable across cycles, which is the whole point.
+	var published bool
+	for _, e := range h.eventsForCycle(recs[len(recs)-1].CycleID) {
+		if e.Kind == obs.KindVMInfo && e.VM.CPUCount != 0 {
+			published = true
+			if e.VM.GuestOS != want.GuestOS || e.VM.Arch != want.Arch ||
+				e.VM.CPUCount != want.CPUCount || e.VM.MemoryBytes != want.MemoryBytes {
+				t.Errorf("published spec = %+v, want %+v", e.VM, want)
+			}
+		}
+	}
+	if !published {
+		t.Error("no VMInfo event carried the resolved spec")
+	}
 }

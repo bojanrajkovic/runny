@@ -170,8 +170,15 @@ Three constraints the spike established, each of which shapes the setup:
   surfaces pre-releases when asked (`--pre`), so a beta tag publishes without
   clobbering what `choco install runny` resolves to.
 
-**WinGet is structurally abandoned as a daemon channel** (the `winget` job
-above stays for reach, but is not the supported install path). WinGet installs
+**WinGet is dropped entirely, and its release job is removed.** The 2026-07-25
+amendment's `winget` job never ran: it skips pre-releases, and every release
+since it landed has been one. Its first real run would have *failed* rather
+than published, because `winget-releaser` can only update a manifest that
+already exists upstream and the one-time manual `wingetcreate new` submission
+was never made. Removing the job also retires the `WINGET_TOKEN` PAT — the
+broadest-blast-radius credential in this pipeline, able to open a PR against
+any public repo the account can fork — along with its `winget` environment.
+WinGet installs
 portable packages into a non-version-qualified directory and refuses to replace
 a running executable; it offers no author hook analogous to Chocolatey's
 `chocolateyBeforeModify.ps1`, so a package cannot stop a service before its own

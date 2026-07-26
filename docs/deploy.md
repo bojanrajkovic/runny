@@ -461,10 +461,11 @@ choco upgrade runny
 Start-Service runnyd
 ```
 
-`winget install BojanRajkovic.Runny` exists for reach but is **not** the
-supported way to run the daemon: winget installs portable packages under
-`%LOCALAPPDATA%`, which is the wrong home for a machine service, and it offers
-no hook to stop a service before swapping its binary.
+There is no winget package. It was tried and dropped (ADR-0010): winget
+installs portable packages under `%LOCALAPPDATA%` — the wrong home for a
+machine service — refuses to replace a running executable, offers no hook to
+stop a service before swapping its binary, and will not let an administrator
+uninstall a user-scope package at all.
 
 `runnyctl install-daemon`/`uninstall-daemon` are the same commands on Windows,
 run from an **elevated** prompt instead of via `sudo`. `--config` behaves the

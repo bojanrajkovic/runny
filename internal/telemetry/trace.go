@@ -400,6 +400,18 @@ func (a *traceAssembler) vmInfo(e obs.Event) {
 		if e.VM.IP != "" {
 			attrs = append(attrs, attribute.String("vm.ip", e.VM.IP))
 		}
+		if e.VM.GuestOS != "" {
+			attrs = append(attrs, attribute.String("vm.guest_os", e.VM.GuestOS))
+		}
+		if e.VM.Arch != "" {
+			attrs = append(attrs, attribute.String("vm.arch", e.VM.Arch))
+		}
+		if e.VM.CPUCount != 0 {
+			attrs = append(attrs, attribute.Int("vm.cpu_count", int(e.VM.CPUCount)))
+		}
+		if e.VM.MemoryBytes != 0 {
+			attrs = append(attrs, attribute.Int64("vm.memory_bytes", int64(e.VM.MemoryBytes)))
+		}
 		cs.root.SetAttributes(attrs...)
 		cs.root.AddEvent("vm_info", trace.WithTimestamp(e.Time), trace.WithAttributes(attrs...))
 	})

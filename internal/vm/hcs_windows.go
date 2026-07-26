@@ -257,7 +257,7 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 		endpoint:    ep,
 		mac:         ep.MacAddress,
 		systemID:    systemID,
-		guestOS:     cfg.OS,
+		spec:        Spec{GuestOS: cfg.OS, Arch: cfg.Arch, CPUCount: cpu, MemoryBytes: mem},
 		consolePipe: consolePipe,
 		sshUser:     opts.SSHUser,
 		sshPassword: opts.SSHPassword,
@@ -333,8 +333,8 @@ type hcsMachine struct {
 	endpoint *hcn.HostComputeEndpoint
 	mac      string
 	systemID string
-	// guestOS is cfg.OS as of Boot -- the dispatch key WaitIP branches on.
-	guestOS string
+	// spec is what this guest actually got, resolved at Boot.
+	spec Spec
 
 	// consolePipe is the COM0 pipe name minted for THIS boot (consolePipeName).
 	// Carried rather than recomputed: the random suffix makes it unguessable,
@@ -350,6 +350,8 @@ type hcsMachine struct {
 }
 
 func (m *hcsMachine) MAC() string { return m.mac }
+
+func (m *hcsMachine) Spec() Spec { return m.spec }
 
 // NeedsRunnerPush is always true here, for two different reasons per guest
 // OS. Linux: schema 2.1's only Linux-guest-capable share device is Plan9,
@@ -382,7 +384,7 @@ const waitIPGracePeriod = 10 * time.Second
 // different strategies, not just different constants -- see each one's own
 // doc comment for why.
 func (m *hcsMachine) WaitIP(ctx bounded.Context) (string, error) {
-	if m.guestOS == "windows" {
+	if m.spec.GuestOS == "windows" {
 		return m.waitIPWindows(ctx)
 	}
 	return m.waitIPLinux(ctx)

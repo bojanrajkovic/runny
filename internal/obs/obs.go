@@ -176,6 +176,12 @@ type DetailEvent struct {
 type VMEvent struct {
 	MAC string
 	IP  string
+	// The guest's resolved shape as of Boot (see vm.Spec), emitted once
+	// alongside MAC.
+	GuestOS     string
+	Arch        string
+	CPUCount    uint
+	MemoryBytes uint64
 }
 
 // ImageEvent carries image identity learned mid-cycle: the resolved

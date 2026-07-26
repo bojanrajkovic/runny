@@ -307,8 +307,23 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 			}
 			c.machine = m
 			mac := m.MAC()
-			c.publish(bc, obs.Event{Kind: obs.KindVMInfo, VM: &obs.VMEvent{MAC: mac}}, func(rec *cycle.Record, st *Status) {
+			// The resolved shape rides along with the MAC: both are known the
+			// instant Boot returns, and publishing them together keeps the
+			// guest's identity and its sizing on the same event rather than
+			// leaving the sizing to be inferred from config and image later.
+			spec := m.Spec()
+			c.publish(bc, obs.Event{Kind: obs.KindVMInfo, VM: &obs.VMEvent{
+				MAC:         mac,
+				GuestOS:     spec.GuestOS,
+				Arch:        spec.Arch,
+				CPUCount:    spec.CPUCount,
+				MemoryBytes: spec.MemoryBytes,
+			}}, func(rec *cycle.Record, st *Status) {
 				rec.VM.MAC = mac
+				rec.VM.GuestOS = spec.GuestOS
+				rec.VM.Arch = spec.Arch
+				rec.VM.CPUCount = spec.CPUCount
+				rec.VM.MemoryBytes = spec.MemoryBytes
 				st.VM.MAC = mac
 			})
 			return nil

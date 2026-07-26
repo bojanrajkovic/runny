@@ -99,6 +99,11 @@ type StateRecord struct {
 type VMInfo struct {
 	MAC string `json:"mac,omitempty"`
 	IP  string `json:"ip,omitempty"`
+	// The guest's resolved shape as of Boot (see vm.Spec).
+	GuestOS     string `json:"guest_os,omitempty"`
+	Arch        string `json:"arch,omitempty"`
+	CPUCount    uint   `json:"cpu_count,omitempty"`
+	MemoryBytes uint64 `json:"memory_bytes,omitempty"`
 }
 
 type JobInfo struct {

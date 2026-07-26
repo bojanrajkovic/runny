@@ -435,10 +435,37 @@ restart and the ADR-0014 reload depend on.
 Get `runnyd`/`runnyctl` onto the host first (ADR-0010), any one of:
 
 ```powershell
-winget install BojanRajkovic.Runny      # once published (see ADR-0010)
-choco install .\runny.<version>.nupkg   # downloaded from the release
+# The supported path: runny's own Chocolatey feed (needs Chocolatey 2.4.1+)
+choco source add -n=runny -s=https://bojanrajkovic.github.io/choco-feed/index.json
+choco install runny
+choco install runny --pre               # pre-release builds
+
+choco install .\runny.<version>.nupkg   # or a release asset, downloaded
 # or extract runny_<version>_windows_{amd64,arm64}.zip anywhere on PATH
 ```
+
+The feed is a static NuGet v3 feed served from GitHub Pages — the Chocolatey
+counterpart to the Homebrew tap, with no server to run (ADR-0010). Chocolatey
+2.4.1 is the floor: earlier versions cannot resolve an explicit `--version`
+against a v3-only feed ([choco#3396](https://github.com/chocolatey/choco/issues/3396)).
+
+**Upgrading the binaries is `choco upgrade runny`, and it is not in-place.**
+Windows locks a running executable, so the service must be stopped before its
+binary is replaced — `runnyctl` cannot drain-and-respawn onto a newer build the
+way `upgrade-daemon` does on darwin, because a newer binary cannot exist at the
+registered path while the daemon runs. Stop the service, upgrade, start it:
+
+```powershell
+Stop-Service runnyd     # drains; the SCM waits rather than force-killing
+choco upgrade runny
+Start-Service runnyd
+```
+
+There is no winget package. It was tried and dropped (ADR-0010): winget
+installs portable packages under `%LOCALAPPDATA%` — the wrong home for a
+machine service — refuses to replace a running executable, offers no hook to
+stop a service before swapping its binary, and will not let an administrator
+uninstall a user-scope package at all.
 
 `runnyctl install-daemon`/`uninstall-daemon` are the same commands on Windows,
 run from an **elevated** prompt instead of via `sudo`. `--config` behaves the

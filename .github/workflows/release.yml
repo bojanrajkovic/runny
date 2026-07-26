@@ -284,28 +284,67 @@ jobs:
           # (main). HEAD:main pushes there regardless of the local name.
           git push origin HEAD:main
 
-  winget:
-    name: submit winget manifest update
+  chocolatey-feed:
+    name: publish to the chocolatey feed
     needs: artifacts
     runs-on: ubuntu-latest
-    # WINGET_TOKEN is a classic PAT scoped public_repo -- it can open a PR
-    # against any public repo you can fork, a broader blast radius than the
-    # installation-token-minting releaser-app credential (scoped to
-    # homebrew-tap alone). It gets its own environment rather than sharing
-    # releaser-app's, restricted to v* tags the same way the `release`
-    # environment restricts the signing/notary secrets.
-    environment: winget
-    # winget-pkgs has no pre-release concept — a beta tag would overwrite the
-    # stable manifest with a beta version, so this only runs for real releases.
-    # Also gracefully no-ops until WINGET_PACKAGE_IDENTIFIER is configured (see
-    # ADR-0010's amendment: the first submission to microsoft/winget-pkgs is a
-    # one-time manual `wingetcreate new`, since this action can only update a
-    # manifest that already exists there).
-    if: ${{ github.event.release.prerelease == false && vars.WINGET_PACKAGE_IDENTIFIER != '' }}
-    permissions: {}
+    # Same App as the tap (see release-please.yml): this job mints an
+    # installation token and must not see signing credentials.
+    environment: releaser-app
+    # contents:read is for reading this release's own .nupkg back via gh; the
+    # feed push uses an installation token scoped to choco-feed, never
+    # GITHUB_TOKEN (which has no cross-repo write anyway).
+    permissions:
+      contents: read
     steps:
-      - uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          identifier: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}
-          installers-regex: "_windows_.*\\.zip$"
-          token: ${{ secrets.WINGET_TOKEN }}
+          dotnet-version: "10.0.x"
+      - name: mint feed token
+        id: feed-token
+        # Absent until the App is configured, which makes the whole feed
+        # publish a graceful no-op — same shape as the tap update above.
+        if: ${{ vars.RELEASER_APP_ID != '' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.RELEASER_APP_ID }}
+          private-key: ${{ secrets.RELEASER_APP_PRIVATE_KEY }}
+          owner: bojanrajkovic
+          repositories: choco-feed
+          permission-contents: write
+      - name: push to the feed
+        if: ${{ steps.feed-token.outputs.token != '' }}
+        env:
+          FEED_TOKEN: ${{ steps.feed-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.artifacts.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Read the .nupkg back off the release rather than rebuilding it, so
+          # the feed serves the exact attested bytes this release published.
+          gh release download "$TAG" --repo "$REPO" --pattern 'runny.*.nupkg' --dir pkg
+          dotnet tool install -g sleet
+          export PATH="$PATH:$HOME/.dotnet/tools"
+
+          git clone "https://x-access-token:${FEED_TOKEN}@github.com/bojanrajkovic/choco-feed.git" feed
+          cd feed
+          # sleet.json lives in the feed repo and uses a RELATIVE path, so sleet
+          # has to run from the clone. Its baseURI is absolute and is baked into
+          # every generated file — changing the Pages URL means regenerating the
+          # whole feed, not editing a config.
+          #
+          # --force makes re-running a release idempotent instead of failing on
+          # an already-present version.
+          sleet push ../pkg/runny.*.nupkg --config ./sleet.json --source runny --force
+
+          # No beta/stable split here, unlike the Homebrew tap: one NuGet feed
+          # holds every version, and Chocolatey only surfaces pre-releases when
+          # asked (`choco install runny --pre`). So a beta tag publishes
+          # alongside the stable versions without clobbering what a plain
+          # `choco install runny` resolves to, and needs no separate channel.
+          git add -A
+          git -c user.name="runny-release[bot]" -c user.email="noreply@coderinserepeat.com" \
+            commit -m "runny ${VERSION}"
+          git push origin HEAD:main

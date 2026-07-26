@@ -463,6 +463,15 @@ drains and stops `runnyd` before the swap, and `chocolateyInstall.ps1` starts it
 again if it was running. A drain that overruns ten minutes is escalated to a
 hard stop rather than left to race the file swap.
 
+Before restarting, the upgrade asks the **new** binary whether it accepts the
+config already in place (`runnyd -test-config`, local checks only — no network,
+so it cannot fail on a GitHub or registry blip). A rejection is printed while
+you are still watching the upgrade, instead of surfacing later as a service that
+will not stay up. It is advisory: the service starts either way, so a valid
+config recovers on its own without a second manual step. This is the same
+question darwin asks before an `upgrade-daemon` handover — Windows can only ask
+it after the swap, because the new binary does not exist until then.
+
 That hook ships **inside the package**, and Chocolatey runs the copy belonging
 to the version you are upgrading *from*. Upgrading from a release older than the
 one that introduced it, stop the service yourself first:

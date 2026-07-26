@@ -28,6 +28,47 @@ if (-not $svc) {
     return
 }
 
+# Ask the NEW binary whether it accepts the config that is already in place,
+# while the operator is still watching this upgrade. On darwin the equivalent
+# question is asked before the handover (upgrade-daemon's exit gate consults the
+# respawn target's -test-config); Windows cannot ask before the swap, because the
+# new binary does not exist until Chocolatey has written it -- so this is the
+# only moment the question can be put, and it is the same question.
+#
+# -test-config is side-effect-free and runs LOCAL checks only: no home, no lock,
+# no network. So it cannot fail spuriously on a GitHub or registry blip, and a
+# verdict here is about the config, not about the weather.
+#
+# Advisory, not a gate: the service still starts. Withholding it would leave the
+# fleet down pending a second manual Start-Service, and would let a false
+# negative do more damage than the crash-loop it was trying to prevent -- which
+# runnyd documents and announces for itself. The value wanted here is the
+# operator learning NOW rather than from a service that will not stay up.
+$configPath = Join-Path $env:ProgramData 'runny\config.yaml'
+$newBinary = Join-Path $env:ChocolateyPackageFolder 'tools\runnyd.exe'
+if ((Test-Path $configPath) -and (Test-Path $newBinary)) {
+    $raw = & $newBinary -test-config $configPath 2>&1 | Out-String
+    try {
+        $verdict = $raw | ConvertFrom-Json
+        switch ($verdict.status) {
+            'ok' { Write-Host "runny: the upgraded binary accepts $configPath." }
+            'warn' {
+                Write-Host "runny: the upgraded binary accepts $configPath with warnings:"
+                $verdict.warnings | ForEach-Object { Write-Host "  - $($_.detail)" }
+            }
+            default {
+                Write-Warning "runny: the upgraded binary REJECTS $configPath -- it will crash-loop until this is fixed:"
+                $verdict.errors | ForEach-Object { Write-Warning "  - $_" }
+                Write-Warning "runny: fix $configPath, then 'runnyctl doctor'. Starting the service anyway so it recovers on its own once the config is valid."
+            }
+        }
+    } catch {
+        # A binary that cannot produce a verdict is itself worth surfacing, but
+        # it is not a reason to withhold the service.
+        Write-Warning "runny: could not read a config verdict from the upgraded binary: $($raw.Trim())"
+    }
+}
+
 Write-Host "runny: restarting $svcName..."
 Start-Service -Name $svcName -ErrorAction Continue
 Start-Sleep -Seconds 3

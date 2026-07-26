@@ -216,6 +216,15 @@ install-daemon`'s privileged, explicit act (ADR-0023), not a side effect of
 unpacking a package. Chocolatey runs the hook from the version being upgraded
 *from*, so it governs upgrades **from** the first release that ships it.
 
+Before restarting, `chocolateyInstall.ps1` runs the **new** binary's
+`-test-config` against the in-place config. That is the same compat question
+darwin's `upgrade-daemon` exit gate asks of the respawn target, put at the only
+moment Windows allows it: the new binary does not exist until Chocolatey has
+written it, so it cannot be asked before the swap. It is advisory rather than a
+gate — the service starts regardless, since withholding it would leave the fleet
+down pending a second manual step and would let a false negative outweigh the
+crash-loop it was avoiding, which runnyd already documents and announces itself.
+
 **`runnyctl upgrade-daemon` now refuses off darwin instead of hanging.** Its
 parse-deferral asks whether the binary the supervisor *would respawn* accepts a
 config the running binary rejects — a question that only means something where a

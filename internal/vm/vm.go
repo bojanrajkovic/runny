@@ -65,21 +65,17 @@ type Machine interface {
 	// Linux-guest-capable share device, Plan9, needs LCOW's own guest-side
 	// agent cooperation a bare compute system doesn't have — see hcs_windows.go).
 	NeedsRunnerPush() bool
-	// Spec reports what the guest ACTUALLY got, as resolved at Boot: the
-	// bundle's baked values with the pool's overrides applied (resolveSizing),
-	// plus the guest identity Boot validated against.
-	//
-	// It exists because neither input answers the question on its own. A pool
-	// that sets no cpu_cores/ram_gb runs on whatever the image baked, so
-	// reading the config tells you nothing; reading the image tells you nothing
-	// once a pool overrides it. Only the resolved pair is the truth, and until
-	// this existed it never left Boot.
+	// Spec reports what the guest actually got, resolved at Boot.
 	Spec() Spec
 }
 
-// Spec is a booted guest's resolved shape. Published on the cycle's telemetry
-// and recorded in its cycle record, so "what did this guest get" is answerable
-// after the fact rather than reconstructed from config and image by hand.
+// Spec is a booted guest's resolved shape: the bundle's baked values with the
+// pool's overrides applied (resolveSizing), plus the identity Boot validated.
+//
+// Neither input answers "what did this guest get" alone -- a pool that sets no
+// cpu_cores/ram_gb runs on whatever the image baked, and an override hides what
+// the image would have given -- so the resolved pair is published on the cycle's
+// telemetry and recorded in its cycle record rather than reconstructed by hand.
 type Spec struct {
 	// GuestOS and Arch are the bundle's, as validated at Boot.
 	GuestOS string

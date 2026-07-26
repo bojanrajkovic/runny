@@ -257,7 +257,6 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 		endpoint:    ep,
 		mac:         ep.MacAddress,
 		systemID:    systemID,
-		guestOS:     cfg.OS,
 		spec:        Spec{GuestOS: cfg.OS, Arch: cfg.Arch, CPUCount: cpu, MemoryBytes: mem},
 		consolePipe: consolePipe,
 		sshUser:     opts.SSHUser,
@@ -334,9 +333,6 @@ type hcsMachine struct {
 	endpoint *hcn.HostComputeEndpoint
 	mac      string
 	systemID string
-	// guestOS is cfg.OS as of Boot -- the dispatch key WaitIP branches on.
-	guestOS string
-
 	// spec is what this guest actually got, resolved at Boot.
 	spec Spec
 
@@ -388,7 +384,7 @@ const waitIPGracePeriod = 10 * time.Second
 // different strategies, not just different constants -- see each one's own
 // doc comment for why.
 func (m *hcsMachine) WaitIP(ctx bounded.Context) (string, error) {
-	if m.guestOS == "windows" {
+	if m.spec.GuestOS == "windows" {
 		return m.waitIPWindows(ctx)
 	}
 	return m.waitIPLinux(ctx)

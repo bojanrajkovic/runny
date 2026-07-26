@@ -3787,17 +3787,22 @@ func TestCycleRecordsAndPublishesTheResolvedGuestSpec(t *testing.T) {
 
 	// The record alone is not enough: the telemetry attributes are what make
 	// this queryable across cycles, which is the whole point.
-	var published bool
-	for _, e := range h.eventsForCycle(recs[len(recs)-1].CycleID) {
+	spec := vmInfoSpecEvent(t, h.eventsForCycle(recs[len(recs)-1].CycleID))
+	if spec.GuestOS != want.GuestOS || spec.Arch != want.Arch ||
+		spec.CPUCount != want.CPUCount || spec.MemoryBytes != want.MemoryBytes {
+		t.Errorf("published spec = %+v, want %+v", spec, want)
+	}
+}
+
+// vmInfoSpecEvent returns the VMInfo event carrying the resolved spec (the one
+// published with the MAC, not the later IP-only one).
+func vmInfoSpecEvent(t *testing.T, events []obs.Event) *obs.VMEvent {
+	t.Helper()
+	for _, e := range events {
 		if e.Kind == obs.KindVMInfo && e.VM.CPUCount != 0 {
-			published = true
-			if e.VM.GuestOS != want.GuestOS || e.VM.Arch != want.Arch ||
-				e.VM.CPUCount != want.CPUCount || e.VM.MemoryBytes != want.MemoryBytes {
-				t.Errorf("published spec = %+v, want %+v", e.VM, want)
-			}
+			return e.VM
 		}
 	}
-	if !published {
-		t.Error("no VMInfo event carried the resolved spec")
-	}
+	t.Fatal("no VMInfo event carried the resolved spec")
+	return nil
 }

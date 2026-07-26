@@ -1,6 +1,9 @@
 package vm
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseInetIP(t *testing.T) {
 	// The whole console exchange as fixupNetwork actually drives it: the getty
@@ -29,5 +32,55 @@ func TestParseInetIP(t *testing.T) {
 	}
 	if _, ok := parseInetIP(""); ok {
 		t.Error("parseInetIP reported an address from empty output")
+	}
+}
+
+// TestConsolePipeNameIsUnpredictable pins the anti-squat property: the console
+// pipe name must not be derivable from the slot alone. A name a local user can
+// predict can be pre-created before the guest boots, and whoever creates it
+// first owns its DACL -- which is how a squatter gets handed the console
+// fixupNetwork types the guest's SSH credentials into.
+func TestConsolePipeNameIsUnpredictable(t *testing.T) {
+	const systemID = "pool-0"
+
+	seen := make(map[string]bool, 64)
+	for range 64 {
+		name, err := consolePipeName(systemID)
+		if err != nil {
+			t.Fatalf("consolePipeName: %v", err)
+		}
+		if !strings.HasPrefix(name, `\\.\pipe\runny-console-`+systemID+"-") {
+			t.Fatalf("name %q lost its identifying prefix; operators locate a guest's console by it", name)
+		}
+		if suffix := strings.TrimPrefix(name, `\\.\pipe\runny-console-`+systemID+"-"); len(suffix) < 16 {
+			t.Errorf("suffix %q is too short to resist guessing", suffix)
+		}
+		if seen[name] {
+			t.Fatalf("consolePipeName repeated %q — a repeatable name is a predictable one", name)
+		}
+		seen[name] = true
+	}
+}
+
+// TestIsTrustedConsoleOwner pins the trust policy to SYSTEM alone. Hyper-V
+// creates the console pipe as vmcompute.exe/SYSTEM (verified against a live
+// guest), and SYSTEM is an owner an unprivileged squatter cannot forge.
+func TestIsTrustedConsoleOwner(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sid  string
+		want bool
+	}{
+		{"local system, what Hyper-V creates", "S-1-5-18", true},
+		{"administrators is NOT enough for a console", "S-1-5-32-544", false},
+		{"an arbitrary user", "S-1-5-21-1111111111-2222222222-3333333333-1001", false},
+		{"a virtual machine account", "S-1-5-83-1-277479287-1468143679-1962191235-2497143080", false},
+		{"empty", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isTrustedConsoleOwner(tc.sid); got != tc.want {
+				t.Errorf("isTrustedConsoleOwner(%q) = %v, want %v", tc.sid, got, tc.want)
+			}
+		})
 	}
 }

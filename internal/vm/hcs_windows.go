@@ -99,6 +99,16 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 		return nil, err
 	}
 
+	// Fresh per boot, and unguessable: see consolePipeName (netfixup.go) for
+	// why the name being derivable from the slot was a squat surface. Logged
+	// because it is no longer derivable — an operator attaching to a guest's
+	// boot console has to read the name from here.
+	consolePipe, err := consolePipeName(systemID)
+	if err != nil {
+		return nil, err
+	}
+	slog.Debug("guest console pipe", "system", systemID, "pipe", consolePipe)
+
 	ep, err := network.CreateEndpoint(&hcn.HostComputeEndpoint{
 		Name:               endpointName,
 		HostComputeNetwork: network.Id,
@@ -165,7 +175,7 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 					}},
 				},
 				ComPorts: map[string]hcsschema.ComPort{
-					"0": {NamedPipe: consolePipeName(systemID)},
+					"0": {NamedPipe: consolePipe},
 				},
 				NetworkAdapters: map[string]hcsschema.NetworkAdapter{
 					"0": {EndpointId: ep.Id, MacAddress: ep.MacAddress},
@@ -234,19 +244,10 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 		mac:         ep.MacAddress,
 		systemID:    systemID,
 		guestOS:     cfg.OS,
+		consolePipe: consolePipe,
 		sshUser:     opts.SSHUser,
 		sshPassword: opts.SSHPassword,
 	}, nil
-}
-
-// consolePipeName is per-system so concurrent slots never collide on the
-// same named pipe. hcsMachine.waitIPLinux's fixupNetwork fallback dials it
-// when the guest doesn't self-configure networking within waitIPGracePeriod
-// (see waitIPLinux's doc comment) -- Windows guests never dial it, see
-// waitIPWindows. It also exists for operator/debug access to the boot
-// console, the same reason vz guests get a display even headless.
-func consolePipeName(systemID string) string {
-	return `\\.\pipe\runny-console-` + systemID
 }
 
 // deleteEndpoint is the plain best-effort delete: used wherever nothing
@@ -320,6 +321,12 @@ type hcsMachine struct {
 	systemID string
 	// guestOS is cfg.OS as of Boot -- the dispatch key WaitIP branches on.
 	guestOS string
+
+	// consolePipe is the COM0 pipe name minted for THIS boot (consolePipeName).
+	// Carried rather than recomputed: the random suffix makes it unguessable,
+	// so the value handed to Hyper-V in the compute system document is the only
+	// way to reach the console fixupNetwork later dials.
+	consolePipe string
 
 	// sshUser/sshPassword are only used by waitIPLinux's fixupNetwork
 	// fallback -- Boot itself needs neither, see waitIPLinux's doc comment.
@@ -449,7 +456,7 @@ func (m *hcsMachine) waitIPLinux(ctx bounded.Context) (string, error) {
 			var leaseIP string
 			if err := obs.Action(ctx, obs.ActionNetworkFixup, func(context.Context) error {
 				obs.Milestone(ctx, "grace-period-elapsed")
-				ip, err := fixupNetwork(ctx, m.systemID, m.sshUser, m.sshPassword)
+				ip, err := fixupNetwork(ctx, m.consolePipe, m.sshUser, m.sshPassword)
 				if err != nil {
 					return err
 				}

@@ -14,8 +14,8 @@
     choco install runny
 
   or `choco install <downloaded-path>` straight from a release asset.
-  Chocolatey 2.4.1+ is required for the feed: v3-only feeds could not resolve
-  an explicit --version before that fix (choco#3396).
+  Chocolatey 2.4.1+ is required for the feed: before that fix (choco#3396),
+  v3-only feeds could not resolve an explicitly pinned version.
 
   Upgrades are graceful: chocolateyBeforeModify.ps1 drains and stops the runnyd
   service before Chocolatey swaps this package's files (the service is

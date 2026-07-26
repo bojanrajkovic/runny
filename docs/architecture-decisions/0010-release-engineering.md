@@ -18,7 +18,7 @@ from conventional commits) + goreleaser (build, package, publish, brew tap).
   derives the version from git — exactly the tag when on a tag; otherwise
   the conventional-commit-implied next version (computed by
   [svu](https://github.com/caarlos0/svu) with `--v0`, whose semantics match
-  release-please's `bump-minor-pre-major`) with a `-beta.<shortsha>`
+  release-please's `bump-minor-pre-major`) with a `-beta.<count>.<shortsha>`
   pre-release suffix. The stamp flows through `--config=release` (`--stamp`
   + workspace status) into `main.version` via rules_go `x_defs`.
 - **Branch/PR artifact builds** carry the pre-release stamp, so every build
@@ -73,7 +73,7 @@ from conventional commits) + goreleaser (build, package, publish, brew tap).
 ## Consequences
 
 - Manual pre-release tags are legal but must be named exactly what
-  `tools/version.sh` stamps at that commit (`<next>-beta.<shortsha>`): svu
+  `tools/version.sh` stamps at that commit (`<next>-beta.<count>.<shortsha>`): svu
   and release-please share bump semantics but not baselines (latest tag vs
   the manifest), and a hand-named tag is how they diverge. Stable tags come
   only from release-please. The release workflow refuses a tag that
@@ -240,3 +240,34 @@ re-consulting a file that could never exist, reporting "config.yaml not accepted
 by the respawn target" about a config the running binary parsed perfectly.
 Recovery needed an out-of-band SCM stop/start. Refusing before the drain, and
 leaving nothing for the exit gate to consult, closes both halves.
+
+## Amended: 2026-07-26 — pre-release versions have to sort
+
+The pre-release suffix was `-beta.<shortsha>`, and that does not order. SemVer
+compares prerelease identifiers containing letters lexically in ASCII order, so
+`1.2.0-beta.8380a10f` outranks `1.2.0-beta.69d743dd` because `'8'` beats `'6'`.
+A hex short SHA is effectively random, so roughly half of all betas sorted
+*below* the beta they followed.
+
+Homebrew never noticed: the tap job overwrites `runny-beta.rb` with whatever the
+release rendered, so the newest publish wins by construction. A NuGet feed does
+not work that way — it holds every version and resolves the highest, so
+`choco upgrade runny --pre` correctly refused to move onto a build it considered
+older than the installed one.
+
+The suffix is now `-beta.<count>.<shortsha>`, where count is commits since the
+last stable tag. A leading all-digit identifier compares numerically, so the
+line orders monotonically; the SHA stays for traceability, since this string is
+what `runnyctl version` reports. The count resets per release line, which is
+harmless because the core version differs across lines and dominates comparison.
+It is not zero-padded: SemVer already compares digits numerically and forbids
+leading zeroes.
+
+The counter has to be a pure function of the repository at that commit, because
+`version.sh` runs twice — locally to compute the tag, and again in CI at that
+tag, where the workflow asserts the two agree. That rules out CI run numbers and
+build timestamps, which the local run could not reproduce.
+
+Betas published under the old scheme sort *above* the new ones, since SemVer
+ranks all-digit identifiers below alphanumeric ones. Both were removed from the
+Chocolatey feed rather than left to shadow every future beta.

@@ -27,4 +27,11 @@ if [ "$next" = "$current" ]; then
 	IFS=. read -r maj min pat <<<"${next#v}"
 	next="v${maj}.${min}.$((pat + 1))"
 fi
-echo "${next#v}-beta.$(git rev-parse --short=8 HEAD)"
+# Counting needs a real ref: `stable` falls back to the literal v0.0.0 when no
+# stable tag exists yet, which is not one, so count the whole history instead.
+if git rev-parse --verify --quiet "$stable" >/dev/null; then
+	count=$(git rev-list --count "$stable"..HEAD)
+else
+	count=$(git rev-list --count HEAD)
+fi
+echo "${next#v}-beta.${count}.$(git rev-parse --short=8 HEAD)"

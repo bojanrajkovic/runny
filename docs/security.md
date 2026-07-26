@@ -38,8 +38,8 @@ The rules a contributor follows to keep this intact live in
 ## Guest network isolation
 
 **On a macOS host, concurrent guests cannot reach each other over the network**,
-by default and not configurably. **On a Windows host they can** — measured, and
-bounded by credentials rather than by the network; see below.
+by default and not configurably. **On a Windows host they can**, and what
+bounds the exposure there is credentials rather than the network; see below.
 
 runny attaches every guest with `VZNATNetworkDeviceAttachment`
 (`internal/vm/vz_darwin.go`), which enables vmnet's bridge isolation. Guests
@@ -47,17 +47,13 @@ share the `192.168.64.0/24` NAT subnet, but the bridge drops guest-to-guest
 frames while still allowing each guest to reach the gateway and the host to
 reach each guest. A compromised job cannot pivot to a sibling guest's services
 (e.g. `ssh`) — the packets have no route. Apple exposes no API to disable, or
-further tighten, this; it is a fixed property of the attachment. This is
-empirical, not assumed: issue #25 tested the pivot directly and disproved it
-(recorded in
-[ADR-0013](architecture-decisions/0013-ephemeral-ssh-keys-in-band-rotation.md)).
+further tighten, this; it is a fixed property of the attachment.
 
 **The Hyper-V backend does not isolate guests, and this is measured.** It
 attaches each guest to the shared HNS Default Switch with a plain endpoint
 carrying no ACL, VLAN, or isolation policy (`internal/vm/hcs_windows.go`).
-Sibling guests answer both ICMP and TCP/22 from each other, confirmed on real
-hardware. **Do not rely on network posture as a boundary between concurrent jobs
-on a Windows host.**
+Sibling guests answer both ICMP and TCP/22 from each other. **Do not rely on
+network posture as a boundary between concurrent jobs on a Windows host.**
 
 What bounds the exposure there is the SSH posture, not the network. At the
 default hardening (`rotate`, which the SECURE_SSH gate fails *closed* into, so

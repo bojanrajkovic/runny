@@ -348,16 +348,12 @@ the published image and watches for it to finish.
   `icacls`, or sshd ignores the file silently), `PasswordAuthentication no`
   is prepended to the top of `sshd_config` (first-match-wins, and the stock
   config ends with a `Match Group administrators` block an append would land
-  inside), and the service restart runs **inline** (`Restart-Service sshd
-  -ErrorAction Stop`) — the session issuing it does not need to survive, since
-  rotate reconnects fresh either way. A detached restart was tried first and
-  hardware-disproved: the detached child never reached `Restart-Service` and the
-  service PID never changed. Scramble mode uses `Set-LocalUser` against
-  **`$env:USERNAME`**, the account that authenticated, not a hardcoded
-  `Administrator` — hardcoding scrambles the wrong account whenever a pool's
-  `ssh_user` is some other administrator, letting verification pass while the
-  well-known password stays live (`net user` prompts interactively above 14
-  characters and would hang, hence `Set-LocalUser`).
+  inside), and the service restart runs inline (`Restart-Service sshd
+  -ErrorAction Stop`); rotate reconnects fresh afterwards, so the session issuing
+  the restart need not survive it. Scramble mode uses `Set-LocalUser` against
+  `$env:USERNAME` — the account that authenticated, and so the one whose
+  well-known password has to stop working (`net user` prompts interactively
+  above 14 characters and would hang).
 - **Windows debug session recording uses two mechanisms, one per SSH usage
   shape, because no single windows mechanism covers both.** The forced
   command (`command=` in `administrators_authorized_keys`, same ACL fix as

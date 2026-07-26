@@ -41,3 +41,9 @@ func vmPreflight() (bool, string) {
 // vmBackendName identifies the VM backend for the telemetry resource
 // attribute (see telemetry.Setup's backend param).
 func vmBackendName() string { return "hcs" }
+
+// systemRespawnTargetPath: none on this platform. See the darwin
+// implementation for why an empty path is a statement about the platform, not
+// a missing feature -- a running executable cannot be replaced in place here,
+// so no newer binary can be staged at the path the supervisor would respawn.
+func systemRespawnTargetPath() string { return "" }

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -567,5 +568,40 @@ func TestMakeDoctorConfigDrift(t *testing.T) {
 	write([]byte("pools: [\n"))
 	if c := drift(); c.OK || c.Detail == "" {
 		t.Errorf("broken file not flagged with the parse error: %+v", c)
+	}
+}
+
+// TestSystemRespawnTargetPathIsDarwinOnly pins the platform statement both the
+// parse deferral and the UpgradeReload refusal read. An empty path off darwin
+// is not a missing feature: a running executable cannot be replaced in place
+// there, so no newer binary can be staged at the respawn path. When this
+// returned a darwin plist path unconditionally, an UpgradeReload against a
+// Windows system daemon drained the fleet and then held the exit forever,
+// because the exit gate kept re-consulting a file that could never exist.
+func TestSystemRespawnTargetPathIsDarwinOnly(t *testing.T) {
+	got := systemRespawnTargetPath()
+	if runtime.GOOS == "darwin" {
+		if got == "" {
+			t.Fatal("darwin must name a respawn target; the parse deferral has nothing to consult without it")
+		}
+		if got != sysdaemon.PlistPath() {
+			t.Errorf("systemRespawnTargetPath() = %q, want the LaunchDaemon plist %q", got, sysdaemon.PlistPath())
+		}
+		return
+	}
+	if got != "" {
+		t.Errorf("systemRespawnTargetPath() = %q on %s, want empty — a non-empty path here re-arms the drain-and-hang", got, runtime.GOOS)
+	}
+}
+
+// TestDeferralPlistPathOffDarwinIsEmptyEvenForTheSystemDaemon is the regression
+// test for the hang itself: the system-home branch must not hand the exit gate
+// a path that cannot exist.
+func TestDeferralPlistPathOffDarwinIsEmptyEvenForTheSystemDaemon(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("darwin does have a respawn target; covered above")
+	}
+	if got := deferralPlistPath(home.Dir(home.SystemHomeDir)); got != "" {
+		t.Errorf("deferralPlistPath(system home) = %q on %s, want empty", got, runtime.GOOS)
 	}
 }

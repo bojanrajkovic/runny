@@ -195,3 +195,39 @@ Chocolatey does not have that problem: `runnyctl install-daemon` resolves
 shim spawns the real binary, the service is registered against
 `lib\runny\tools\runnyd.exe` — the path Chocolatey replaces in place on
 upgrade — rather than against a shim or a user-profile symlink.
+
+## Amended: 2026-07-26 — Windows upgrades are the package's job, not the daemon's
+
+Shipping the Chocolatey feed made an existing gap load-bearing:
+`runnyctl install-daemon` registers the service against
+`lib\runny\tools\runnyd.exe`, which is inside the directory Chocolatey replaces
+on upgrade. Windows locks the image file of a running process, so `choco upgrade
+runny` against a live daemon would fail partway through the swap and could leave
+the package directory half migrated.
+
+**The package now owns the service lifecycle across an upgrade.**
+`chocolateyBeforeModify.ps1` — the one hook that runs *before* Chocolatey
+touches an installed package's files, on upgrade and uninstall alike — drains
+and stops `runnyd`, escalating to a hard stop if the drain overruns, because
+Chocolatey treats hook failure as non-blocking and would otherwise proceed into
+the swap regardless. `chocolateyInstall.ps1` restarts the service only if that
+hook stopped it. Neither registers a service: that stays `runnyctl
+install-daemon`'s privileged, explicit act (ADR-0023), not a side effect of
+unpacking a package. Chocolatey runs the hook from the version being upgraded
+*from*, so it governs upgrades **from** the first release that ships it.
+
+**`runnyctl upgrade-daemon` now refuses off darwin instead of hanging.** Its
+parse-deferral asks whether the binary the supervisor *would respawn* accepts a
+config the running binary rejects — a question that only means something where a
+newer binary can exist on disk while the old process runs. Homebrew produces
+that state with a versioned cellar and a stable opt symlink; no Windows package
+manager does. `systemRespawnTargetPath` states this per platform and is empty
+off darwin, which both disarms the deferral and gates the refusal.
+
+Before this, the darwin plist path was returned for any system daemon
+regardless of platform, so an `upgrade-daemon` against a Windows system daemon
+drained the whole fleet and then held the exit forever — the exit gate
+re-consulting a file that could never exist, reporting "config.yaml not accepted
+by the respawn target" about a config the running binary parsed perfectly.
+Recovery needed an out-of-band SCM stop/start. Refusing before the drain, and
+leaving nothing for the exit gate to consult, closes both halves.

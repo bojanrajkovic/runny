@@ -99,15 +99,25 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 		return nil, err
 	}
 
-	// Fresh per boot, and unguessable: see consolePipeName (netfixup.go) for
-	// why the name being derivable from the slot was a squat surface. Logged
-	// because it is no longer derivable — an operator attaching to a guest's
-	// boot console has to read the name from here.
-	consolePipe, err := consolePipeName(systemID)
-	if err != nil {
-		return nil, err
+	// A COM port is attached ONLY for guests that can actually use it. Windows
+	// guests never dial the console (waitIPWindows: no grace period, no fixup),
+	// so attaching one would create a named pipe nothing ever reads -- a
+	// standing local surface, on which Hyper-V grants Everyone read, bought for
+	// nothing. Linux guests need it because fixupNetwork is the only way into a
+	// guest whose networking has not come up.
+	//
+	// The name is fresh per boot and unguessable: see consolePipeName
+	// (netfixup.go) for why a slot-derived name was a squat surface. Logged
+	// because it is no longer derivable — an operator attaching to a boot
+	// console has to read the name from here.
+	var consolePipe string
+	if cfg.OS != "windows" {
+		consolePipe, err = consolePipeName(systemID)
+		if err != nil {
+			return nil, err
+		}
+		slog.Debug("guest console pipe", "system", systemID, "pipe", consolePipe)
 	}
-	slog.Debug("guest console pipe", "system", systemID, "pipe", consolePipe)
 
 	ep, err := network.CreateEndpoint(&hcn.HostComputeEndpoint{
 		Name:               endpointName,
@@ -174,14 +184,18 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 						"0": {Type_: "VirtualDisk", Path: bundle.VHDXPath()},
 					}},
 				},
-				ComPorts: map[string]hcsschema.ComPort{
-					"0": {NamedPipe: consolePipe},
-				},
 				NetworkAdapters: map[string]hcsschema.NetworkAdapter{
 					"0": {EndpointId: ep.Id, MacAddress: ep.MacAddress},
 				},
 			},
 		},
+	}
+	// Empty for a Windows guest (above), which never dials a console — so no
+	// pipe is created for it at all.
+	if consolePipe != "" {
+		doc.VirtualMachine.Devices.ComPorts = map[string]hcsschema.ComPort{
+			"0": {NamedPipe: consolePipe},
+		}
 	}
 
 	// hcs.CreateComputeSystem/System.Start take ctx but the vendored package's
@@ -439,6 +453,9 @@ func (m *hcsMachine) waitIPLinux(ctx bounded.Context) (string, error) {
 				continue // transient GetIpNetTable2 failure; next tick retries
 			}
 			if ip, ok := learnedLeaseIP(entries, m.mac); ok {
+				// Self-configured: fixupNetwork never ran, but the console is
+				// attached regardless, so it still needs detaching.
+				m.detachConsole(ctx)
 				return ip, nil
 			}
 			if time.Now().Before(deadline) {
@@ -481,6 +498,7 @@ func (m *hcsMachine) waitIPLinux(ctx bounded.Context) (string, error) {
 			}); err != nil {
 				return "", fmt.Errorf("network fixup: %w", err)
 			}
+			m.detachConsole(ctx)
 			return leaseIP, nil
 		}
 	}
@@ -555,4 +573,49 @@ func (o hcsStopOps) forceStop() error {
 	ctx, cancel := bounded.WithTimeout(context.Background(), forceStopTimeout)
 	defer cancel()
 	return o.system.Terminate(ctx)
+}
+
+// detachConsoleTimeout bounds the best-effort COM port detach. The modify is a
+// host-side HCS call with no guest participation, so it either lands promptly
+// or something is wrong with the platform; a short bound keeps a wedged HCS
+// from stalling AWAIT_IP's own budget on cleanup work the cycle does not
+// depend on.
+const detachConsoleTimeout = 10 * time.Second
+
+// detachConsole disconnects the guest's COM0 pipe once networking is up, so the
+// console does not stay bound — and readable, Hyper-V grants Everyone
+// FILE_GENERIC_READ on it — for the guest's whole working life. Schema 2.1
+// documents an empty NamedPipe as "a disconnected port" (hcs/schema2/
+// com_port.go), so this updates the port rather than removing the device.
+//
+// Called only on waitIPLinux's success paths: the console's one programmatic
+// job (fixupNetwork) is finished by then, whether it ran or the guest
+// self-configured. Windows guests never get here — they have no COM port at all.
+//
+// Best-effort and loud, never fatal: networking is already up and the cycle is
+// healthy, so failing it here would destroy a working guest over a cleanup step.
+// A failure leaves the console bound, which is exactly the pre-existing posture,
+// so the warning names that rather than implying data loss.
+func (m *hcsMachine) detachConsole(parent bounded.Context) {
+	if m.consolePipe == "" {
+		return
+	}
+	ctx, cancel := bounded.WithTimeout(parent, detachConsoleTimeout)
+	defer cancel()
+	req := &hcsschema.ModifySettingRequest{
+		ResourcePath: "VirtualMachine/Devices/ComPorts/0",
+		// Untyped constant rather than guestrequest.RequestTypeUpdate: that
+		// package is not visible to internal/vm (the vendored tree's
+		// visibility trap, internal/winhcs/README.md), and widening a vendor
+		// BUILD file for one string is not worth it. Value must stay in step
+		// with guestrequest.RequestTypeUpdate.
+		RequestType: "Update",
+		Settings:    hcsschema.ComPort{NamedPipe: ""},
+	}
+	if err := m.system.Modify(ctx, req); err != nil {
+		slog.Warn("detaching the guest console failed; the console pipe stays bound for this guest's lifetime",
+			"system", m.systemID, "pipe", m.consolePipe, "err", err)
+		return
+	}
+	m.consolePipe = ""
 }

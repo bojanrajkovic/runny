@@ -40,10 +40,10 @@ Three parts, in escalating order:
    dir and, the process having exited, the leaked guest is gone. Convergence
    is bounded by the existing max-job-duration budget.
 
-## Addendum (2026-06-11, ADR-0014)
+## Addendum (2026-06-11, ADR-0014 debug-key injection)
 
 The wedge drain now rides the shared drainer that the config reload
-(ADR-0014) also uses: commands are re-issued on every status change until
+(ADR-0014, debug-key injection) also uses: commands are re-issued on every status change until
 convergence (the original issue-once drain could stall on a dropped
 command or on backoffWait's timer-vs-pause select race), the exit passes a
 local exit gate (the on-disk config must still parse — the respawn loads

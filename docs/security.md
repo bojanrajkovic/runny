@@ -37,8 +37,9 @@ The rules a contributor follows to keep this intact live in
 
 ## Guest network isolation
 
-**Concurrent guests cannot reach each other over the network**, by default and
-not configurably.
+**On a macOS host, concurrent guests cannot reach each other over the network**,
+by default and not configurably. **On a Windows host they can**, and what
+bounds the exposure there is credentials rather than the network; see below.
 
 runny attaches every guest with `VZNATNetworkDeviceAttachment`
 (`internal/vm/vz_darwin.go`), which enables vmnet's bridge isolation. Guests
@@ -48,10 +49,41 @@ reach each guest. A compromised job cannot pivot to a sibling guest's services
 (e.g. `ssh`) — the packets have no route. Apple exposes no API to disable, or
 further tighten, this; it is a fixed property of the attachment.
 
+**The Hyper-V backend does not isolate guests, and this is measured.** It
+attaches each guest to the shared HNS Default Switch with a plain endpoint
+carrying no ACL, VLAN, or isolation policy (`internal/vm/hcs_windows.go`).
+Sibling guests answer both ICMP and TCP/22 from each other. **Do not rely on
+network posture as a boundary between concurrent jobs on a Windows host.**
+
+What bounds the exposure there is the SSH posture, not the network. At the
+default hardening (`rotate`, which the SECURE_SSH gate fails *closed* into, so
+an unset value hardens), a guest accepts only the per-cycle key that never
+leaves the daemon, password auth is off, and the host key is per-guest and
+random — a sibling reaches port 22 and cannot authenticate. `scramble` also
+randomizes the account password, closing the non-SSH channels too.
+
+Three things that posture does **not** bound, in descending order of how much
+they should worry you:
+
+- **`ssh_hardening: off` pools.** The image's well-known password stays live for
+  the whole cycle and is now reachable from every sibling guest — a
+  straightforward pivot. That mode is a deliberate opt-out, not a default, but
+  choosing it on a Windows host is a materially different decision than on
+  darwin.
+- **Any non-SSH port a job binds.** A test server, a language runtime's debug
+  port, a container daemon: reachable from siblings, and nothing in the SSH
+  posture touches it.
+- **The window before SECURE_SSH completes.** Between boot and the rotation the
+  image default is still live — seconds per cycle, but a long-running neighbour
+  can poll for it.
+
+Closing this properly means an HNS-level isolation policy on the endpoint, which
+is unexplored and would be ADR-worthy.
+
 **Residual risk.** Bridge isolation does not defend against ARP spoofing (a
 guest poisoning the bridge's ARP table to intercept *host↔guest* traffic) or
 DHCP-pool exhaustion under heavy guest churn. The userspace packet filter
-[softnet](https://github.com/openai/softnet) closes both, but runs as a
+[softnet](https://github.com/cirruslabs/softnet) closes both, but runs as a
 SUID-root helper holding the `com.apple.vm.networking` entitlement — a
 privileged runtime dependency against the no-runtime-binary posture
 ([ADR-0008](architecture-decisions/0008-native-virtualization-framework.md)).
@@ -86,9 +118,12 @@ that rejects the cycle key fails the cycle loudly rather than silently
 falling back to the password.
 
 Pools can opt out per pool (`ssh_hardening: off`), which preserves
-password-auth-for-the-whole-cycle behavior; the network posture above is then
-what bounds the password (reachable from the host datapath only, not from
-sibling guests).
+password-auth-for-the-whole-cycle behavior. On a **macOS** host the network
+posture above is then what bounds the password: reachable from the host datapath
+only, not from sibling guests. **On a Windows host nothing bounds it** — siblings
+can reach the port and the password is the image's well-known default, so an
+`off` pool there means any concurrent job can log into any other guest. Prefer
+`rotate` or `scramble` on Windows hosts.
 
 Pools can also opt further **in** (`ssh_hardening: scramble`): the same
 pre-flip exec that installs the cycle key and disables password auth also
@@ -180,13 +215,18 @@ socket (no restart; the Windows control channel is a pipe with no file to
 stamp, so the home-dir ACE — which the gate reads — is the whole grant) —
 reaching the `GrantOperator`/`RevokeOperator` RPCs at all
 already means the caller is an operator, so granting another is transitive
-trust, not a new gate, the same posture ADR-0014 already established for
+trust, not a new gate, the same posture ADR-0014 (debug-key injection) already established for
 debug-key injection. Grants are attributed in an `operator-grants.jsonl`
 audit trail under the operator-writable home — a good-faith reconstruction
 aid, not a tamper-proof control, exactly like the `injected_keys` trail and
 the guest `authorized_keys` before it. `runnyctl operator revoke` refuses to
-remove the last operator (recoverable only via `sudo runnyctl
-install-daemon`, which resets the ACL to the install-time bootstrap). A root
+remove the last operator. On darwin that is recoverable only via `sudo runnyctl
+install-daemon`, which resets the ACL to the install-time bootstrap. **On
+Windows reinstall does not reset it**: `icacls /inheritance:d` converts and
+keeps existing explicit entries, so a reinstall re-grants the named operator
+while preserving every other live grant
+([ADR-0027](architecture-decisions/0027-windows-operator-identity.md)) —
+revocation, not reinstall, is the removal path there. A root
 peer is refused as a grant target (root already bypasses the socket's
 `0600` mode and needs no ACE). Per-user deployments have a single owner and
 no ACL-managed set, so `operator grant`/`revoke` require the system daemon;

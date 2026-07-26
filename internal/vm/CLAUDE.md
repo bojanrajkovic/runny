@@ -62,21 +62,26 @@ ADR-0026 for the Hyper-V backend's decisions and why; this doc is sharp edges on
   accepts Administrators: that check authenticates runnyd's own pipe, this one
   authenticates Hyper-V. `slog.Debug` logs the minted name at Boot, since an
   operator attaching to a boot console can no longer derive it.
-- **A Windows guest gets no COM port at all, and a Linux guest's is detached
-  once networking is up.** The console's only programmatic job is
-  `fixupNetwork`, which `waitIPWindows` never calls — so `Boot` omits `ComPorts`
-  entirely for a Windows guest, and no pipe is created for it. For a Linux guest
-  the port is attached at boot (the fixup is the only way into a guest whose
-  networking has not come up) and `detachConsole` disconnects it on **both** of
-  `waitIPLinux`'s success paths — the self-configured fast path as well as the
-  post-fixup one, since the port is attached either way. Schema 2.1 documents an
-  empty `NamedPipe` as "a disconnected port" (`hcs/schema2/com_port.go`), so
-  this is an `Update` of the port, not a `Remove` of the device. Best-effort and
-  loud: networking is already up and the cycle is healthy by then, so a failed
-  detach warns and leaves the console bound (the pre-existing posture) rather
-  than destroying a working guest over cleanup. `RequestType` is the untyped
-  string `"Update"` because `winhcs/protocol/guestrequest` is not visible to
-  `internal/vm`.
+- **A Windows guest gets no COM port at all; a Linux guest's stays attached for
+  the guest's lifetime, and HCS gives no way to change that.** The console's only
+  programmatic job is `fixupNetwork`, which `waitIPWindows` never calls, so `Boot`
+  omits `ComPorts` entirely for a Windows guest and no pipe is created for it. A
+  Linux guest must have one at boot (the fixup is the only way into a guest whose
+  networking has not come up), and it cannot be detached afterwards:
+  `hcs::System::Modify` on `VirtualMachine/Devices/ComPorts/0` fails with "The
+  remote procedure call failed" on every attempt, whether the port is Removed or
+  Updated to schema 2.1's documented empty-NamedPipe "disconnected port". Nothing
+  in hcsshim modifies a ComPort anywhere -- the type appears only in the schema
+  struct -- so there is no upstream precedent to copy and no reason to think a
+  different resource path exists. **Do not re-attempt this without new evidence
+  from Microsoft**, and note that the attempt is not free: restricted to cycles that
+  ran the console fixup, AWAIT_SSH failed 17 of 21 times (81%) on the build that
+  made it, against 0 of 25 across the three released builds before it -- dialing
+  an address the fixup had just read successfully off the console, and timing
+  out. A rejected device
+  modify on a running compute system evidently disturbs the guest's networking,
+  so this costs guests, not just a warning line. What bounds the exposure instead is the pipe's
+  unguessable per-boot name and the SYSTEM-owner check on the dial (above).
 - **On the fixup path, `WaitIP` returns the console-observed address, NOT the
   neighbor-table entry.** HNS's `Permanent` neighbor row is a pre-commit written
   before the guest boots, and the guest's own DHCP client can land on a

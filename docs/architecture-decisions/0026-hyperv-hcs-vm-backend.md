@@ -226,3 +226,18 @@ condition fired on the very first real-hardware validation — trusting the
 image's behavior was the wrong call, not a defensible one that later
 changed. The fixup is now built, gated behind `WaitIP`'s grace period so it
 still costs nothing for an image that doesn't need it (see Decision above).
+
+**Amended:** 2026-07-26 — the console pipe is authenticated, and its name is
+unguessable. The fixup above dials a pipe runny only *names*; Hyper-V's
+`vmcompute.exe` creates it, so runny does not choose its DACL. Reading that DACL
+off a live guest showed `O:SY G:SY D:(A;;FR;;;WD)(A;;FA;;;SY)(A;;FA;;;BA)
+(A;;FA;;;HA)…` — Everyone can read a guest's serial console, and only
+SYSTEM/administrators/Hyper-V administrators/the VM's own account get more.
+Since whoever creates a pipe name first owns its security descriptor, the
+original slot-derived name — stable across cycles and derivable from config —
+could be pre-created by any local user, who would then receive the dial this
+fixup types the guest's SSH credentials into, and whose console output `WaitIP`
+treats as the authoritative lease address. Two changes close that: the name now
+carries 8 random bytes minted per boot, so it cannot be pre-created; and the
+dial refuses any console whose owner is not SYSTEM, which is the part a squatter
+cannot forge. Neither changes what the fixup does or when it runs.

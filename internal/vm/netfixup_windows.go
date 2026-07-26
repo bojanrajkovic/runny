@@ -13,6 +13,8 @@ import (
 	"github.com/Microsoft/go-winio"
 
 	"github.com/bojanrajkovic/runny/internal/bounded"
+	"golang.org/x/sys/windows"
+
 	"github.com/bojanrajkovic/runny/internal/obs"
 )
 
@@ -66,10 +68,18 @@ const consoleSeenCap = 4096
 // less diagnosable, and the returned address is the one WaitIP actually dials
 // (the host neighbor table's Permanent row can name a different, stale address
 // -- see WaitIP's doc comment).
-func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) (string, error) {
-	conn, err := dialConsoleWithRetry(ctx, consolePipeName(systemID))
+func fixupNetwork(ctx bounded.Context, consolePipe, sshUser, sshPassword string) (string, error) {
+	conn, err := dialConsoleWithRetry(ctx, consolePipe)
 	if err != nil {
 		return "", fmt.Errorf("dialing console: %w", err)
+	}
+	// Authenticate Hyper-V before typing the guest's credentials into whatever
+	// answered. consolePipeName's random suffix already makes pre-creating this
+	// name impractical; this closes the residue, and is the same client-side
+	// anti-squat posture cmd/runnyctl applies to the control pipe.
+	if err := verifyConsoleOwner(conn); err != nil {
+		conn.Close()
+		return "", err
 	}
 	// Milestones from here on: named, distinctly-timestamped span events on
 	// the caller's network-fixup action, so a trace shows which stage a run
@@ -127,7 +137,7 @@ func fixupNetwork(ctx bounded.Context, systemID, sshUser, sshPassword string) (s
 	go func() {
 		defer conn.Close()
 		if err := consoleWrite(ctx, conn, "exit\r\n"); err != nil {
-			slog.Warn("network fixup: logging out the console session failed; it may remain authenticated", "system_id", systemID, "err", err)
+			slog.Warn("network fixup: logging out the console session failed; it may remain authenticated", "pipe", consolePipe, "err", err)
 		}
 	}()
 	return leaseIP, nil
@@ -293,4 +303,37 @@ func appendCapped(acc, add string) string {
 		acc = acc[len(acc)-consoleSeenCap:]
 	}
 	return acc
+}
+
+// verifyConsoleOwner fails closed unless the dialed console pipe is owned by
+// SYSTEM -- what Hyper-V's vmcompute.exe creates it as. runny NAMES this pipe
+// (the compute system document's ComPorts entry) but does not create it, so it
+// cannot choose the DACL; the owner is the part a squatter cannot forge,
+// because setting an object's owner to SYSTEM needs privilege an unprivileged
+// local user does not have.
+//
+// Fails closed on a read error for the same reason cmd/runnyctl's
+// verifyPipeOwner does: the owner read is reliable on a live dialed pipe, so a
+// failure is anomalous, and refusing is the correct posture before typing the
+// guest's SSH credentials into the connection.
+func verifyConsoleOwner(conn net.Conn) error {
+	fd, ok := conn.(interface{ Fd() uintptr })
+	if !ok {
+		return fmt.Errorf("console pipe conn does not expose Fd() — cannot verify its owner, refusing to log in")
+	}
+	sd, err := windows.GetSecurityInfo(windows.Handle(fd.Fd()), windows.SE_KERNEL_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return fmt.Errorf("cannot verify console pipe owner, refusing to log in: %w", err)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return fmt.Errorf("cannot extract console pipe owner SID, refusing to log in: %w", err)
+	}
+	if owner == nil {
+		return fmt.Errorf("console pipe has no owner SID, refusing to log in")
+	}
+	if !isTrustedConsoleOwner(owner.String()) {
+		return fmt.Errorf("console pipe is not owned by SYSTEM (owner %s) — refusing to log in; the pipe may be squatted", owner.String())
+	}
+	return nil
 }

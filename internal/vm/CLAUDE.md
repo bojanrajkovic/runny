@@ -41,6 +41,27 @@ ADR-0026 for the Hyper-V backend's decisions and why; this doc is sharp edges on
   log in, and apply a netplan drop-in matching by driver instead of by
   interface name. See ADR-0026's amendment for why the original "no fallback"
   decision was reversed rather than merely revisited.
+- **The console pipe name is randomized per boot, and that is a security
+  property — do not make it derivable again.** runny *names* the COM0 pipe (the
+  compute system document's `ComPorts` entry) but Hyper-V's `vmcompute.exe`
+  *creates* it, so runny cannot choose its DACL. Measured on real hardware, that
+  DACL is `O:SY G:SY D:(A;;FR;;;WD)(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;HA)…` —
+  **Everyone gets read** on a guest's serial console, and only SYSTEM/admins/
+  Hyper-V admins/the VM account get more. Whoever creates a pipe *name* first
+  owns its security descriptor, so the old slot-derived name (stable across
+  cycles, derivable from config) could be pre-created by any local user, who
+  would then be handed the dial that `fixupNetwork` types the guest's SSH
+  credentials into — and whose output `WaitIP` treats as the authoritative lease
+  address. `consolePipeName` (`netfixup.go`, untagged so it unit-tests
+  off-hardware) now appends 8 random bytes per boot; `hcsMachine.consolePipe`
+  carries the value because it can no longer be recomputed. `verifyConsoleOwner`
+  (`netfixup_windows.go`) covers the residue by refusing any console whose owner
+  is not SYSTEM — the one thing an unprivileged squatter cannot forge, since
+  setting an object's owner to SYSTEM needs privilege they don't have. It is
+  deliberately narrower than `cmd/runnyctl`'s `isTrustedPipeOwner`, which also
+  accepts Administrators: that check authenticates runnyd's own pipe, this one
+  authenticates Hyper-V. `slog.Debug` logs the minted name at Boot, since an
+  operator attaching to a boot console can no longer derive it.
 - **On the fixup path, `WaitIP` returns the console-observed address, NOT the
   neighbor-table entry.** HNS's `Permanent` neighbor row is a pre-commit written
   before the guest boots, and the guest's own DHCP client can land on a

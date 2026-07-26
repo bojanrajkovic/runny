@@ -801,3 +801,57 @@ func TestPullToEmitsBlobClass(t *testing.T) {
 		t.Errorf("got %d ok blob round trips, want 4", blobs)
 	}
 }
+
+// A registry token is scoped to one repository, so a client that resolves two
+// repositories on the same host must not present the first repo's token to the
+// second. Caching by host alone was invisible while a host served one
+// repository and wrong the moment it served two -- and the failure is
+// especially misleading because Harbor answers a wrong-scope Bearer token with
+// a *Basic* challenge, which read as "no credentials configured" for a
+// repository that needs none.
+func TestTokenIsNotReusedAcrossRepositoriesOnOneHost(t *testing.T) {
+	var srvURL string
+	mux := http.NewServeMux()
+
+	// Tokens are scoped, exactly as a real registry mints them.
+	mux.HandleFunc("GET /token", func(w http.ResponseWriter, r *http.Request) {
+		scope := r.URL.Query().Get("scope") // repository:<name>:pull
+		name := strings.TrimSuffix(strings.TrimPrefix(scope, "repository:"), ":pull")
+		_ = json.NewEncoder(w).Encode(map[string]string{"token": "tok-for-" + name})
+	})
+
+	manifest := []byte(`{"schemaVersion":2,"layers":[]}`)
+	serve := func(name string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			switch got := r.Header.Get("Authorization"); got {
+			case "Bearer tok-for-" + name:
+				w.Header().Set("Content-Type", manifestAccept)
+				_, _ = w.Write(manifest)
+			case "":
+				w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q,service="fake",scope="repository:%s:pull"`, srvURL+"/token", name))
+				w.WriteHeader(http.StatusUnauthorized)
+			default:
+				// A token for the wrong repository. Harbor's actual reply, and
+				// the reason the old bug surfaced as a credentials error.
+				w.Header().Set("WWW-Authenticate", `Basic realm="harbor"`)
+				w.WriteHeader(http.StatusUnauthorized)
+			}
+		}
+	}
+	mux.HandleFunc("GET /v2/proj/first/manifests/{ref}", serve("proj/first"))
+	mux.HandleFunc("GET /v2/proj/second/manifests/{ref}", serve("proj/second"))
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	srvURL = srv.URL
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	// One client across both repositories, as runPrune does over cfg.Pools.
+	c := NewClient()
+	for _, name := range []string{"proj/first", "proj/second"} {
+		ref := Ref{Host: host, Name: name, Tag: "v1"}
+		if _, err := c.Resolve(testCtx(t), ref); err != nil {
+			t.Fatalf("resolving %s: %v", name, err)
+		}
+	}
+}

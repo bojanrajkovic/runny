@@ -163,6 +163,11 @@ type Client struct {
 	// much as the Bearer one — an image is hundreds of layer requests, and
 	// re-handshaking each would mean hundreds of deliberate 401s against a
 	// registry that may well be behind rate limiting or fail2ban.
+	// auth is keyed by HOST/NAME, not host: a registry token is scoped to one
+	// repository (scope="repository:<name>:pull"), so a token minted for one
+	// repo is rejected when presented for another on the same registry. Basic
+	// credentials really are per-host, but they are re-derived per repo from
+	// the same file, which costs a map entry and nothing else.
 	auth map[string]string
 }
 
@@ -581,10 +586,11 @@ func (c *Client) get(ctx context.Context, class obs.HTTPClass, ref Ref, u, accep
 			req.Header.Set("Accept", accept)
 		}
 		c.mu.Lock()
-		if v := c.auth[ref.Host]; v != "" {
-			req.Header.Set("Authorization", v)
-		}
+		sent := c.auth[authKey(ref)]
 		c.mu.Unlock()
+		if sent != "" {
+			req.Header.Set("Authorization", sent)
+		}
 		resp, err := c.hc.Do(req)
 		if err != nil {
 			return nil, err
@@ -592,14 +598,33 @@ func (c *Client) get(ctx context.Context, class obs.HTTPClass, ref Ref, u, accep
 		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
 			challenge := resp.Header.Get("WWW-Authenticate")
 			_ = resp.Body.Close()
+			if sent != "" {
+				// Whatever we presented was rejected -- an expired token, most
+				// likely. Drop it so the challenge below is answered afresh
+				// instead of re-sending the credential that just failed.
+				c.mu.Lock()
+				delete(c.auth, authKey(ref))
+				c.mu.Unlock()
+			}
 			if isBasicChallenge(challenge) {
 				user, pass, ok := credentialsFor(ref.Host)
 				if !ok {
+					// Distinguish the two ways this lands. With nothing sent,
+					// the registry genuinely wants a password. Having sent one,
+					// the registry is rejecting it -- and some registries
+					// (Harbor) answer a rejected Bearer token with a Basic
+					// challenge, so blaming missing credentials would send the
+					// operator hunting for an auths entry that was never the
+					// problem.
+					if sent != "" {
+						return nil, fmt.Errorf("GET %s: %s rejected the credential presented for this repository and asked for Basic authentication instead; no credentials are configured (an auths entry keyed exactly %q in %s would be used if this repository is private)",
+							u, ref.Host, ref.Host, CredentialConfigPath())
+					}
 					return nil, fmt.Errorf("GET %s: registry requires Basic authentication and no credentials are configured for %s (expected an auths entry keyed exactly %q in %s)",
 						u, ref.Host, ref.Host, CredentialConfigPath())
 				}
 				c.mu.Lock()
-				c.auth[ref.Host] = "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
+				c.auth[authKey(ref)] = "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
 				c.mu.Unlock()
 				continue
 			}
@@ -669,10 +694,20 @@ func (c *Client) fetchToken(ctx context.Context, ref Ref, challenge string) erro
 		return fmt.Errorf("registry token response unusable (HTTP %d): %v", resp.StatusCode, err)
 	}
 	c.mu.Lock()
-	c.auth[ref.Host] = "Bearer " + tok.Token
+	c.auth[authKey(ref)] = "Bearer " + tok.Token
 	c.mu.Unlock()
 	return nil
 }
+
+// authKey scopes a cached Authorization header to one repository, matching the
+// scope a registry token is actually minted for. Keying by host alone was
+// invisible while a host served a single repository and wrong the moment it
+// served two: the first repo's token was then presented for the second, which
+// Harbor answers with a Basic challenge rather than another Bearer one.
+//
+// ParseRef requires an explicit host and name, so this is well defined for
+// every ref runny can parse -- there is no Docker Hub short form to normalize.
+func authKey(ref Ref) string { return ref.Host + "/" + ref.Name }
 
 // isBasicChallenge reports whether the challenge selects HTTP Basic instead of
 // the token dance. parseChallenge only understands the Bearer form, so a Basic

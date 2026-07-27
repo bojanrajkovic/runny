@@ -493,6 +493,11 @@ var runnerZipRE = regexp.MustCompile(`^[A-Za-z0-9._-]+\.zip$`)
 // Int32 besides). The header is emitted before the copy starts, so a file that
 // fails midway leaves what it managed plus the unreadable line.
 //
+// The path is hoisted into $p before the try because PowerShell rebinds $_ to
+// the ErrorRecord inside a catch, shadowing ForEach-Object's pipeline item —
+// so $_.FullName there expands to nothing and the unreadable line would name
+// no file, which is the one thing it exists to do.
+//
 // Each file is read inside try/catch to keep a failure attributable. An
 // uncaught .NET exception here does not abort the loop — PowerShell reports
 // it as non-terminating and ForEach-Object continues to the next file — but
@@ -509,15 +514,16 @@ var runnerZipRE = regexp.MustCompile(`^[A-Za-z0-9._-]+\.zip$`)
 const pullDiagScriptWindows = `$stdout = [Console]::OpenStandardOutput()
 function Emit($s) { $b = [Text.Encoding]::UTF8.GetBytes($s); $stdout.Write($b, 0, $b.Length) }
 Get-ChildItem -Path '` + runnerDirWindows + `\_diag' -Filter *.log -ErrorAction SilentlyContinue | ForEach-Object {
+  $p = $_.FullName
   try {
-    $fs = [IO.File]::Open($_.FullName, 'Open', 'Read', 'ReadWrite')
+    $fs = [IO.File]::Open($p, 'Open', 'Read', 'ReadWrite')
     try {
-      Emit "==> $($_.FullName) <==` + "`n" + `"
+      Emit "==> $p <==` + "`n" + `"
       $fs.CopyTo($stdout)
       Emit "` + "`n" + `"
     } finally { $fs.Close() }
   } catch {
-    Emit "==> $($_.FullName) <== (unreadable: $($_.Exception.Message))` + "`n" + `"
+    Emit "==> $p <== (unreadable: $($_.Exception.Message))` + "`n" + `"
   }
 }
 $stdout.Flush()

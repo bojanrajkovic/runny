@@ -129,8 +129,10 @@ func handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 			fmt.Fprintln(ch, "marker after long line")
 			exit(0)
 		case payload.Cmd == "flood":
-			// Far more than the client's Output byte cap, then exit cleanly: the
-			// cap must bound the buffer even when the command completes normally.
+			// Multi-megabyte but deliberately UNDER the client's Output cap:
+			// PullDiag streams whole runner logs, so a large capture that fits
+			// must arrive intact. capBuf's overflow behaviour is pinned by its
+			// own unit tests rather than by flooding maxOutput through here.
 			chunk := strings.Repeat("x", 1<<20)
 			for range 8 { // 8 MiB total
 				fmt.Fprint(ch, chunk)
@@ -450,6 +452,69 @@ func TestCapBufMarksTruncation(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "BBBB") {
 		t.Errorf("marker must precede the kept tail, not replace it: %q", got)
+	}
+}
+
+// The cap must bound what is RETAINED, not merely what is reported. Sliding a
+// window by advancing a read offset leaves the dropped bytes in the backing
+// array, so the allocation a guest can provoke settles at twice the documented
+// figure.
+func TestCapBufRetainsOnlyItsCap(t *testing.T) {
+	const max = 1 << 16
+	b := capBuf{max: max}
+	chunk := make([]byte, 4<<10)
+	for range 200 {
+		if _, err := b.Write(chunk); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	b.mu.Lock()
+	held := cap(b.b)
+	b.mu.Unlock()
+	if held > max {
+		t.Errorf("capBuf retains %d bytes for a %d-byte cap (%.2fx)", held, max, float64(held)/max)
+	}
+}
+
+// bytes must not alias the live buffer: on a timeout the caller reads it while
+// the session goroutine is still writing, so a shared array is a data race and
+// a mutating result.
+func TestCapBufBytesIsASnapshot(t *testing.T) {
+	b := capBuf{max: 1024}
+	if _, err := b.Write([]byte("first")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	snap := b.bytes()
+	if _, err := b.Write([]byte("second")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := string(snap); got != "first" {
+		t.Errorf("earlier snapshot mutated by a later write: %q", got)
+	}
+}
+
+// A pull that runs out of time must still yield what already crossed the wire.
+// PullDiag streams whole runner logs under a deadline, and the guest is
+// destroyed straight after — discarding a partial capture turns a slow
+// transfer into no post-mortem at all.
+func TestOutputReturnsPartialCaptureOnTimeout(t *testing.T) {
+	c, err := Dial(testCtx(t), testServer(t), testCfg)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+	// "spew" writes 500 lines and then never exits.
+	ctx, cancel := bounded.WithTimeout(t.Context(), 750*time.Millisecond)
+	defer cancel()
+	out, _, err := c.Output(ctx, "spew")
+	if err == nil {
+		t.Fatal("expected a timeout error")
+	}
+	if len(out) == 0 {
+		t.Fatal("timed-out pull discarded everything it had already received")
+	}
+	if !strings.Contains(string(out), "spew 0") {
+		t.Errorf("partial capture missing the bytes that did arrive: %.60q", out)
 	}
 }
 

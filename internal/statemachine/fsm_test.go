@@ -1085,6 +1085,35 @@ func TestGitHubOutageDoesNotRecycle(t *testing.T) {
 	cancel()
 }
 
+// A pull that ran out of time still hands back what crossed the wire, and that
+// partial post-mortem must be kept. PullDiag streams whole runner logs and the
+// guest is destroyed immediately after, so discarding a truncated capture
+// because the call also reported an error throws away the only copy.
+func TestPostMortemKeptWhenPullDegrades(t *testing.T) {
+	h := newHarness(t, nil)
+	h.guest.diag = []byte("partial diag before the deadline\n")
+	h.guest.diagErr = errors.New("ssh command timed out")
+	cancel := h.start(t)
+
+	h.waitState(t, StateProvision)
+	h.proc.exit(2)
+	h.waitState(t, StateBackoff)
+	cancel()
+
+	rec := h.records(t)[0]
+	if len(rec.Artifacts) != 1 || rec.Artifacts[0] != "runner-diag.log" {
+		t.Fatalf("a degraded pull must still record its partial artifact, got %v", rec.Artifacts)
+	}
+	dir, _ := (cycle.Store{SlotDir: h.dir.SlotCyclesDir("runner-1")}).Dir(rec)
+	got, err := os.ReadFile(filepath.Join(dir, "runner-diag.log"))
+	if err != nil {
+		t.Fatalf("runner-diag.log missing after a degraded pull: %v", err)
+	}
+	if !strings.Contains(string(got), "partial diag") {
+		t.Errorf("artifact lost the bytes that did arrive: %q", got)
+	}
+}
+
 func TestPostMortemCollectedOnFailure(t *testing.T) {
 	h := newHarness(t, nil)
 	cancel := h.start(t)

@@ -361,8 +361,17 @@ func TestPullDiagScriptWindowsToleratesLiveWriters(t *testing.T) {
 	if strings.Contains(pullDiagScriptWindows, "ReadAllBytes") {
 		t.Error("diag script must not use ReadAllBytes: FileShare.Read collides with the runner's open log")
 	}
-	if !strings.Contains(pullDiagScriptWindows, `[IO.File]::Open($_.FullName, 'Open', 'Read', 'ReadWrite')`) {
+	if !strings.Contains(pullDiagScriptWindows, `'Open', 'Read', 'ReadWrite')`) {
 		t.Error("diag script must open each log with explicit ReadWrite sharing to tolerate the live runner")
+	}
+	// PowerShell rebinds $_ to the ErrorRecord inside a catch, so a $_.FullName
+	// there expands to nothing and the unreadable line names no file — the one
+	// thing it exists to do. The path must be hoisted before the try.
+	if strings.Contains(pullDiagScriptWindows, `$_.FullName) <== (unreadable`) {
+		t.Error("the unreadable line must use a hoisted path: $_ is the ErrorRecord inside a catch")
+	}
+	if !strings.Contains(pullDiagScriptWindows, `$p = $_.FullName`) {
+		t.Error("diag script must hoist the pipeline item's path before the try block")
 	}
 	// POSIX PullDiag continues past a failed file (shell `for` + 2>/dev/null).
 	// Without a per-file catch the windows script loses every log to one bad

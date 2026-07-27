@@ -385,11 +385,11 @@ func (g *Guest) PullDiag(ctx bounded.Context) ([]byte, error) {
 	if g.goos == home.OSWindows {
 		script = encodedCommand(pullDiagScriptWindows)
 	}
+	// Partial output is returned alongside the error rather than dropped: a
+	// pull that exhausted its deadline mid-transfer still holds everything
+	// that arrived, and the guest is about to be destroyed.
 	out, _, err := g.c.Output(ctx, script)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
+	return out, err
 }
 
 // PullDebugSession fetches the operator's session recording at teardown.

@@ -117,6 +117,27 @@ edges only.
   reporting), and the guard is defense in depth, since the 250ms
   settle-then-redrain before reading already makes an empty/partial read
   practically unreachable.
+- **Every windows read of a file the guest is still writing opens with
+  explicit `ReadWrite` sharing, and emits through
+  `[Console]::OpenStandardOutput()` rather than `[Console]::Out`.** All three
+  readers do both: `watcherScriptWindows`'s `Detect`/`Drain`,
+  `pullDebugSessionScriptWindows`, and `pullDiagScriptWindows`. Windows file
+  sharing is mutual, which is the counter-intuitive half — a reader declaring
+  `FileShare.Read`, which is what `[IO.File]::ReadAllBytes` and `Get-Content`
+  open with, refuses to coexist with an existing handle's `Write` access, so
+  it throws against a live writer *even when that writer declared
+  `FileShare.ReadWrite`* (measured on a windows host across all three writer
+  share modes; only a `FileShare.None` writer defeats
+  `[IO.File]::Open($p,'Open','Read','ReadWrite')`). Every one of these reads
+  races a live writer by design, not by accident: teardown pulls diag
+  *before* `StopRunner`, so the runner still holds `_diag\Runner_*.log`, and
+  a debug session is pulled while the operator may still be connected.
+  `[Console]::Out` is a TextWriter that re-encodes to the console's OEM
+  codepage and turns any non-ASCII into `?`. A failure here is quiet —
+  PowerShell reports the sharing violation as non-terminating, so the loop
+  continues and the script still exits 0; `Output` folds stderr into the same
+  buffer, so the exception text lands in the artifact where the file's
+  contents should have been.
 - **Windows debug session recording needs two mechanisms, not one, because
   no single windows mechanism covers both SSH usage shapes.**
   `debugRecorderScriptWindows`'s doc comment has the full rationale; the

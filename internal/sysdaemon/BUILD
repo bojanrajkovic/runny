@@ -80,6 +80,7 @@ go_test(
         "scm_windows_test.go",
         "scmcmds_test.go",
         "stage_test.go",
+        "sysdaemon_darwin_test.go",
         "sysdaemon_test.go",
     ],
     embed = [":sysdaemon"],

@@ -87,10 +87,14 @@ jobs:
   # EXECUTES the test suite on a real Windows host. mise (not bazelisk)
   # acquires bazel: the aqua backend supports windows/amd64 for our pinned
   # 9.1.1, so this is one toolchain source (.mise.toml) across every job
-  # rather than a second pinning mechanism for one platform. Excluded:
-  # internal/sysdaemon (macOS LaunchDaemon-only — launchctl/dscl — with no
-  # Windows SCM equivalent yet; its tests assert literal unix paths against a
-  # feature that plainly can't run here).
+  # rather than a second pinning mechanism for one platform.
+  #
+  # internal/sysdaemon is NOT excluded. It was, on the grounds that the package
+  # was macOS LaunchDaemon-only with no Windows SCM equivalent — which stopped
+  # being true when the SCM installer landed, leaving the one package that
+  # installs the daemon as a Windows service with no CI executing its tests on
+  # Windows at all. apps/Runny stays excluded: it is a SwiftUI target that
+  # cannot build off darwin.
   windows:
     name: build + test (windows)
     runs-on: windows-2022
@@ -120,12 +124,12 @@ jobs:
       # natively, so this sidesteps the escaping problem entirely.
       - name: build
         shell: bash
-        run: mise x -- bazel --output_base=C:/b build --config=ci -- //... -//apps/Runny/... -//internal/sysdaemon:sysdaemon_test
+        run: mise x -- bazel --output_base=C:/b build --config=ci -- //... -//apps/Runny/...
       # Bazel's local test sandbox doesn't pass USERPROFILE through by
       # default on windows (unlike HOME on unix) — os.UserHomeDir needs it.
       - name: test
         shell: bash
-        run: mise x -- bazel --output_base=C:/b test --config=ci --test_env=USERPROFILE -- //... -//apps/Runny/... -//internal/sysdaemon:sysdaemon_test
+        run: mise x -- bazel --output_base=C:/b test --config=ci --test_env=USERPROFILE -- //... -//apps/Runny/...
 
   # The race detector, on its own job because the instrumented rebuild runs
   # ~2-10x slower than the default test path (.bazelrc test:race). macOS so

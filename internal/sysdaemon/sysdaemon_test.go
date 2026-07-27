@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -24,34 +25,6 @@ var testOperator = func() string {
 	}
 	return "root"
 }()
-
-func TestPlist(t *testing.T) {
-	cfg := Config{RunnydPath: "/opt/homebrew/bin/runnyd"}
-	p := Plist(cfg)
-	// Check keys and values independently — format-agnostic so the test doesn't
-	// pin howett.net/plist's internal whitespace.
-	for _, want := range []string{
-		"<key>Label</key>",
-		"<string>com.coderinserepeat.runnyd</string>",
-		"<key>UserName</key>",
-		"<string>_runny</string>",
-		"<string>/opt/homebrew/bin/runnyd</string>",
-		"<key>KeepAlive</key>",
-		"<true/>",
-		"<key>ProcessType</key>",
-		"<string>Standard</string>",
-		"<string>/Library/Application Support/runny/logs/launchd.out.log</string>",
-		"<string>/Library/Application Support/runny/logs/launchd.err.log</string>",
-	} {
-		if !strings.Contains(p, want) {
-			t.Errorf("plist missing %q\n---\n%s", want, p)
-		}
-	}
-	// A system daemon must NOT carry the per-user agent's Interactive type.
-	if strings.Contains(p, "<string>Interactive</string>") {
-		t.Error("system plist must not use ProcessType Interactive (no GUI session)")
-	}
-}
 
 // The ACE strings are pinned: they are the exact grants validated by the PR4c
 // spike on a real Mac. A change here silently re-opens the read gaps the spike
@@ -98,30 +71,23 @@ func TestParseTakenIDs(t *testing.T) {
 	}
 }
 
-func TestResolveRunnydPath(t *testing.T) {
-	cases := map[string]string{
-		"/opt/homebrew/bin/runnyctl":                      "/opt/homebrew/bin/runnyd",
-		"/Applications/Runny.app/Contents/MacOS/runnyctl": "/Applications/Runny.app/Contents/MacOS/runnyd",
-	}
-	for in, want := range cases {
-		if got := ResolveRunnydPath(in); got != want {
-			t.Errorf("ResolveRunnydPath(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 // resolveRunnydPath's windows case is tested directly (not through
-// ResolveRunnydPath, which hardcodes runtime.GOOS) so it's covered on every
-// host, not just a windows build. filepath.Dir/Join's separator is baked in at
-// compile time for the HOST's GOOS regardless of the goos argument here, so
-// this uses a forward-slash input — portable across every test host — to
-// isolate what's actually being tested: the "runnyd" vs "runnyd.exe" suffix
-// decision, not path-joining semantics only a real windows build can exercise.
+// ResolveRunnydPath, which hardcodes runtime.GOOS) so it is covered on every
+// host, not just a windows build.
+//
+// It asserts the two things that decision actually makes -- the "runnyd.exe"
+// suffix and the preserved directory -- rather than a whole path string.
+// filepath's separator is baked in for the HOST at compile time regardless of
+// the goos argument, so comparing a full path here passes off windows and fails
+// on it: a test named for windows that only held when not run there.
 func TestResolveRunnydPathWindows(t *testing.T) {
-	got := resolveRunnydPath("/opt/runny/runnyctl", "windows")
-	want := "/opt/runny/runnyd.exe"
-	if got != want {
-		t.Errorf("resolveRunnydPath(..., %q) = %q, want %q", "windows", got, want)
+	in := filepath.Join(string(filepath.Separator)+"opt", "runny", "runnyctl")
+	got := resolveRunnydPath(in, "windows")
+	if want := "runnyd.exe"; filepath.Base(got) != want {
+		t.Errorf("resolveRunnydPath(%q, windows) = %q, want basename %q", in, got, want)
+	}
+	if want := filepath.Dir(in); filepath.Dir(got) != want {
+		t.Errorf("resolveRunnydPath(%q, windows) = %q, want dir %q", in, got, want)
 	}
 }
 
@@ -176,82 +142,6 @@ func indexOfCall(calls [][]string, pred func([]string) bool) int {
 func newTestInstaller(r *recordedRun, wf func(string, []byte, os.FileMode) error) *Installer {
 	cfg := Config{Operator: testOperator, RunnydPath: "/opt/homebrew/bin/runnyd"}
 	return &Installer{cfg: cfg, run: r.run, writeFile: wf, log: func(string, ...any) {}}
-}
-
-func TestInstallPlan(t *testing.T) {
-	r := &recordedRun{
-		readErr: errors.New("eDSRecordNotFound"),
-		listOut: map[string]string{
-			"PrimaryGroupID": "staff 20\nadmin 80\n",
-			"UniqueID":       "root 0\nbrajkovic 501\n",
-		},
-	}
-	var wrotePath string
-	var wroteData []byte
-	var wroteMode os.FileMode
-	inst := newTestInstaller(r, func(p string, d []byte, m os.FileMode) error {
-		wrotePath, wroteData, wroteMode = p, d, m
-		return nil
-	})
-	if err := inst.Install(context.Background()); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	// Account: hidden, no-home, no-shell, with the first free uid (200).
-	for _, want := range [][]string{
-		{"/usr/bin/dscl", ".", "-create", "/Users/_runny", "UniqueID", "200"},
-		{"/usr/bin/dscl", ".", "-create", "/Users/_runny", "NFSHomeDirectory", "/var/empty"},
-		{"/usr/bin/dscl", ".", "-create", "/Users/_runny", "IsHidden", "1"},
-		{"/usr/bin/dscl", ".", "-create", "/Users/_runny", "UserShell", "/usr/bin/false"},
-	} {
-		if !exactCall(r.calls, want...) {
-			t.Errorf("missing account step: %v", want)
-		}
-	}
-
-	// Home: 0700 + the dual inheriting ACL.
-	if !exactCall(r.calls, "/bin/chmod", "0700", home.SystemHomeDir) {
-		t.Error("missing chmod 0700 on the home")
-	}
-	if !exactCall(r.calls, "/bin/chmod", "-R", "+a", opacl.OperatorACE(testOperator), home.SystemHomeDir) {
-		t.Error("missing operator ACE (recursive)")
-	}
-	if !exactCall(r.calls, "/bin/chmod", "-R", "+a", serviceACE("_runny"), home.SystemHomeDir) {
-		t.Error("missing service ACE (recursive)")
-	}
-
-	// Ordering: logs/ must be created AFTER the home ACL so it inherits the ACEs.
-	lastACL := -1
-	for i, c := range r.calls {
-		if len(c) >= 3 && c[0] == "/bin/chmod" && c[2] == "+a" {
-			lastACL = i
-		}
-	}
-	logsIdx := indexOfCall(r.calls, func(c []string) bool {
-		return len(c) == 3 && c[0] == "/bin/mkdir" && c[2] == home.SystemHomeDir+"/logs"
-	})
-	if logsIdx < 0 || lastACL < 0 || logsIdx < lastACL {
-		t.Errorf("logs/ (idx %d) must be created after the home ACL (idx %d) so it inherits", logsIdx, lastACL)
-	}
-
-	// launchctl: bootstrap into system/ then enable.
-	if !exactCall(r.calls, "/bin/launchctl", "bootstrap", "system", PlistPath()) {
-		t.Error("missing launchctl bootstrap system")
-	}
-	if !exactCall(r.calls, "/bin/launchctl", "enable", "system/com.coderinserepeat.runnyd") {
-		t.Error("missing launchctl enable")
-	}
-
-	// Plist: right path, mode, and contents.
-	if wrotePath != "/Library/LaunchDaemons/com.coderinserepeat.runnyd.plist" {
-		t.Errorf("plist path = %q", wrotePath)
-	}
-	if wroteMode != 0o644 {
-		t.Errorf("plist mode = %v, want 0644", wroteMode)
-	}
-	if !strings.Contains(string(wroteData), "<string>/opt/homebrew/bin/runnyd</string>") {
-		t.Error("plist missing the runnyd path")
-	}
 }
 
 const validServiceAccountRead = "UniqueID: 250\nUserShell: /usr/bin/false\nNFSHomeDirectory: /var/empty\n"

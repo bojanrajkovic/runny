@@ -474,9 +474,7 @@ var runnerZipRE = regexp.MustCompile(`^[A-Za-z0-9._-]+\.zip$`)
 
 // pullDiagScriptWindows mirrors the POSIX PullDiag shape (a "==> name <=="
 // header per file, each tailed to the same 32KiB bound) over
-// C:\actions-runner\_diag instead of $HOME/runny-runner/_diag. Three details
-// are what make it actually mirror `tail -c 32768 "$f" ... 2>/dev/null`
-// rather than merely resemble it.
+// C:\actions-runner\_diag instead of $HOME/runny-runner/_diag.
 //
 // Each log is opened with explicit ReadWrite sharing, the same reason
 // pullDebugSessionScriptWindows and watcherScriptWindows open with it.
@@ -509,17 +507,11 @@ Get-ChildItem -Path '` + runnerDirWindows + `\_diag' -Filter *.log -ErrorAction 
     $fs = [IO.File]::Open($_.FullName, 'Open', 'Read', 'ReadWrite')
     try {
       $take = [Math]::Min($fs.Length, 32768)
-      if ($fs.Length -gt $take) { $fs.Seek(-$take, 'End') | Out-Null }
-      $buf = New-Object byte[] $take
-      $off = 0
-      while ($off -lt $take) {
-        $n = $fs.Read($buf, $off, $take - $off)
-        if ($n -le 0) { break }
-        $off += $n
-      }
+      $fs.Seek(-$take, 'End') | Out-Null
+      $buf = (New-Object IO.BinaryReader($fs)).ReadBytes($take)
     } finally { $fs.Close() }
     Emit "==> $($_.FullName) <==` + "`n" + `"
-    $stdout.Write($buf, 0, $off)
+    $stdout.Write($buf, 0, $buf.Length)
     Emit "` + "`n" + `"
   } catch {
     Emit "==> $($_.FullName) <== (unreadable: $($_.Exception.Message))` + "`n" + `"

@@ -26,7 +26,7 @@ jobs:
     name: build + test (linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           lfs: true # internal/vhdx/testdata's binary fixtures are LFS-tracked
@@ -67,7 +67,7 @@ jobs:
     # macos-26 matches the deployment host (ix) and guest image generation.
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           lfs: true # internal/vhdx/testdata's binary fixtures are LFS-tracked
@@ -104,7 +104,7 @@ jobs:
       - name: disable line-ending mangling
         shell: bash
         run: git config --global core.autocrlf false
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           lfs: true # internal/vhdx/testdata's binary fixtures are LFS-tracked
@@ -144,7 +144,7 @@ jobs:
     name: build + test (race)
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           lfs: true # internal/vhdx/testdata's binary fixtures are LFS-tracked
@@ -171,7 +171,7 @@ jobs:
     permissions:
       contents: read # checkout only
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           lfs: true # internal/vhdx/testdata's binary fixtures are LFS-tracked
@@ -200,7 +200,7 @@ jobs:
       contents: read # checkout only
       security-events: write # SARIF upload to code scanning
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: zizmorcore/zizmor-action@6599ee8b7a49aef6a770f63d261d214911a7ce02 # v0.6.0
@@ -232,7 +232,7 @@ jobs:
       id-token: write # OIDC identity for provenance attestation
       attestations: write # attest-build-provenance stores the attestation
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0 # tools/version.sh needs tags + history

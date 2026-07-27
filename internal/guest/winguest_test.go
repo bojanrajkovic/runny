@@ -370,10 +370,10 @@ func TestPullDiagScriptWindowsToleratesLiveWriters(t *testing.T) {
 	if !strings.Contains(pullDiagScriptWindows, "catch") {
 		t.Error("diag script must tolerate one unreadable log without aborting the rest")
 	}
-	// tail -c semantics: seek to the last 32KiB rather than reading the whole
-	// log into guest memory and slicing it.
-	if !strings.Contains(pullDiagScriptWindows, "Seek(") {
-		t.Error("diag script must seek to the tail, not read the entire log to slice it")
+	// Whole logs, not a tail: the guest is destroyed right after, so anything
+	// left behind is gone. sshx.Output's cap is the backstop, not this script.
+	if strings.Contains(pullDiagScriptWindows, "32768") {
+		t.Error("diag script must read each log whole, not clip it to a byte bound")
 	}
 	if !strings.Contains(pullDiagScriptWindows, "OpenStandardOutput()") {
 		t.Error("diag script must write to the standard-output stream")

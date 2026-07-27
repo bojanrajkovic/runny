@@ -412,10 +412,65 @@ func TestStartDeliversStdin(t *testing.T) {
 	}
 }
 
-// Output reads the full combined output; a guest controlling how many
-// _diag/*.log files exist (PullDiag) could otherwise force an unbounded
-// transient allocation. The byte cap must bound the buffer.
-func TestOutputByteCapped(t *testing.T) {
+// When Output overflows its cap, the END of the output is what survives.
+// PullDiag streams whole runner logs, and a log's ending is the failure that
+// teardown pulled it for — keeping the first N bytes would discard exactly
+// the part worth having and leave the runner's startup chatter behind.
+func TestCapBufKeepsTheTailNotTheHead(t *testing.T) {
+	b := capBuf{max: 10}
+	if _, err := b.Write([]byte("0123456789")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if _, err := b.Write([]byte("ABCDE")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	got := string(b.bytes())
+	if !strings.HasSuffix(got, "56789ABCDE") {
+		t.Errorf("cap kept the wrong end: %q, want it to end in %q", got, "56789ABCDE")
+	}
+	if strings.Contains(got, "01234") {
+		t.Errorf("the oldest bytes must be the ones dropped: %q", got)
+	}
+}
+
+// A truncated capture must say so. capBuf reports a full write regardless, so
+// without a marker in the bytes themselves a clipped post-mortem is
+// indistinguishable from a log that simply ended there.
+func TestCapBufMarksTruncation(t *testing.T) {
+	b := capBuf{max: 4}
+	if _, err := b.Write([]byte("aaaaBBBB")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	got := string(b.bytes())
+	if !strings.Contains(got, "runny:") {
+		t.Errorf("truncated output carries no marker: %q", got)
+	}
+	if !strings.Contains(got, "4") {
+		t.Errorf("marker should report how many bytes were dropped: %q", got)
+	}
+	if !strings.HasSuffix(got, "BBBB") {
+		t.Errorf("marker must precede the kept tail, not replace it: %q", got)
+	}
+}
+
+// The common case must stay byte-identical: no marker, no reordering, nothing
+// added for a capture that fit.
+func TestCapBufUnderCapIsUntouched(t *testing.T) {
+	b := capBuf{max: 1024}
+	if _, err := b.Write([]byte("hello world")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := string(b.bytes()); got != "hello world" {
+		t.Errorf("under-cap output altered: %q", got)
+	}
+}
+
+// A multi-megabyte capture must arrive whole. PullDiag streams the runner's
+// _diag logs unabridged, so anything under the cap has to survive the pipe
+// intact — not merely stay under it. The cap's own overflow behaviour is
+// pinned directly on capBuf above; driving 64 MiB through the test server to
+// re-prove it here would buy nothing for the runtime.
+func TestOutputDeliversLargeCaptureIntact(t *testing.T) {
 	c, err := Dial(testCtx(t), testServer(t), testCfg)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -425,8 +480,14 @@ func TestOutputByteCapped(t *testing.T) {
 	if err != nil || code != 0 {
 		t.Fatalf("Output: code %d, err %v", code, err)
 	}
+	if want := 8 << 20; len(out) != want {
+		t.Errorf("Output delivered %d bytes, want the full %d", len(out), want)
+	}
 	if len(out) > maxOutput {
-		t.Errorf("Output not byte-capped: %d bytes (want <= %d)", len(out), maxOutput)
+		t.Errorf("Output exceeded its cap: %d bytes (want <= %d)", len(out), maxOutput)
+	}
+	if strings.Contains(string(out), "runny:") {
+		t.Errorf("an under-cap capture must carry no truncation marker")
 	}
 }
 

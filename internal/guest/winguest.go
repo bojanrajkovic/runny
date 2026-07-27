@@ -475,13 +475,49 @@ var runnerZipRE = regexp.MustCompile(`^[A-Za-z0-9._-]+\.zip$`)
 // pullDiagScriptWindows mirrors the POSIX PullDiag shape (a "==> name <=="
 // header per file, each tailed to the same 32KiB bound) over
 // C:\actions-runner\_diag instead of $HOME/runny-runner/_diag.
-const pullDiagScriptWindows = `Get-ChildItem -Path '` + runnerDirWindows + `\_diag' -Filter *.log -ErrorAction SilentlyContinue | ForEach-Object {
-  Write-Output "==> $($_.FullName) <=="
-  $bytes = [IO.File]::ReadAllBytes($_.FullName)
-  if ($bytes.Length -gt 32768) { $bytes = $bytes[($bytes.Length - 32768)..($bytes.Length - 1)] }
-  [Console]::Out.Write([Text.Encoding]::UTF8.GetString($bytes))
-  Write-Output ""
+//
+// Each log is opened with explicit ReadWrite sharing, the same reason
+// pullDebugSessionScriptWindows and watcherScriptWindows open with it.
+// Teardown pulls the post-mortem BEFORE StopRunner, so on exactly the failure
+// cycles diag exists for, the listener still holds _diag\Runner_*.log open.
+// [IO.File]::ReadAllBytes opens FileShare.Read, which collides with any open
+// writer — measured on a Windows host, including against a writer that
+// declared FileShare.ReadWrite, because sharing is mutual: a FileShare.Read
+// reader refuses to coexist with the writer's Write access no matter how
+// permissive that writer was. Only a FileShare.None writer defeats the
+// ReadWrite open, so it strictly dominates.
+//
+// Each file is read inside try/catch to keep a failure attributable. An
+// uncaught .NET exception here does not abort the loop — PowerShell reports
+// it as non-terminating and ForEach-Object continues to the next file — but
+// Output collects stdout and stderr into one buffer, so the exception text
+// lands in the middle of the artifact at whatever offset it interleaved at,
+// detached from the file it refers to. Catching it turns that into a labelled
+// line under the right header, and keeps the pull's own exit code meaning
+// what it says.
+//
+// Output goes through the raw stdout stream rather than [Console]::Out, whose
+// TextWriter re-encodes to the console's OEM codepage and would turn any
+// non-ASCII in a diag log into "?" — the same reason the two sibling scripts
+// avoid it.
+const pullDiagScriptWindows = `$stdout = [Console]::OpenStandardOutput()
+function Emit($s) { $b = [Text.Encoding]::UTF8.GetBytes($s); $stdout.Write($b, 0, $b.Length) }
+Get-ChildItem -Path '` + runnerDirWindows + `\_diag' -Filter *.log -ErrorAction SilentlyContinue | ForEach-Object {
+  try {
+    $fs = [IO.File]::Open($_.FullName, 'Open', 'Read', 'ReadWrite')
+    try {
+      $take = [Math]::Min($fs.Length, 32768)
+      $fs.Seek(-$take, 'End') | Out-Null
+      $buf = (New-Object IO.BinaryReader($fs)).ReadBytes($take)
+    } finally { $fs.Close() }
+    Emit "==> $($_.FullName) <==` + "`n" + `"
+    $stdout.Write($buf, 0, $buf.Length)
+    Emit "` + "`n" + `"
+  } catch {
+    Emit "==> $($_.FullName) <== (unreadable: $($_.Exception.Message))` + "`n" + `"
+  }
 }
+$stdout.Flush()
 `
 
 // stopRunnerScriptWindows is the windows equivalent of stopRunnerScript:

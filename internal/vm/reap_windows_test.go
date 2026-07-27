@@ -195,7 +195,7 @@ func TestReapAllSlotsSkipsNonDirsAndReapsEachSlotDir(t *testing.T) {
 
 	seen := map[string]int{}
 	ops := &countingReapOps{seen: seen}
-	if err := reapAllSlots(ops, vmsDir); err != nil {
+	if err := reapAllSlots(ops, vmsDir, ""); err != nil {
 		t.Fatalf("reapAllSlots = %v, want nil", err)
 	}
 	if len(seen) != 2 || seen["slot-a"] != 1 || seen["slot-b"] != 1 {
@@ -206,7 +206,7 @@ func TestReapAllSlotsSkipsNonDirsAndReapsEachSlotDir(t *testing.T) {
 // TestReapAllSlotsMissingVmsDirIsNoOp: a daemon's very first cold start (no
 // vms/ yet) must not be treated as a reap failure.
 func TestReapAllSlotsMissingVmsDirIsNoOp(t *testing.T) {
-	if err := reapAllSlots(&fakeReapOps{}, filepath.Join(t.TempDir(), "does-not-exist")); err != nil {
+	if err := reapAllSlots(&fakeReapOps{}, filepath.Join(t.TempDir(), "does-not-exist"), ""); err != nil {
 		t.Fatalf("reapAllSlots = %v, want nil for a missing vms dir", err)
 	}
 }
@@ -224,7 +224,7 @@ func TestReapAllSlotsBestEffortContinuesPastAFailure(t *testing.T) {
 
 	seen := map[string]int{}
 	ops := &countingReapOps{seen: seen, failFor: "slot-b"}
-	if err := reapAllSlots(ops, vmsDir); err != nil {
+	if err := reapAllSlots(ops, vmsDir, ""); err != nil {
 		t.Fatalf("reapAllSlots = %v, want nil (best-effort: per-slot failures are logged, not returned)", err)
 	}
 	if len(seen) != 3 {
@@ -249,7 +249,7 @@ func TestReapAllSlotsRespectsOverallTimeout(t *testing.T) {
 
 	seen := map[string]int{}
 	ops := &countingReapOps{seen: seen, delay: 15 * time.Millisecond}
-	if err := reapAllSlots(ops, vmsDir); err != nil {
+	if err := reapAllSlots(ops, vmsDir, ""); err != nil {
 		t.Fatalf("reapAllSlots = %v, want nil even when the budget runs out", err)
 	}
 	if len(seen) >= 4 {
@@ -281,4 +281,43 @@ func (c *countingReapOps) openSystem(_ context.Context, systemID string) (reapSy
 
 func (c *countingReapOps) openEndpoint(string) (reapEndpoint, error) {
 	return nil, nil
+}
+
+// TestReapAllSlotsScopesSystemIDsToTheInstance pins the property that keeps two
+// daemons on one host from reaping each other's live guests.
+//
+// HCS system IDs and HNS endpoint names live in a HOST-GLOBAL namespace, while a
+// slot name is unique only inside one daemon's home — so a system daemon and a
+// per-user daemon each running a pool named the same way derive identical slot
+// names from different directories. The pre-boot reap is unconditional, so the
+// second daemon to boot would terminate the first's running guest and log it as
+// cleaning up after an unclean shutdown.
+func TestReapAllSlotsScopesSystemIDsToTheInstance(t *testing.T) {
+	vmsDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(vmsDir, "linux-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[string]int{}
+	if err := reapAllSlots(&countingReapOps{seen: seen}, vmsDir, "hosta-1a2b3c4d"); err != nil {
+		t.Fatalf("reapAllSlots = %v, want nil", err)
+	}
+	if seen["hosta-1a2b3c4d-linux-1"] != 1 {
+		t.Errorf("reaped %v, want the instance-scoped id hosta-1a2b3c4d-linux-1", seen)
+	}
+	if seen["linux-1"] != 0 {
+		t.Error("reaped the bare slot name, which another daemon on this host may own")
+	}
+}
+
+// TestSlotSystemIDMatchesBootDerivation: Boot and the reap must never disagree
+// about what a slot is called. They share slotSystemID for exactly that reason,
+// so this pins its two branches directly.
+func TestSlotSystemIDMatchesBootDerivation(t *testing.T) {
+	if got := slotSystemID("hosta-1a2b3c4d", "linux-1"); got != "hosta-1a2b3c4d-linux-1" {
+		t.Errorf("slotSystemID with a prefix = %q", got)
+	}
+	if got := slotSystemID("", "linux-1"); got != "linux-1" {
+		t.Errorf("slotSystemID with no prefix = %q, want the bare slot name", got)
+	}
 }

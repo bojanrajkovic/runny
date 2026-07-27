@@ -301,6 +301,7 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 				MemorySize:     uint64(c.deps.Pool.RAMGB) << 30, // GiB → bytes; 0 keeps the image's
 				SSHUser:        c.deps.Pool.SSHUser,
 				SSHPassword:    c.deps.Pool.SSHPassword,
+				InstancePrefix: c.deps.InstancePrefix,
 			})
 			if err != nil {
 				return err

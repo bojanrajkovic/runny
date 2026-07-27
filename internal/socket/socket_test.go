@@ -305,6 +305,19 @@ func TestLookupUsernameUnknownIDIsEmpty(t *testing.T) {
 // call. Only one lookup may be in flight; concurrent callers skip resolution
 // entirely until it completes and frees the slot.
 func TestLookupUsernameCapsStuckGoroutines(t *testing.T) {
+	// Start from a free slot. A lookup that blows through usernameLookupBound
+	// returns "" but keeps its goroutine -- and the one in-flight slot -- until
+	// it finally answers; that is the behaviour under test, and it means any
+	// earlier test can hand this one an occupied slot. Inheriting it would send
+	// every call below down the "" fast path without spawning anything, which
+	// reads here as a pile-up that never happened.
+	select {
+	case lookupInFlight <- struct{}{}:
+		<-lookupInFlight
+	case <-time.After(10 * time.Second):
+		t.Fatal("in-flight lookup slot still held by an earlier test's lookup")
+	}
+
 	release := make(chan struct{})
 	var calls atomic.Int32
 	orig := lookupID

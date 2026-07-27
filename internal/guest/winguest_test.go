@@ -345,6 +345,44 @@ func TestInstallDebugKeyScriptWindowsWrapsForcedCommand(t *testing.T) {
 	}
 }
 
+// pullDiagScriptWindows reads logs the runner is still writing — teardown
+// pulls the post-mortem before StopRunner, so on exactly the failure cycles
+// diag exists for, the listener still holds _diag\Runner_*.log open.
+//
+// Measured on a Windows host: [IO.File]::ReadAllBytes opens FileShare.Read,
+// which collides with ANY open writer — including one that declared
+// FileShare.ReadWrite, because sharing is mutual and a FileShare.Read reader
+// refuses to coexist with the writer's Write access. Against the same
+// fixture the pre-fix script lost the held log's contents and mangled
+// non-ASCII to "?", while still exiting 0, so the pull reported success and
+// wrote an artifact carrying a .NET exception where the runner's log should
+// have been.
+func TestPullDiagScriptWindowsToleratesLiveWriters(t *testing.T) {
+	if strings.Contains(pullDiagScriptWindows, "ReadAllBytes") {
+		t.Error("diag script must not use ReadAllBytes: FileShare.Read collides with the runner's open log")
+	}
+	if !strings.Contains(pullDiagScriptWindows, `[IO.File]::Open($_.FullName, 'Open', 'Read', 'ReadWrite')`) {
+		t.Error("diag script must open each log with explicit ReadWrite sharing to tolerate the live runner")
+	}
+	// POSIX PullDiag continues past a failed file (shell `for` + 2>/dev/null).
+	// Without a per-file catch the windows script loses every log to one bad
+	// one, which is the opposite of best-effort post-mortem.
+	if !strings.Contains(pullDiagScriptWindows, "catch") {
+		t.Error("diag script must tolerate one unreadable log without aborting the rest")
+	}
+	// tail -c semantics: seek to the last 32KiB rather than reading the whole
+	// log into guest memory and slicing it.
+	if !strings.Contains(pullDiagScriptWindows, "Seek(") {
+		t.Error("diag script must seek to the tail, not read the entire log to slice it")
+	}
+	if !strings.Contains(pullDiagScriptWindows, "OpenStandardOutput()") {
+		t.Error("diag script must write to the standard-output stream")
+	}
+	if strings.Contains(pullDiagScriptWindows, "[Console]::Out.Write") {
+		t.Error("diag script must not write through [Console]::Out (OEM codepage re-encoding)")
+	}
+}
+
 // pullDebugSessionScriptWindows cannot assume UTF-8: Tee-Object/Out-File's
 // default windows PowerShell 5.1 encoding is UTF-16LE with a BOM, measured
 // directly off a real recorded session. It must detect the BOM via

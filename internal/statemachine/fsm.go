@@ -138,7 +138,10 @@ type Guest interface {
 	// attach RunnerShareDir as a live share (see vm.Machine.NeedsRunnerPush).
 	// Called before StartRunner, over the same already-hardened SSH session.
 	PushRunnerTarball(ctx bounded.Context, localPath string) error
-	// PullDiag fetches the tail of the runner's _diag logs (post-mortem).
+	// PullDiag fetches the runner's _diag logs whole (post-mortem). It may
+	// return partial output ALONGSIDE an error: a pull that exhausted its
+	// deadline mid-transfer still holds what arrived, and the guest is
+	// destroyed right after, so the caller keeps those bytes.
 	PullDiag(ctx bounded.Context) ([]byte, error)
 	// PullDebugSession fetches the operator's session recording at teardown;
 	// empty output means the operator never connected — skip the artifact.

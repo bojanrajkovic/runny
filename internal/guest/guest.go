@@ -375,18 +375,21 @@ func runnerAssetRE(goos string) *regexp.Regexp {
 	return runnerTarballRE
 }
 
-// PullDiag fetches the tail of the runner's diagnostic logs — the
-// post-mortem material TEARDOWN collects before destroying the guest.
+// PullDiag fetches the runner's diagnostic logs whole — the post-mortem
+// material TEARDOWN collects before destroying the guest. Whole rather than
+// tailed: the guest is about to be destroyed, so whatever is not pulled here
+// is gone, and which part of a log explains a failure is not knowable in
+// advance. sshx.Output's cap is the backstop against a runaway guest.
 func (g *Guest) PullDiag(ctx bounded.Context) ([]byte, error) {
-	script := `for f in $HOME/runny-runner/_diag/*.log; do echo "==> $f <=="; tail -c 32768 "$f"; done 2>/dev/null`
+	script := `for f in $HOME/runny-runner/_diag/*.log; do echo "==> $f <=="; cat "$f"; done 2>/dev/null`
 	if g.goos == home.OSWindows {
 		script = encodedCommand(pullDiagScriptWindows)
 	}
+	// Partial output is returned alongside the error rather than dropped: a
+	// pull that exhausted its deadline mid-transfer still holds everything
+	// that arrived, and the guest is about to be destroyed.
 	out, _, err := g.c.Output(ctx, script)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
+	return out, err
 }
 
 // PullDebugSession fetches the operator's session recording at teardown.

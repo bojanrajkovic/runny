@@ -1447,20 +1447,22 @@ func (c *run) teardown(ctx context.Context) bool {
 		pctx, pcancel := bounded.WithTimeout(tctx, 15*time.Second)
 		defer pcancel()
 		_ = obs.Action(ctx, obs.ActionDiagPull, func(context.Context) error {
+			// Write before reporting: a pull that ran out of time still
+			// returns what crossed the wire, and the guest is destroyed
+			// right after, so those bytes are the only copy there will be.
 			diag, err := c.guest.PullDiag(pctx)
+			if len(diag) > 0 {
+				// A pull whose artifact never landed must not report ok —
+				// the operator would go looking for a runner-diag.log that
+				// doesn't exist.
+				if werr := c.store.WriteArtifact(c.rec, "runner-diag.log", diag); werr != nil {
+					c.deps.Log.Debug("post-mortem write failed", "err", werr)
+					return werr
+				}
+			}
 			if err != nil {
-				c.deps.Log.Debug("post-mortem pull failed", "err", err)
+				c.deps.Log.Debug("post-mortem pull degraded", "err", err, "kept_bytes", len(diag))
 				return err
-			}
-			if len(diag) == 0 {
-				return nil
-			}
-			// A pull that succeeded but whose artifact never landed must
-			// not report ok — the operator would go looking for a
-			// runner-diag.log that doesn't exist.
-			if werr := c.store.WriteArtifact(c.rec, "runner-diag.log", diag); werr != nil {
-				c.deps.Log.Debug("post-mortem write failed", "err", werr)
-				return werr
 			}
 			return nil
 		})

@@ -473,8 +473,8 @@ func (g *Guest) startRunnerWindows(ctx context.Context, jit, runnerTarball strin
 var runnerZipRE = regexp.MustCompile(`^[A-Za-z0-9._-]+\.zip$`)
 
 // pullDiagScriptWindows mirrors the POSIX PullDiag shape (a "==> name <=="
-// header per file, each tailed to the same 32KiB bound) over
-// C:\actions-runner\_diag instead of $HOME/runny-runner/_diag.
+// header per file, each read whole) over C:\actions-runner\_diag instead of
+// $HOME/runny-runner/_diag.
 //
 // Each log is opened with explicit ReadWrite sharing, the same reason
 // pullDebugSessionScriptWindows and watcherScriptWindows open with it.
@@ -486,6 +486,17 @@ var runnerZipRE = regexp.MustCompile(`^[A-Za-z0-9._-]+\.zip$`)
 // reader refuses to coexist with the writer's Write access no matter how
 // permissive that writer was. Only a FileShare.None writer defeats the
 // ReadWrite open, so it strictly dominates.
+//
+// Content streams via Stream.CopyTo rather than being read into a buffer
+// first: the logs are pulled whole now, and a byte array would size an
+// allocation in the guest to whatever the job happened to log (and cap it at
+// Int32 besides). The header is emitted before the copy starts, so a file that
+// fails midway leaves what it managed plus the unreadable line.
+//
+// The path is hoisted into $p before the try because PowerShell rebinds $_ to
+// the ErrorRecord inside a catch, shadowing ForEach-Object's pipeline item —
+// so $_.FullName there expands to nothing and the unreadable line would name
+// no file, which is the one thing it exists to do.
 //
 // Each file is read inside try/catch to keep a failure attributable. An
 // uncaught .NET exception here does not abort the loop — PowerShell reports
@@ -503,18 +514,16 @@ var runnerZipRE = regexp.MustCompile(`^[A-Za-z0-9._-]+\.zip$`)
 const pullDiagScriptWindows = `$stdout = [Console]::OpenStandardOutput()
 function Emit($s) { $b = [Text.Encoding]::UTF8.GetBytes($s); $stdout.Write($b, 0, $b.Length) }
 Get-ChildItem -Path '` + runnerDirWindows + `\_diag' -Filter *.log -ErrorAction SilentlyContinue | ForEach-Object {
+  $p = $_.FullName
   try {
-    $fs = [IO.File]::Open($_.FullName, 'Open', 'Read', 'ReadWrite')
+    $fs = [IO.File]::Open($p, 'Open', 'Read', 'ReadWrite')
     try {
-      $take = [Math]::Min($fs.Length, 32768)
-      $fs.Seek(-$take, 'End') | Out-Null
-      $buf = (New-Object IO.BinaryReader($fs)).ReadBytes($take)
+      Emit "==> $p <==` + "`n" + `"
+      $fs.CopyTo($stdout)
+      Emit "` + "`n" + `"
     } finally { $fs.Close() }
-    Emit "==> $($_.FullName) <==` + "`n" + `"
-    $stdout.Write($buf, 0, $buf.Length)
-    Emit "` + "`n" + `"
   } catch {
-    Emit "==> $($_.FullName) <== (unreadable: $($_.Exception.Message))` + "`n" + `"
+    Emit "==> $p <== (unreadable: $($_.Exception.Message))` + "`n" + `"
   }
 }
 $stdout.Flush()

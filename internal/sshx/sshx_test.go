@@ -129,8 +129,10 @@ func handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 			fmt.Fprintln(ch, "marker after long line")
 			exit(0)
 		case payload.Cmd == "flood":
-			// Far more than the client's Output byte cap, then exit cleanly: the
-			// cap must bound the buffer even when the command completes normally.
+			// Multi-megabyte but deliberately UNDER the client's Output cap:
+			// PullDiag streams whole runner logs, so a large capture that fits
+			// must arrive intact. capBuf's overflow behaviour is pinned by its
+			// own unit tests rather than by flooding maxOutput through here.
 			chunk := strings.Repeat("x", 1<<20)
 			for range 8 { // 8 MiB total
 				fmt.Fprint(ch, chunk)
@@ -412,10 +414,128 @@ func TestStartDeliversStdin(t *testing.T) {
 	}
 }
 
-// Output reads the full combined output; a guest controlling how many
-// _diag/*.log files exist (PullDiag) could otherwise force an unbounded
-// transient allocation. The byte cap must bound the buffer.
-func TestOutputByteCapped(t *testing.T) {
+// When Output overflows its cap, the END of the output is what survives.
+// PullDiag streams whole runner logs, and a log's ending is the failure that
+// teardown pulled it for — keeping the first N bytes would discard exactly
+// the part worth having and leave the runner's startup chatter behind.
+func TestCapBufKeepsTheTailNotTheHead(t *testing.T) {
+	b := capBuf{max: 10}
+	if _, err := b.Write([]byte("0123456789")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if _, err := b.Write([]byte("ABCDE")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	got := string(b.bytes())
+	if !strings.HasSuffix(got, "56789ABCDE") {
+		t.Errorf("cap kept the wrong end: %q, want it to end in %q", got, "56789ABCDE")
+	}
+	if strings.Contains(got, "01234") {
+		t.Errorf("the oldest bytes must be the ones dropped: %q", got)
+	}
+}
+
+// A truncated capture must say so. capBuf reports a full write regardless, so
+// without a marker in the bytes themselves a clipped post-mortem is
+// indistinguishable from a log that simply ended there.
+func TestCapBufMarksTruncation(t *testing.T) {
+	b := capBuf{max: 4}
+	if _, err := b.Write([]byte("aaaaBBBB")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	got := string(b.bytes())
+	if !strings.Contains(got, "runny:") {
+		t.Errorf("truncated output carries no marker: %q", got)
+	}
+	if !strings.Contains(got, "4") {
+		t.Errorf("marker should report how many bytes were dropped: %q", got)
+	}
+	if !strings.HasSuffix(got, "BBBB") {
+		t.Errorf("marker must precede the kept tail, not replace it: %q", got)
+	}
+}
+
+// The cap must bound what is RETAINED, not merely what is reported. Sliding a
+// window by advancing a read offset leaves the dropped bytes in the backing
+// array, so the allocation a guest can provoke settles at twice the documented
+// figure.
+func TestCapBufRetainsOnlyItsCap(t *testing.T) {
+	const max = 1 << 16
+	b := capBuf{max: max}
+	chunk := make([]byte, 4<<10)
+	for range 200 {
+		if _, err := b.Write(chunk); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	b.mu.Lock()
+	held := cap(b.b)
+	b.mu.Unlock()
+	if held > max {
+		t.Errorf("capBuf retains %d bytes for a %d-byte cap (%.2fx)", held, max, float64(held)/max)
+	}
+}
+
+// bytes must not alias the live buffer: on a timeout the caller reads it while
+// the session goroutine is still writing, so a shared array is a data race and
+// a mutating result.
+func TestCapBufBytesIsASnapshot(t *testing.T) {
+	b := capBuf{max: 1024}
+	if _, err := b.Write([]byte("first")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	snap := b.bytes()
+	if _, err := b.Write([]byte("second")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := string(snap); got != "first" {
+		t.Errorf("earlier snapshot mutated by a later write: %q", got)
+	}
+}
+
+// A pull that runs out of time must still yield what already crossed the wire.
+// PullDiag streams whole runner logs under a deadline, and the guest is
+// destroyed straight after — discarding a partial capture turns a slow
+// transfer into no post-mortem at all.
+func TestOutputReturnsPartialCaptureOnTimeout(t *testing.T) {
+	c, err := Dial(testCtx(t), testServer(t), testCfg)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+	// "spew" writes 500 lines and then never exits.
+	ctx, cancel := bounded.WithTimeout(t.Context(), 750*time.Millisecond)
+	defer cancel()
+	out, _, err := c.Output(ctx, "spew")
+	if err == nil {
+		t.Fatal("expected a timeout error")
+	}
+	if len(out) == 0 {
+		t.Fatal("timed-out pull discarded everything it had already received")
+	}
+	if !strings.Contains(string(out), "spew 0") {
+		t.Errorf("partial capture missing the bytes that did arrive: %.60q", out)
+	}
+}
+
+// The common case must stay byte-identical: no marker, no reordering, nothing
+// added for a capture that fit.
+func TestCapBufUnderCapIsUntouched(t *testing.T) {
+	b := capBuf{max: 1024}
+	if _, err := b.Write([]byte("hello world")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := string(b.bytes()); got != "hello world" {
+		t.Errorf("under-cap output altered: %q", got)
+	}
+}
+
+// A multi-megabyte capture must arrive whole. PullDiag streams the runner's
+// _diag logs unabridged, so anything under the cap has to survive the pipe
+// intact — not merely stay under it. The cap's own overflow behaviour is
+// pinned directly on capBuf above; driving 64 MiB through the test server to
+// re-prove it here would buy nothing for the runtime.
+func TestOutputDeliversLargeCaptureIntact(t *testing.T) {
 	c, err := Dial(testCtx(t), testServer(t), testCfg)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -425,8 +545,14 @@ func TestOutputByteCapped(t *testing.T) {
 	if err != nil || code != 0 {
 		t.Fatalf("Output: code %d, err %v", code, err)
 	}
+	if want := 8 << 20; len(out) != want {
+		t.Errorf("Output delivered %d bytes, want the full %d", len(out), want)
+	}
 	if len(out) > maxOutput {
-		t.Errorf("Output not byte-capped: %d bytes (want <= %d)", len(out), maxOutput)
+		t.Errorf("Output exceeded its cap: %d bytes (want <= %d)", len(out), maxOutput)
+	}
+	if strings.Contains(string(out), "runny:") {
+		t.Errorf("an under-cap capture must carry no truncation marker")
 	}
 }
 

@@ -211,30 +211,81 @@ func (c *Client) newSession() (*ssh.Session, error) {
 // maxOutput caps the bytes Output buffers from one command. Output reads the
 // full combined stdout+stderr, bounded by the per-call deadline and the
 // teardown socket-cut — but not by bytes: a guest controlling how many
-// _diag/*.log files exist (PullDiag) could force a large transient allocation
-// on every failure teardown. Sized well above any healthy Output — PullDiag,
-// the largest caller, tails 32 KB from a handful of files (a few hundred KB).
-const maxOutput = 4 << 20
+// _diag/*.log files exist, and how large they grow, could otherwise force an
+// allocation it chooses on every failure teardown.
+//
+// This is a backstop against a runaway guest, not a working limit. PullDiag is
+// the largest caller and streams the runner's _diag logs whole, which run from
+// a few hundred KB to tens of MB depending on how much the job logged; 64 MiB
+// clears that with room to spare, so a healthy failure teardown never reaches
+// the cap. A capture that does reach it keeps its last 64 MiB and says so
+// (capBuf), so the ending survives even then.
+const maxOutput = 64 << 20
 
-// capBuf collects up to max bytes of combined output and silently discards the
-// rest. It always reports a full write so the session's stdout/stderr io.Copy
-// is never short-write errored — the goal is to bound the buffer, not to
-// backpressure the guest. The mutex guards concurrent stdout+stderr writes
+// capBuf collects combined output, keeping the LAST max bytes when it
+// overflows. It always reports a full write so the session's stdout/stderr
+// io.Copy is never short-write errored — the goal is to bound the buffer, not
+// to backpressure the guest. The mutex guards concurrent stdout+stderr writes
 // (the session pumps them from separate goroutines), exactly as x/crypto/ssh's
 // own CombinedOutput buffer does.
+//
+// The tail is the half worth keeping. Every caller's interesting output is at
+// the end — a provisioning step's error, and above all a runner log, which
+// PullDiag streams whole and which teardown pulled precisely for how it ends.
+// Dropping the newest bytes would discard the failure and keep the startup
+// chatter.
+//
+// Overflow is recorded rather than silent: Write cannot report it (a short
+// write would error the copy), so bytes prefixes a marker naming how much went
+// missing. Without it a clipped post-mortem reads exactly like a log that
+// ended there.
+// The window slides by copying survivors down rather than by advancing a read
+// offset into a bytes.Buffer: Buffer only compacts once its array reaches twice
+// what it holds, so a sliding window settles at ~2x max and the allocation a
+// guest can provoke is double the documented cap.
 type capBuf struct {
-	mu  sync.Mutex
-	b   bytes.Buffer
-	max int
+	mu      sync.Mutex
+	b       []byte
+	max     int
+	dropped int
 }
 
 func (c *capBuf) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if room := c.max - c.b.Len(); room > 0 {
-		c.b.Write(p[:min(len(p), room)])
+	if len(p) > c.max {
+		// One write larger than the whole window: only its own tail survives.
+		c.dropped += len(c.b) + len(p) - c.max
+		p, c.b = p[len(p)-c.max:], c.b[:0]
 	}
+	if over := len(c.b) + len(p) - c.max; over > 0 {
+		c.dropped += over
+		c.b = append(c.b[:0], c.b[over:]...) // copy handles the overlap
+	}
+	// Grow geometrically but never past max. Plain append rounds its
+	// allocation up, so the array a guest can provoke would sit above the cap
+	// this type exists to enforce; small captures still stay small.
+	if need := len(c.b) + len(p); need > cap(c.b) {
+		grown := make([]byte, len(c.b), min(max(2*cap(c.b), need), c.max))
+		copy(grown, c.b)
+		c.b = grown
+	}
+	c.b = append(c.b, p...)
 	return len(p), nil
+}
+
+// bytes returns a snapshot of the captured output, prefixed with a truncation
+// marker if any was dropped. It copies because a timed-out caller reads this
+// while the session goroutine is still writing.
+func (c *capBuf) bytes() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dropped == 0 {
+		return append([]byte(nil), c.b...)
+	}
+	marker := fmt.Sprintf("[runny: output exceeded the %d-byte cap; dropped the first %d bytes]\n", c.max, c.dropped)
+	out := make([]byte, 0, len(marker)+len(c.b))
+	return append(append(out, marker...), c.b...)
 }
 
 // Output runs cmd and captures combined stdout+stderr, bounded by ctx and
@@ -268,13 +319,16 @@ func (c *Client) run(ctx bounded.Context, cmd string, stdin io.Reader) ([]byte, 
 		code int
 		err  error
 	}
+	// The buffer outlives the goroutine's scope so a timeout can still return
+	// what already arrived; capBuf's mutex is what makes that read safe while
+	// the detached goroutine keeps writing.
+	buf := capBuf{max: maxOutput}
 	done := make(chan result, 1)
 	go func() {
-		buf := capBuf{max: maxOutput}
 		sess.Stdout, sess.Stderr = &buf, &buf
 		err := sess.Run(cmd)
 		_ = sess.Close()
-		done <- result{buf.b.Bytes(), exitCode(err), err}
+		done <- result{buf.bytes(), exitCode(err), err}
 	}()
 	select {
 	case <-ctx.Done():
@@ -282,9 +336,13 @@ func (c *Client) run(ctx bounded.Context, cmd string, stdin io.Reader) ([]byte, 
 		// here it can block forever — detach it. The worker unblocks when
 		// the close lands or when Client.Close cuts the socket.
 		go func() { _ = sess.Close() }()
+		// Return what already crossed the wire alongside the error. PullDiag
+		// streams whole runner logs and the guest is destroyed straight after,
+		// so discarding a partial capture turns a slow transfer into no
+		// post-mortem at all — the failure mode the pull exists to prevent.
 		// Never echo cmd: it may carry a secret (the JIT registration blob
 		// rides inside the provision script). The caller knows which step ran.
-		return nil, -1, fmt.Errorf("ssh command timed out: %w", ctx.Err())
+		return buf.bytes(), -1, fmt.Errorf("ssh command timed out: %w", ctx.Err())
 	case r := <-done:
 		if r.err != nil && r.code < 0 {
 			return r.out, r.code, fmt.Errorf("ssh command failed: %w", r.err)

@@ -361,8 +361,17 @@ func TestPullDiagScriptWindowsToleratesLiveWriters(t *testing.T) {
 	if strings.Contains(pullDiagScriptWindows, "ReadAllBytes") {
 		t.Error("diag script must not use ReadAllBytes: FileShare.Read collides with the runner's open log")
 	}
-	if !strings.Contains(pullDiagScriptWindows, `[IO.File]::Open($_.FullName, 'Open', 'Read', 'ReadWrite')`) {
+	if !strings.Contains(pullDiagScriptWindows, `'Open', 'Read', 'ReadWrite')`) {
 		t.Error("diag script must open each log with explicit ReadWrite sharing to tolerate the live runner")
+	}
+	// PowerShell rebinds $_ to the ErrorRecord inside a catch, so a $_.FullName
+	// there expands to nothing and the unreadable line names no file — the one
+	// thing it exists to do. The path must be hoisted before the try.
+	if strings.Contains(pullDiagScriptWindows, `$_.FullName) <== (unreadable`) {
+		t.Error("the unreadable line must use a hoisted path: $_ is the ErrorRecord inside a catch")
+	}
+	if !strings.Contains(pullDiagScriptWindows, `$p = $_.FullName`) {
+		t.Error("diag script must hoist the pipeline item's path before the try block")
 	}
 	// POSIX PullDiag continues past a failed file (shell `for` + 2>/dev/null).
 	// Without a per-file catch the windows script loses every log to one bad
@@ -370,10 +379,10 @@ func TestPullDiagScriptWindowsToleratesLiveWriters(t *testing.T) {
 	if !strings.Contains(pullDiagScriptWindows, "catch") {
 		t.Error("diag script must tolerate one unreadable log without aborting the rest")
 	}
-	// tail -c semantics: seek to the last 32KiB rather than reading the whole
-	// log into guest memory and slicing it.
-	if !strings.Contains(pullDiagScriptWindows, "Seek(") {
-		t.Error("diag script must seek to the tail, not read the entire log to slice it")
+	// Whole logs, not a tail: the guest is destroyed right after, so anything
+	// left behind is gone. sshx.Output's cap is the backstop, not this script.
+	if strings.Contains(pullDiagScriptWindows, "32768") {
+		t.Error("diag script must read each log whole, not clip it to a byte bound")
 	}
 	if !strings.Contains(pullDiagScriptWindows, "OpenStandardOutput()") {
 		t.Error("diag script must write to the standard-output stream")

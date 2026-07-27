@@ -93,7 +93,7 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 	// on every subsequent boot attempt for this slot -- reapPriorSystem
 	// clears that the same way CLONE's own RemoveAll(vmDir) self-heals a
 	// surviving clone file.
-	systemID := filepath.Base(string(bundle))
+	systemID := slotSystemID(opts.InstancePrefix, filepath.Base(string(bundle)))
 	endpointName := "runny-" + systemID
 	if err := reapPriorSystem(hcsReapOps{}, systemID, endpointName); err != nil {
 		return nil, err

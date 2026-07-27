@@ -42,6 +42,13 @@ type BootOptions struct {
 	// already correct, see hcs_windows.go's waitIPWindows).
 	SSHUser     string
 	SSHPassword string
+	// InstancePrefix is this install's identity namespace — the same value
+	// runner names carry. Backends whose per-guest identifiers live in a
+	// HOST-GLOBAL namespace mix it into them: two daemons on one host (a system
+	// daemon and a per-user one, or two users' own) with a same-named pool
+	// otherwise derive identical identifiers from identical slot names, even
+	// though their homes are different directories.
+	InstancePrefix string
 }
 
 // ShareTag is the virtiofs mount tag guests use:
@@ -98,7 +105,7 @@ type Manager interface {
 	// startup — exactly the failure mode this exists to kill. A no-op on
 	// backends with no such orphan class (darwin's Virtualization.framework
 	// releases everything on process exit; there is nothing to reap).
-	ReapOrphans(vmsDir string) error
+	ReapOrphans(vmsDir, instancePrefix string) error
 }
 
 // checkHostArch rejects a bundle whose Arch doesn't match this process's own

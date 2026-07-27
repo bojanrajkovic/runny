@@ -19,7 +19,7 @@ func (unsupportedManager) Boot(bounded.Context, tart.Bundle, vm.BootOptions) (vm
 	return nil, vm.ErrUnsupportedPlatform
 }
 
-func (unsupportedManager) ReapOrphans(string) error { return nil }
+func (unsupportedManager) ReapOrphans(string, string) error { return nil }
 
 func vmManager() vm.Manager { return unsupportedManager{} }
 

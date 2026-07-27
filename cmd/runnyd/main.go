@@ -187,7 +187,13 @@ func run(parent context.Context) error {
 		// outright the moment it hits one — not skip-and-continue — which
 		// used to crash-loop the daemon forever with nothing in between ever
 		// reaping the orphan. A no-op on backends with no such class (darwin).
-		if err := vmManager().ReapOrphans(dir.VMsDir()); err != nil {
+		// ReadInstancePrefix, not InstancePrefix: this runs before dir.Ensure(),
+		// so the generating accessor could be asked to persist an id into a home
+		// that does not exist yet. An install with no persisted prefix has never
+		// booted a guest and so has nothing to reap, and the empty prefix the
+		// read returns yields the bare slot name either way.
+		reapPrefix, _ := dir.ReadInstancePrefix()
+		if err := vmManager().ReapOrphans(dir.VMsDir(), reapPrefix); err != nil {
 			return fmt.Errorf("reaping orphaned VMs: %w", err)
 		}
 		if err := sweepVMsDir(dir.VMsDir(), logger); err != nil {

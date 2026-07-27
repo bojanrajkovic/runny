@@ -186,8 +186,28 @@ var reapOrphansTimeout = 5 * time.Minute
 // and fail to remove that one slot, crash-looping the daemon forever on the
 // exact same lock with no cold-start recovery: nothing else ever reaps the
 // orphan in between restarts.
-func (HCSManager) ReapOrphans(vmsDir string) error {
-	return reapAllSlots(hcsReapOps{}, vmsDir)
+func (HCSManager) ReapOrphans(vmsDir, instancePrefix string) error {
+	return reapAllSlots(hcsReapOps{}, vmsDir, instancePrefix)
+}
+
+// slotSystemID is the single derivation of a slot's HCS compute-system ID, used
+// by Boot and by the orphan reap so the two can never disagree about what a
+// slot is called.
+//
+// HCS system IDs and HNS endpoint names are host-global, while a slot name is
+// only unique within one daemon's home. Mixing in the install's own prefix —
+// the same one runner names carry — keeps two daemons on one host from deriving
+// the same identifier for different guests, which would otherwise let each
+// daemon's unconditional pre-boot reap terminate the other's live guest and log
+// it as routine cleanup.
+//
+// An empty prefix yields the bare slot name, which is what the unit tests and
+// any caller without a resolved home get.
+func slotSystemID(instancePrefix, slot string) string {
+	if instancePrefix == "" {
+		return slot
+	}
+	return instancePrefix + "-" + slot
 }
 
 // reapAllSlots is ReapOrphans' actual logic, split out so it's unit-testable
@@ -202,7 +222,7 @@ func (HCSManager) ReapOrphans(vmsDir string) error {
 // systemIDs (Boot derives systemID the same way, from the slot's own vmDir
 // basename — see Boot's systemID comment), so listing vmsDir's entries is
 // sufficient; no cross-reference against the config's pools is needed.
-func reapAllSlots(ops reapOps, vmsDir string) error {
+func reapAllSlots(ops reapOps, vmsDir, instancePrefix string) error {
 	entries, err := os.ReadDir(vmsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -221,7 +241,7 @@ func reapAllSlots(ops reapOps, vmsDir string) error {
 			slog.Error("startup: orphan reap pass ran out of time; remaining slots left for a later restart", "err", err)
 			return nil
 		}
-		systemID := e.Name()
+		systemID := slotSystemID(instancePrefix, e.Name())
 		if err := reapPriorSystem(ops, systemID, "runny-"+systemID); err != nil {
 			slog.Error("startup: reaping orphaned compute system failed; a later restart or manual cleanup may be needed", "slot", systemID, "err", err)
 		}

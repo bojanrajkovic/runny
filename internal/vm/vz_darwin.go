@@ -27,7 +27,7 @@ var _ Manager = VZManager{}
 // ReapOrphans) — a *vz.VirtualMachine releases on GC / process exit, and
 // there is no separate OS-level object left behind that could hold a clone
 // file open across a restart.
-func (VZManager) ReapOrphans(string) error { return nil }
+func (VZManager) ReapOrphans(string, string) error { return nil }
 
 // Boot builds the VZ configuration from the bundle's tart config and starts
 // the guest, dispatching on the bundle's OS: the Mac platform

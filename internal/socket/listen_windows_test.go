@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,8 +61,8 @@ func TestPipeTransportRoundTrip(t *testing.T) {
 	}
 }
 
-// pipeDialAccessTest is GENERIC_READ|GENERIC_WRITE, matching runnyctl's client
-// dial access (dial_windows.go's pipeDialAccess, which lives in package main).
+// pipeDialAccessTest mirrors runnyctl's pipeDialAccess (dial_windows.go, which
+// lives in package main and so cannot be imported).
 const pipeDialAccessTest = 0x80000000 | 0x40000000
 
 // TestPipeSDDL pins the per-daemon connect DACL: the system daemon grants
@@ -77,15 +78,19 @@ func TestPipeSDDL(t *testing.T) {
 	// Literal, not compared to the const: this catches an edit that drops the
 	// O:BA owner the client's dial trusts, which a self-referential
 	// `sys != authenticatedUsersSDDL` check never could.
-	if want := "O:BAD:(A;;GA;;;AU)"; sys != want {
-		t.Errorf("system pipe SDDL = %q, want %q (explicit O:BA owner)", sys, want)
+	tuSys, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatalf("GetTokenUser: %v", err)
+	}
+	if want := "O:BAD:(A;;FA;;;" + tuSys.User.Sid.String() + ")(A;;0x12019b;;;AU)"; sys != want {
+		t.Errorf("system pipe SDDL = %q, want %q", sys, want)
 	}
 
 	user, err := pipeSDDL(false)
 	if err != nil {
 		t.Fatalf("pipeSDDL(per-user): %v", err)
 	}
-	if user == authenticatedUsersSDDL {
+	if strings.Contains(user, ";AU)") {
 		t.Error("per-user pipe SDDL must not grant Authenticated Users")
 	}
 	tu, err := windows.GetCurrentProcessToken().GetTokenUser()
@@ -94,5 +99,29 @@ func TestPipeSDDL(t *testing.T) {
 	}
 	if want := "D:(A;;GA;;;" + tu.User.Sid.String() + ")"; user != want {
 		t.Errorf("per-user pipe SDDL = %q, want %q (owner-only)", user, want)
+	}
+}
+
+// TestClientGrantWithholdsInstanceCreation pins the one property the whole
+// change exists for: whatever Authenticated Users are granted, it must not
+// include FILE_CREATE_PIPE_INSTANCE.
+//
+// A pipe's security descriptor belongs to the NAME and is fixed by the first
+// instance, so an instance added by another process inherits this owner — which
+// is why the client's owner check cannot detect one, and why the DACL is the
+// only place the squat can be stopped. Measured on Windows: granting GRGW here
+// instead of the explicit mask lets an unprivileged principal add an instance,
+// so a future "simplification" back to generic rights is a real regression and
+// not a cosmetic one.
+func TestClientGrantWithholdsInstanceCreation(t *testing.T) {
+	if clientAccessMask&fileCreatePipeInstance != 0 {
+		t.Errorf("clientAccessMask 0x%x grants FILE_CREATE_PIPE_INSTANCE — any authenticated user could add an instance to the live pipe", clientAccessMask)
+	}
+	sys, err := pipeSDDL(true)
+	if err != nil {
+		t.Fatalf("pipeSDDL(system): %v", err)
+	}
+	if strings.Contains(sys, "GA;;;AU") || strings.Contains(sys, "FA;;;AU") || strings.Contains(sys, "GRGW;;;AU") {
+		t.Errorf("system pipe SDDL %q grants Authenticated Users a generic right that carries instance creation", sys)
 	}
 }

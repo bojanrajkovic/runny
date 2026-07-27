@@ -276,29 +276,44 @@ gate (they already own the machine and the home DACL, and hold no operator
 ACE); a UAC-filtered, non-elevated admin does not — it must be granted an ACE
 like any other operator.
 
-**The client verifies the pipe server's owner before trusting the
-connection.** The system daemon's pipe name (`\\.\pipe\runnyd`) is necessarily
-predictable — clients compute it from the fixed system home, so it cannot be
-randomized — which leaves a squat window: during a service-restart interval on
-a shared multi-user box, an already-logged-in unprivileged user could
-pre-create the name and MITM a connecting `runnyctl`, harvesting operator
-traffic (debug-key injection carries SSH material) or feeding false responses.
-go-winio's `ListenPipe` creates the first instance with `FILE_CREATE`, so the
-real daemon's bind **fails loud** on a squatted name (never a silent join), and
-the service binds at boot before interactive logon — but neither closes the
-restart-window MITM. So the dial is mutually authenticated: the server already
-reads the client's SID by impersonation, and now the client reads the pipe's
-owner SID (`GetSecurityInfo(OWNER)` on the connected handle) and refuses the
-connection unless the owner is `BUILTIN\Administrators` (`S-1-5-32-544`, the
-live daemon's owner) or SYSTEM (`S-1-5-18`) — before any RPC or credential
-crosses the wire. Setting an object's owner to either principal requires
-membership in it (or `SeRestorePrivilege`), which an unprivileged squatter
-lacks, so its pipe is owned by *itself* and fails the check; an arbitrary user
-SID is never trusted. The read is fail-closed: an unreadable owner is refused,
-not waved through. This **closes the MITM residual**. The **DoS residual is
-accepted**: a squatter holding the name across a restart still blocks the real
-daemon's bind, but that fails visibly (bind error, SCM failure) rather than
-silently — the loud failure this project is built to prefer.
+**A pipe name is a namespace object, not a single server, so the control
+channel is defended in three layers.** The system daemon's pipe name
+(`\\.\pipe\runnyd`) is necessarily predictable — clients compute it from the
+fixed system home, so it cannot be randomized.
+
+**Pre-creation is refused at bind.** go-winio's `ListenPipe` creates the first
+instance with NT disposition `FILE_CREATE`, so a name already held by another
+process makes the daemon's bind **fail loud** rather than join it silently; the
+service also binds at boot, before interactive logon. The **DoS residual is
+accepted**: a squatter holding the name across a restart blocks the real
+daemon's bind, but visibly (bind error, SCM failure) rather than silently — the
+loud failure this project is built to prefer.
+
+**Instance addition is refused by the DACL.** A pipe's security descriptor
+belongs to the *name* and is fixed by its first instance; every later instance
+inherits it, and any principal holding `FILE_CREATE_PIPE_INSTANCE` on the name
+can add a server instance that serves a share of connecting clients. The system
+pipe therefore grants Authenticated Users an explicit access mask — read and
+write data, EA and attributes, `READ_CONTROL` and `SYNCHRONIZE` — with
+`FILE_CREATE_PIPE_INSTANCE` withheld. Generic rights are not sufficient here: a
+grant of `GENERIC_WRITE` carries instance creation. The daemon's own principal
+holds a full-access ACE, named by the SID of its running token rather than by
+`Administrators`, because it adds an instance per client it serves and is not
+required to be an administrator. The AU grant is a coarse connect filter, not
+the authorization tier: the per-RPC operator-revocation gate fails every RPC
+closed for a principal absent from the home ACL.
+
+**The client verifies the pipe server's owner.** After dialing, `runnyctl` reads
+the pipe's owner SID (`GetSecurityInfo(OWNER)` on the connected handle) and
+refuses the connection unless the owner is `BUILTIN\Administrators`
+(`S-1-5-32-544`) or SYSTEM (`S-1-5-18`) — before any RPC or credential crosses
+the wire, and mutually with the server's own read of the client's SID by
+impersonation. Setting an object's owner to either principal requires membership
+in it (or `SeRestorePrivilege`), which an unprivileged squatter lacks. The read
+is fail-closed: an unreadable owner is refused, not waved through. The owner
+belongs to the name and is shared by every instance of it, so this check is
+defence in depth against an unexpected owner — the DACL above is what bounds who
+may add an instance.
 
 The trusted owner is not left to chance: the daemon binds the system pipe with
 an explicit `O:BA` owner in its security descriptor. The unprivileged `NT

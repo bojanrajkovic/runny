@@ -16,17 +16,30 @@ import (
 
 // pipeDialAccess is GENERIC_READ|GENERIC_WRITE — the duplex access a gRPC
 // client needs on the pipe.
+//
+// Deliberately left generic even though the daemon's DACL grants Authenticated
+// Users an explicit mask that withholds FILE_CREATE_PIPE_INSTANCE. Measured on
+// Windows: a client opening with GENERIC_READ|GENERIC_WRITE is admitted by that
+// descriptor, while a server-side attempt to add a pipe instance under the same
+// grant is denied. Client opens and instance creation do not resolve the
+// generic mask the same way, so there is no coupling here to keep in step — and
+// an older runnyctl talks to a newer daemon unchanged.
 const pipeDialAccess = 0x80000000 | 0x40000000
 
-// Trusted control-pipe owner SIDs. The pipe name is necessarily predictable
-// (clients compute it from the fixed system home), so during a service-restart
-// window an unprivileged local user could pre-create the name and MITM a
-// connecting client. But setting an object's owner to Administrators or SYSTEM
-// requires membership in that principal (or SeRestorePrivilege), which an
-// unprivileged squatter lacks — so a squatted pipe is owned by the squatter,
-// and these two owners are un-forgeable proof the server is the real daemon.
-// The live daemon's pipe is owned by BUILTIN\Administrators (S-1-5-32-544);
-// SYSTEM (S-1-5-18) is accepted for a service running as LocalSystem.
+// Trusted control-pipe owner SIDs — a secondary check, not the anti-squat
+// anchor it was once described as.
+//
+// Pre-creation is already prevented a layer down: winio creates the first
+// instance with NT disposition FILE_CREATE, so if the name already exists the
+// daemon fails to bind rather than adopting a squatter's object. That closes
+// the restart-window MITM without reference to owners.
+//
+// What the owner check cannot do is see INSTANCES. A pipe's security descriptor
+// belongs to the name and is fixed by the first instance, so an instance added
+// by another process inherits it — measured on a live daemon, a rogue instance
+// reported owner BUILTIN\Administrators and this check passed against it. The
+// DACL withholding FILE_CREATE_PIPE_INSTANCE is what stops that; this remains
+// as cheap defence in depth against an owner that is somehow neither.
 const (
 	sidAdministrators = "S-1-5-32-544"
 	sidLocalSystem    = "S-1-5-18"

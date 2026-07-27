@@ -10,29 +10,46 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// authenticatedUsersSDDL is the system daemon pipe's security descriptor: owner
-// BUILTIN\Administrators (O:BA) plus a connect DACL granting Authenticated
-// Users.
+// fileCreatePipeInstance is FILE_CREATE_PIPE_INSTANCE: the right to add another
+// server instance to a pipe NAME that already exists. It is the bit files call
+// FILE_APPEND_DATA, and on NPFS it is a member of FILE_GENERIC_WRITE — so ANY
+// grant of generic write carries it, which is why the fix here is an explicit
+// mask rather than GENERIC_ALL narrowed to GENERIC_READ|GENERIC_WRITE.
+const fileCreatePipeInstance = 0x0004
+
+// clientAccessMask is what a control-channel client is granted: the union of
+// FILE_GENERIC_READ (0x120089) and FILE_GENERIC_WRITE (0x120116) with
+// FILE_CREATE_PIPE_INSTANCE cleared. Read and write data, EA and attributes,
+// READ_CONTROL (the client needs it to read the pipe's owner) and SYNCHRONIZE.
 //
-// O:BA pins the owner deterministically. The client's dial trusts the system
-// pipe only if it is owned by Administrators or SYSTEM — an un-forgeable
-// anti-squat anchor (see cmd/runnyctl's dial). The unprivileged NT
-// SERVICE\runnyd account the daemon runs as carries Administrators as
-// owner-eligible, so the pipe's *default* owner already lands on BA; setting it
-// explicitly makes that a contract rather than an implicit token default. On any
-// host where the account cannot own as BA, ListenPipe fails loud at bind — the
-// no-silent-failure posture — instead of binding a pipe the client would then
-// silently refuse.
+// This must stay in lockstep with runnyctl's dial access: an access check runs
+// on the EXPANDED mask, so a client that asks for GENERIC_WRITE against this
+// DACL is denied outright — it would be asking for the one bit deliberately
+// withheld. listen_windows_test.go pins the two together.
+const clientAccessMask = 0x12019B
+
+// systemPipeSDDLFormat is the system daemon pipe's security descriptor: owner
+// BUILTIN\Administrators (O:BA), full access for the daemon's own principal,
+// and the restricted client mask for Authenticated Users.
 //
-// The AU DACL is a coarse connect filter, deliberately NOT the sole
-// authorization tier the way a unix socket's 0600 mode is on darwin: any
-// authenticated principal can open the pipe, but the per-RPC
-// operator-revocation gate (armed unconditionally on the system daemon — the
-// handshake reads the client's kernel-established SID by impersonation, so
-// there is no unreadable-identity failure to degrade around) fails every RPC
-// closed for a principal absent from the home ACL. AU, not Everyone (WD): an
-// unauthenticated / anonymous logon has no business even reaching the gate.
-const authenticatedUsersSDDL = "O:BAD:(A;;GA;;;AU)"
+// The daemon's own ACE is not decoration. winio adds every instance after the
+// first by opening the existing name for GENERIC_READ|GENERIC_WRITE, which
+// expands to include FILE_CREATE_PIPE_INSTANCE — so a descriptor that grants
+// the daemon nothing of its own would let it bind once and then fail to serve a
+// second client. It names the running token's SID rather than Administrators
+// because the service account is not required to be an administrator.
+//
+// Withholding that bit from AU is what closes the real squat. A pipe's security
+// descriptor is per-NAME, fixed by the first instance, so an instance added by
+// another process inherits this owner — measured on a live daemon, a rogue
+// instance reported owner BUILTIN\Administrators and the client's owner check
+// passed against it. The owner check cannot see instances; only the DACL can
+// stop them existing.
+//
+// AU, not Everyone (WD): an unauthenticated logon has no business reaching the
+// per-RPC operator-revocation gate, which remains the real authorization tier —
+// this DACL is a coarse connect filter, not the whole story.
+const systemPipeSDDLFormat = "O:BAD:(A;;FA;;;%s)(A;;0x%x;;;AU)"
 
 // pipeBufferBytes sizes the pipe's kernel input/output buffers. A zero-buffer
 // (winio's default) pipe makes every client WriteFile rendezvous with the
@@ -74,16 +91,18 @@ func listen(path string, systemDaemon bool) (net.Listener, error) {
 	return ln, nil
 }
 
-// pipeSDDL builds the pipe's connect security descriptor: Authenticated Users
-// for the system daemon, the resolving user's own SID (owner-only) for a
-// per-user daemon.
+// pipeSDDL builds the pipe's connect security descriptor. Both branches name
+// the running token's own SID: the system daemon grants itself full access and
+// Authenticated Users the restricted client mask; a per-user daemon grants only
+// itself, owner-only, the pipe-namespace analogue of darwin's 0600 socket.
 func pipeSDDL(systemDaemon bool) (string, error) {
-	if systemDaemon {
-		return authenticatedUsersSDDL, nil
-	}
 	tu, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
-		return "", fmt.Errorf("resolving current user SID for the per-user pipe ACL: %w", err)
+		return "", fmt.Errorf("resolving current user SID for the pipe ACL: %w", err)
 	}
-	return "D:(A;;GA;;;" + tu.User.Sid.String() + ")", nil
+	own := tu.User.Sid.String()
+	if systemDaemon {
+		return fmt.Sprintf(systemPipeSDDLFormat, own, clientAccessMask), nil
+	}
+	return "D:(A;;GA;;;" + own + ")", nil
 }

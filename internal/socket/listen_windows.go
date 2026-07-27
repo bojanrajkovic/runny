@@ -22,10 +22,12 @@ const fileCreatePipeInstance = 0x0004
 // FILE_CREATE_PIPE_INSTANCE cleared. Read and write data, EA and attributes,
 // READ_CONTROL (the client needs it to read the pipe's owner) and SYNCHRONIZE.
 //
-// This must stay in lockstep with runnyctl's dial access: an access check runs
-// on the EXPANDED mask, so a client that asks for GENERIC_WRITE against this
-// DACL is denied outright — it would be asking for the one bit deliberately
-// withheld. listen_windows_test.go pins the two together.
+// Deliberately NOT coupled to runnyctl's dial access, which stays generic. A
+// client opening the pipe with GENERIC_READ|GENERIC_WRITE is admitted by this
+// descriptor, while a server-side attempt to add an instance under the same
+// grant is refused: client opens and instance creation do not resolve the
+// generic mask the same way. TestClientGrantWithholdsInstanceCreation pins the
+// property that matters — that this mask never carries instance creation.
 const clientAccessMask = 0x12019B
 
 // systemPipeSDDLFormat is the system daemon pipe's security descriptor: owner

@@ -82,12 +82,28 @@ func stopMachine(ctx bounded.Context, grace time.Duration, done <-chan struct{},
 		case <-time.After(stopSettle):
 			return wedged
 		case <-ctx.Done():
-			return stopDeadlineErr(ctx, err)
+			return stoppedOrDeadline(done, ctx, err)
 		}
 	case <-done:
 		return nil // terminal state reached before forceStop returned
 	case <-ctx.Done():
-		return stopDeadlineErr(ctx, nil)
+		return stoppedOrDeadline(done, ctx, nil)
+	}
+}
+
+// stoppedOrDeadline resolves the tie when the guest reaches its terminal state
+// at the same instant the deadline expires. Both cases are then ready and Go
+// picks uniformly, so without this the same physical outcome -- guest stopped --
+// is reported as success or as a deadline failure at random. It is never a
+// failure: done closing means the guest IS stopped, which is what the stop was
+// for. Reporting otherwise is a false wedge, and a wedged stop is what makes
+// the daemon restart cold once idle.
+func stoppedOrDeadline(done <-chan struct{}, ctx bounded.Context, forceErr error) error {
+	select {
+	case <-done:
+		return nil
+	default:
+		return stopDeadlineErr(ctx, forceErr)
 	}
 }
 

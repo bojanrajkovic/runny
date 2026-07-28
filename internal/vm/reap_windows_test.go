@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bojanrajkovic/runny/internal/bounded"
 )
 
 // fakeReapSystem is a scriptable reapSystem: Terminate/WaitCtx/Close return
@@ -67,11 +69,11 @@ type fakeReapOps struct {
 
 	// The contexts each lookup was handed, so a test can assert the reap
 	// actually bounds its HNS calls rather than merely accepting a parameter.
-	systemCtx   context.Context
-	endpointCtx context.Context
+	systemCtx   bounded.Context
+	endpointCtx bounded.Context
 }
 
-func (f *fakeReapOps) openSystem(ctx context.Context, _ string) (reapSystem, error) {
+func (f *fakeReapOps) openSystem(ctx bounded.Context, _ string) (reapSystem, error) {
 	f.openSystemCalls++
 	f.systemCtx = ctx
 	if f.systemErr != nil {
@@ -83,7 +85,7 @@ func (f *fakeReapOps) openSystem(ctx context.Context, _ string) (reapSystem, err
 	return f.system, nil
 }
 
-func (f *fakeReapOps) openEndpoint(ctx context.Context, _ string) (reapEndpoint, error) {
+func (f *fakeReapOps) openEndpoint(ctx bounded.Context, _ string) (reapEndpoint, error) {
 	f.openEndpointCalls++
 	f.endpointCtx = ctx
 	if f.endpntErr != nil {
@@ -109,9 +111,6 @@ func TestReapPriorSystemBoundsBothLookups(t *testing.T) {
 	ops := &fakeReapOps{}
 	if err := reapPriorSystem(ops, "slot-1", "runny-slot-1"); err != nil {
 		t.Fatalf("reapPriorSystem = %v, want nil", err)
-	}
-	if ops.endpointCtx == nil {
-		t.Fatal("the endpoint lookup got no context at all")
 	}
 	epDeadline, ok := ops.endpointCtx.Deadline()
 	if !ok {
@@ -306,7 +305,7 @@ type countingReapOps struct {
 	delay   time.Duration
 }
 
-func (c *countingReapOps) openSystem(_ context.Context, systemID string) (reapSystem, error) {
+func (c *countingReapOps) openSystem(_ bounded.Context, systemID string) (reapSystem, error) {
 	if c.delay > 0 {
 		time.Sleep(c.delay)
 	}
@@ -317,7 +316,7 @@ func (c *countingReapOps) openSystem(_ context.Context, systemID string) (reapSy
 	return nil, nil
 }
 
-func (c *countingReapOps) openEndpoint(context.Context, string) (reapEndpoint, error) {
+func (c *countingReapOps) openEndpoint(bounded.Context, string) (reapEndpoint, error) {
 	return nil, nil
 }
 

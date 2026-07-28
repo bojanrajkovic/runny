@@ -1,6 +1,10 @@
 package vm
 
-import "context"
+import (
+	"log/slog"
+
+	"github.com/bojanrajkovic/runny/internal/bounded"
+)
 
 // awaitBounded runs a platform call that takes no context under one that does.
 //
@@ -24,7 +28,7 @@ import "context"
 // cancelled, so the alternative is blocking the FSM instead, and one goroutine
 // per attempt against a service that is down is the cheaper failure. The same
 // ceiling applies to the existing abandoned-boot paths on both backends.
-func awaitBounded[T any](ctx context.Context, fn func() (T, error), abandon func(T)) (T, error) {
+func awaitBounded[T any](ctx bounded.Context, fn func() (T, error), abandon func(T)) (T, error) {
 	type result struct {
 		v   T
 		err error
@@ -40,13 +44,19 @@ func awaitBounded[T any](ctx context.Context, fn func() (T, error), abandon func
 		}
 		return r.v, nil
 	case <-ctx.Done():
-		if abandon != nil {
-			go func() {
-				if r := <-ch; r.err == nil {
-					abandon(r.v)
-				}
-			}()
-		}
+		// Always drain, even with no abandon: the late outcome is the only way
+		// to tell "the call landed a moment later" from "it really did leak",
+		// and the caller's own error says only that WE stopped waiting.
+		go func() {
+			switch r := <-ch; {
+			case r.err != nil:
+				slog.Debug("bounded call failed after its deadline passed", "err", r.err)
+			case abandon != nil:
+				abandon(r.v)
+			default:
+				slog.Debug("bounded call succeeded after its deadline passed")
+			}
+		}()
 		return zero, ctx.Err()
 	}
 }
@@ -54,7 +64,7 @@ func awaitBounded[T any](ctx context.Context, fn func() (T, error), abandon func
 // awaitBoundedErr is awaitBounded for a call that returns only an error, which
 // is every release (a delete, a close): there is no value to disown, so no
 // abandon. Takes the method value directly -- awaitBoundedErr(ctx, ep.Delete).
-func awaitBoundedErr(ctx context.Context, fn func() error) error {
+func awaitBoundedErr(ctx bounded.Context, fn func() error) error {
 	_, err := awaitBounded(ctx, func() (struct{}, error) { return struct{}{}, fn() }, nil)
 	return err
 }

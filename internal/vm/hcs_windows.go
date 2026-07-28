@@ -286,7 +286,7 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 // goroutine, where a wedged HNS would hold the state past its deadline. A
 // delete that times out leaves the endpoint for this slot's next
 // reapPriorSystem, which is where an orphan of this exact shape is collected.
-func deleteEndpoint(ctx context.Context, ep *hcn.HostComputeEndpoint) {
+func deleteEndpoint(ctx bounded.Context, ep *hcn.HostComputeEndpoint) {
 	if err := awaitBoundedErr(ctx, ep.Delete); err != nil {
 		slog.Error("abandoned HNS endpoint: delete failed; endpoint may leak until manually cleaned up", "id", ep.Id, "err", err)
 	}
@@ -568,15 +568,22 @@ func (m *hcsMachine) Stop(ctx bounded.Context, grace time.Duration) error {
 // unconditionally at the top of this slot's next boot and deletes exactly this.
 // The neighbor scrub is skipped in that case for the same reason a failed
 // delete skips it — the entry belongs to an endpoint that still exists.
-func (m *hcsMachine) destroy(ctx context.Context) {
+func (m *hcsMachine) destroy(ctx bounded.Context) {
 	if err := m.system.Close(); err != nil {
 		slog.Error("teardown: closing compute system failed", "id", m.system.ID(), "err", err)
 	}
-	if err := awaitBoundedErr(ctx, m.endpoint.Delete); err != nil {
-		slog.Error("teardown: deleting HNS endpoint failed", "id", m.endpoint.Id, "err", err)
-		return
+	// Detached from ctx's deadline, the way run.go's own teardown detaches from
+	// daemon shutdown: stopMachine returns success the instant the guest reaches
+	// its terminal state, which can be the same instant the teardown deadline
+	// expires -- so inheriting what is left of that budget can mean inheriting
+	// nothing, and this cleanup would never run on an otherwise clean stop.
+	// WithoutCancel keeps ctx's values (the obs scope) while dropping its
+	// deadline.
+	dctx, cancel := bounded.WithTimeout(context.WithoutCancel(ctx), abandonedStopTimeout)
+	defer cancel()
+	if err := deleteAndScrub(dctx, m.endpoint.Delete, m.mac); err != nil {
+		slog.Error("teardown: deleting HNS endpoint did not confirm before the window closed", "id", m.endpoint.Id, "err", err)
 	}
-	scrubNeighborEntry(m.mac)
 }
 
 // hcsStopOps closes over the Stop call's own ctx: hcs.System.Shutdown/

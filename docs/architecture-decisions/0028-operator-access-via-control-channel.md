@@ -121,7 +121,14 @@ is destructive if a read that merely *failed* can reach the same branch.
 
 - **Revocation means what it says.** Removing an operator removes their access,
   rather than their access to one directory plus a permanent private grant on
-  every artifact created before the revoke.
+  every artifact created before the revoke. One residual is inherent and
+  unchanged by this decision: an operator keeps access to objects they *created*
+  and therefore own — POSIX ownership on darwin, and on Windows a `CREATOR
+  OWNER` ACE inherited from `ProgramData` and preserved by the install's
+  `/inheritance:d`. That covers a hand-landed App key and the operator-created
+  `<home>/docker` credential directory, and is what keeps both of those flows
+  working with a non-inheriting entry; it does not extend to anything the
+  daemon wrote.
 
 - **The unverified assumption stops being load-bearing.** Whether a Windows
   non-administrator can rename a file over one it has no access to — documented

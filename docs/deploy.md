@@ -129,7 +129,9 @@ loopback registry, matching the convention container tooling already uses.
 **Where to put it.** A per-user agent uses the standard
 `~/.docker/config.json`. The system daemon's own home is `/var/empty`, so it
 defaults `DOCKER_CONFIG` to `<home>/docker`, which you can write without
-`sudo` via the home's inheriting ACL.
+`sudo`: your ACL entry on the home directory lets you create that directory,
+and you own what you create, so you can write inside it. The daemon reads it
+through its own inherited entry.
 
 `auth` is base64 of `username:password`:
 

@@ -57,10 +57,14 @@ const programDataLeakGroup = `*S-1-5-32-545`
 // (OI)(CI) so every artifact it later writes is reachable; windows re-propagates
 // an inheritable entry to children that already exist, so /T would only add
 // redundant explicit copies. The operator gets plain Modify on the home
-// DIRECTORY — enough to rename a config edit into place, which windows charges
-// to FILE_DELETE_CHILD on the parent — and nothing inheritable at all: a copy of
-// the operator entry on a descendant is one no later /remove:g against the home
-// could ever reach, which is exactly how a revoked operator used to keep access.
+// DIRECTORY — enough to reach the pipe's home-derived paths, land an App key,
+// and create the DOCKER_CONFIG directory — and nothing inheritable at all: a
+// copy of the operator entry on a descendant is one no later /remove:g against
+// the home could ever reach, which is exactly how a revoked operator used to
+// keep access. What makes those create-then-write flows work without an
+// inheritable entry is the CREATOR OWNER ACE this sequence's /inheritance:d
+// converts from ProgramData and keeps — verified present on an installed host —
+// which grants the creator full access to what they create, and only that.
 //
 // /remove:g then strips programDataLeakGroup specifically — the one entry
 // /inheritance:d's conversion doesn't get rid of on its own and that

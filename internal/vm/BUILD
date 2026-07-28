@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "vm",
     srcs = [
+        "await.go",
         "hcs_windows.go",
         "leases.go",
         "neighbortable.go",
@@ -43,6 +44,7 @@ go_library(
 go_test(
     name = "vm_test",
     srcs = [
+        "await_test.go",
         "leases_test.go",
         "neighbortable_test.go",
         "netfixup_test.go",

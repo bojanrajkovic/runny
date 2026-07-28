@@ -25,8 +25,11 @@ type reapOps interface {
 	// an error.
 	openSystem(ctx context.Context, systemID string) (reapSystem, error)
 	// openEndpoint returns the existing HNS endpoint for endpointName, or a
-	// nil reapEndpoint if none exists.
-	openEndpoint(endpointName string) (reapEndpoint, error)
+	// nil reapEndpoint if none exists. Takes a ctx because the real
+	// implementation is a context-free HNS RPC that a wedged HNS service never
+	// returns from — and this runs at daemon startup, where a hang has no
+	// outer deadline to save it.
+	openEndpoint(ctx context.Context, endpointName string) (reapEndpoint, error)
 }
 
 // reapSystem is the subset of *hcs.System reapPriorSystem needs. *hcs.System
@@ -63,8 +66,10 @@ func (hcsReapOps) openSystem(ctx context.Context, systemID string) (reapSystem, 
 	return system, nil
 }
 
-func (hcsReapOps) openEndpoint(endpointName string) (reapEndpoint, error) {
-	ep, err := hcn.GetEndpointByName(endpointName)
+func (hcsReapOps) openEndpoint(ctx context.Context, endpointName string) (reapEndpoint, error) {
+	ep, err := awaitBounded(ctx, func() (*hcn.HostComputeEndpoint, error) {
+		return hcn.GetEndpointByName(endpointName)
+	}, nil) // a lookup allocates nothing
 	if err != nil {
 		var notFound hcn.EndpointNotFoundError
 		if errors.As(err, &notFound) {
@@ -118,7 +123,7 @@ func reapPriorSystem(ops reapOps, systemID, endpointName string) error {
 		}
 	}
 
-	ep, err := ops.openEndpoint(endpointName)
+	ep, err := ops.openEndpoint(ctx, endpointName)
 	if err != nil {
 		return fmt.Errorf("checking for a stale HNS endpoint %q: %w", endpointName, err)
 	}
@@ -126,7 +131,7 @@ func reapPriorSystem(ops reapOps, systemID, endpointName string) error {
 		return nil
 	}
 	slog.Warn("reaping HNS endpoint left behind by an unclean shutdown", "id", ep.ID(), "name", endpointName)
-	deleteEndpointAndScrub(ep, "reaping stale HNS endpoint")
+	deleteEndpointAndScrub(ctx, ep, "reaping stale HNS endpoint")
 	return nil
 }
 
@@ -160,9 +165,14 @@ func terminateAndClose(ctx context.Context, sys reapSystem, label string) error 
 // scrubNeighborEntry's own doc comment). Best-effort: a delete failure is
 // logged, not returned -- there's nothing further either caller could do
 // differently.
-func deleteEndpointAndScrub(ep reapEndpoint, label string) {
+func deleteEndpointAndScrub(ctx context.Context, ep reapEndpoint, label string) {
 	mac := ep.MAC()
-	if err := ep.Delete(); err != nil {
+	// ep.Delete is another context-free HNS RPC. A bounded delete can leave the
+	// endpoint behind, which is self-healing: this same reap runs at the top of
+	// the slot's next boot. A hang would not be.
+	if _, err := awaitBounded(ctx, func() (struct{}, error) {
+		return struct{}{}, ep.Delete()
+	}, nil); err != nil {
 		slog.Error(label+": delete failed; it may leak until manually cleaned up", "id", ep.ID(), "err", err)
 		return
 	}

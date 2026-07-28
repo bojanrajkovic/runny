@@ -1,0 +1,58 @@
+package vm
+
+import (
+	"context"
+	"fmt"
+)
+
+// awaitBounded runs a platform call that takes no context under one that does.
+//
+// The backends' host bindings are synchronous RPCs with no ctx and no internal
+// timeout: HNS's hcn entry points, and VZ's own start/stop on darwin. A wedged
+// service therefore blocks the calling goroutine indefinitely — and since that
+// goroutine is the FSM's, it blows through whatever deadline the state was
+// given, which is the failure this project exists to make impossible. Nothing
+// can interrupt the call itself, so the only bound available is on OUR wait.
+//
+// abandon is the half that is easy to forget and expensive to omit. A call that
+// resolves AFTER we gave up has produced something nobody holds a reference to,
+// because the caller already returned an error; abandon runs detached and owns
+// it. A call that FAILED late allocated nothing, so abandon is not called —
+// handing it a zero value would have the caller release a resource that never
+// existed. Pass nil when the call allocates nothing, which is the common case
+// for pure reads.
+//
+// ponytail: a call that never resolves leaks its goroutine for the process's
+// life. That is the deliberate trade — a wedged host binding cannot be
+// cancelled, so the alternative is blocking the FSM instead, and one goroutine
+// per attempt against a service that is down is the cheaper failure. The same
+// ceiling applies to the existing abandoned-boot paths on both backends.
+func awaitBounded[T any](ctx context.Context, fn func() (T, error), abandon func(T)) (T, error) {
+	type result struct {
+		v   T
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		v, err := fn()
+		ch <- result{v, err}
+	}()
+
+	var zero T
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return zero, r.err
+		}
+		return r.v, nil
+	case <-ctx.Done():
+		if abandon != nil {
+			go func() {
+				if r := <-ch; r.err == nil {
+					abandon(r.v)
+				}
+			}()
+		}
+		return zero, fmt.Errorf("%w", ctx.Err())
+	}
+}

@@ -1,9 +1,6 @@
 package vm
 
-import (
-	"context"
-	"fmt"
-)
+import "context"
 
 // awaitBounded runs a platform call that takes no context under one that does.
 //
@@ -33,10 +30,7 @@ func awaitBounded[T any](ctx context.Context, fn func() (T, error), abandon func
 		err error
 	}
 	ch := make(chan result, 1)
-	go func() {
-		v, err := fn()
-		ch <- result{v, err}
-	}()
+	go func() { v, err := fn(); ch <- result{v, err} }()
 
 	var zero T
 	select {
@@ -53,6 +47,14 @@ func awaitBounded[T any](ctx context.Context, fn func() (T, error), abandon func
 				}
 			}()
 		}
-		return zero, fmt.Errorf("%w", ctx.Err())
+		return zero, ctx.Err()
 	}
+}
+
+// awaitBoundedErr is awaitBounded for a call that returns only an error, which
+// is every release (a delete, a close): there is no value to disown, so no
+// abandon. Takes the method value directly -- awaitBoundedErr(ctx, ep.Delete).
+func awaitBoundedErr(ctx context.Context, fn func() error) error {
+	_, err := awaitBounded(ctx, func() (struct{}, error) { return struct{}{}, fn() }, nil)
+	return err
 }

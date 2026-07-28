@@ -125,11 +125,8 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 		slog.Debug("guest console pipe", "system", systemID, "pipe", consolePipe)
 	}
 
-	// Unlike the lookup above this one ALLOCATES: an endpoint that HNS finishes
-	// creating after we gave up is referenced by nothing, since Boot has already
-	// returned an error, so it is disowned the same way an abandoned compute
-	// system is. A late failure created nothing and nothing else is allocated
-	// yet at this point, so there is no other resource to release.
+	// ALLOCATES, unlike the lookup above: an endpoint HNS finishes creating
+	// after we gave up is referenced by nothing, so it is disowned.
 	ep, err := awaitBounded(ctx, func() (*hcn.HostComputeEndpoint, error) {
 		return network.CreateEndpoint(&hcn.HostComputeEndpoint{
 			Name:               endpointName,
@@ -290,9 +287,7 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 // delete that times out leaves the endpoint for this slot's next
 // reapPriorSystem, which is where an orphan of this exact shape is collected.
 func deleteEndpoint(ctx context.Context, ep *hcn.HostComputeEndpoint) {
-	if _, err := awaitBounded(ctx, func() (struct{}, error) {
-		return struct{}{}, ep.Delete()
-	}, nil); err != nil {
+	if err := awaitBoundedErr(ctx, ep.Delete); err != nil {
 		slog.Error("abandoned HNS endpoint: delete failed; endpoint may leak until manually cleaned up", "id", ep.Id, "err", err)
 	}
 }
@@ -577,9 +572,7 @@ func (m *hcsMachine) destroy(ctx context.Context) {
 	if err := m.system.Close(); err != nil {
 		slog.Error("teardown: closing compute system failed", "id", m.system.ID(), "err", err)
 	}
-	if _, err := awaitBounded(ctx, func() (struct{}, error) {
-		return struct{}{}, m.endpoint.Delete()
-	}, nil); err != nil {
+	if err := awaitBoundedErr(ctx, m.endpoint.Delete); err != nil {
 		slog.Error("teardown: deleting HNS endpoint failed", "id", m.endpoint.Id, "err", err)
 		return
 	}

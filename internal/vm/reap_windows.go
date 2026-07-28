@@ -170,9 +170,7 @@ func deleteEndpointAndScrub(ctx context.Context, ep reapEndpoint, label string) 
 	// ep.Delete is another context-free HNS RPC. A bounded delete can leave the
 	// endpoint behind, which is self-healing: this same reap runs at the top of
 	// the slot's next boot. A hang would not be.
-	if _, err := awaitBounded(ctx, func() (struct{}, error) {
-		return struct{}{}, ep.Delete()
-	}, nil); err != nil {
+	if err := awaitBoundedErr(ctx, ep.Delete); err != nil {
 		slog.Error(label+": delete failed; it may leak until manually cleaned up", "id", ep.ID(), "err", err)
 		return
 	}

@@ -26,13 +26,13 @@ var testOperator = func() string {
 	return "root"
 }()
 
-// The ACE strings are pinned: they are the exact grants validated by the PR4c
-// spike on a real Mac. A change here silently re-opens the read gaps the spike
-// closed (operator can't write, or the daemon can't read its own config/key).
+// The ACE strings are pinned. A change here silently re-opens a read gap (the
+// daemon can't read its own config/key) or a revoke gap: the operator entry
+// must stay free of the inherit flags the service entry carries, or every
+// artifact gets a copy of it that a revoke of the home dir can never remove.
 func TestACEsPinned(t *testing.T) {
 	wantOp := "user:alice allow list,add_file,search,delete,add_subdirectory,delete_child," +
-		"readattr,writeattr,readextattr,writeextattr,readsecurity,read,write,append,execute," +
-		"file_inherit,directory_inherit"
+		"readattr,writeattr,readextattr,writeextattr,readsecurity,read,write,append,execute"
 	if got := opacl.OperatorACE("alice"); got != wantOp {
 		t.Errorf("opacl.OperatorACE drift:\n got %q\nwant %q", got, wantOp)
 	}

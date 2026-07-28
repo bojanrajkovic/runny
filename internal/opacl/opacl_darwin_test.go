@@ -145,3 +145,48 @@ func TestListExcludesReadOnlyACE(t *testing.T) {
 		t.Errorf("read-only (no write) ACE counted as an operator: %+v", ops)
 	}
 }
+
+// TestGrantReachesNothingButTheHome is the behavioural half of the home-only
+// operator entry: after a grant, an artifact the daemon writes afterwards
+// carries no operator entry at all. This is what makes a revoke total — the
+// home dir holds the only entry there is, so removing it removes every one.
+func TestGrantReachesNothingButTheHome(t *testing.T) {
+	requireGrantee(t)
+	u, err := user.Lookup(testGrantee)
+	if err != nil {
+		t.Skipf("test principal %q not present: %v", testGrantee, err)
+	}
+	dir := t.TempDir()
+	homeDir := filepath.Join(dir, "home")
+	if err := os.MkdirAll(homeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(homeDir, "runnyd.sock")
+	if err := os.WriteFile(sock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := bounded.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	if err := Grant(ctx, homeDir, sock, testGrantee); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+
+	// Written AFTER the grant, exactly as the daemon writes its artifacts.
+	sub := filepath.Join(homeDir, "vms")
+	if err := os.MkdirAll(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(sub, "clone.img")
+	if err := os.WriteFile(artifact, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{sub, artifact} {
+		ids, err := ListIDs(p)
+		if err != nil {
+			t.Fatalf("ListIDs(%s): %v", p, err)
+		}
+		if slices.Contains(ids, u.Uid) {
+			t.Errorf("%s inherited an operator entry — a revoke of the home dir cannot reach it", p)
+		}
+	}
+}

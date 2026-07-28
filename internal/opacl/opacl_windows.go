@@ -5,7 +5,6 @@ package opacl
 import (
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"unsafe"
 
@@ -14,88 +13,28 @@ import (
 	"github.com/bojanrajkovic/runny/internal/bounded"
 )
 
-// grantArgs is the icacls sequence Grant runs, a pure function for the same
-// testability reason internal/sysdaemon's icaclsHomeArgs is one. It stamps only
-// the home dir: the control channel is a named pipe (no filesystem object to
-// grant), so unlike darwin there is no separate live-socket target. The home
-// ACE is exactly the install bootstrap's operator grant — (OI)(CI)M, Modify
-// inherited by every file and directory created beneath — so a
-// bootstrap-granted and a live-granted operator are indistinguishable to
-// ListIDs.
-func grantArgs(homeDir, account string) [][]string {
-	// Home LAST: it is the object the revocation gate reads, so it is what
-	// makes someone an operator. If the logs\ command fails, nobody was
-	// granted anything and the reported failure is the truth. Granting the
-	// home first would leave a caller HasID authorizes but no audit record
-	// names, and a retry that refuses because they are already an operator.
-	return reverse(aclTargets(homeDir, "/grant", account+":(OI)(CI)M"))
+// grantArgs is the icacls invocation Grant runs, a pure function for the same
+// testability reason internal/sysdaemon's icaclsHomeArgs is one. ONE command
+// against ONE object, and no partial state to reason about because a single
+// command cannot half-run.
+//
+// Modify on the home DIRECTORY, without (OI)(CI): the entry answers "is this
+// account an operator" for HasID, and grants the directory access a rename over
+// config.yaml needs, and stops there. An inheriting entry would put a copy of
+// itself on every artifact below, and a copy is not reachable from here — a
+// later /remove:g against the home cannot touch it, so a revoked operator would
+// keep Modify on images\, vms\ and cycles\. The control channel is a named
+// pipe, so unlike darwin there is no socket file to stamp alongside.
+func grantArgs(homeDir, account string) []string {
+	return []string{"icacls", homeDir, "/grant", account + ":M"}
 }
 
-func revokeArgs(homeDir, account string) [][]string {
-	// Home FIRST, the mirror of grantArgs: revoking the authoritative object
-	// first means a later failure leaves someone already denied by the gate
-	// rather than still authorized. Both orders put the authoritative change
-	// on the side where a partial run is safe.
-	return aclTargets(homeDir, "/remove:g", account)
+// revokeArgs is grantArgs' mirror: one command, same object.
+func revokeArgs(homeDir, account string) []string {
+	return []string{"icacls", homeDir, "/remove:g", account}
 }
 
-// reverse orders a command list authoritative-last.
-func reverse(cmds [][]string) [][]string {
-	out := make([][]string, 0, len(cmds))
-	for i := len(cmds) - 1; i >= 0; i-- {
-		out = append(out, cmds[i])
-	}
-	return out
-}
-
-// aclTargets names the two objects a fresh install gives an explicit operator
-// ACE, home first; callers order it for their own partial-failure safety.
-//
-// KNOWN GAPS, both closing with the same change and neither papered over here.
-//
-// install-daemon re-run over a POPULATED home stamps explicit ACEs onto every
-// existing descendant (icaclsHomeArgs carries /T on the grants), so on such a
-// host a revoke reports success while leaving access on images/, vms/ and
-// cycles/.
-//
-// And two commands can always half-run, in both directions. A grant whose home
-// command fails leaves the target holding logs\ Modify, unaudited, while the
-// caller is told the grant failed. A revoke whose logs\ command fails leaves
-// that same ACE behind AND unremovable: membership is read from the home DACL,
-// which is already gone, so every retry answers "is not an operator".
-//
-// Ordering buys the safe direction on each verb -- a failed grant authorizes
-// nobody, a failed revoke denies immediately -- and cannot buy both properties
-// at once, because the object that decides membership is also the object whose
-// removal ends the ability to act. Neither compensating rollback nor a
-// residual-tolerant precheck is added: each is a new failure path that exists
-// only to serve this shape. Making home the single ACL authority collapses
-// both verbs to ONE command, at which point no partial state exists to
-// handle.
-//
-// The install bootstrap creates home and logs\ and then runs
-// icacls /inheritance:d /T, which COPIES the then-inherited ACEs onto both and
-// stops future propagation. logs\ therefore holds a real ACE of its own, not a
-// reflection of the home's: a revoke of the home alone leaves a revoked
-// operator with Modify on the daemon's logs, and a live grant of the home
-// alone never reaches them at all. Everything created later (images/, vms/,
-// cycles/) inherits normally and can never hold an explicit ACE.
-//
-// Deliberately NOT icacls /T. Without /C it aborts on the first object it
-// cannot open for WRITE_DAC, and the daemon's own (OI)(CI)M does not include
-// WRITE_DAC -- so a tree walk dies on any file the operator wrote (the App
-// key, the atomically renamed config.yaml) AFTER removing the home's ACE,
-// reporting failure for a revoke that partly happened and leaving it
-// unrecorded. It would also descend multi-GB VHDX clones under a bound sized
-// for a single directory.
-func aclTargets(homeDir, verb, spec string) [][]string {
-	return [][]string{
-		{"icacls", homeDir, verb, spec},
-		{"icacls", filepath.Join(homeDir, "logs"), verb, spec},
-	}
-}
-
-// Grant adds the inheriting operator ACE for account to homeDir via icacls —
+// Grant adds the operator ACE for account to homeDir via icacls —
 // executed bare (resolved from PATH), matching the install bootstrap's own
 // icacls calls. sock is unused: the windows control channel is a named pipe
 // with no file to stamp (the signature matches darwin's for the shared apply
@@ -110,12 +49,10 @@ func Revoke(ctx bounded.Context, homeDir, sock, account string) error {
 	return runIcacls(ctx, revokeArgs(homeDir, account))
 }
 
-func runIcacls(ctx bounded.Context, cmds [][]string) error {
-	for _, args := range cmds {
-		out, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("%s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-		}
+func runIcacls(ctx bounded.Context, args []string) error {
+	out, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

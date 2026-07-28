@@ -22,17 +22,30 @@ type Operator struct {
 // inheriting ACE in internal/sysdaemon.
 const ACLInherit = "file_inherit,directory_inherit"
 
-// OperatorACE grants the named account full directory management plus
-// read/write on inherited files: edit config, atomically rename over it,
-// land the App key, and read the daemon's artifacts. It overrides the
-// home's 0700 POSIX mode (ACL allow is evaluated ahead of POSIX). Pinned
-// literal — validated by the PR4c spike (internal/sysdaemon) and, for the
-// live-grant path, the aclprobe spike.
+// OperatorACE grants the named account management of the home DIRECTORY, and
+// deliberately nothing below it. It overrides the home's 0700 POSIX mode (ACL
+// allow is evaluated ahead of POSIX). Pinned literal.
+//
+// It does two jobs, both of which stop at the directory. It is the
+// authorization registry — HasID reads this entry off the home dir to answer
+// "is this caller an operator" — and it is the directory access the operator's
+// one remaining filesystem job needs: creating a temp file in the home and
+// renaming it over config.yaml, which POSIX charges to the DIRECTORY, not to
+// the file being replaced.
+//
+// Deliberately NOT inheriting. An inheriting entry is a copy of itself on every
+// artifact the daemon writes, and a copy cannot be reached from the home dir:
+// removing this entry cannot remove them, so a revoked operator would keep
+// write on images/, vms/ and cycles/. Everything an operator reads out of the
+// home goes through an RPC instead, so the copies bought nothing and cost the
+// revoke its meaning. The service account's own entry (internal/sysdaemon's
+// serviceACE) still inherits — it is installed once and never revoked, and the
+// daemon does need to reach what it writes.
 func OperatorACE(operator string) string {
 	return "user:" + operator + " allow " +
 		"list,add_file,search,delete,add_subdirectory,delete_child," +
 		"readattr,writeattr,readextattr,writeextattr,readsecurity," +
-		"read,write,append,execute," + ACLInherit
+		"read,write,append,execute"
 }
 
 // List reads homeDir's operator ACL via the per-platform ListIDs, resolving

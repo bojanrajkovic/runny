@@ -1,0 +1,113 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
+)
+
+// configClient stubs GetConfig alone; every other RPC panics through the
+// embedded nil interface, which is what keeps a test honest about which calls
+// the code under test actually makes.
+type configClient struct {
+	runnyv1.RunnyServiceClient
+	resp *runnyv1.GetConfigResponse
+	err  error
+}
+
+func (c *configClient) GetConfig(ctx context.Context, in *runnyv1.GetConfigRequest, opts ...grpc.CallOption) (*runnyv1.GetConfigResponse, error) {
+	return c.resp, c.err
+}
+
+func TestConfigBytesPrefersTheDaemon(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("stale: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := &ctl{client: &configClient{resp: &runnyv1.GetConfigResponse{Content: []byte("live: true\n")}}}
+
+	got, err := c.configBytes(t.Context(), path)
+	if err != nil {
+		t.Fatalf("configBytes: %v", err)
+	}
+	if string(got) != "live: true\n" {
+		t.Errorf("got %q, want the daemon's bytes — a readable file on disk must not win over the daemon", got)
+	}
+}
+
+// The daemon saying "there is no config" is authoritative, and is what lets
+// edit-config seed a fresh skeleton.
+func TestConfigBytesMapsNotFoundToErrNotExist(t *testing.T) {
+	c := &ctl{client: &configClient{err: status.Error(codes.NotFound, "no config")}}
+	_, err := c.configBytes(t.Context(), filepath.Join(t.TempDir(), "config.yaml"))
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("err = %v, want os.ErrNotExist in the chain", err)
+	}
+}
+
+// A daemon that is down (or predates GetConfig) falls back to a direct read —
+// the normal path for a per-user home, whose owner is the operator.
+func TestConfigBytesFallsBackToDiskWhenTheDaemonIsUnreachable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("on: disk\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, code := range []codes.Code{codes.Unavailable, codes.Unimplemented} {
+		c := &ctl{client: &configClient{err: status.Error(code, "nope")}}
+		got, err := c.configBytes(t.Context(), path)
+		if err != nil {
+			t.Fatalf("%s: configBytes: %v", code, err)
+		}
+		if string(got) != "on: disk\n" {
+			t.Errorf("%s: got %q, want the on-disk bytes", code, got)
+		}
+	}
+}
+
+func TestConfigBytesReportsAnAbsentFileAsErrNotExist(t *testing.T) {
+	c := &ctl{client: &configClient{err: status.Error(codes.Unavailable, "nope")}}
+	_, err := c.configBytes(t.Context(), filepath.Join(t.TempDir(), "config.yaml"))
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("err = %v, want os.ErrNotExist in the chain", err)
+	}
+}
+
+// The one that matters. With the daemon unreachable AND the file unreadable —
+// a stopped system daemon, seen by an operator whose ACL entry stops at the
+// home directory — the answer must NOT look like "no config exists". Callers
+// seed a blank skeleton on ErrNotExist, and applying that over a live fleet's
+// config destroys it. Skipped as root, which reads through mode bits.
+func TestConfigBytesDoesNotDisguiseAnUnreadableConfigAsAbsent(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads through mode bits; the distinction is unobservable")
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("pools: [{name: prod}]\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	c := &ctl{client: &configClient{err: status.Error(codes.Unavailable, "connection refused")}}
+
+	_, err := c.configBytes(t.Context(), path)
+	if err == nil {
+		t.Fatal("expected an error for an unreadable config")
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unreadable config reported as absent (%v); the caller would seed a blank skeleton over it", err)
+	}
+	// Both attempts failed for different reasons; naming only one of them sends
+	// the operator to the wrong fix.
+	for _, want := range []string{"connection refused", path} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}

@@ -53,6 +53,15 @@ const programDataLeakGroup = `*S-1-5-32-545`
 // never produces that empty-DACL window: whatever was there (inherited or
 // explicit) stays present throughout, just re-flagged.
 //
+// Neither /grant carries /T, and they differ in shape. The service gets
+// (OI)(CI) so every artifact it later writes is reachable; windows re-propagates
+// an inheritable entry to children that already exist, so /T would only add
+// redundant explicit copies. The operator gets plain Modify on the home
+// DIRECTORY — enough to rename a config edit into place, which windows charges
+// to FILE_DELETE_CHILD on the parent — and nothing inheritable at all: a copy of
+// the operator entry on a descendant is one no later /remove:g against the home
+// could ever reach, which is exactly how a revoked operator used to keep access.
+//
 // /remove:g then strips programDataLeakGroup specifically — the one entry
 // /inheritance:d's conversion doesn't get rid of on its own and that
 // actually matters (ProgramData's default grants it read, which would leak
@@ -78,8 +87,8 @@ func icaclsHomeArgs(homeDir, operator string) [][]string {
 		{"icacls", homeDir, "/setowner", operator, "/T"},
 		{"icacls", homeDir, "/inheritance:d", "/T"},
 		{"icacls", homeDir, "/remove:g", programDataLeakGroup, "/T"},
-		{"icacls", homeDir, "/grant", windowsServiceSID + ":(OI)(CI)M", "/T"},
-		{"icacls", homeDir, "/grant", operator + ":(OI)(CI)M", "/T"},
+		{"icacls", homeDir, "/grant", windowsServiceSID + ":(OI)(CI)M"},
+		{"icacls", homeDir, "/grant", operator + ":M"},
 		{"icacls", homeDir, "/setowner", windowsServiceSID, "/T"},
 	}
 }

@@ -212,21 +212,26 @@ func (i *Installer) freeID(ctx context.Context, dsclPath, attr string) (int, err
 func (i *Installer) ensureHome(ctx context.Context) error {
 	owner := ServiceUser + ":" + ServiceGroup
 	logs := home.Dir(home.SystemHomeDir).LogsDir()
-	// Set the home's mode + dual inheriting ACL BEFORE creating logs/, so logs
-	// (and every dir the daemon's Ensure() later creates) inherits the ACEs. The
-	// ACL ops are RECURSIVE (-R): a changed parent ACL does NOT retroactively
-	// inherit onto files that already exist, so on a re-run (e.g. a different
-	// operator, or a partial install that lacked the _runny ACE) the existing
-	// config/key/artifacts must be re-stamped, not just the root — and a failure
-	// to re-stamp surfaces (the run seam returns the error) rather than reporting
-	// a success the operator/daemon can't actually use. -N first clears any stale
-	// ACL across the tree so the two ACEs don't stack on a reinstall.
+	// Set the home's mode + ACL BEFORE creating logs/, so logs (and every dir
+	// the daemon's Ensure() later creates) inherits the service entry. -N first
+	// clears any stale ACL across the tree so the entries don't stack on a
+	// reinstall.
+	//
+	// The two +a steps differ, deliberately. The SERVICE entry is recursive: -N
+	// just stripped every descendant's ACL, darwin's chown above is not
+	// recursive, and darwin does not re-propagate a changed parent ACL onto
+	// anything that already exists — so on a reinstall over a populated home,
+	// operator-owned files (config.yaml, the App key) are reachable by the
+	// daemon through this entry and nothing else. The OPERATOR entry is not
+	// recursive, and does not inherit: it names who an operator IS and grants
+	// the home-directory access a config rename needs. A copy of it on a
+	// descendant is one a later revoke of the home dir could never remove.
 	steps := [][]string{
 		{"/bin/mkdir", "-p", home.SystemHomeDir},
 		{"/usr/sbin/chown", owner, home.SystemHomeDir},
 		{"/bin/chmod", "0700", home.SystemHomeDir},
 		{"/bin/chmod", "-R", "-N", home.SystemHomeDir},
-		{"/bin/chmod", "-R", "+a", opacl.OperatorACE(i.cfg.Operator), home.SystemHomeDir},
+		{"/bin/chmod", "+a", opacl.OperatorACE(i.cfg.Operator), home.SystemHomeDir},
 		{"/bin/chmod", "-R", "+a", serviceACE(ServiceUser), home.SystemHomeDir},
 		{"/bin/mkdir", "-p", logs},
 		{"/usr/sbin/chown", owner, logs},
@@ -236,7 +241,7 @@ func (i *Installer) ensureHome(ctx context.Context) error {
 			return err
 		}
 	}
-	i.log("prepared %s (0700, owned by %s, dual inheriting ACL: %s + %s)",
+	i.log("prepared %s (0700, owned by %s, operator %s on the home dir, inheriting %s)",
 		home.SystemHomeDir, ServiceUser, i.cfg.Operator, ServiceUser)
 	return nil
 }

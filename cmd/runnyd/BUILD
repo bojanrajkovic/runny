@@ -25,6 +25,8 @@ go_library(
         "lock_unix.go",
         "lock_windows.go",
         "main.go",
+        "managedservice_unix.go",
+        "managedservice_windows.go",
         "parsegate.go",
         "platform_darwin.go",
         "platform_other.go",

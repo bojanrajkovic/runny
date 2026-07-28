@@ -4,6 +4,7 @@ package opacl
 
 import (
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"unsafe"
@@ -27,11 +28,16 @@ func grantArgs(homeDir, account string) [][]string {
 	}
 }
 
-// revokeArgs mirrors grantArgs: the home dir only — the ACL the revocation
-// gate reads.
+// revokeArgs targets the home dir and everything beneath it. The grant is
+// (OI)(CI), so it propagates outward by inheritance -- but the install
+// bootstrap runs icacls /inheritance:d on logs\, which COPIES the inherited
+// ACEs in place and stops future propagation. That copy is a real ACE on
+// logs\, not a reflection of the home's, so removing the home's grant alone
+// leaves a revoked operator holding Modify on the daemon's logs. /T walks the
+// tree the grant reached.
 func revokeArgs(homeDir, account string) [][]string {
 	return [][]string{
-		{"icacls", homeDir, "/remove:g", account},
+		{"icacls", homeDir, "/remove:g", account, "/T"},
 	}
 }
 
@@ -117,7 +123,19 @@ func operatorSIDs(dacl *windows.ACL) ([]string, error) {
 		if ExcludedSID(s) {
 			continue
 		}
-		if _, _, accType, err := sid.LookupAccount(""); err != nil || accType != windows.SidTypeUser {
+		// A failed lookup and a deleted account are the SAME signal here, and
+		// the consequences are not symmetric: LookupAccount with an empty
+		// system name falls through to the domain, so a DC blip on a
+		// domain-joined host would drop a live operator's SID and lock them
+		// out of their own daemon -- silently, on a transient network fault.
+		// Admitting a SID that no longer resolves only shows a stale entry in
+		// an operator listing. Keep the type filter where it can mean
+		// something (a successful lookup naming a group), and admit the SID
+		// where it cannot.
+		switch _, _, accType, err := sid.LookupAccount(""); {
+		case err != nil:
+			slog.Warn("operator SID did not resolve; treating it as an operator rather than dropping it", "sid", s, "err", err)
+		case accType != windows.SidTypeUser:
 			continue
 		}
 		ids = append(ids, s)

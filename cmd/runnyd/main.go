@@ -93,7 +93,7 @@ func run(parent context.Context) error {
 		return err
 	}
 	_, systemHomeErr := os.Stat(home.SystemHomeDir)
-	if err := systemHomeOwnershipError(dir, os.Geteuid(), systemHomeErr == nil); err != nil {
+	if err := systemHomeOwnershipError(dir, runningAsManagedService(), systemHomeErr == nil); err != nil {
 		return err
 	}
 	dir, diagnosingOtherHome := doctorHome(*checkOnly, *configFlag, dir)
@@ -841,12 +841,14 @@ func runPrune(ctx context.Context, apply bool, slots []*statemachine.Slot, dir h
 // `mkdir /var/empty/.runny: permission denied`. A login user (uid >= 500) running
 // a per-user agent beside a system install legitimately falls back, so the check
 // is scoped to the service-uid range and to an existing system home.
-func systemHomeOwnershipError(dir home.Dir, euid int, systemHomeExists bool) error {
-	if euid <= 0 || euid >= 500 || string(dir) == home.SystemHomeDir || !systemHomeExists {
+func systemHomeOwnershipError(dir home.Dir, managedService, systemHomeExists bool) error {
+	if !managedService || string(dir) == home.SystemHomeDir || !systemHomeExists {
 		return nil
 	}
-	return fmt.Errorf("running as a system service account (uid %d) but %s is not owned by it; "+
-		"reinstall the system daemon with `sudo runnyctl install-daemon`", euid, home.SystemHomeDir)
+	return fmt.Errorf("started by the service manager but %s exists and is not owned by this account, "+
+		"so the daemon fell back to a per-user home at %s; reinstall the system daemon "+
+		"(`sudo runnyctl install-daemon`, or `runnyctl install-daemon` elevated on windows)",
+		home.SystemHomeDir, dir)
 }
 
 // poolClientError attributes a GitHub client construction failure to its

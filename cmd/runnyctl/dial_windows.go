@@ -92,6 +92,33 @@ func verifyPipeOwner(conn net.Conn) error {
 	return nil
 }
 
+// verifyPipeOwnerIsSelf is the per-user pipe's counterpart to
+// verifyPipeOwner: it asserts identity rather than privilege. The system
+// check accepts Administrators/SYSTEM and would refuse a healthy per-user
+// daemon, whose pipe is owned by the resolving user.
+//
+// It exists because the skip it replaces reasoned from the HEALTHY pipe's
+// owner-only connect DACL -- but that DACL is set by whoever creates the name
+// first, so a squatter's pipe carries the squatter's DACL and says nothing
+// about who created it. The name is derivable (an unsalted sha256 prefix of a
+// guessable home path), so any local user can pre-create it and receive
+// whatever this client sends, debug-key SSH material included. That is the
+// same shape as the system pipe's exposure, one privilege level down.
+func verifyPipeOwnerIsSelf(conn net.Conn) error {
+	owner, err := pipeOwnerSID(conn)
+	if err != nil {
+		return fmt.Errorf("cannot verify runnyd control pipe owner, refusing to connect: %w", err)
+	}
+	tu, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return fmt.Errorf("cannot read this process's own identity to verify the control pipe owner, refusing to connect: %w", err)
+	}
+	if self := tu.User.Sid.String(); owner != self {
+		return fmt.Errorf("per-user runnyd control pipe is owned by %s, not by this user (%s) - refusing to connect; the pipe may be squatted", owner, self)
+	}
+	return nil
+}
+
 // dial connects to the daemon's named pipe. The pipe is dialed at
 // SECURITY_IDENTIFICATION (winio.PipeImpLevelIdentification): the daemon reads
 // the client's SID by impersonating this connection at the handshake, and
@@ -122,11 +149,13 @@ func dial(socketPath string) (*grpc.ClientConn, error) {
 			// is owned by that user, not Administrators/SYSTEM: the anti-squat
 			// check neither applies (no cross-user exposure) nor would pass, so
 			// applying it there would falsely refuse a healthy non-admin daemon.
+			verify := verifyPipeOwnerIsSelf
 			if socketPath == home.PipeName {
-				if err := verifyPipeOwner(conn); err != nil {
-					_ = conn.Close()
-					return nil, err
-				}
+				verify = verifyPipeOwner
+			}
+			if err := verify(conn); err != nil {
+				_ = conn.Close()
+				return nil, err
 			}
 			return conn, nil
 		}),

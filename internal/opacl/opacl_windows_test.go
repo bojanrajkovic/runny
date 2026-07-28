@@ -24,9 +24,15 @@ func TestGrantRevokeArgs(t *testing.T) {
 		t.Errorf("grantArgs =\n got %v\nwant %v", got, want)
 	}
 
+	// /T is load-bearing, not symmetry with grant. The install bootstrap runs
+	// icacls /inheritance:d on logs\, which COPIES the then-current inherited
+	// ACEs and stops future propagation -- so the operator ACE lives on inside
+	// logs\ independently. A revoke that touches only the home dir leaves that
+	// copy behind, and the operator keeps Modify on the daemon's logs after
+	// being revoked. A revocation that does not revoke is worse than none.
 	got = revokeArgs(`C:\ProgramData\runny`, `CORP\alice`)
 	want = [][]string{
-		{"icacls", `C:\ProgramData\runny`, "/remove:g", `CORP\alice`},
+		{"icacls", `C:\ProgramData\runny`, "/remove:g", `CORP\alice`, "/T"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("revokeArgs =\n got %v\nwant %v", got, want)

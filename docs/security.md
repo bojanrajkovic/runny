@@ -226,7 +226,10 @@ Windows reinstall does not reset it**: `icacls /inheritance:d` converts and
 keeps existing explicit entries, so a reinstall re-grants the named operator
 while preserving every other live grant
 ([ADR-0027](architecture-decisions/0027-windows-operator-identity.md)) —
-revocation, not reinstall, is the removal path there. A root
+revocation, not reinstall, is the removal path there — and it walks the tree,
+because the same `/inheritance:d` that makes reinstall non-resetting also gave
+`logs\` its own copy of the operator ACE, which removing the home dir's grant
+alone would leave behind. A root
 peer is refused as a grant target (root already bypasses the socket's
 `0600` mode and needs no ACE). Per-user deployments have a single owner and
 no ACL-managed set, so `operator grant`/`revoke` require the system daemon;

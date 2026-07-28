@@ -99,9 +99,11 @@ func ListIDs(homeDir string) ([]string, error) {
 // itself as an operator. ExcludedSID drops SYSTEM/LOCAL SERVICE/NETWORK
 // SERVICE, the S-1-5-32- built-in aliases
 // (Administrators, Users, ...), and the S-1-5-80- service range up front. The
-// SidTypeUser check is kept as a secondary filter: it still drops a SID that no
-// longer resolves at all (a deleted account), which the grant/revoke path
-// cannot act on anyway. The walk is bounded by the DACL's own uint16 ACE count;
+// SidTypeUser check is kept only for a lookup that SUCCEEDS, where it still
+// drops a group SID. A lookup that FAILS is admitted, not dropped: an empty
+// system name falls through to the domain, so a deleted account and an
+// unreachable DC are the same error, and dropping on it would turn a transient
+// network fault into an operator lockout. The walk is bounded by the DACL's own uint16 ACE count;
 // no separate cap needed.
 func operatorSIDs(dacl *windows.ACL) ([]string, error) {
 	if dacl == nil {

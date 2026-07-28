@@ -92,18 +92,13 @@ func verifyPipeOwner(conn net.Conn) error {
 	return nil
 }
 
-// verifyPipeOwnerIsSelf is the per-user pipe's counterpart to
-// verifyPipeOwner: it asserts identity rather than privilege. The system
-// check accepts Administrators/SYSTEM and would refuse a healthy per-user
-// daemon, whose pipe is owned by the resolving user.
+// verifyPipeOwnerIsSelf is verifyPipeOwner's per-user counterpart: identity,
+// not privilege, since a per-user daemon's pipe is owned by the resolving user
+// and Administrators/SYSTEM would refuse a healthy one.
 //
-// It exists because the skip it replaces reasoned from the HEALTHY pipe's
-// owner-only connect DACL -- but that DACL is set by whoever creates the name
-// first, so a squatter's pipe carries the squatter's DACL and says nothing
-// about who created it. The name is derivable (an unsalted sha256 prefix of a
-// guessable home path), so any local user can pre-create it and receive
-// whatever this client sends, debug-key SSH material included. That is the
-// same shape as the system pipe's exposure, one privilege level down.
+// The skip it replaces reasoned from the healthy pipe's owner-only DACL — but
+// a DACL belongs to whoever creates the name first, so a squatter's says
+// nothing about who created it.
 func verifyPipeOwnerIsSelf(conn net.Conn) error {
 	owner, err := pipeOwnerSID(conn)
 	if err != nil {
@@ -141,14 +136,10 @@ func dial(socketPath string) (*grpc.ClientConn, error) {
 			if err != nil {
 				return nil, err
 			}
-			// Owner-verify the SYSTEM pipe only. Its name is fixed and
-			// predictable (home.PipeName), so a squatter can pre-create it —
-			// the exposure the owner check exists to close. A per-user daemon's
-			// pipe has an owner-only connect DACL (only the resolving user can
-			// open it — the pipe-namespace analogue of darwin's 0600 socket) and
-			// is owned by that user, not Administrators/SYSTEM: the anti-squat
-			// check neither applies (no cross-user exposure) nor would pass, so
-			// applying it there would falsely refuse a healthy non-admin daemon.
+			// Both pipes are owner-verified, by different rules: the system
+			// pipe must be owned by Administrators/SYSTEM, the per-user one by
+			// this user. Every pipe name here is derivable, so a squatter can
+			// pre-create either.
 			verify := verifyPipeOwnerIsSelf
 			if socketPath == home.PipeName {
 				verify = verifyPipeOwner

@@ -21,3 +21,5 @@ func HasID(homeDir, id string) (bool, error) { return false, ErrUnsupported }
 func Grant(ctx bounded.Context, homeDir, sock, username string) error { return ErrUnsupported }
 
 func Revoke(ctx bounded.Context, homeDir, sock, username string) error { return ErrUnsupported }
+
+func StampSocket(ctx bounded.Context, homeDir, sock string) error { return ErrUnsupported }

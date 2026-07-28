@@ -21,9 +21,11 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/bojanrajkovic/runny/internal/bounded"
 	"github.com/bojanrajkovic/runny/internal/cycle"
 	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/logring"
+	"github.com/bojanrajkovic/runny/internal/opacl"
 	"github.com/bojanrajkovic/runny/internal/statemachine"
 	"github.com/bojanrajkovic/runny/internal/versioncore"
 	runnyv1 "github.com/bojanrajkovic/runny/proto/runny/v1"
@@ -277,6 +279,18 @@ func (s *Server) Serve(ctx context.Context, socketPath string) error {
 		return err
 	}
 	s.socketPath = socketPath
+	// Re-derive the socket's own ACL from the operator set. The operator entry
+	// lives on the home dir and does not inherit, so this brand-new socket node
+	// carries nothing, and on darwin its 0600 mode is what a connecting operator
+	// is checked against. Not fatal: a daemon that cannot be reached by its
+	// operators still needs to come up and say so in its log, and root and the
+	// service account reach it regardless.
+	sctx, scancel := bounded.WithTimeout(ctx, aclOpTimeout)
+	if err := opacl.StampSocket(sctx, s.HomeDir.String(), socketPath); err != nil && s.IsSystemDaemon {
+		slog.Error("could not grant the current operators access to the control socket; they will be refused at connect until this is fixed",
+			"socket", socketPath, "err", err)
+	}
+	scancel()
 	s.gate = newOperatorGate(s.IsSystemDaemon, s.HomeDir.String())
 	unaryChain := []grpc.UnaryServerInterceptor{recoveryUnary}
 	streamChain := []grpc.StreamServerInterceptor{recoveryStream}

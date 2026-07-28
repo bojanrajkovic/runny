@@ -188,3 +188,8 @@ func operatorACEShape(aceType, aceFlags uint8, mask uint32) bool {
 		aceFlags&windows.INHERIT_ONLY_ACE == 0 &&
 		mask&windows.FILE_WRITE_DATA != 0
 }
+
+// StampSocket is a no-op on windows: the control channel is a named pipe whose
+// security descriptor is built when the pipe is created (internal/socket's
+// listen), not a filesystem node anything can stamp afterwards.
+func StampSocket(ctx bounded.Context, homeDir, sock string) error { return nil }

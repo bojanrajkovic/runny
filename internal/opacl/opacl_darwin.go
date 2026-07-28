@@ -115,6 +115,36 @@ func Revoke(ctx bounded.Context, homeDir, sock, username string) error {
 	return chmodBoth(ctx, "-a", homeDir, sock, username)
 }
 
+// StampSocket gives every current operator write on sock. A freshly created
+// socket carries no operator entry of its own: the operator entry lives on the
+// home dir and does not inherit, and the socket is 0600 owned by the daemon
+// (internal/socket's listen). The daemon re-creates the socket on every start,
+// so without this a restart would lock every operator out of their own daemon.
+//
+// This is the darwin analogue of the windows control channel's security
+// descriptor, which is likewise built from the operator set when the pipe is
+// created rather than inherited from anything. The operator set is read from
+// the home dir, which stays the single authority for who an operator is.
+//
+// An operator whose identity no longer resolves to a name is skipped: chmod
+// addresses a principal by name, so there is nothing to stamp, and List already
+// reports such an entry with an empty user.
+func StampSocket(ctx bounded.Context, homeDir, sock string) error {
+	ops, err := List(homeDir)
+	if err != nil {
+		return fmt.Errorf("reading %s's operator set: %w", homeDir, err)
+	}
+	for _, op := range ops {
+		if op.User == "" {
+			continue
+		}
+		if err := chmod(ctx, "+a", OperatorACE(op.User), sock); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func chmodBoth(ctx bounded.Context, verb, homeDir, sock, username string) error {
 	ace := OperatorACE(username)
 	if err := chmod(ctx, verb, ace, homeDir); err != nil {

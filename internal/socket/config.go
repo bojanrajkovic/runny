@@ -2,9 +2,7 @@ package socket
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
-	"fmt"
 	"os"
 
 	"google.golang.org/grpc/codes"
@@ -36,7 +34,7 @@ func (s *Server) GetConfig(_ context.Context, _ *runnyv1.GetConfigRequest) (*run
 	case err != nil:
 		return nil, status.Errorf(codes.Internal, "reading %s: %v", path, err)
 	}
-	return &runnyv1.GetConfigResponse{Content: b, Path: path}, nil
+	return &runnyv1.GetConfigResponse{Content: b}, nil
 }
 
 // SetConfig replaces config.yaml with req.Content, atomically.
@@ -51,12 +49,8 @@ func (s *Server) GetConfig(_ context.Context, _ *runnyv1.GetConfigRequest) (*run
 // runny.proto for why a parser gate here would re-break upgrade-daemon's
 // forward-only edit.
 func (s *Server) SetConfig(_ context.Context, req *runnyv1.SetConfigRequest) (*runnyv1.SetConfigResponse, error) {
-	path := s.HomeDir.ConfigPath()
-	if err := home.AtomicWrite(path, req.Content); err != nil {
+	if err := home.AtomicWrite(s.HomeDir.ConfigPath(), req.Content); err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
-	return &runnyv1.SetConfigResponse{
-		ConfigSha256: fmt.Sprintf("%x", sha256.Sum256(req.Content)),
-		Path:         path,
-	}, nil
+	return &runnyv1.SetConfigResponse{}, nil
 }

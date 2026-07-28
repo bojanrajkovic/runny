@@ -654,10 +654,6 @@ message GetConfigResponse {
   // have to survive the round trip. install-daemon's staging holds the same
   // line for the same reason (literal byte substitution, not a re-marshal).
   bytes content = 1;
-  // Absolute path of the file these bytes came from — the daemon's own home
-  // is authoritative, so a client reports the path the daemon actually read
-  // rather than the one it would have resolved for itself.
-  string path = 2;
 }
 
 message SetConfigRequest {
@@ -666,12 +662,4 @@ message SetConfigRequest {
   bytes content = 1;
 }
 
-message SetConfigResponse {
-  // SHA-256 (hex) of the bytes the daemon persisted, so "the config I saved"
-  // is provable across the wire rather than assumed from what was sent — and
-  // ties an edit to the ReloadResponse.config_sha256 of the reload that
-  // picked it up.
-  string config_sha256 = 1;
-  // Absolute path written (see GetConfigResponse.path).
-  string path = 2;
-}
+message SetConfigResponse {}

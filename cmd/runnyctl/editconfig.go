@@ -87,28 +87,15 @@ func (c *ctl) editConfig(ctx context.Context) error {
 	}
 
 	// The scratch copy lives in the operator's own temp dir, not the daemon's
-	// home: the edit round-trips through RPCs, so there is no reason to require
-	// (or exercise) write access to the home for the editing itself. Config
-	// validation is not path-sensitive — home.ParseConfig takes the path for
-	// error messages only, and private_key_path is read verbatim rather than
-	// resolved against the config's directory — so a copy elsewhere validates
-	// identically.
-	tmp, err := os.CreateTemp("", "runny-config-*.yaml")
+	// home: the edit round-trips through RPCs, so the editing itself needs no
+	// write access to the home at all.
+	tmpPath, err := stageConfigCopy(seed)
 	if err != nil {
-		return fmt.Errorf("creating a temp file: %w", err)
+		return err
 	}
-	tmpPath := tmp.Name()
-	// Always removed now that the apply is a copy rather than a rename: the
-	// scratch file holds a config the operator authored, and it outlives the
-	// command otherwise.
+	// Always removed: the apply is a copy rather than a rename, and the scratch
+	// file holds a config the operator authored.
 	defer os.Remove(tmpPath)
-	if _, err := tmp.Write(seed); err != nil {
-		tmp.Close()
-		return fmt.Errorf("seeding the temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("seeding the temp file: %w", err)
-	}
 
 	var after []byte
 	for {
@@ -150,11 +137,10 @@ func (c *ctl) editConfig(ctx context.Context) error {
 		break
 	}
 
-	sum, err := c.applyConfig(ctx, configPath, after)
-	if err != nil {
+	if err := c.applyConfig(ctx, configPath, after); err != nil {
 		return err
 	}
-	fmt.Fprintf(c.out, "config saved (sha256 %s)\n", shortHex(sum))
+	fmt.Fprintf(c.out, "config saved (sha256 %s)\n", shortHex(fmt.Sprintf("%x", sha256.Sum256(after))))
 
 	pctx, cancel := context.WithTimeout(ctx, probeCallTimeout)
 	_, statusErr := c.client.GetStatus(pctx, &runnyv1.GetStatusRequest{})
@@ -166,35 +152,57 @@ func (c *ctl) editConfig(ctx context.Context) error {
 	return c.reloadWait(ctx, "runnyctl edit-config", c.plainReload, defaultFollowOpts(90*time.Second, 0))
 }
 
-// applyConfig persists the edited bytes and returns the hex SHA-256 of what
-// landed. The daemon writes it when it can, which is what keeps config.yaml
-// owned by the daemon rather than by whichever operator edited last — an
-// operator cannot chown a file to the service account, so a rename from the
-// client is a one-way door on ownership.
+// applyConfig persists the edited bytes. The daemon writes them when it can,
+// which is what keeps config.yaml owned by the daemon rather than by whichever
+// operator edited last — an operator cannot chown a file to the service
+// account, so a rename from the client is a one-way door on ownership.
 //
 // The direct write is the fallback for a daemon that is down or predates
 // SetConfig. On a system home it will fail for anyone but the file's owner,
 // and that is the intended shape: recovery for a stopped system daemon is
 // `sudo runnyctl install-daemon --config`, not a hand-write into its home.
-//
-// The digest is taken from the daemon's own answer, so what is printed is what
-// the daemon persisted rather than what the client believes it sent — the same
-// hash then appears as ReloadResponse.config_sha256 when the reload picks it up.
-func (c *ctl) applyConfig(ctx context.Context, configPath string, content []byte) (string, error) {
+func (c *ctl) applyConfig(ctx context.Context, configPath string, content []byte) error {
 	rctx, cancel := context.WithTimeout(ctx, probeCallTimeout)
 	defer cancel()
-	switch resp, err := c.client.SetConfig(rctx, &runnyv1.SetConfigRequest{Content: content}); {
-	case err == nil:
-		return resp.ConfigSha256, nil
-	case status.Code(err) != codes.Unavailable && status.Code(err) != codes.Unimplemented:
+	_, err := c.client.SetConfig(rctx, &runnyv1.SetConfigRequest{Content: content})
+	switch status.Code(err) {
+	case codes.OK:
+		return nil
+	case codes.Unavailable, codes.Unimplemented:
+	default:
 		// The daemon answered and refused. Writing behind its back would apply
 		// an edit it rejected.
-		return "", fmt.Errorf("applying the edited config: %w", err)
+		return fmt.Errorf("applying the edited config: %w", err)
 	}
 	if err := home.AtomicWrite(configPath, content); err != nil {
-		return "", fmt.Errorf("applying the edited config: %w", err)
+		return fmt.Errorf("applying the edited config: %w", err)
 	}
-	return fmt.Sprintf("%x", sha256.Sum256(content)), nil
+	return nil
+}
+
+// stageConfigCopy writes config bytes to a scratch file this process owns and
+// returns its path; the caller removes it. Both callers need the same thing —
+// a config on a path the operator can read, because the daemon's own copy is
+// not one they can open. Validation is not path-sensitive: home.ParseConfig
+// takes the path for error messages only, and private_key_path is read
+// verbatim rather than resolved against the config's directory, so a copy
+// anywhere validates identically to the original.
+func stageConfigCopy(content []byte) (string, error) {
+	tmp, err := os.CreateTemp("", "runny-config-*.yaml")
+	if err != nil {
+		return "", fmt.Errorf("creating a temp file: %w", err)
+	}
+	if _, werr := tmp.Write(content); werr != nil {
+		err = werr
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(tmp.Name())
+		return "", fmt.Errorf("staging a config copy: %w", err)
+	}
+	return tmp.Name(), nil
 }
 
 // openEditor runs $VISUAL, else $EDITOR, else vi on path, connected to the

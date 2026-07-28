@@ -1,8 +1,6 @@
 package socket
 
 import (
-	"crypto/sha256"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,9 +42,6 @@ func TestGetConfigReturnsTheFileVerbatim(t *testing.T) {
 	if got := string(resp.Content); got != seededConfig {
 		t.Errorf("content round-tripped lossily:\n got %q\nwant %q", got, seededConfig)
 	}
-	if resp.Path != s.HomeDir.ConfigPath() {
-		t.Errorf("path = %q, want %q", resp.Path, s.HomeDir.ConfigPath())
-	}
 }
 
 // NotFound must be its own code. edit-config seeds a blank skeleton on "no
@@ -79,11 +74,10 @@ func TestGetConfigDoesNotReportAnUnreadableConfigAsMissing(t *testing.T) {
 	}
 }
 
-func TestSetConfigWritesTheBytesAndReturnsTheirDigest(t *testing.T) {
+func TestSetConfigWritesTheBytesVerbatim(t *testing.T) {
 	s := configServer(t)
 
-	resp, err := s.SetConfig(t.Context(), &runnyv1.SetConfigRequest{Content: []byte(seededConfig)})
-	if err != nil {
+	if _, err := s.SetConfig(t.Context(), &runnyv1.SetConfigRequest{Content: []byte(seededConfig)}); err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
 	on, err := os.ReadFile(s.HomeDir.ConfigPath())
@@ -92,12 +86,6 @@ func TestSetConfigWritesTheBytesAndReturnsTheirDigest(t *testing.T) {
 	}
 	if string(on) != seededConfig {
 		t.Errorf("on-disk config:\n got %q\nwant %q", on, seededConfig)
-	}
-	if want := fmt.Sprintf("%x", sha256.Sum256([]byte(seededConfig))); resp.ConfigSha256 != want {
-		t.Errorf("config_sha256 = %q, want %q", resp.ConfigSha256, want)
-	}
-	if resp.Path != s.HomeDir.ConfigPath() {
-		t.Errorf("path = %q, want %q", resp.Path, s.HomeDir.ConfigPath())
 	}
 }
 

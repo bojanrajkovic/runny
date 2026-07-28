@@ -35,32 +35,6 @@ func decideUpgrade(status string, force bool) (proceed bool, refusal string) {
 	}
 }
 
-// stageConfigForValidation writes the daemon's current config to a temp file
-// this process can read, and returns its path (the caller removes it). The
-// gate it feeds must run the NEW binary against the config, so it cannot be
-// delegated to the running daemon — the whole point is to learn whether a
-// runnyd this daemon is not yet running accepts the file.
-func (c *ctl) stageConfigForValidation(ctx context.Context, configPath string) (string, error) {
-	content, err := c.configBytes(ctx, configPath)
-	if err != nil {
-		return "", err
-	}
-	tmp, err := os.CreateTemp("", "runny-config-*.yaml")
-	if err != nil {
-		return "", fmt.Errorf("creating a temp file: %w", err)
-	}
-	if _, err := tmp.Write(content); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return "", fmt.Errorf("staging %s for validation: %w", configPath, err)
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
-		return "", fmt.Errorf("staging %s for validation: %w", configPath, err)
-	}
-	return tmp.Name(), nil
-}
-
 // upgradeDaemon gates a daemon update on the on-disk (newer) runnyd validating
 // the in-place config, then — on OK (or Warn with --force) — issues the
 // drain-gated reload that respawns the daemon onto the new binary. brew owns the
@@ -78,9 +52,13 @@ func (c *ctl) upgradeDaemon(ctx context.Context, force bool, opts followOpts) er
 	// Validate a COPY, not the live file. `runnyd -test-config` runs as the
 	// operator, and on a system home the operator has no access to config.yaml
 	// — its ACL entry stops at the home directory — so the bytes come over the
-	// control channel and land somewhere this process can read. Validation is
-	// not path-sensitive (see editConfig), so the copy's verdict is the file's.
-	configCopy, err := c.stageConfigForValidation(ctx, dir.ConfigPath())
+	// control channel and land somewhere this process can read. The gate must
+	// run the NEW binary, so it cannot be delegated to the running daemon.
+	content, err := c.configBytes(ctx, dir.ConfigPath())
+	if err != nil {
+		return err
+	}
+	configCopy, err := stageConfigCopy(content)
 	if err != nil {
 		return err
 	}

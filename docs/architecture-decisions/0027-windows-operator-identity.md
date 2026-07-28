@@ -2,6 +2,14 @@
 
 **Status:** Accepted (2026-07-23)
 
+**Amended:** 2026-07-28 — the home ACE's *shape* is superseded in part by
+[ADR-0028](0028-operator-access-via-control-channel.md): the operator entry no
+longer inherits, on either platform, so the bootstrap's `(OI)(CI)M` below is now
+a plain `M` on the home directory alone. The identity-string, impersonation
+peer-read, membership-rule and grant-target-exclusion halves are unchanged — the
+DACL is still where operator membership is read from, and `FILE_WRITE_DATA` is
+still the bit that defines it.
+
 **Amended:** 2026-07-23 — the peer-read half of this decision is reversed. The
 original plan kept the Windows peer read on the existing AF_UNIX socket via the
 `SIO_AF_UNIX_GETPEERPID` ioctl resolved through `OpenProcess` to the peer's

@@ -94,9 +94,10 @@ func (s *scmInstaller) WithStage(p StagePlan) *scmInstaller {
 	return s
 }
 
-// writeOwned writes 0600 and does NOT chown — unlike darwin, operator access
-// arrives via the home's inherited grant ACE (icacls, ensureHome), not file
-// ownership.
+// writeOwned writes 0600 and does NOT chown — unlike darwin, where the staged
+// config and key are chowned to the operator. Neither is reachable by an
+// operator on Windows and neither needs to be: the daemon reads them through
+// its own inherited entry, and an operator reads the config through the daemon.
 func (s *scmInstaller) writeOwned(ctx context.Context, path string, data []byte) error {
 	return s.writeFile(path, data, 0o600)
 }

@@ -73,8 +73,8 @@ func credentialsFor(host string) (username, password string, ok bool) {
 		// Absent is the common case -- every public pull on a host that never
 		// logged in anywhere -- and stays quiet. Anything else means the file
 		// is THERE and we still couldn't read it, which for the system daemon
-		// is usually the home's inheriting ACL not granting the service
-		// account read: the operator sees a file they can read perfectly well
+		// is usually the home's inherited service-account ACE not reaching the
+		// file: the operator sees a file they can read perfectly well
 		// themselves, and without this the only symptom is a bare 401.
 		if !errors.Is(err, os.ErrNotExist) {
 			slog.Warn("registry credential config is unreadable; falling back to an anonymous pull",

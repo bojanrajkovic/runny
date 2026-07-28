@@ -79,6 +79,13 @@ account, privileged once at install, unprivileged at runtime.**
   cannot read its own config/key; without the operator ACE the operator cannot
   manage the daemon without `sudo`.
 
+  > **Superseded in part by
+  > [ADR-0028](0028-operator-access-via-control-channel.md) (2026-07-28):** the
+  > operator's ACE no longer inherits. It is the operator registry plus the
+  > directory access needed to reach the socket and land the App key; reading
+  > and replacing the config are RPCs. The `_runny` ACE is unchanged and still
+  > inherits.
+
 - **Install via `runnyctl install-daemon` (one `sudo`)** — it creates the
   account, the home + ACL, the plist, and `launchctl bootstrap system`. The app
   shells to the same subcommand (ADR for the app path is PR5's). The plist points

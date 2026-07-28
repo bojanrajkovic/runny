@@ -100,12 +100,12 @@ func ListIDs(homeDir string) ([]string, error) {
 	return ids, nil
 }
 
-// Grant adds an inheriting operator ACE for username to homeDir (so every
-// subsequently created file and the NEXT socket inherit it) and directly to
-// sock (the current live socket, which already exists and so does not pick
-// up the dir's ACE by inheritance — inheritance is copy-at-create). Not
-// recursive: a grant only reaches artifacts from this point forward: see
-// docs/security.md's "no recursive re-stamp" sharp edge.
+// Grant adds the operator ACE for username to homeDir and to sock, the live
+// socket. Two targets, not because the ACE propagates — it does not inherit,
+// so it reaches nothing beneath the home — but because the socket is a
+// separate object the operator must be able to connect() to, and the daemon
+// re-derives its ACL from the operator set on every start (StampSocket). A
+// grant against a running daemon has to reach the socket that already exists.
 func Grant(ctx bounded.Context, homeDir, sock, username string) error {
 	return chmodBoth(ctx, "+a", homeDir, sock, username)
 }

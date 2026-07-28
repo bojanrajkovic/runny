@@ -58,13 +58,20 @@ func reverse(cmds [][]string) [][]string {
 // host a revoke reports success while leaving access on images/, vms/ and
 // cycles/.
 //
-// And two commands can always half-run: a grant whose home command fails
-// leaves the target holding logs\ Modify, unaudited, while the caller is told
-// the grant failed. Ordering shrinks that from full authorization to
-// logs-only, it does not remove it. Compensating rollback is deliberately NOT
-// added -- the compensating command can fail too, leaving a third state with
-// nothing to report it. Making home the single ACL authority collapses this to
-// ONE command, at which point there is no partial state to compensate for.
+// And two commands can always half-run, in both directions. A grant whose home
+// command fails leaves the target holding logs\ Modify, unaudited, while the
+// caller is told the grant failed. A revoke whose logs\ command fails leaves
+// that same ACE behind AND unremovable: membership is read from the home DACL,
+// which is already gone, so every retry answers "is not an operator".
+//
+// Ordering buys the safe direction on each verb -- a failed grant authorizes
+// nobody, a failed revoke denies immediately -- and cannot buy both properties
+// at once, because the object that decides membership is also the object whose
+// removal ends the ability to act. Neither compensating rollback nor a
+// residual-tolerant precheck is added: each is a new failure path that exists
+// only to serve this shape. Making home the single ACL authority collapses
+// both verbs to ONE command, at which point no partial state exists to
+// handle.
 //
 // The install bootstrap creates home and logs\ and then runs
 // icacls /inheritance:d /T, which COPIES the then-inherited ACEs onto both and

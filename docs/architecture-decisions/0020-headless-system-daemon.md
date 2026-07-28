@@ -2,6 +2,22 @@
 
 **Status:** Accepted (2026-06-19)
 
+**Amended:** 2026-07-28 — the **operator half of the dual ACL no longer
+inherits** (below: "A dual inheriting ACL on the home"). An inherited entry is a
+private copy on every artifact the daemon writes, and a copy cannot be reached
+from the directory it came from, so removing the entry from the home left a
+revoked operator holding write on everything created before the revoke. The
+entry now grants the home *directory* — the operator registry the revocation
+gate reads, plus the access needed to reach the socket and land the App key —
+and nothing beneath it; reading and replacing `config.yaml` are RPCs, with the
+daemon performing the write so the file stays daemon-owned whoever edited it.
+Grant and revoke are one command against one object on both platforms. A
+platform *group* as the ACL principal would be cleaner still, and is rejected on
+size: it moves operator identity into a directory service the per-RPC gate would
+then have to consult. The `_runny` half is unchanged and still inherits — it is
+installed once, never revoked, and the daemon does need to reach what it writes.
+The posture is stated in [security.md](../security.md).
+
 **Superseded in part by [ADR-0023](0023-app-non-privileged-boundary.md)
 (2026-06-26):** the **app path** for installing the system daemon (below: "The app
 shells to the same subcommand") is withdrawn — the app is now non-privileged and
@@ -78,13 +94,6 @@ account, privileged once at install, unprivileged at runtime.**
   party creates. Both ACEs are load-bearing — without the `_runny` ACE the daemon
   cannot read its own config/key; without the operator ACE the operator cannot
   manage the daemon without `sudo`.
-
-  > **Superseded in part by
-  > [ADR-0028](0028-operator-access-via-control-channel.md) (2026-07-28):** the
-  > operator's ACE no longer inherits. It is the operator registry plus the
-  > directory access needed to reach the socket and land the App key; reading
-  > and replacing the config are RPCs. The `_runny` ACE is unchanged and still
-  > inherits.
 
 - **Install via `runnyctl install-daemon` (one `sudo`)** — it creates the
   account, the home + ACL, the plist, and `launchctl bootstrap system`. The app

@@ -238,7 +238,7 @@ the home **directory** and nothing beneath it: it is the operator registry the
 revocation gate reads, plus the directory access needed to reach the control
 socket and land the App key. Everything else an operator reads or writes in the
 home travels over the control channel instead
-([ADR-0028](architecture-decisions/0028-operator-access-via-control-channel.md)),
+([ADR-0020](architecture-decisions/0020-headless-system-daemon.md)),
 including reading and replacing `config.yaml`. The daemon performs that write,
 which is also what keeps the file daemon-owned: an operator cannot chown a file
 to the service account, so a client-side rename would be a one-way door on
@@ -551,7 +551,7 @@ is the access boundary:
   `private_key_path` App key, and reach the control socket (above). It does
   **not** inherit, so it reaches nothing beneath the directory; config edits and
   artifact reads are RPCs
-  ([ADR-0028](architecture-decisions/0028-operator-access-via-control-channel.md));
+  ([ADR-0020](architecture-decisions/0020-headless-system-daemon.md));
 - the **`_runny`** account gets read, and this one **does** inherit — so the
   daemon can read an operator-landed `0600` config and key it does not own.
 

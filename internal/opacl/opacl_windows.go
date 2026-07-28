@@ -51,12 +51,20 @@ func reverse(cmds [][]string) [][]string {
 // aclTargets names the two objects a fresh install gives an explicit operator
 // ACE, home first; callers order it for their own partial-failure safety.
 //
-// KNOWN GAP: install-daemon re-run over a POPULATED home stamps explicit ACEs
-// onto every existing descendant (icaclsHomeArgs carries /T on the grants), so
-// on such a host a revoke reports success while leaving access on images/,
-// vms/ and cycles/. Making home the single ACL authority — and normalizing
-// hosts already scattered — is its own change; this one does not claim to
-// cover it.
+// KNOWN GAPS, both closing with the same change and neither papered over here.
+//
+// install-daemon re-run over a POPULATED home stamps explicit ACEs onto every
+// existing descendant (icaclsHomeArgs carries /T on the grants), so on such a
+// host a revoke reports success while leaving access on images/, vms/ and
+// cycles/.
+//
+// And two commands can always half-run: a grant whose home command fails
+// leaves the target holding logs\ Modify, unaudited, while the caller is told
+// the grant failed. Ordering shrinks that from full authorization to
+// logs-only, it does not remove it. Compensating rollback is deliberately NOT
+// added -- the compensating command can fail too, leaving a third state with
+// nothing to report it. Making home the single ACL authority collapses this to
+// ONE command, at which point there is no partial state to compensate for.
 //
 // The install bootstrap creates home and logs\ and then runs
 // icacls /inheritance:d /T, which COPIES the then-inherited ACEs onto both and

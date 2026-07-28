@@ -230,9 +230,14 @@ revocation, not reinstall, is the removal path there. Grant and revoke both
 target the home dir **and** `logs\`: the same `/inheritance:d` that makes
 reinstall non-resetting gave `logs\` its own explicit copy of the ACE rather
 than an inherited one, so a single-target grant would never reach the daemon's
-logs and a single-target revoke would leave access to them behind. Those two
-are the only objects that can hold an explicit ACE — everything created later
-inherits normally. A root
+logs and a single-target revoke would leave access to them behind. On a fresh install those two are the
+only objects holding an explicit ACE, everything created later inheriting
+normally — but `install-daemon` re-run over a **populated** home applies its
+`/inheritance:d` and its grants recursively, stamping explicit ACEs onto
+existing descendants (`images\`, `vms\`, `cycles\`). On such a host a revoke
+reports success while leaving the operator's access on those descendants.
+Making the home dir the single ACL authority, and normalizing hosts already in
+that state, is outstanding. A root
 peer is refused as a grant target (root already bypasses the socket's
 `0600` mode and needs no ACE). Per-user deployments have a single owner and
 no ACL-managed set, so `operator grant`/`revoke` require the system daemon;

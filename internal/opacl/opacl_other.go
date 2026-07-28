@@ -16,6 +16,8 @@ var ErrUnsupported = errors.New("opacl: operator ACL management requires darwin 
 
 func ListIDs(homeDir string) ([]string, error) { return nil, ErrUnsupported }
 
+func HasID(homeDir, id string) (bool, error) { return false, ErrUnsupported }
+
 func Grant(ctx bounded.Context, homeDir, sock, username string) error { return ErrUnsupported }
 
 func Revoke(ctx bounded.Context, homeDir, sock, username string) error { return ErrUnsupported }

@@ -168,6 +168,7 @@ go_test(
         "launchcontext_test.go",
         "localnet_test.go",
         "lock_test.go",
+        "managedservice_unix_test.go",
         "privatekey_test.go",
         "reload_test.go",
         "rotate_test.go",

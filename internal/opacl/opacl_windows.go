@@ -4,8 +4,8 @@ package opacl
 
 import (
 	"fmt"
-	"log/slog"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"unsafe"
 
@@ -23,21 +23,35 @@ import (
 // bootstrap-granted and a live-granted operator are indistinguishable to
 // ListIDs.
 func grantArgs(homeDir, account string) [][]string {
-	return [][]string{
-		{"icacls", homeDir, "/grant", account + ":(OI)(CI)M"},
-	}
+	return aclTargets(homeDir, "/grant", account+":(OI)(CI)M")
 }
 
-// revokeArgs targets the home dir and everything beneath it. The grant is
-// (OI)(CI), so it propagates outward by inheritance -- but the install
-// bootstrap runs icacls /inheritance:d on logs\, which COPIES the inherited
-// ACEs in place and stops future propagation. That copy is a real ACE on
-// logs\, not a reflection of the home's, so removing the home's grant alone
-// leaves a revoked operator holding Modify on the daemon's logs. /T walks the
-// tree the grant reached.
 func revokeArgs(homeDir, account string) [][]string {
+	return aclTargets(homeDir, "/remove:g", account)
+}
+
+// aclTargets names the only two objects that can carry an EXPLICIT operator
+// ACE, so grant and revoke both reach exactly them.
+//
+// The install bootstrap creates home and logs\ and then runs
+// icacls /inheritance:d /T, which COPIES the then-inherited ACEs onto both and
+// stops future propagation. logs\ therefore holds a real ACE of its own, not a
+// reflection of the home's: a revoke of the home alone leaves a revoked
+// operator with Modify on the daemon's logs, and a live grant of the home
+// alone never reaches them at all. Everything created later (images/, vms/,
+// cycles/) inherits normally and can never hold an explicit ACE.
+//
+// Deliberately NOT icacls /T. Without /C it aborts on the first object it
+// cannot open for WRITE_DAC, and the daemon's own (OI)(CI)M does not include
+// WRITE_DAC -- so a tree walk dies on any file the operator wrote (the App
+// key, the atomically renamed config.yaml) AFTER removing the home's ACE,
+// reporting failure for a revoke that partly happened and leaving it
+// unrecorded. It would also descend multi-GB VHDX clones under a bound sized
+// for a single directory.
+func aclTargets(homeDir, verb, spec string) [][]string {
 	return [][]string{
-		{"icacls", homeDir, "/remove:g", account, "/T"},
+		{"icacls", homeDir, verb, spec},
+		{"icacls", filepath.Join(homeDir, "logs"), verb, spec},
 	}
 }
 
@@ -99,11 +113,12 @@ func ListIDs(homeDir string) ([]string, error) {
 // itself as an operator. ExcludedSID drops SYSTEM/LOCAL SERVICE/NETWORK
 // SERVICE, the S-1-5-32- built-in aliases
 // (Administrators, Users, ...), and the S-1-5-80- service range up front. The
-// SidTypeUser check is kept only for a lookup that SUCCEEDS, where it still
-// drops a group SID. A lookup that FAILS is admitted, not dropped: an empty
-// system name falls through to the domain, so a deleted account and an
-// unreachable DC are the same error, and dropping on it would turn a transient
-// network fault into an operator lockout. The walk is bounded by the DACL's own uint16 ACE count;
+// SidTypeUser check is kept as a secondary filter: it still drops a SID that no
+// longer resolves at all (a deleted account), which the grant/revoke path
+// cannot act on anyway -- and which must not inflate the count RevokeOperator's
+// last-operator guard reads. HasID, not this, answers "is this caller an
+// operator": that question needs no name lookup and must not fail closed on a
+// domain controller blip. The walk is bounded by the DACL's own uint16 ACE count;
 // no separate cap needed.
 func operatorSIDs(dacl *windows.ACL) ([]string, error) {
 	if dacl == nil {
@@ -125,24 +140,49 @@ func operatorSIDs(dacl *windows.ACL) ([]string, error) {
 		if ExcludedSID(s) {
 			continue
 		}
-		// A failed lookup and a deleted account are the SAME signal here, and
-		// the consequences are not symmetric: LookupAccount with an empty
-		// system name falls through to the domain, so a DC blip on a
-		// domain-joined host would drop a live operator's SID and lock them
-		// out of their own daemon -- silently, on a transient network fault.
-		// Admitting a SID that no longer resolves only shows a stale entry in
-		// an operator listing. Keep the type filter where it can mean
-		// something (a successful lookup naming a group), and admit the SID
-		// where it cannot.
-		switch _, _, accType, err := sid.LookupAccount(""); {
-		case err != nil:
-			slog.Warn("operator SID did not resolve; treating it as an operator rather than dropping it", "sid", s, "err", err)
-		case accType != windows.SidTypeUser:
+		if _, _, accType, err := sid.LookupAccount(""); err != nil || accType != windows.SidTypeUser {
 			continue
 		}
 		ids = append(ids, s)
 	}
 	return ids, nil
+}
+
+// HasID reports whether id holds an operator ACE on homeDir. It is the
+// membership question the per-RPC revocation gate asks, and it deliberately
+// does NOT go through operatorSIDs' name lookup: the caller's identity is
+// already known, so resolving it buys nothing, while LookupAccount with an
+// empty system name falls through to the domain -- making a DC blip on a
+// domain-joined host lock a live operator out of their own daemon on every
+// RPC. The listing path keeps the lookup because a name is what it exists to
+// produce, and because a SID that no longer resolves must not inflate the
+// count the last-operator guard reads.
+func HasID(homeDir, id string) (bool, error) {
+	sd, err := windows.GetNamedSecurityInfo(homeDir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, fmt.Errorf("reading %s's security descriptor: %w", homeDir, err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return false, fmt.Errorf("reading %s's DACL: %w", homeDir, err)
+	}
+	if dacl == nil {
+		return false, nil
+	}
+	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, i, &ace); err != nil {
+			return false, fmt.Errorf("reading ACE %d: %w", i, err)
+		}
+		if !operatorACEShape(ace.Header.AceType, ace.Header.AceFlags, uint32(ace.Mask)) {
+			continue
+		}
+		s := (*windows.SID)(unsafe.Pointer(&ace.SidStart)).String()
+		if !ExcludedSID(s) && s == id {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ExcludedSID reports whether a SID string can never be an operator: the

@@ -60,6 +60,7 @@ import "C"
 import (
 	"fmt"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"unsafe"
@@ -128,4 +129,16 @@ func chmod(ctx bounded.Context, verb, ace, path string) error {
 		return fmt.Errorf("chmod %s %q %s: %w: %s", verb, ace, path, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// HasID reports whether id holds an operator ACE on homeDir. On darwin the ACL
+// read yields raw uids with no name resolution involved, so there is no lookup
+// that could fail and membership is simply the listing -- unlike windows,
+// where the two paths must differ.
+func HasID(homeDir, id string) (bool, error) {
+	ids, err := ListIDs(homeDir)
+	if err != nil {
+		return false, err
+	}
+	return slices.Contains(ids, id), nil
 }

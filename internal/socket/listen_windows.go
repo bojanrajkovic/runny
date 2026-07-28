@@ -106,5 +106,10 @@ func pipeSDDL(systemDaemon bool) (string, error) {
 	if systemDaemon {
 		return fmt.Sprintf(systemPipeSDDLFormat, own, clientAccessMask), nil
 	}
-	return "D:(A;;GA;;;" + own + ")", nil
+	// O: is pinned, not left to the token default: "System objects: Default
+	// owner for objects created by members of the Administrators group" makes
+	// an elevated per-user daemon's pipe owned by Administrators, and the
+	// client verifies the owner is the resolving user. Assert the property you
+	// create.
+	return "O:" + own + "D:(A;;GA;;;" + own + ")", nil
 }

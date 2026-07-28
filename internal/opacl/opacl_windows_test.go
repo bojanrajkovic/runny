@@ -19,20 +19,22 @@ func TestGrantRevokeArgs(t *testing.T) {
 	got := grantArgs(`C:\ProgramData\runny`, `CORP\alice`)
 	want := [][]string{
 		{"icacls", `C:\ProgramData\runny`, "/grant", `CORP\alice:(OI)(CI)M`},
+		{"icacls", `C:\ProgramData\runny\logs`, "/grant", `CORP\alice:(OI)(CI)M`},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("grantArgs =\n got %v\nwant %v", got, want)
 	}
 
-	// /T is load-bearing, not symmetry with grant. The install bootstrap runs
-	// icacls /inheritance:d on logs\, which COPIES the then-current inherited
-	// ACEs and stops future propagation -- so the operator ACE lives on inside
-	// logs\ independently. A revoke that touches only the home dir leaves that
-	// copy behind, and the operator keeps Modify on the daemon's logs after
-	// being revoked. A revocation that does not revoke is worse than none.
+	// Both verbs target home AND logs\, and neither uses /T. logs\ holds its
+	// own explicit copy of the ACE (the bootstrap's /inheritance:d converted
+	// it), so a single-target grant never reaches the logs and a single-target
+	// revoke leaves access to them behind. A /T walk would abort on the first
+	// file the daemon cannot open for WRITE_DAC -- which its own (OI)(CI)M
+	// does not confer -- after already removing the home's ACE.
 	got = revokeArgs(`C:\ProgramData\runny`, `CORP\alice`)
 	want = [][]string{
-		{"icacls", `C:\ProgramData\runny`, "/remove:g", `CORP\alice`, "/T"},
+		{"icacls", `C:\ProgramData\runny`, "/remove:g", `CORP\alice`},
+		{"icacls", `C:\ProgramData\runny\logs`, "/remove:g", `CORP\alice`},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("revokeArgs =\n got %v\nwant %v", got, want)

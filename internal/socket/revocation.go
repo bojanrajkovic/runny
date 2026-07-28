@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"slices"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -75,11 +74,15 @@ func (g *operatorGate) checkID(id string, privileged bool) error {
 	if privileged {
 		return nil
 	}
-	ids, err := opacl.ListIDs(g.homeDir)
+	// HasID, not ListIDs: this is a membership test on an identity we already
+	// have, and on windows the listing's name lookup can fail transiently
+	// against a domain controller -- which would revoke every operator on the
+	// host for as long as the DC is unreachable.
+	ok, err := opacl.HasID(g.homeDir, id)
 	if err != nil {
 		return status.Errorf(codes.PermissionDenied, "operator revocation check: reading the operator set: %v", err)
 	}
-	if slices.Contains(ids, id) {
+	if ok {
 		return nil
 	}
 	return status.Error(codes.PermissionDenied, "operator revoked")

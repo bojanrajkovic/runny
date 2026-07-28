@@ -326,12 +326,17 @@ an explicit `O:BA` owner in its security descriptor. The unprivileged `NT
 SERVICE\runnyd` account carries Administrators as owner-eligible, so the pipe's
 default owner already lands on `BA` — setting it explicitly makes that a
 contract, so a host where the account cannot own as `BA` fails loud at bind
-rather than binding a pipe the client would silently refuse. The owner check is
-scoped to this **system** pipe alone: a per-user daemon's pipe carries an
-owner-only connect DACL (only the resolving user can open it — the
-pipe-namespace analogue of darwin's `0600` socket) and is owned by that user, so
-it has no cross-user squat exposure and the Administrators/SYSTEM owner check is
-not applied to it (applying it would falsely refuse a healthy non-admin daemon).
+rather than binding a pipe the client would silently refuse. Both pipes are owner-verified, by
+different rules. The system pipe must be owned by Administrators or SYSTEM. A
+per-user daemon's must be owned by the resolving user — the same check would
+falsely refuse it, since its owner is that user rather than an administrative
+principal, but skipping the check entirely was wrong: the owner-only connect
+DACL that made it look safe is set by whoever creates the pipe NAME first, so a
+squatter's pipe carries the squatter's DACL and says nothing about who created
+it. The per-user name is an unsalted `sha256` prefix of a guessable home path,
+so any local user can pre-create it. Both SDDLs pin `O:` explicitly rather than
+leaving the owner to the token default, so the property the client asserts is
+the property the server creates.
 
 The kill is cooperative, not preemptive: it cancels a context both stream
 handlers already select on between sends, so a handler currently blocked

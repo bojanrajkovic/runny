@@ -23,15 +23,40 @@ import (
 // bootstrap-granted and a live-granted operator are indistinguishable to
 // ListIDs.
 func grantArgs(homeDir, account string) [][]string {
-	return aclTargets(homeDir, "/grant", account+":(OI)(CI)M")
+	// Home LAST: it is the object the revocation gate reads, so it is what
+	// makes someone an operator. If the logs\ command fails, nobody was
+	// granted anything and the reported failure is the truth. Granting the
+	// home first would leave a caller HasID authorizes but no audit record
+	// names, and a retry that refuses because they are already an operator.
+	return reverse(aclTargets(homeDir, "/grant", account+":(OI)(CI)M"))
 }
 
 func revokeArgs(homeDir, account string) [][]string {
+	// Home FIRST, the mirror of grantArgs: revoking the authoritative object
+	// first means a later failure leaves someone already denied by the gate
+	// rather than still authorized. Both orders put the authoritative change
+	// on the side where a partial run is safe.
 	return aclTargets(homeDir, "/remove:g", account)
 }
 
-// aclTargets names the only two objects that can carry an EXPLICIT operator
-// ACE, so grant and revoke both reach exactly them.
+// reverse orders a command list authoritative-last.
+func reverse(cmds [][]string) [][]string {
+	out := make([][]string, 0, len(cmds))
+	for i := len(cmds) - 1; i >= 0; i-- {
+		out = append(out, cmds[i])
+	}
+	return out
+}
+
+// aclTargets names the two objects a fresh install gives an explicit operator
+// ACE, home first; callers order it for their own partial-failure safety.
+//
+// KNOWN GAP: install-daemon re-run over a POPULATED home stamps explicit ACEs
+// onto every existing descendant (icaclsHomeArgs carries /T on the grants), so
+// on such a host a revoke reports success while leaving access on images/,
+// vms/ and cycles/. Making home the single ACL authority — and normalizing
+// hosts already scattered — is its own change; this one does not claim to
+// cover it.
 //
 // The install bootstrap creates home and logs\ and then runs
 // icacls /inheritance:d /T, which COPIES the then-inherited ACEs onto both and

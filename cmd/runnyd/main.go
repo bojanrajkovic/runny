@@ -93,7 +93,7 @@ func run(parent context.Context) error {
 		return err
 	}
 	_, systemHomeErr := os.Stat(home.SystemHomeDir)
-	if err := systemHomeOwnershipError(dir, os.Geteuid(), systemHomeErr == nil); err != nil {
+	if err := systemHomeOwnershipError(dir, runningAsManagedService(), systemHomeErr == nil); err != nil {
 		return err
 	}
 	dir, diagnosingOtherHome := doctorHome(*checkOnly, *configFlag, dir)
@@ -835,18 +835,22 @@ func runPrune(ctx context.Context, apply bool, slots []*statemachine.Slot, dir h
 }
 
 // systemHomeOwnershipError fails a botched system-daemon install loudly and
-// clearly. A non-root service account (uid below the 500 login-user floor) that
-// resolved to a per-user home because it does NOT own an existing SystemHomeDir
-// is a broken install — without this it would crash-loop on a cryptic
-// `mkdir /var/empty/.runny: permission denied`. A login user (uid >= 500) running
-// a per-user agent beside a system install legitimately falls back, so the check
-// is scoped to the service-uid range and to an existing system home.
-func systemHomeOwnershipError(dir home.Dir, euid int, systemHomeExists bool) error {
-	if euid <= 0 || euid >= 500 || string(dir) == home.SystemHomeDir || !systemHomeExists {
+// clearly. A service-manager-started daemon that resolved to a per-user home
+// because it does NOT own an existing SystemHomeDir is a broken install —
+// without this it crash-loops on a cryptic `mkdir /var/empty/.runny: permission
+// denied` on unix, and on windows comes up healthy-looking on the wrong home
+// while runnyctl (which picks a home by existence) dials a pipe nobody serves.
+// A human running a per-user daemon beside a system install legitimately falls
+// back, which is why the launch context and not ownership alone drives this;
+// runningAsManagedService answers it per platform.
+func systemHomeOwnershipError(dir home.Dir, managedService, systemHomeExists bool) error {
+	if !managedService || string(dir) == home.SystemHomeDir || !systemHomeExists {
 		return nil
 	}
-	return fmt.Errorf("running as a system service account (uid %d) but %s is not owned by it; "+
-		"reinstall the system daemon with `sudo runnyctl install-daemon`", euid, home.SystemHomeDir)
+	return fmt.Errorf("started by the service manager but %s exists and is not owned by this account, "+
+		"so the daemon fell back to a per-user home at %s; reinstall the system daemon "+
+		"(`sudo runnyctl install-daemon`, or `runnyctl install-daemon` elevated on windows)",
+		home.SystemHomeDir, dir)
 }
 
 // poolClientError attributes a GitHub client construction failure to its

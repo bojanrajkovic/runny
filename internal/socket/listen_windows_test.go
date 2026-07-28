@@ -97,8 +97,14 @@ func TestPipeSDDL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTokenUser: %v", err)
 	}
-	if want := "D:(A;;GA;;;" + tu.User.Sid.String() + ")"; user != want {
-		t.Errorf("per-user pipe SDDL = %q, want %q (owner-only)", user, want)
+	// O: is pinned rather than left to the token default, and that is not
+	// cosmetic: "System objects: Default owner for objects created by members
+	// of the Administrators group" makes an elevated per-user daemon's pipe
+	// owned by Administrators, which the client's per-user owner check reads
+	// as a squat and refuses. Assert the property you create.
+	sid := tu.User.Sid.String()
+	if want := "O:" + sid + "D:(A;;GA;;;" + sid + ")"; user != want {
+		t.Errorf("per-user pipe SDDL = %q, want %q (owner pinned, owner-only)", user, want)
 	}
 }
 

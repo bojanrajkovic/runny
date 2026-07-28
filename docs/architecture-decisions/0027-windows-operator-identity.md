@@ -150,7 +150,9 @@ in-flight stream kill apply.
   system daemon*: the pipe SD is a coarse connect filter and the per-RPC gate is
   primary, rather than the socket's own mode being the outer gate. A *per-user*
   Windows daemon keeps darwin's single-owner shape — its pipe name is derived
-  from the resolved home (distinct per user, un-squattable) and its SD grants
+  from the resolved home (distinct per user, but derivable: an unsalted hash of
+  a guessable path, so the client owner-verifies it like the system pipe, by
+  identity rather than privilege) and its SD grants
   connect to the owning user's SID alone, the owner-only analogue of the 0600
   per-user socket; the gate stays unarmed there, as on a per-user home
   everywhere (a single owner, no ACL-managed operator set). Documented in

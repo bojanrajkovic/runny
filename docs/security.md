@@ -226,7 +226,18 @@ Windows reinstall does not reset it**: `icacls /inheritance:d` converts and
 keeps existing explicit entries, so a reinstall re-grants the named operator
 while preserving every other live grant
 ([ADR-0027](architecture-decisions/0027-windows-operator-identity.md)) —
-revocation, not reinstall, is the removal path there. A root
+revocation, not reinstall, is the removal path there. Grant and revoke both
+target the home dir **and** `logs\`: the same `/inheritance:d` that makes
+reinstall non-resetting gave `logs\` its own explicit copy of the ACE rather
+than an inherited one, so a single-target grant would never reach the daemon's
+logs and a single-target revoke would leave access to them behind. On a fresh install those two are the
+only objects holding an explicit ACE, everything created later inheriting
+normally — but `install-daemon` re-run over a **populated** home applies its
+`/inheritance:d` and its grants recursively, stamping explicit ACEs onto
+existing descendants (`images\`, `vms\`, `cycles\`). On such a host a revoke
+reports success while leaving the operator's access on those descendants.
+Making the home dir the single ACL authority, and normalizing hosts already in
+that state, is outstanding. A root
 peer is refused as a grant target (root already bypasses the socket's
 `0600` mode and needs no ACE). Per-user deployments have a single owner and
 no ACL-managed set, so `operator grant`/`revoke` require the system daemon;
@@ -320,12 +331,17 @@ an explicit `O:BA` owner in its security descriptor. The unprivileged `NT
 SERVICE\runnyd` account carries Administrators as owner-eligible, so the pipe's
 default owner already lands on `BA` — setting it explicitly makes that a
 contract, so a host where the account cannot own as `BA` fails loud at bind
-rather than binding a pipe the client would silently refuse. The owner check is
-scoped to this **system** pipe alone: a per-user daemon's pipe carries an
-owner-only connect DACL (only the resolving user can open it — the
-pipe-namespace analogue of darwin's `0600` socket) and is owned by that user, so
-it has no cross-user squat exposure and the Administrators/SYSTEM owner check is
-not applied to it (applying it would falsely refuse a healthy non-admin daemon).
+rather than binding a pipe the client would silently refuse. Both pipes are owner-verified, by
+different rules. The system pipe must be owned by Administrators or SYSTEM. A
+per-user daemon's must be owned by the resolving user — the same check would
+falsely refuse it, since its owner is that user rather than an administrative
+principal, but skipping the check entirely was wrong: the owner-only connect
+DACL that made it look safe is set by whoever creates the pipe NAME first, so a
+squatter's pipe carries the squatter's DACL and says nothing about who created
+it. The per-user name is an unsalted `sha256` prefix of a guessable home path,
+so any local user can pre-create it. Both SDDLs pin `O:` explicitly rather than
+leaving the owner to the token default, so the property the client asserts is
+the property the server creates.
 
 The kill is cooperative, not preemptive: it cancels a context both stream
 handlers already select on between sends, so a handler currently blocked

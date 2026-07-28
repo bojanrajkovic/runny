@@ -5,6 +5,7 @@ package opacl
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"unsafe"
 
@@ -22,16 +23,75 @@ import (
 // bootstrap-granted and a live-granted operator are indistinguishable to
 // ListIDs.
 func grantArgs(homeDir, account string) [][]string {
-	return [][]string{
-		{"icacls", homeDir, "/grant", account + ":(OI)(CI)M"},
-	}
+	// Home LAST: it is the object the revocation gate reads, so it is what
+	// makes someone an operator. If the logs\ command fails, nobody was
+	// granted anything and the reported failure is the truth. Granting the
+	// home first would leave a caller HasID authorizes but no audit record
+	// names, and a retry that refuses because they are already an operator.
+	return reverse(aclTargets(homeDir, "/grant", account+":(OI)(CI)M"))
 }
 
-// revokeArgs mirrors grantArgs: the home dir only — the ACL the revocation
-// gate reads.
 func revokeArgs(homeDir, account string) [][]string {
+	// Home FIRST, the mirror of grantArgs: revoking the authoritative object
+	// first means a later failure leaves someone already denied by the gate
+	// rather than still authorized. Both orders put the authoritative change
+	// on the side where a partial run is safe.
+	return aclTargets(homeDir, "/remove:g", account)
+}
+
+// reverse orders a command list authoritative-last.
+func reverse(cmds [][]string) [][]string {
+	out := make([][]string, 0, len(cmds))
+	for i := len(cmds) - 1; i >= 0; i-- {
+		out = append(out, cmds[i])
+	}
+	return out
+}
+
+// aclTargets names the two objects a fresh install gives an explicit operator
+// ACE, home first; callers order it for their own partial-failure safety.
+//
+// KNOWN GAPS, both closing with the same change and neither papered over here.
+//
+// install-daemon re-run over a POPULATED home stamps explicit ACEs onto every
+// existing descendant (icaclsHomeArgs carries /T on the grants), so on such a
+// host a revoke reports success while leaving access on images/, vms/ and
+// cycles/.
+//
+// And two commands can always half-run, in both directions. A grant whose home
+// command fails leaves the target holding logs\ Modify, unaudited, while the
+// caller is told the grant failed. A revoke whose logs\ command fails leaves
+// that same ACE behind AND unremovable: membership is read from the home DACL,
+// which is already gone, so every retry answers "is not an operator".
+//
+// Ordering buys the safe direction on each verb -- a failed grant authorizes
+// nobody, a failed revoke denies immediately -- and cannot buy both properties
+// at once, because the object that decides membership is also the object whose
+// removal ends the ability to act. Neither compensating rollback nor a
+// residual-tolerant precheck is added: each is a new failure path that exists
+// only to serve this shape. Making home the single ACL authority collapses
+// both verbs to ONE command, at which point no partial state exists to
+// handle.
+//
+// The install bootstrap creates home and logs\ and then runs
+// icacls /inheritance:d /T, which COPIES the then-inherited ACEs onto both and
+// stops future propagation. logs\ therefore holds a real ACE of its own, not a
+// reflection of the home's: a revoke of the home alone leaves a revoked
+// operator with Modify on the daemon's logs, and a live grant of the home
+// alone never reaches them at all. Everything created later (images/, vms/,
+// cycles/) inherits normally and can never hold an explicit ACE.
+//
+// Deliberately NOT icacls /T. Without /C it aborts on the first object it
+// cannot open for WRITE_DAC, and the daemon's own (OI)(CI)M does not include
+// WRITE_DAC -- so a tree walk dies on any file the operator wrote (the App
+// key, the atomically renamed config.yaml) AFTER removing the home's ACE,
+// reporting failure for a revoke that partly happened and leaving it
+// unrecorded. It would also descend multi-GB VHDX clones under a bound sized
+// for a single directory.
+func aclTargets(homeDir, verb, spec string) [][]string {
 	return [][]string{
-		{"icacls", homeDir, "/remove:g", account},
+		{"icacls", homeDir, verb, spec},
+		{"icacls", filepath.Join(homeDir, "logs"), verb, spec},
 	}
 }
 
@@ -95,7 +155,10 @@ func ListIDs(homeDir string) ([]string, error) {
 // (Administrators, Users, ...), and the S-1-5-80- service range up front. The
 // SidTypeUser check is kept as a secondary filter: it still drops a SID that no
 // longer resolves at all (a deleted account), which the grant/revoke path
-// cannot act on anyway. The walk is bounded by the DACL's own uint16 ACE count;
+// cannot act on anyway -- and which must not inflate the count RevokeOperator's
+// last-operator guard reads. HasID, not this, answers "is this caller an
+// operator": that question needs no name lookup and must not fail closed on a
+// domain controller blip. The walk is bounded by the DACL's own uint16 ACE count;
 // no separate cap needed.
 func operatorSIDs(dacl *windows.ACL) ([]string, error) {
 	if dacl == nil {
@@ -123,6 +186,43 @@ func operatorSIDs(dacl *windows.ACL) ([]string, error) {
 		ids = append(ids, s)
 	}
 	return ids, nil
+}
+
+// HasID reports whether id holds an operator ACE on homeDir. It is the
+// membership question the per-RPC revocation gate asks, and it deliberately
+// does NOT go through operatorSIDs' name lookup: the caller's identity is
+// already known, so resolving it buys nothing, while LookupAccount with an
+// empty system name falls through to the domain -- making a DC blip on a
+// domain-joined host lock a live operator out of their own daemon on every
+// RPC. The listing path keeps the lookup because a name is what it exists to
+// produce, and because a SID that no longer resolves must not inflate the
+// count the last-operator guard reads.
+func HasID(homeDir, id string) (bool, error) {
+	sd, err := windows.GetNamedSecurityInfo(homeDir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, fmt.Errorf("reading %s's security descriptor: %w", homeDir, err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return false, fmt.Errorf("reading %s's DACL: %w", homeDir, err)
+	}
+	if dacl == nil {
+		return false, nil
+	}
+	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, i, &ace); err != nil {
+			return false, fmt.Errorf("reading ACE %d: %w", i, err)
+		}
+		if !operatorACEShape(ace.Header.AceType, ace.Header.AceFlags, uint32(ace.Mask)) {
+			continue
+		}
+		s := (*windows.SID)(unsafe.Pointer(&ace.SidStart)).String()
+		if !ExcludedSID(s) && s == id {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ExcludedSID reports whether a SID string can never be an operator: the

@@ -16,17 +16,32 @@ import (
 // internal/sysdaemon's icaclsHomeArgs) so ListIDs cannot tell a bootstrap
 // operator from a live-granted one.
 func TestGrantRevokeArgs(t *testing.T) {
+	// ORDER is the assertion, not just the contents. The home dir is what the
+	// revocation gate reads, so granting it LAST means a failure on the other
+	// target leaves nobody authorized -- rather than an operator the gate
+	// admits, no audit record naming them, and a retry that refuses because
+	// they already hold the ACE.
 	got := grantArgs(`C:\ProgramData\runny`, `CORP\alice`)
 	want := [][]string{
+		{"icacls", `C:\ProgramData\runny\logs`, "/grant", `CORP\alice:(OI)(CI)M`},
 		{"icacls", `C:\ProgramData\runny`, "/grant", `CORP\alice:(OI)(CI)M`},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("grantArgs =\n got %v\nwant %v", got, want)
 	}
 
+	// Revoke mirrors it: home FIRST, so a failure on the other target leaves
+	// someone already denied rather than still authorized. Both verbs target
+	// home AND logs\, and neither uses /T. logs\ holds its
+	// own explicit copy of the ACE (the bootstrap's /inheritance:d converted
+	// it), so a single-target grant never reaches the logs and a single-target
+	// revoke leaves access to them behind. A /T walk would abort on the first
+	// file the daemon cannot open for WRITE_DAC -- which its own (OI)(CI)M
+	// does not confer -- after already removing the home's ACE.
 	got = revokeArgs(`C:\ProgramData\runny`, `CORP\alice`)
 	want = [][]string{
 		{"icacls", `C:\ProgramData\runny`, "/remove:g", `CORP\alice`},
+		{"icacls", `C:\ProgramData\runny\logs`, "/remove:g", `CORP\alice`},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("revokeArgs =\n got %v\nwant %v", got, want)

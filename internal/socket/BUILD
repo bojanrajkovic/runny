@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "socket",
     srcs = [
+        "config.go",
         "listen_unix.go",
         "listen_windows.go",
         "operator.go",
@@ -55,6 +56,7 @@ go_library(
 go_test(
     name = "socket_test",
     srcs = [
+        "config_test.go",
         "listen_windows_test.go",
         "operator_test.go",
         "operator_windows_test.go",

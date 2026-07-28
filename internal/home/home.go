@@ -28,8 +28,8 @@ const socketName = "runnyd.sock"
 // exists and is OWNED by this process's uid — the system-daemon deployment, run
 // as the dedicated service account that owns the installer-created tree (a
 // home-less account never needs $HOME) — else the per-user ~/.runny. Ownership,
-// not writability, is the signal: the operator account holds an inheriting ACL
-// granting it dir-write (to land the App key and atomically edit config), so a
+// not writability, is the signal: the operator account holds an ACL entry
+// granting it dir-write (to land the App key and reach the socket), so a
 // writability test would ALSO pass for an operator who runs runnyd by hand,
 // letting a per-user daemon bind the system socket and stomp the real daemon's
 // home. Only the owning account is the system daemon; everyone else falls back
@@ -46,8 +46,8 @@ func resolveServer(systemDir string) (Dir, error) {
 // ResolveClient returns the home runnyctl and other clients read and dial:
 // SystemHomeDir when it EXISTS, else the per-user ~/.runny. Existence is the
 // client signal — neither ownership (the operator reaches a system daemon's home
-// through an inheriting ACL, never owning it) nor a connect probe: it selects
-// WHICH home; the dial/read then reports a dead or unreadable one.
+// through an ACL entry on the directory, never owning it) nor a connect probe:
+// it selects WHICH home; the dial/read then reports a dead or unreadable one.
 func ResolveClient() (Dir, error) { return resolveClient(SystemHomeDir) }
 
 func resolveClient(systemDir string) (Dir, error) {
@@ -83,6 +83,37 @@ func resolvePerUser() (Dir, error) {
 }
 
 func (d Dir) String() string { return string(d) }
+
+// AtomicWrite writes data to path via a sibling temp file and a rename, so a
+// crash or a failed write can never leave a torn file where a whole one was —
+// a half-written config.yaml is a daemon that will not restart. The temp file
+// is created in the destination's own directory (a rename across filesystems
+// fails) with a random name (two writers must not collide on it), and is
+// removed whenever the rename does not consume it.
+//
+// It writes 0600 and does not chown: a caller writes into its OWN home, so the
+// file lands owned by whoever is entitled to it. That is the point on a system
+// home, where the daemon performs the write precisely so the config stays
+// daemon-owned no matter which operator authored the edit.
+func AtomicWrite(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating a temp file beside %s: %w", path, err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op once the rename below consumes it
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("writing %s: %w", tmpPath, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("writing %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("placing %s: %w", path, err)
+	}
+	return nil
+}
 
 func (d Dir) ConfigPath() string { return filepath.Join(string(d), "config.yaml") }
 func (d Dir) LockPath() string   { return filepath.Join(string(d), "runnyd.lock") }

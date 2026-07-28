@@ -79,7 +79,13 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 		return nil, fmt.Errorf("Hyper-V VM backend needs schema 2.1 (Windows build %d or later); this host is build %d", osversion.RS5, osversion.Build())
 	}
 
-	network, err := hcn.GetNetworkByName(defaultSwitchName)
+	// hcn's entry points are synchronous HNS RPCs with no ctx and no internal
+	// timeout, so a wedged HNS service would block this goroutine — the FSM's —
+	// past the BOOT deadline. Bound them on Boot's own ctx rather than inventing
+	// a second budget for the network calls to spend.
+	network, err := awaitBounded(ctx, func() (*hcn.HostComputeNetwork, error) {
+		return hcn.GetNetworkByName(defaultSwitchName)
+	}, nil) // a lookup allocates nothing; a late success needs no disowning
 	if err != nil {
 		return nil, fmt.Errorf("resolving %q: %w", defaultSwitchName, err)
 	}
@@ -119,18 +125,22 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 		slog.Debug("guest console pipe", "system", systemID, "pipe", consolePipe)
 	}
 
-	ep, err := network.CreateEndpoint(&hcn.HostComputeEndpoint{
-		Name:               endpointName,
-		HostComputeNetwork: network.Id,
-		SchemaVersion:      hcn.V2SchemaVersion(),
-	})
+	// ALLOCATES, unlike the lookup above: an endpoint HNS finishes creating
+	// after we gave up is referenced by nothing, so it is disowned.
+	ep, err := awaitBounded(ctx, func() (*hcn.HostComputeEndpoint, error) {
+		return network.CreateEndpoint(&hcn.HostComputeEndpoint{
+			Name:               endpointName,
+			HostComputeNetwork: network.Id,
+			SchemaVersion:      hcn.V2SchemaVersion(),
+		})
+	}, deleteEndpointDetached)
 	if err != nil {
 		return nil, fmt.Errorf("creating HNS endpoint: %w", err)
 	}
 
 	cpu, mem, err := resolveSizing(cfg, opts)
 	if err != nil {
-		deleteEndpoint(ep)
+		deleteEndpoint(ctx, ep)
 		return nil, err
 	}
 	// HCS's schema takes memory as whole MiB and CPU count as uint32; neither
@@ -139,11 +149,11 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 	// non-whole-MiB memorySize or a CPU count above uint32's range would
 	// otherwise truncate/wrap silently into the document sent to HCS.
 	if mem%(1<<20) != 0 {
-		deleteEndpoint(ep)
+		deleteEndpoint(ctx, ep)
 		return nil, fmt.Errorf("memory size %d bytes is not a whole number of MiB", mem)
 	}
 	if cpu > math.MaxUint32 {
-		deleteEndpoint(ep)
+		deleteEndpoint(ctx, ep)
 		return nil, fmt.Errorf("cpu_cores %d exceeds the maximum HCS can express", cpu)
 	}
 
@@ -222,7 +232,7 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 	select {
 	case res := <-createCh:
 		if res.err != nil {
-			deleteEndpoint(ep)
+			deleteEndpoint(ctx, ep)
 			return nil, fmt.Errorf("CreateComputeSystem: %w", res.err)
 		}
 		system = res.system
@@ -231,7 +241,9 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 			if res := <-createCh; res.err == nil {
 				abandonComputeSystem(res.system, ep)
 			} else {
-				deleteEndpoint(ep)
+				// Detached: ctx is already expired by definition here, so this
+				// cleanup needs its own window rather than the dead one.
+				deleteEndpointDetached(ep)
 			}
 		}()
 		return nil, fmt.Errorf("CreateComputeSystem: %w", ctx.Err())
@@ -267,11 +279,26 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 // deleteEndpoint is the plain best-effort delete: used wherever nothing
 // downstream depends on whether it succeeded. abandonComputeSystem and
 // hcsMachine.destroy need the error itself (to decide whether to scrub the
-// neighbor-table entry below), so they call ep.Delete() directly instead.
-func deleteEndpoint(ep *hcn.HostComputeEndpoint) {
-	if err := ep.Delete(); err != nil {
+// neighbor-table entry below), so they go through deleteEndpointAndScrub or
+// their own bounded delete instead.
+//
+// Bounded on the caller's ctx because Boot's error paths call this on the FSM
+// goroutine, where a wedged HNS would hold the state past its deadline. A
+// delete that times out leaves the endpoint for this slot's next
+// reapPriorSystem, which is where an orphan of this exact shape is collected.
+func deleteEndpoint(ctx bounded.Context, ep *hcn.HostComputeEndpoint) {
+	if err := awaitBoundedErr(ctx, ep.Delete); err != nil {
 		slog.Error("abandoned HNS endpoint: delete failed; endpoint may leak until manually cleaned up", "id", ep.Id, "err", err)
 	}
+}
+
+// deleteEndpointDetached is deleteEndpoint for the abandonment paths, which run
+// on a goroutine nobody waits on and so have no caller ctx to inherit — the
+// same window abandonComputeSystem gives its own cleanup.
+func deleteEndpointDetached(ep *hcn.HostComputeEndpoint) {
+	ctx, cancel := bounded.WithTimeout(context.Background(), abandonedStopTimeout)
+	defer cancel()
+	deleteEndpoint(ctx, ep)
 }
 
 // scrubNeighborEntry removes the stale Permanent neighbor-table entries HNS
@@ -325,7 +352,7 @@ func abandonComputeSystem(system *hcs.System, ep *hcn.HostComputeEndpoint) {
 		slog.Error("abandoned compute system: did not exit before the cleanup window closed; leaving it in place for a later reap", "id", system.ID(), "err", err)
 		return
 	}
-	deleteEndpointAndScrub(hcnEndpoint{ep}, "abandoned HNS endpoint")
+	deleteEndpointAndScrub(ctx, hcnEndpoint{ep}, "abandoned HNS endpoint")
 }
 
 type hcsMachine struct {
@@ -521,7 +548,7 @@ func (m *hcsMachine) Stop(ctx bounded.Context, grace time.Duration) error {
 	if err := stopMachine(ctx, grace, m.system.WaitChannel(), hcsStopOps{system: m.system, ctx: ctx}); err != nil {
 		return err
 	}
-	m.destroy()
+	m.destroy(ctx)
 	return nil
 }
 
@@ -534,15 +561,29 @@ func (m *hcsMachine) Stop(ctx bounded.Context, grace time.Duration) error {
 // outlived Terminate, endpoint Delete, and 30s of polling after both), so
 // scrubNeighborEntry (shared with abandonComputeSystem) scrubs it
 // explicitly once the endpoint is confirmed gone.
-func (m *hcsMachine) destroy() {
+// The endpoint delete runs under the caller's ctx — teardown's deadline —
+// because ep.Delete is another context-free HNS RPC, and this one is on the
+// teardown goroutine rather than a detached cleanup. A delete that times out
+// leaves the endpoint behind, which is self-healing: reapPriorSystem runs
+// unconditionally at the top of this slot's next boot and deletes exactly this.
+// The neighbor scrub is skipped in that case for the same reason a failed
+// delete skips it — the entry belongs to an endpoint that still exists.
+func (m *hcsMachine) destroy(ctx bounded.Context) {
 	if err := m.system.Close(); err != nil {
 		slog.Error("teardown: closing compute system failed", "id", m.system.ID(), "err", err)
 	}
-	if err := m.endpoint.Delete(); err != nil {
-		slog.Error("teardown: deleting HNS endpoint failed", "id", m.endpoint.Id, "err", err)
-		return
+	// Detached from ctx's deadline, the way run.go's own teardown detaches from
+	// daemon shutdown: stopMachine returns success the instant the guest reaches
+	// its terminal state, which can be the same instant the teardown deadline
+	// expires -- so inheriting what is left of that budget can mean inheriting
+	// nothing, and this cleanup would never run on an otherwise clean stop.
+	// WithoutCancel keeps ctx's values (the obs scope) while dropping its
+	// deadline.
+	dctx, cancel := bounded.WithTimeout(context.WithoutCancel(ctx), abandonedStopTimeout)
+	defer cancel()
+	if err := deleteAndScrub(dctx, m.endpoint.Delete, m.mac); err != nil {
+		slog.Error("teardown: deleting HNS endpoint did not confirm before the window closed", "id", m.endpoint.Id, "err", err)
 	}
-	scrubNeighborEntry(m.mac)
 }
 
 // hcsStopOps closes over the Stop call's own ctx: hcs.System.Shutdown/

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bojanrajkovic/runny/internal/bounded"
 )
 
 // fakeReapSystem is a scriptable reapSystem: Terminate/WaitCtx/Close return
@@ -64,10 +66,16 @@ type fakeReapOps struct {
 
 	openSystemCalls   int
 	openEndpointCalls int
+
+	// The contexts each lookup was handed, so a test can assert the reap
+	// actually bounds its HNS calls rather than merely accepting a parameter.
+	systemCtx   bounded.Context
+	endpointCtx bounded.Context
 }
 
-func (f *fakeReapOps) openSystem(context.Context, string) (reapSystem, error) {
+func (f *fakeReapOps) openSystem(ctx bounded.Context, _ string) (reapSystem, error) {
 	f.openSystemCalls++
+	f.systemCtx = ctx
 	if f.systemErr != nil {
 		return nil, f.systemErr
 	}
@@ -77,8 +85,9 @@ func (f *fakeReapOps) openSystem(context.Context, string) (reapSystem, error) {
 	return f.system, nil
 }
 
-func (f *fakeReapOps) openEndpoint(string) (reapEndpoint, error) {
+func (f *fakeReapOps) openEndpoint(ctx bounded.Context, _ string) (reapEndpoint, error) {
 	f.openEndpointCalls++
+	f.endpointCtx = ctx
 	if f.endpntErr != nil {
 		return nil, f.endpntErr
 	}
@@ -86,6 +95,34 @@ func (f *fakeReapOps) openEndpoint(string) (reapEndpoint, error) {
 		return nil, nil
 	}
 	return f.endpoint, nil
+}
+
+// The endpoint lookup must be bounded, and bounded by the SAME window as the
+// system lookup. hcn.GetEndpointByName is a synchronous HNS RPC with no ctx of
+// its own, and this reap runs at daemon startup where a hang has no outer
+// deadline to rescue it: reapAllSlots checks ctx.Err() only BETWEEN slots, so a
+// lookup that blocks inside reapPriorSystem never yields back to that check and
+// startup hangs with no error and no log.
+//
+// Asserting the deadline reaches the seam, rather than driving a blocking fake
+// to expiry, keeps this fast and deterministic; that a bounded ctx actually
+// cuts the wait short is pinned directly on awaitBounded (await_test.go).
+func TestReapPriorSystemBoundsBothLookups(t *testing.T) {
+	ops := &fakeReapOps{}
+	if err := reapPriorSystem(ops, "slot-1", "runny-slot-1"); err != nil {
+		t.Fatalf("reapPriorSystem = %v, want nil", err)
+	}
+	epDeadline, ok := ops.endpointCtx.Deadline()
+	if !ok {
+		t.Error("the endpoint lookup's context carries no deadline; a wedged HNS would hang startup")
+	}
+	sysDeadline, ok := ops.systemCtx.Deadline()
+	if !ok {
+		t.Fatal("the system lookup's context carries no deadline")
+	}
+	if !epDeadline.Equal(sysDeadline) {
+		t.Errorf("the two lookups are bounded by different windows (%v vs %v); one reap is one budget", epDeadline, sysDeadline)
+	}
 }
 
 // TestReapPriorSystemNothingToReap: neither a stale system nor a stale
@@ -268,7 +305,7 @@ type countingReapOps struct {
 	delay   time.Duration
 }
 
-func (c *countingReapOps) openSystem(_ context.Context, systemID string) (reapSystem, error) {
+func (c *countingReapOps) openSystem(_ bounded.Context, systemID string) (reapSystem, error) {
 	if c.delay > 0 {
 		time.Sleep(c.delay)
 	}
@@ -279,7 +316,7 @@ func (c *countingReapOps) openSystem(_ context.Context, systemID string) (reapSy
 	return nil, nil
 }
 
-func (c *countingReapOps) openEndpoint(string) (reapEndpoint, error) {
+func (c *countingReapOps) openEndpoint(bounded.Context, string) (reapEndpoint, error) {
 	return nil, nil
 }
 

@@ -151,6 +151,31 @@ ADR-0026 for the Hyper-V backend's decisions and why; this doc is sharp edges on
   time rather than the whole tree in one `RemoveAll` — a third line of
   defense so that one still-wedged slot can't crash-loop startup for every
   other slot.
+- **Every `hcn`/HNS call goes through `awaitBounded` (`await.go`), and the
+  question it forces — whose deadline is this? — has a wrong answer that looks
+  right.** The vendored `hcn` entry points are synchronous HNS RPCs with no ctx
+  and no internal timeout, so the only bound available is on *our* wait;
+  `awaitBounded` runs the call on a goroutine and selects against the caller's
+  ctx, with an `abandon` callback that disowns anything the call allocates if it
+  resolves after we gave up. Pass `nil` for a pure read (it allocated nothing);
+  pass a deleter for `CreateEndpoint` (a late success owns an endpoint nobody
+  references). `abandon` deliberately does **not** run on a late *failure* —
+  handing it a zero value would have the caller release something that never
+  existed. The trap: a cleanup running inside a `go func()` spawned from
+  `case <-ctx.Done()` must NOT inherit that ctx, which is expired by
+  definition — `awaitBounded` would return instantly and the cleanup would never
+  happen, so `deleteEndpointDetached` gives those paths their own window the way
+  `abandonComputeSystem` already does. `deleteEndpoint(ctx, …)` is for callers
+  still on a live goroutine. `awaitBounded` lives in an untagged file so it
+  unit-tests on every host, unlike everything else here.
+- **`reapAllSlots`' `reapOrphansTimeout` only bounds the loop BETWEEN slots, so
+  anything blocking *inside* `reapPriorSystem` escapes it.** The per-slot
+  `ctx.Err()` check never gets another turn once a call hangs beneath it — which
+  is why `openEndpoint` takes a ctx even though its fake ignores it. This runs at
+  daemon startup, where there is no outer deadline to rescue a hang: before the
+  bound, a wedged HNS hung startup with no error and no log, behind a ceiling
+  that looked like it applied. Don't "simplify" `openEndpoint`'s signature back
+  to `(string)` because the fake doesn't use the ctx.
 - **Windows guests trust the `Permanent` neighbor row DIRECTLY — this is not a
   regression of the "never trust `Permanent`" rule above, it's guest-OS-
   conditional.** `hcsMachine.WaitIP` dispatches on `guestOS` (set from

@@ -157,3 +157,57 @@ func TestStopMachineAlreadyStopped(t *testing.T) {
 		t.Fatal("already-stopped guest must not call requestStop/forceStop")
 	}
 }
+
+// raceStopOps closes done from inside a stop primitive, so the terminal state
+// lands mid-sequence rather than before stopMachine's own already-stopped
+// early-out — which is what makes the racing select reachable at all.
+type raceStopOps struct {
+	done     chan struct{}
+	closeOn  string // "request" or "force"
+	block    chan struct{}
+	forceRet error
+}
+
+func (o *raceStopOps) requestStop() (bool, error) {
+	if o.closeOn == "request" {
+		close(o.done)
+	}
+	return false, nil // decline, so the sequence goes straight to force
+}
+
+func (o *raceStopOps) forceStop() error {
+	if o.closeOn == "force" {
+		close(o.done)
+		return o.forceRet
+	}
+	<-o.block // never returns: the pre-force select is the one under test
+	return o.forceRet
+}
+
+// A guest that reaches its terminal state at the same instant the deadline
+// expires has STOPPED — the stop succeeded, and reporting a deadline error for
+// it is a false wedge. That matters: a wedged stop is what makes the daemon
+// restart cold once idle, so the same physical outcome must not report success
+// or catastrophe depending on which ready case Go's uniform select happens to
+// pick. Run it enough times that a coin flip cannot pass.
+func TestStopMachineTerminalStateWinsOverSimultaneousDeadline(t *testing.T) {
+	shortSettle(t, time.Second)
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) }) // release the parked forceStop goroutines
+	for i := range 200 {
+		ctx, cancel := bounded.WithTimeout(context.Background(), time.Nanosecond)
+		<-ctx.Done()
+		ops := &raceStopOps{done: make(chan struct{}), closeOn: "request", block: block}
+		err := stopMachine(ctx, time.Millisecond, ops.done, ops)
+		cancel()
+		if err != nil {
+			t.Fatalf("iteration %d: guest was stopped, got err=%v, want nil (false wedge)", i, err)
+		}
+	}
+}
+
+// Deliberately not tested: the same tie in the post-force select. Reaching it
+// requires forceStop to have already run, and if it has not, `done` is open and
+// a deadline error is the CORRECT answer — so the assertion would only ever
+// hold by timing luck. Both selects resolve the tie through stoppedOrDeadline,
+// which the test above pins.

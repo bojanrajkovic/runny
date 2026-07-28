@@ -128,7 +128,9 @@ func (d Dir) CyclesDir() string  { return filepath.Join(string(d), "cycles") }
 // file. The system daemon runs as a service account whose home is /var/empty,
 // so the default ~/.docker/config.json is both absent and unwritable by the
 // operator; pointing DOCKER_CONFIG here puts the credential somewhere the
-// operator can author (the home's inheriting ACL) and the daemon can read.
+// operator can author (they create the directory under their home-directory
+// grant, and own what they create) and the daemon can read (its own entry
+// inherits).
 // Deliberately NOT a copy of the operator's own credential — a copy goes stale
 // on rotation with nothing to notice; the file here is the one source, re-read
 // on every pull attempt.

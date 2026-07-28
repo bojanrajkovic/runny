@@ -402,8 +402,8 @@ recognize such a config and report it.
 
 Config states that are *unusable rather than absent* are logged instead of
 silently downgrading the pull: a `config.json` that cannot be read (for the
-system daemon, usually the home's inheriting ACL not granting the service
-account read), one that cannot be parsed, and one holding the host's
+system daemon, usually the home's inherited service-account entry not reaching
+the file), one that cannot be parsed, and one holding the host's
 credential in a helper. Each still falls back to an anonymous pull, but a
 private pull that quietly goes anonymous otherwise resurfaces as a bare 401
 with no trace of the cause.
@@ -412,8 +412,9 @@ with no trace of the cause.
 service account whose home is `/var/empty`, so `~/.docker/config.json` is
 neither present for it nor writable by the operator. The **system daemon
 only** therefore defaults `DOCKER_CONFIG` to `<home>/docker` (an operator-set
-value still wins), which the home's inheriting ACL makes operator-writable and
-daemon-readable without `sudo`. A per-user agent is left on the standard
+value still wins). The operator creates that directory under their home-directory
+grant and owns what they create, so it is operator-writable; the daemon reads it
+through its own inherited entry, so no `sudo` is involved either way. A per-user agent is left on the standard
 `~/.docker` path: its home *is* the operator's, so redirecting it would hide
 the very credentials it is meant to use.
 
@@ -543,8 +544,8 @@ is auto-allowed Local Network access regardless of uid (Apple TN3179), so
 reaching guests needs neither a GUI prompt nor root.
 
 The daemon's entire state lives in `/Library/Application Support/runny`, owned by
-`_runny` at `0700`, nothing world- or group-accessible, with a **dual inheriting
-ACL** that is the access boundary:
+`_runny` at `0700`, nothing world- or group-accessible, with a **dual ACL** that
+is the access boundary:
 
 - the **operator** account gets write on the home **directory** — land the
   `private_key_path` App key, and reach the control socket (above). It does

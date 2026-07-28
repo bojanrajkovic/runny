@@ -10,7 +10,7 @@ import (
 	"github.com/bojanrajkovic/runny/internal/launchd"
 )
 
-// resolveOperator picks the operator account the system home's inheriting ACL
+// resolveOperator picks the operator account the system home's directory ACL
 // will grant: the explicit --operator flag wins, else $SUDO_USER. The flag-wins
 // rule covers a root invocation without sudo (e.g. CI, or `su root`), which leaves
 // SUDO_USER unset, so the operator must travel by flag there. The headless `sudo`

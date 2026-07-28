@@ -10,7 +10,7 @@ import (
 // The system daemon (run as the service account that OWNS the installer-created
 // SystemHomeDir) binds/writes there; everyone else falls back to the per-user
 // ~/.runny. The server keys on OWNERSHIP, not writability: the operator account
-// is granted dir-write via an inheriting ACL (to land the App key and edit
+// is granted dir-write via an ACL entry on the directory (to land the App key and edit
 // config), so a writability test would also pass for an operator running runnyd
 // by hand — and a per-user daemon must never bind the system socket. A
 // t.TempDir() is owned by the test process, so it stands in for the owned home.

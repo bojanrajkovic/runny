@@ -22,10 +22,19 @@ commit-msg:
     commitlint:
       run: mise x -- npx --no-install commitlint --edit {1}
 
+# Both pre-push commands exclude //apps/Runny/... so the hook behaves the same
+# on every host runny is developed on. The app needs a full-Xcode darwin host,
+# and rules_apple resolves the Apple toolchain during ANALYSIS, which hard-fails
+# anywhere else before incompatible-target skipping can apply (bazel#12897) —
+# so it cannot be pruned by target_compatible_with, only excluded by pattern.
+# Without the exclusion the hook is dead on a Windows host and on a CLT-only
+# Mac: it fails on the app before reaching a line of the daemon. The app is not
+# left unverified — CI's macOS lane builds and tests the whole tree including
+# it, and pre-commit formats Swift like everything else.
 pre-push:
   commands:
     build:
-      run: mise x -- bazel build //...
+      run: mise x -- bazel build -- //... -//apps/Runny/...
     test:
       # Exit 4 = no test targets found; tolerated until the first test lands.
-      run: sh -c 'mise x -- bazel test //... || test $? -eq 4'
+      run: sh -c 'mise x -- bazel test -- //... -//apps/Runny/... || test $? -eq 4'

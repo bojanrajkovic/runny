@@ -6,7 +6,7 @@ The human-developer workflow. Agent-facing guidance and the project-wide index l
 
 - **Toolchain:** mise-managed (`mise install`): Bazel, Go, Node (commitlint only), lefthook — `.mise.toml` is the single home for every tool version, including Bazel's.
 - `npm install` once for the commitlint dev dependency, then `lefthook install` to wire the git hooks.
-- **macOS hosts (ix):** Command Line Tools suffice for the daemon (cgo + Virtualization.framework, verified); full Xcode is required to build the Runny app (`apps/Runny`) — and therefore for the pre-push hook's `bazel build //...` on a macOS host (rules_apple needs the SDK; Xcode is never opened — ADR-0007). On a CLT-only macOS host, daemon-only work can still build the tree minus the app: `bazel build -- //... -//apps/... -//proto/runny/v1:runnyv1_swift_proto`.
+- **macOS hosts:** Command Line Tools suffice for the daemon (cgo + Virtualization.framework, verified); full Xcode is required to build the Runny app (`apps/Runny`) — rules_apple needs the SDK, though Xcode is never opened (ADR-0007). The pre-push hook excludes the app on every host, so a CLT-only Mac is a fine daemon-development machine; building the app there needs `bazel build -- //... -//apps/... -//proto/runny/v1:runnyv1_swift_proto` to stay out of its way.
 - **Windows hosts:** `mise install` covers the toolchain here too — bazel included, via mise's aqua backend, which supports windows/amd64 for the pinned version. Clone with `git config --global core.autocrlf false` set **first** (see "Cross-host dev loops"), and with git-lfs available: `internal/vhdx/testdata`'s binary VHDX fixtures are LFS-tracked. Nothing about the Runny app builds here.
 
 ## Commands
@@ -40,11 +40,12 @@ runny targets two host platforms, and **neither one can test the other**. Primar
 
 The windows half is pure Go — no cgo — which makes it easy to assume a macOS `bazel test //...` covers it. It does not compile a line of it. Both halves are covered in CI (the `macos-26` and `windows-2022` lanes), so a PR is gated either way; the loops below are for finding out before you push.
 
-### Linux ↔ macOS (ix)
+**Getting the tree onto the other host is just git.** Push the branch, pull it there, run the commands below — no rsync recipe to keep current, nothing that assumes a particular shell or share, and it works the same for a Mac and a Windows box. Use whatever transfer you prefer instead; nothing here depends on it.
+
+### On a macOS host
 
 ```
-rsync -a --exclude bazel-\* --exclude node_modules . brajkovic@ix:~/src/runny/
-ssh brajkovic@ix 'cd ~/src/runny && bazel test //...'
+bazel test //...
 ```
 
 The daemon binary must be codesigned with the `com.apple.security.virtualization` entitlement to boot VMs (ad-hoc signing is fine locally; see ADR-0008):
@@ -53,7 +54,7 @@ The daemon binary must be codesigned with the `com.apple.security.virtualization
 codesign -s - --entitlements tools/sign/runnyd.entitlements --force bazel-bin/cmd/runnyd/runnyd_/runnyd
 ```
 
-### → Windows
+### On a Windows host
 
 **Compile-check locally first — it catches most of it and needs no second host.** A cross-build proves the windows-gated tree still compiles, including the in-graph proto package a plain `GOOS=windows go build` can't resolve:
 
@@ -71,7 +72,7 @@ The two excluded test targets are not optional: cross-compiling a windows `go_te
 GOOS=windows go vet ./internal/opacl/
 ```
 
-**Executing the suite needs a real Windows host.** Get the tree there (a branch push and pull is the least surprising way — there is no rsync on a stock Windows OpenSSH host), then:
+**Executing the suite needs a real Windows host.** With the tree there:
 
 ```
 bazel --output_base=C:/b test --config=ci --test_env=USERPROFILE -- //... -//apps/Runny/...
@@ -84,7 +85,7 @@ Four things in that line are load-bearing, each earned:
 - **`-//apps/Runny/...`** — a SwiftUI target that cannot build off darwin.
 - **`core.autocrlf false`, set before cloning** — mangled line endings in checked-out fixtures are a one-way trip, not something to fix up afterwards.
 
-**The pre-push hook does not work as-is on a Windows host.** It runs bare `bazel build //...` / `bazel test //...`, which includes `//apps/Runny/...` and so fails before reaching anything real — the same wrinkle a CLT-only macOS host has under Setup, without that host's option of installing the SDK. Run the excluded form above by hand.
+The pre-push hook works here unchanged — it excludes `//apps/Runny/...` on every host for exactly this reason.
 
 CI never boots guests on either platform (GitHub's macOS runners are VMs themselves, and the Windows runners have no nested-virtualization guarantee), so anything that actually starts a compute system is verified on a real host, by hand.
 

@@ -7,6 +7,7 @@ The human-developer workflow. Agent-facing guidance and the project-wide index l
 - **Toolchain:** mise-managed (`mise install`): Bazel, Go, Node (commitlint only), lefthook — `.mise.toml` is the single home for every tool version, including Bazel's.
 - `npm install` once for the commitlint dev dependency, then `lefthook install` to wire the git hooks.
 - **macOS hosts (ix):** Command Line Tools suffice for the daemon (cgo + Virtualization.framework, verified); full Xcode is required to build the Runny app (`apps/Runny`) — and therefore for the pre-push hook's `bazel build //...` on a macOS host (rules_apple needs the SDK; Xcode is never opened — ADR-0007). On a CLT-only macOS host, daemon-only work can still build the tree minus the app: `bazel build -- //... -//apps/... -//proto/runny/v1:runnyv1_swift_proto`.
+- **Windows hosts:** `mise install` covers the toolchain here too — bazel included, via mise's aqua backend, which supports windows/amd64 for the pinned version. Clone with `git config --global core.autocrlf false` set **first** (see "Cross-host dev loops"), and with git-lfs available: `internal/vhdx/testdata`'s binary VHDX fixtures are LFS-tracked. Nothing about the Runny app builds here.
 
 ## Commands
 
@@ -28,9 +29,18 @@ The human-developer workflow. Agent-facing guidance and the project-wide index l
 
 **Renovate and go.sum:** every `gomod`-manager Renovate PR arrives with a bumped `go.mod` but a stale `go.sum`. Renovate's artifact updater runs `go get -t ./...` before `go mod tidy` to re-resolve the whole graph, and that step hits the same in-graph-only `proto/runny/v1` import above — but `go get` lost its own `-e` tolerance flag when Go moved to module mode, so `postUpdateOptions: ['gomodTidyE']` (which only reaches the later `go mod tidy` call) can't save it. This is not a misconfiguration; there is no Renovate config that avoids it. The `renovate-gosum` workflow regenerates `go.sum` (and gazelle/`bazel mod tidy`, for the rarer bump that adds or removes a package) and pushes it back automatically. If it misfires, the manual flow is the same as above: check out the branch, run the three commands, build/test, commit, merge once CI re-proves it.
 
-## The Linux ↔ ix dev loop
+## Cross-host dev loops
 
-Primary development happens on the Linux box; everything pure-Go builds and tests there. Darwin-only targets (`internal/vm`'s vz code, `cmd/runnyd`'s final binary, the Runny app) need a macOS arm64 host:
+runny targets two host platforms, and **neither one can test the other**. Primary development happens on the Linux box, where everything pure-Go builds and tests; both platform-gated halves need a real host of their own.
+
+| Gated on | Targets | Needs |
+| --- | --- | --- |
+| darwin | `internal/vm`'s vz cgo code, `cmd/runnyd`'s final binary, the Runny app | macOS arm64 host |
+| windows | `internal/winhcs`, `internal/vm`'s hcs/neighbortable/netfixup/reap files, `internal/vhdx`, the SCM installer, `cmd/runnyd`'s svc/lock/platform files | Windows amd64 host |
+
+The windows half is pure Go — no cgo — which makes it easy to assume a macOS `bazel test //...` covers it. It does not compile a line of it. Both halves are covered in CI (the `macos-26` and `windows-2022` lanes), so a PR is gated either way; the loops below are for finding out before you push.
+
+### Linux ↔ macOS (ix)
 
 ```
 rsync -a --exclude bazel-\* --exclude node_modules . brajkovic@ix:~/src/runny/
@@ -42,6 +52,41 @@ The daemon binary must be codesigned with the `com.apple.security.virtualization
 ```
 codesign -s - --entitlements tools/sign/runnyd.entitlements --force bazel-bin/cmd/runnyd/runnyd_/runnyd
 ```
+
+### → Windows
+
+**Compile-check locally first — it catches most of it and needs no second host.** A cross-build proves the windows-gated tree still compiles, including the in-graph proto package a plain `GOOS=windows go build` can't resolve:
+
+```
+bazel build --platforms=@rules_go//go/toolchain:windows_amd64 -- \
+  //cmd/runnyd //cmd/runnyctl //internal/winhcs/... \
+  -//internal/winhcs/log:log_test -//internal/winhcs/oc:oc_test
+```
+
+The two excluded test targets are not optional: cross-compiling a windows `go_test` needs a windows test-execution platform this host doesn't have. This is the same command CI's Linux lane runs.
+
+**Windows-only `_test.go` files are the blind spot in that check** — Bazel can't cross-build them, so a test file that doesn't compile passes the cross-build and fails only on the Windows lane. For a package that doesn't import the generated proto, `go vet` type-checks the test sources without Bazel:
+
+```
+GOOS=windows go vet ./internal/opacl/
+```
+
+**Executing the suite needs a real Windows host.** Get the tree there (a branch push and pull is the least surprising way — there is no rsync on a stock Windows OpenSSH host), then:
+
+```
+bazel --output_base=C:/b test --config=ci --test_env=USERPROFILE -- //... -//apps/Runny/...
+```
+
+Four things in that line are load-bearing, each earned:
+
+- **`--output_base=C:/b`** — Bazel's default per-workspace-hash path under `%USERPROFILE%` nests deep enough to hit `MAX_PATH`. Forward slashes, not `C:\b`: in Git Bash an unquoted `\b` loses its backslash before Bazel sees it, and Bazel accepts forward-slash paths on Windows natively.
+- **`--test_env=USERPROFILE`** — Bazel's local test sandbox doesn't pass `USERPROFILE` through by default on Windows the way it does `HOME` on unix, and `os.UserHomeDir` needs it.
+- **`-//apps/Runny/...`** — a SwiftUI target that cannot build off darwin.
+- **`core.autocrlf false`, set before cloning** — mangled line endings in checked-out fixtures are a one-way trip, not something to fix up afterwards.
+
+**The pre-push hook does not work as-is on a Windows host.** It runs bare `bazel build //...` / `bazel test //...`, which includes `//apps/Runny/...` and so fails before reaching anything real — the same wrinkle a CLT-only macOS host has under Setup, without that host's option of installing the SDK. Run the excluded form above by hand.
+
+CI never boots guests on either platform (GitHub's macOS runners are VMs themselves, and the Windows runners have no nested-virtualization guarantee), so anything that actually starts a compute system is verified on a real host, by hand.
 
 ## Code conventions
 
@@ -61,7 +106,9 @@ codesign -s - --entitlements tools/sign/runnyd.entitlements --force bazel-bin/cm
 
 ## CI
 
-GitHub Actions gate every PR and push to `main`: `ci.yml` (Linux: build/test/format; macOS: darwin targets + an ad-hoc-signed `runnyd` artifact; race: `-race` rebuild; zizmor: workflow audit; coverage: combined Go+Swift lcov uploaded to Codecov, informational only per `codecov.yml` — no status check blocks) and `pr-title.yml`. All checks must pass before merge. CI never boots guests — GitHub's macOS runners are VMs themselves, so VM-touching verification happens on a real host.
+GitHub Actions gate every PR and push to `main`: `ci.yml` (Linux: build/test/format, plus the windows/amd64 cross-build; macOS: darwin targets + an ad-hoc-signed `runnyd` artifact; Windows: the suite *executed* on `windows-2022`, which is what the Linux lane's cross-build can't do; race: `-race` rebuild; zizmor: workflow audit; coverage: combined Go+Swift lcov uploaded to Codecov, informational only per `codecov.yml` — no status check blocks) and `pr-title.yml`. All checks must pass before merge. CI never boots guests — GitHub's macOS runners are VMs themselves — so VM-touching verification happens on a real host.
+
+The Windows lane excludes only `//apps/Runny/...`. In particular `//internal/sysdaemon` is **not** excluded: it once was, on the grounds that the package was macOS-LaunchDaemon-only, which stopped being true when the SCM installer landed — leaving the one package that installs the daemon as a Windows service with no CI executing its tests on Windows at all. Sixteen tests had never run. If you exclude a target from a platform lane, the justification has to stay true as the target changes.
 
 ### CI security
 

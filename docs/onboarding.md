@@ -9,10 +9,10 @@ running, [docs/deploy.md](deploy.md) is the reference for everything this skips
 You need **macOS Sequoia (15.0+)** on **Apple Silicon**. Everything else you
 install below.
 
-**On a Windows host?** This guide is the macOS path. Go to
-[docs/deploy.md](deploy.md)'s "Windows" section instead — it covers the
-Chocolatey feed, `runnyctl install-daemon`, and the Hyper-V prerequisites. The
-GitHub App setup below still applies; the install and daemon steps do not.
+**On a Windows host?** This guide is the macOS path — go to
+[docs/onboarding-windows.md](onboarding-windows.md) instead. Step 1 (the GitHub
+App) and step 5 (telemetry) below are platform-independent and that guide links
+back to them; everything in between differs.
 
 ## Pick a shape first
 

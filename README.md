@@ -18,14 +18,15 @@ silent outage.
 
 Requires a GitHub App with the runner-administration permission, and either
 **macOS Sequoia (15.0+)** on **Apple Silicon** or **Windows** with Hyper-V
-(build 17763+). The quick install below and the guided walkthrough are the macOS
-path; for a Windows host go straight to
-[docs/deploy.md](docs/deploy.md)'s "Windows" section, which covers the
-Chocolatey feed and `runnyctl install-daemon`. **New here? Start with
-[docs/onboarding.md](docs/onboarding.md)** — it walks you from an empty host to
-a runner's first job: the GitHub App, install, config, daemon, and telemetry.
-The quick install below is the short version; [docs/deploy.md](docs/deploy.md)
-is the operator reference.
+(build 17763+). **New here? Start with the guided walkthrough for your host** —
+it goes from an empty machine to a runner's first job: the GitHub App, install,
+config, daemon, and telemetry.
+
+- macOS → [docs/onboarding.md](docs/onboarding.md)
+- Windows → [docs/onboarding-windows.md](docs/onboarding-windows.md)
+
+The quick install below is the short version, and is the macOS path;
+[docs/deploy.md](docs/deploy.md) is the operator reference for both.
 
 **Desktop — Runny.app (menu-bar status + daemon manager):**
 
@@ -81,7 +82,8 @@ loop, codesigning tiers, and the CI setup.
 
 | Topic | |
 |---|---|
-| Getting started (zero to first job) | [docs/onboarding.md](docs/onboarding.md) |
+| Getting started, macOS host (zero to first job) | [docs/onboarding.md](docs/onboarding.md) |
+| Getting started, Windows host | [docs/onboarding-windows.md](docs/onboarding-windows.md) |
 | Install, config, GitHub App setup, migration | [docs/deploy.md](docs/deploy.md) |
 | How it works | [docs/architecture/](docs/architecture/) |
 | Why it works that way | [docs/architecture-decisions/](docs/architecture-decisions/) |

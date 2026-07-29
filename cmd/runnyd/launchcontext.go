@@ -67,3 +67,36 @@ func logSinkFor(lc launchContext, file, console io.Writer) io.Writer {
 	}
 	return file
 }
+
+// openLogSink opens the structured log's destination. -doctor gets the console
+// and NO file, which is what makes the documented read-only contract true:
+//
+//   - Against another deployment's home (-doctor -config) opening the log
+//     creates it, re-modes it, appends, and rotates it at the cap — four writes
+//     into a home the invoker does not own. For a non-owning operator the create
+//     and the chmod simply fail, so the diagnostic never ran at all.
+//   - Against the invoker's OWN home it is worse than a contract violation: a
+//     -doctor pass deliberately skips the instance lock, whose stated job is
+//     keeping a second process's startup lines out of the winner's log. Opening
+//     that same log unlocked is precisely the interleave the lock exists to
+//     prevent, and a rotation would rename it out from under the live daemon.
+//
+// Nothing is lost by dropping it: under -doctor the file sink carries one line
+// (`runnyd starting`), the check table goes to stdout, and the operator is at a
+// terminal by construction.
+func openLogSink(checkOnly bool, lc launchContext, path string, console io.Writer) (io.Writer, io.Closer, error) {
+	if checkOnly {
+		return console, noopCloser{}, nil
+	}
+	f, err := openRotatingFile(path, logFileCap)
+	if err != nil {
+		return nil, nil, err
+	}
+	return logSinkFor(lc, f, console), f, nil
+}
+
+// noopCloser is the doctor sink's Close — there is no file to close — so the
+// caller defers one unconditional Close either way.
+type noopCloser struct{}
+
+func (noopCloser) Close() error { return nil }

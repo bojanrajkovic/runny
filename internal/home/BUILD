@@ -74,6 +74,7 @@ go_test(
     srcs = [
         "config_test.go",
         "instance_test.go",
+        "instance_unix_test.go",
         "operatorgrants_test.go",
         "resolve_test.go",
         "socketpath_unix_test.go",

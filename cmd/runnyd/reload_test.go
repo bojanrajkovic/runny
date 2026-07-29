@@ -549,7 +549,7 @@ func TestMakeDoctorConfigDrift(t *testing.T) {
 	cancel()
 	drift := func() socket.DoctorCheck {
 		t.Helper()
-		for _, c := range makeDoctor(dir, path, cfg, nil)(ctx) {
+		for _, c := range makeDoctor(dir, path, cfg, nil, false)(ctx) {
 			if c.Name == "config-drift" {
 				return c
 			}

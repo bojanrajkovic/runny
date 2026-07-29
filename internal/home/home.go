@@ -243,6 +243,18 @@ func (d Dir) Ensure() error {
 			return fmt.Errorf("setting the mode on %s: %w", e.path, err)
 		}
 	}
+	// instance-id gets the same re-assert as the directories above, for the
+	// same reason: an id written by an older runny keeps its 0600 forever
+	// otherwise, and an unreadable id is a permanent startup failure rather
+	// than a self-healing one (InstancePrefix surfaces a read denial instead
+	// of regenerating). Never created here — generating one is InstancePrefix's
+	// job, gated on the home being the daemon's own — so an absent id is the
+	// normal first-start shape and not an error. Best-effort: a foreign-owned
+	// id cannot be chmod'd by this account either, and that case is the doctor
+	// suite's to report, not a reason to refuse startup.
+	if _, err := os.Stat(d.InstanceIDPath()); err == nil {
+		_ = os.Chmod(d.InstanceIDPath(), 0o644)
+	}
 	return nil
 }
 

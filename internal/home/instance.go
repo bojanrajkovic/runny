@@ -120,7 +120,13 @@ func (d Dir) InstancePrefix() (string, error) {
 		return "", fmt.Errorf("generating instance id: %w", err)
 	}
 	id := slugHostname(host) + "-" + hex.EncodeToString(rnd[:])
-	if err := os.WriteFile(p, []byte(id+"\n"), 0o600); err != nil {
+	// 0644, not 0600: the id is a hostname slug plus four random bytes, not a
+	// secret, and it lives inside a home whose own mode is what withholds it.
+	// An unreadable instance-id is a permanent startup failure — this accessor
+	// regenerates only on IsNotExist/empty, so it surfaces a read denial as an
+	// error — which is what an id created by any account other than the
+	// daemon's own would otherwise produce.
+	if err := os.WriteFile(p, []byte(id+"\n"), 0o644); err != nil {
 		return "", fmt.Errorf("writing instance id: %w", err)
 	}
 	return id, nil

@@ -201,8 +201,8 @@ silently empty credential. (Under launchd the daemon's environment is
 whatever the plist's `EnvironmentVariables` provides — the expansion is most
 useful for foreground `runnyd` runs and dev shells.) Only that exact placeholder shape expands — every
 other byte, including bare `$`, passes through untouched. A literal key in
-the file works too: the config is already an operator-owned `0600` file, the
-same posture that protects the `github.private_key_path` target. See
+the file works too: the config is already a `0600` file inside the daemon's
+home, the same posture that protects the `github.private_key_path` target. See
 [ADR-0024](architecture-decisions/0024-observability-event-seam.md) for the
 design this enables.
 
@@ -388,10 +388,10 @@ filename get a disambiguating suffix.
   with a **dual ACL**: your operator account gets write on the home
   **directory** — enough to land the App key and reach the control socket — and
   deliberately nothing beneath it, so revoking an operator actually revokes
-  them; `_runny` gets read, inherited, so the daemon can read a `0600` config
-  and key you own. What you need to *read* below the home comes from the mode
-  instead: `logs/` and `cycles/` are `0755` with `0644` files, inside the `0700`
-  home. Config edits go through `runnyctl edit-config`, which reads and writes
+  them; `_runny` gets read, inherited, so the daemon can read a `0600` App key
+  you land there yourself. What you need to *read* below the home comes from
+  the mode instead: `logs/` and `cycles/` are `0755` with `0644` files, inside
+  the `0700` home. Config edits go through `runnyctl edit-config`, which reads and writes
   the file through the daemon rather than touching it directly. The home holds
   everything — config, the App key, logs, images, VM clones, cycle artifacts,
   and the control socket.

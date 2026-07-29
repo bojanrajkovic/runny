@@ -18,18 +18,29 @@ import (
 // against ONE object, and no partial state to reason about because a single
 // command cannot half-run.
 //
-// Modify on the home DIRECTORY, without (OI)(CI): the entry answers "is this
-// account an operator" for HasID, and grants the directory access a rename over
-// config.yaml needs, and stops there. An inheriting entry would put a copy of
-// itself on every artifact below, and a copy is not reachable from here — a
-// later /remove:g against the home cannot touch it, so a revoked operator would
-// keep Modify on images\, vms\ and cycles\. The control channel is a named
-// pipe, so unlike darwin there is no socket file to stamp alongside.
+// (OI)(CI) Modify on the home DIRECTORY, and the inheritance is deliberate here
+// where darwin's is deliberately absent. Windows keeps a non-protected child in
+// sync with its parent's inheritable entries automatically, in BOTH directions:
+// this grant reaches every artifact already written, and Revoke's single
+// /remove:g against this same object takes it back off all of them — measured
+// on a real host. Nothing below the home is ever written to, and nothing below
+// it may be protected, which is what the install sequence guarantees.
+//
+// Darwin cannot do this: inheritance there is copy-at-create, so an inherited
+// entry is a copy no later chmod -a against the home could reach, and its
+// operator entry must not inherit at all (opacl_darwin.go). Same registry, same
+// RPCs, opposite ACE shape — because the platforms maintain inheritance
+// differently, not because the design differs.
+//
+// The control channel is a named pipe, so unlike darwin there is no socket file
+// to stamp alongside.
 func grantArgs(homeDir, account string) []string {
-	return []string{"icacls", homeDir, "/grant", account + ":M"}
+	return []string{"icacls", homeDir, "/grant", account + ":(OI)(CI)M"}
 }
 
-// revokeArgs is grantArgs' mirror: one command, same object.
+// revokeArgs is grantArgs' mirror: one command, same object. It takes the
+// entry off every inherited copy too, which is the whole reason the grant may
+// inherit here.
 func revokeArgs(homeDir, account string) []string {
 	return []string{"icacls", homeDir, "/remove:g", account}
 }

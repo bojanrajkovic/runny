@@ -11,13 +11,15 @@ import (
 )
 
 // TestGrantRevokeArgs pins each verb to ONE icacls invocation against ONE
-// object, with a NON-inheriting Modify entry. No (OI)(CI): the entry is the
-// operator registry HasID reads plus the directory access a config rename
-// needs, and an inheriting copy on each descendant is one this command could
-// never remove again.
+// object, with an INHERITING Modify entry — the opposite of darwin's, and
+// correct for the opposite reason: windows keeps non-protected children in sync
+// with the parent in both directions, so revokeArgs' single /remove:g against
+// the home takes the entry off every descendant that inherited it. Darwin's
+// copy-at-create inheritance cannot be undone that way, which is why its entry
+// must not inherit.
 func TestGrantRevokeArgs(t *testing.T) {
 	got := grantArgs(`C:\ProgramData\runny`, `CORP\alice`)
-	want := []string{"icacls", `C:\ProgramData\runny`, "/grant", `CORP\alice:M`}
+	want := []string{"icacls", `C:\ProgramData\runny`, "/grant", `CORP\alice:(OI)(CI)M`}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("grantArgs =\n got %v\nwant %v", got, want)
 	}

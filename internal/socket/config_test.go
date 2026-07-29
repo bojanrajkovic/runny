@@ -3,6 +3,7 @@ package socket
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -58,6 +59,9 @@ func TestGetConfigReportsNotFoundForAMissingConfig(t *testing.T) {
 // An unreadable config is NOT NotFound: it is exactly the case the skeleton
 // fallback must refuse to handle. Skipped as root, which can read anything.
 func TestGetConfigDoesNotReportAnUnreadableConfigAsMissing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits do not gate reads on windows -- os.WriteFile with 0o000 yields a perfectly readable file, so the present-but-unreadable state this pins cannot be constructed there")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root reads through mode bits; the distinction is unobservable")
 	}

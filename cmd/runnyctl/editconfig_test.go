@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -87,6 +88,9 @@ func TestConfigBytesReportsAnAbsentFileAsErrNotExist(t *testing.T) {
 // seed a blank skeleton on ErrNotExist, and applying that over a live fleet's
 // config destroys it. Skipped as root, which reads through mode bits.
 func TestConfigBytesDoesNotDisguiseAnUnreadableConfigAsAbsent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits do not gate reads on windows -- os.WriteFile with 0o000 yields a perfectly readable file, so the present-but-unreadable state this pins cannot be constructed there")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root reads through mode bits; the distinction is unobservable")
 	}

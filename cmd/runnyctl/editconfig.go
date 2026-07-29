@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -93,9 +94,14 @@ func (c *ctl) editConfig(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Always removed: the apply is a copy rather than a rename, and the scratch
-	// file holds a config the operator authored.
-	defer os.Remove(tmpPath)
+	// Removed unless the apply failed, in which case it is the only copy of
+	// what the operator wrote.
+	keep := false
+	defer func() {
+		if !keep {
+			os.Remove(tmpPath)
+		}
+	}()
 
 	var after []byte
 	for {
@@ -138,7 +144,13 @@ func (c *ctl) editConfig(ctx context.Context) error {
 	}
 
 	if err := c.applyConfig(ctx, configPath, after); err != nil {
-		return err
+		// Keep the scratch file and say where it is. visudo semantics are the
+		// claim this command makes, and applyConfig can fail for reasons that
+		// have nothing to do with the edit -- a 2s RPC deadline, a revoke that
+		// landed mid-session -- so silently deleting the operator's work is the
+		// one outcome that is never right.
+		keep = true
+		return fmt.Errorf("%w (your edit is kept at %s)", err, tmpPath)
 	}
 	fmt.Fprintf(c.out, "config saved (sha256 %s)\n", shortHex(fmt.Sprintf("%x", sha256.Sum256(after))))
 
@@ -174,7 +186,12 @@ func (c *ctl) applyConfig(ctx context.Context, configPath string, content []byte
 		// an edit it rejected.
 		return fmt.Errorf("applying the edited config: %w", err)
 	}
-	if err := home.AtomicWrite(configPath, content); err != nil {
+	// The home may not exist yet: on a per-user host where the daemon has never
+	// run, this is the first thing to create it.
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		return fmt.Errorf("preparing %s: %w", filepath.Dir(configPath), err)
+	}
+	if err := home.AtomicWrite(configPath, content, 0o600); err != nil {
 		return fmt.Errorf("applying the edited config: %w", err)
 	}
 	return nil

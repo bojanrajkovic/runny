@@ -111,3 +111,47 @@ func TestConfigBytesDoesNotDisguiseAnUnreadableConfigAsAbsent(t *testing.T) {
 		}
 	}
 }
+
+// setConfigClient stubs the write side. Unavailable is what a stopped daemon
+// looks like, which is the branch that writes to disk.
+type setConfigClient struct {
+	runnyv1.RunnyServiceClient
+	err error
+}
+
+func (c *setConfigClient) SetConfig(ctx context.Context, in *runnyv1.SetConfigRequest, opts ...grpc.CallOption) (*runnyv1.SetConfigResponse, error) {
+	return &runnyv1.SetConfigResponse{}, c.err
+}
+
+// A per-user host where the daemon has never run has no ~/.runny at all, and
+// edit-config is what creates it. Without this the fallback write fails on a
+// directory that does not exist -- after the operator has already done the edit.
+func TestApplyConfigCreatesTheHomeWhenTheDaemonIsDown(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "never-ran", "config.yaml")
+	c := &ctl{client: &setConfigClient{err: status.Error(codes.Unavailable, "connection refused")}}
+
+	if err := c.applyConfig(t.Context(), configPath, []byte("pools: []\n")); err != nil {
+		t.Fatalf("applyConfig: %v", err)
+	}
+	on, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("config was not written: %v", err)
+	}
+	if string(on) != "pools: []\n" {
+		t.Errorf("config = %q, want the bytes passed in", on)
+	}
+}
+
+// A daemon that answers and REFUSES must not be written around -- that would
+// apply an edit it rejected.
+func TestApplyConfigDoesNotWriteBehindARefusingDaemon(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	c := &ctl{client: &setConfigClient{err: status.Error(codes.PermissionDenied, "revoked")}}
+
+	if err := c.applyConfig(t.Context(), configPath, []byte("pools: []\n")); err == nil {
+		t.Fatal("expected the refusal to propagate")
+	}
+	if _, err := os.Stat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("config was written despite the daemon refusing (stat err %v)", err)
+	}
+}

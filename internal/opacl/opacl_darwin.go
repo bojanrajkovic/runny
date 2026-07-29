@@ -59,6 +59,7 @@ import "C"
 
 import (
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"slices"
 	"strconv"
@@ -121,14 +122,16 @@ func Revoke(ctx bounded.Context, homeDir, sock, username string) error {
 // (internal/socket's listen). The daemon re-creates the socket on every start,
 // so without this a restart would lock every operator out of their own daemon.
 //
-// This is the darwin analogue of the windows control channel's security
-// descriptor, which is likewise built from the operator set when the pipe is
-// created rather than inherited from anything. The operator set is read from
-// the home dir, which stays the single authority for who an operator is.
+// Windows needs no equivalent: its pipe has no filesystem node, and its
+// security descriptor is a coarse connect filter (the daemon's own SID plus a
+// restricted mask for Authenticated Users) rather than anything derived from
+// the operator set -- there, the per-RPC gate is the authorization tier. The
+// operator set is read from the home dir, which stays the single authority for
+// who an operator is.
 //
-// An operator whose identity no longer resolves to a name is skipped: chmod
-// addresses a principal by name, so there is nothing to stamp, and List already
-// reports such an entry with an empty user.
+// An operator whose identity no longer resolves to a name cannot be stamped --
+// chmod addresses a principal by name -- and is logged rather than dropped
+// quietly, because the consequence is that they are refused at connect().
 func StampSocket(ctx bounded.Context, homeDir, sock string) error {
 	ops, err := List(homeDir)
 	if err != nil {
@@ -136,6 +139,11 @@ func StampSocket(ctx bounded.Context, homeDir, sock string) error {
 	}
 	for _, op := range ops {
 		if op.User == "" {
+			// chmod addresses a principal by name, so there is nothing to
+			// stamp -- but this operator is refused at connect() until the
+			// next restart, which is not an outcome to reach silently.
+			slog.Warn("operator identity does not resolve to a name; they will be refused on the control socket",
+				"operator_id", op.ID, "socket", sock)
 			continue
 		}
 		if err := chmod(ctx, "+a", OperatorACE(op.User), sock); err != nil {

@@ -176,7 +176,7 @@ type Store struct {
 func (s Store) Dir(r *Record) (string, error) {
 	name := r.Started.UTC().Format("2006-01-02T15-04-05Z") + "-" + r.CycleID
 	dir := filepath.Join(s.SlotDir, name)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("creating cycle dir: %w", err)
 	}
 	return dir, nil
@@ -194,7 +194,7 @@ func (s Store) Write(r *Record) error {
 	if err != nil {
 		return fmt.Errorf("marshaling cycle record: %w", err)
 	}
-	if err := home.AtomicWrite(filepath.Join(dir, "cycle.json"), data); err != nil {
+	if err := home.AtomicWrite(filepath.Join(dir, "cycle.json"), data, 0o644); err != nil {
 		return err
 	}
 	if abs, err := filepath.Abs(dir); err == nil {
@@ -214,7 +214,7 @@ func (s Store) WriteArtifact(r *Record, name string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := home.AtomicWrite(filepath.Join(dir, name), data); err != nil {
+	if err := home.AtomicWrite(filepath.Join(dir, name), data, 0o644); err != nil {
 		return err
 	}
 	if !slices.Contains(r.Artifacts, name) {

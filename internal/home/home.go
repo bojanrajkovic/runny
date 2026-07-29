@@ -91,11 +91,13 @@ func (d Dir) String() string { return string(d) }
 // fails) with a random name (two writers must not collide on it), and is
 // removed whenever the rename does not consume it.
 //
-// It writes 0600 and does not chown: a caller writes into its OWN home, so the
-// file lands owned by whoever is entitled to it. That is the point on a system
-// home, where the daemon performs the write precisely so the config stays
-// daemon-owned no matter which operator authored the edit.
-func AtomicWrite(path string, data []byte) error {
+// It does not chown: a caller writes into its OWN home, so the file lands owned
+// by whoever is entitled to it. That is the point on a system home, where the
+// daemon performs the write precisely so the config stays daemon-owned no
+// matter which operator authored the edit. perm is explicit because the two
+// callers differ -- a config the operator never opens stays 0600, a cycle
+// artifact they do open is 0644 (see Ensure).
+func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
 	if err != nil {
 		return fmt.Errorf("creating a temp file beside %s: %w", path, err)
@@ -105,6 +107,17 @@ func AtomicWrite(path string, data []byte) error {
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return fmt.Errorf("writing %s: %w", tmpPath, err)
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return fmt.Errorf("setting the mode on %s: %w", tmpPath, err)
+	}
+	// Sync before the rename, or the promise above is only about THIS process
+	// dying: a rename can reach disk ahead of the bytes it points at, leaving a
+	// zero-length file where a whole one was.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("flushing %s: %w", tmpPath, err)
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("writing %s: %w", tmpPath, err)
@@ -181,17 +194,33 @@ func (d Dir) SlotCyclesDir(slot string) string { return filepath.Join(d.CyclesDi
 // user only (RunnyBar and runnyctl run as the same user; virtiofs shares
 // are exported by the daemon process itself).
 func (d Dir) Ensure() error {
-	for _, p := range []string{
-		string(d), d.LogsDir(), d.ImagesDir(), d.VMsDir(), d.CyclesDir(), d.RunnerCacheDir(),
+	for _, e := range []struct {
+		path string
+		perm os.FileMode
+	}{
+		// The home at 0700 is the boundary. logs/ and cycles/ are readable
+		// below it so an operator -- who reaches the home through its ACL entry
+		// and no further -- can open what `runnyctl why` and the docs point
+		// them at; they are inside a 0700 directory, so the home is still what
+		// gates them. images/, vms/ and cache/ stay closed: nothing points an
+		// operator at a VM disk, and prune reports them over the RPC.
+		//
+		// Mode bits are inert on windows, where the operator's inherited ACL
+		// entry does this job instead (internal/sysdaemon's icaclsHomeArgs).
+		{string(d), 0o700},
+		{d.LogsDir(), 0o755},
+		{d.CyclesDir(), 0o755},
+		{d.ImagesDir(), 0o700},
+		{d.VMsDir(), 0o700},
+		{d.RunnerCacheDir(), 0o700},
 	} {
-		if err := os.MkdirAll(p, 0o700); err != nil {
-			return fmt.Errorf("creating %s: %w", p, err)
+		if err := os.MkdirAll(e.path, e.perm); err != nil {
+			return fmt.Errorf("creating %s: %w", e.path, err)
 		}
-		// Tighten dirs created by an older runny too (MkdirAll leaves
-		// existing modes alone). The root at 0o700 is the boundary that
-		// matters; the rest is defense in depth.
-		if err := os.Chmod(p, 0o700); err != nil {
-			return fmt.Errorf("tightening %s: %w", p, err)
+		// Re-assert on every start: MkdirAll leaves an existing directory's
+		// mode alone, including one an older runny created at 0700.
+		if err := os.Chmod(e.path, e.perm); err != nil {
+			return fmt.Errorf("setting the mode on %s: %w", e.path, err)
 		}
 	}
 	return nil

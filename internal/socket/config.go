@@ -49,7 +49,7 @@ func (s *Server) GetConfig(_ context.Context, _ *runnyv1.GetConfigRequest) (*run
 // runny.proto for why a parser gate here would re-break upgrade-daemon's
 // forward-only edit.
 func (s *Server) SetConfig(_ context.Context, req *runnyv1.SetConfigRequest) (*runnyv1.SetConfigResponse, error) {
-	if err := home.AtomicWrite(s.HomeDir.ConfigPath(), req.Content); err != nil {
+	if err := home.AtomicWrite(s.HomeDir.ConfigPath(), req.Content, 0o600); err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
 	return &runnyv1.SetConfigResponse{}, nil

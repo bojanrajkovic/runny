@@ -138,13 +138,15 @@ their job).
    ahead of the sweep that would free it (ADR-0014, config reload). The sweep runs only on
    the real-startup path under the lock; `-doctor` stays read-only, and an
    explicit `-doctor -config <path>` diagnoses *that* deployment's home
-   (`cmd/runnyd`'s `doctorHome`), not the invoker's own. Read-only is
-   enforced, not merely intended: `-doctor` opens no log file at all (its
-   output goes to the console — `openLogSink`) and resolves the runner-name
-   prefix through the non-generating accessor when the home is not its own
-   (`checkRunnerNamespace`), so it can neither append to nor rotate a live
-   daemon's log, nor persist an `instance-id` the diagnosed daemon would then
-   be unable to read.
+   (`cmd/runnyd`'s `doctorHome`), not the invoker's own. Read-only means
+   **writes nothing, to any home, ever** — not "nothing to a home that isn't
+   yours". `-doctor` skips `Dir.Ensure` (scaffolding and re-moding is a
+   *repair*, which a diagnostic reports rather than performs), opens no log
+   file at all (output goes to the console — `openLogSink`), and resolves the
+   runner-name prefix through the non-generating accessor
+   (`checkRunnerNamespace`). So it can neither append to nor rotate a live
+   daemon's log, nor persist an `instance-id` — which, created by the wrong
+   account, the diagnosed daemon would then be unable to read.
 2. **Validate**: the doctor suite (the check inventory lives in
    `cmd/runnyd`'s `makeDoctor`; `runnyd -doctor` prints it, and it includes
    a `config-drift` check against the running config, and a Darwin-only

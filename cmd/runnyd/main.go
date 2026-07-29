@@ -96,15 +96,18 @@ func run(parent context.Context) error {
 	if err := systemHomeOwnershipError(dir, runningAsManagedService(), systemHomeErr == nil); err != nil {
 		return err
 	}
-	dir, diagnosingOtherHome := doctorHome(*checkOnly, *configFlag, dir)
+	dir = doctorHome(*checkOnly, *configFlag, dir)
 	// Computed once here rather than re-derived at each of its two other
 	// use sites (the upgrade notice below, and Server.IsSystemDaemon) —
 	// each doing its own dir.String() == home.SystemHomeDir comparison.
 	isSystemDaemon := dir.String() == home.SystemHomeDir
-	// Skipped when diagnosing another deployment's home (see doctorHome):
-	// -doctor is documented read-only, and scaffolding or chmod'ing a home
-	// that isn't the caller's own would break that promise.
-	if !diagnosingOtherHome {
+	// Skipped for every -doctor run, not just one pointed at another
+	// deployment: scaffolding and re-moding is a REPAIR, which a read-only
+	// diagnostic must report rather than perform. Nothing is lost on a home
+	// that does not exist yet — the config load below fails there regardless,
+	// so the only thing Ensure accomplished was leaving an empty skeleton
+	// behind.
+	if !*checkOnly {
 		if err := dir.Ensure(); err != nil {
 			return err
 		}
@@ -217,7 +220,7 @@ func run(parent context.Context) error {
 		return err
 	}
 
-	doctor := makeDoctor(dir, configPath, cfg, distinctClients, diagnosingOtherHome)
+	doctor := makeDoctor(dir, configPath, cfg, distinctClients, *checkOnly)
 	if *checkOnly {
 		return runDoctor(doctor) // read-only: runs fine alongside a live daemon
 	}
@@ -1133,8 +1136,9 @@ type ghKey struct {
 }
 
 // readOnlyHome is threaded down to checkRunnerNamespace, the one check that
-// writes: see its doc comment. Every caller but `-doctor -config <other home>`
-// passes false.
+// writes: see its doc comment. True for every -doctor run; the startup pass and
+// the reload preflight, which are the daemon acting on its own home, pass
+// false.
 func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*github.Client, readOnlyHome bool) func(context.Context) []socket.DoctorCheck {
 	return func(ctx context.Context) []socket.DoctorCheck {
 		var checks []socket.DoctorCheck

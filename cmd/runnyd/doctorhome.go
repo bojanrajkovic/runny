@@ -22,15 +22,17 @@ import (
 // resolved as-is, which already falls back to an operator's own ~/.runny
 // when they don't own an installed system home.
 //
-// diagnosingOther reports whether dir was pinned to a named deployment that
-// may not be the caller's own — the caller must skip any write (Dir.Ensure,
-// namely) when true: -doctor is documented read-only, and MkdirAll+Chmod'ing
-// another deployment's home (or a permission error attempting to, for an
-// operator without chmod rights on it) would break that promise the moment
-// -config points elsewhere.
-func doctorHome(checkOnly bool, configFlag string, resolved home.Dir) (dir home.Dir, diagnosingOther bool) {
+// It deliberately reports only WHICH home, not whether that home is the
+// caller's own. An earlier shape returned a "diagnosing someone else's home"
+// flag and the writes were gated on it, which made the read-only contract true
+// for -config and false for a bare -doctor — the caller's own home was still
+// scaffolded, re-moded and given an instance-id. Whose home it is turns out not
+// to be the interesting question: -doctor writes to no home at all, so checkOnly
+// alone gates every write and there is nothing left for a second return value
+// to decide.
+func doctorHome(checkOnly bool, configFlag string, resolved home.Dir) home.Dir {
 	if checkOnly && configFlag != "" {
-		return home.Dir(filepath.Dir(configFlag)), true
+		return home.Dir(filepath.Dir(configFlag))
 	}
-	return resolved, false
+	return resolved
 }

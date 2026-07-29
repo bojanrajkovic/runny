@@ -158,10 +158,10 @@ func TestInstanceIDIsGroupAndWorldReadable(t *testing.T) {
 	}
 }
 
-// The class guard, not a per-write assertion: a read-only doctor pass must
-// leave the diagnosed home byte-identical. This is what catches the NEXT
-// write added to a check — the failure mode that produced this bug, where the
-// diagnosingOther guard was honoured at one site and two others grew past it.
+// The class guard, not a per-write assertion: a doctor pass must leave the
+// diagnosed home byte-identical. This is what catches the NEXT write added to
+// a check — the failure mode that produced this bug, where the read-only guard
+// was honoured at one site and two others grew past it.
 func TestDoctorSuiteWritesNothingToAReadOnlyHome(t *testing.T) {
 	dir, configPath := seedDiagnosableHome(t)
 	// Built in Go rather than loaded: the suite needs at least one pool (a

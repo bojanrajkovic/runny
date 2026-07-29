@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -48,7 +49,21 @@ func (c *ctl) upgradeDaemon(ctx context.Context, force bool, opts followOpts) er
 	if err != nil {
 		return err
 	}
-	v, err := testconfig.RunTestConfig(ctx, runnyd, dir.ConfigPath())
+	// Validate a COPY, not the live file. `runnyd -test-config` runs as the
+	// operator, and on a system home the operator cannot open config.yaml (0600
+	// and daemon-owned) — so the bytes come over the
+	// control channel and land somewhere this process can read. The gate must
+	// run the NEW binary, so it cannot be delegated to the running daemon.
+	content, err := c.configBytes(ctx, dir.ConfigPath())
+	if err != nil {
+		return err
+	}
+	configCopy, err := stageConfigCopy(content)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(configCopy)
+	v, err := testconfig.RunTestConfig(ctx, runnyd, configCopy)
 	if err != nil {
 		return err
 	}

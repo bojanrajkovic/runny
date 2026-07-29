@@ -933,16 +933,13 @@ func preflightReload(ctx context.Context, dir home.Dir, configPath string) (sha 
 //   - competing-registration is orthogonal to whether the new config is valid:
 //     a leftover per-user agent must not refuse a reload, so it becomes a
 //     warning (like local-network).
-//   - private-key-perms is an App-key hygiene warning, not a validity failure:
-//     a loose-perms key still authenticates, so it must not refuse a reload —
-//     a warning, like the two above (see failedChecks for the full reasoning).
 func splitPreflightChecks(checks []socket.DoctorCheck) (failed, warnings []socket.DoctorCheck) {
 	for _, c := range checks {
 		if c.OK {
 			continue
 		}
 		switch c.Name {
-		case "local-network", "competing-registration", privateKeyPermsCheck:
+		case "local-network", "competing-registration":
 			warnings = append(warnings, c)
 		case "disk-headroom":
 			c.Detail += " (measured with guests running; the respawn sweeps clones before re-checking — free space or retry)"
@@ -970,18 +967,13 @@ func splitPreflightChecks(checks []socket.DoctorCheck) (failed, warnings []socke
 //     deny — is surfaced loudly (an Error log + a red `runnyctl doctor`/status)
 //     but must not refuse boot, since foreground and launchd starts are fine and
 //     even a denied daemon should run and report the cause rather than crash-loop.
-//   - private-key-perms: a group/world-readable App key is a security-hygiene
-//     warning, not an operational blocker — the daemon still authenticates with
-//     it. The exit gate (localConfigChecks) does not check perms, so gating here
-//     would let a mid-drain edit be green-lit by the exit gate then refused by
-//     the respawn child (no daemon). Advisory, like competing-registration.
 //
 // All stay visible via `runnyctl doctor`, just not as a startup gate.
 func failedChecks(checks []socket.DoctorCheck) []socket.DoctorCheck {
 	var out []socket.DoctorCheck
 	for _, c := range checks {
 		if !c.OK && c.Name != "config-drift" && c.Name != "local-network" &&
-			c.Name != "competing-registration" && c.Name != privateKeyPermsCheck {
+			c.Name != "competing-registration" {
 			out = append(out, c)
 		}
 	}
@@ -1145,7 +1137,6 @@ func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*gi
 		// guests only; linux pools are bounded by memory, not licensing. Both
 		// are shared with the exit gate (pure-local, deterministic).
 		checks = append(checks, checkRunnerNamespace(dir, cfg), checkMacOSGuestCap(cfg))
-		checks = append(checks, checkPrivateKeyPerms(cfg))
 
 		// Local Network (TCC): a self-daemonized / reparented runnyd (one launchd
 		// did not start) is silently denied vmnet access, so guest dials fail "no
@@ -1160,7 +1151,7 @@ func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*gi
 			// A per-user runnyd agent co-registered with this system daemon is the one
 			// cross-shape conflict the ownership model no longer auto-resolves — surface
 			// it loudly here so a headless operator can spot it in one command.
-			checks = append(checks, checkCompetingRegistration(ctx, dir, configPath))
+			checks = append(checks, checkCompetingRegistration(ctx, dir))
 		}
 
 		for _, gh := range clients {

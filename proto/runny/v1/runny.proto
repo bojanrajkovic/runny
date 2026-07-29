@@ -47,11 +47,13 @@ service RunnyService {
   // and arm a DEBUG hold for job end. In DEBUG: extend the hold / add a
   // key. Per-guest, per-cycle: the key dies at teardown.
   rpc InjectDebugKey(InjectDebugKeyRequest) returns (InjectDebugKeyResponse);
-  // Grant another account operator status on the control socket: an
-  // inheriting ACL entry on the home dir (future artifacts) and the live
-  // socket (immediate). No root, no restart — the daemon owns its home.
-  // Authorization is reaching this RPC at all (an existing operator).
-  // System-daemon deployments only; a per-user home has a single owner.
+  // Grant another account operator status on the control socket: an ACL
+  // entry on the home DIRECTORY (and, on darwin, the live socket, which
+  // exists already and so inherits nothing). Whether that entry inherits is
+  // per-platform and is what makes revoke total on each — see internal/opacl.
+  // No root, no restart — the daemon owns its home. Authorization is reaching
+  // this RPC at all (an existing operator). System-daemon deployments only;
+  // a per-user home has a single owner.
   rpc GrantOperator(GrantOperatorRequest) returns (OperatorMutation);
   // Revoke an account's operator status. Refuses to remove the last
   // operator (recover via `install-daemon`). Takes effect on the very next
@@ -67,6 +69,30 @@ service RunnyService {
   // is held by a live slot are never removed. Defaults to dry-run (apply=false).
   // Pre-feature daemons return Unimplemented.
   rpc Prune(PruneRequest) returns (PruneResponse);
+  // Read the daemon's config.yaml verbatim. The operator's ACL entry stops
+  // at the home DIRECTORY and never reaches the file, so on a system home
+  // this is the only way an operator sees its own config — `edit-config`
+  // seeds its editor from here and `upgrade-daemon` validates these bytes
+  // against the new binary. NotFound when no config exists yet; that is a
+  // distinct answer from a read the operator is not allowed to attempt,
+  // and clients must not collapse the two (seeding an editor from a blank
+  // skeleton because the file was unreadable destroys a working config).
+  // Pre-feature daemons return Unimplemented.
+  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
+  // Replace config.yaml with content, atomically. The daemon does the write,
+  // so the file ends up owned by the daemon at the daemon's mode no matter
+  // which operator authored the edit.
+  //
+  // It deliberately does NOT validate. The running binary's parser is the
+  // wrong authority: `upgrade-daemon` exists to move a config forward past
+  // what the running binary accepts, which is why UpgradeReload can defer a
+  // parse failure to the respawn target. A parser gate here would re-break
+  // that. Validation stays where it already is — client-side against the
+  // binary being upgraded TO, and daemon-side in Reload's exit gate, which
+  // holds the exit rather than respawning onto a config that will not load.
+  // Writing does not reload; call Reload after.
+  // Pre-feature daemons return Unimplemented.
+  rpc SetConfig(SetConfigRequest) returns (SetConfigResponse);
 }
 
 // SlotState mirrors internal/statemachine; the FSM is the authority (ADR-0004).
@@ -617,3 +643,22 @@ message Operator {
   // identity is numeric and carried in uid.
   string sid = 5;
 }
+
+message GetConfigRequest {}
+
+message GetConfigResponse {
+  // The config file's bytes, verbatim. Raw bytes rather than a parsed
+  // document because a human reads and re-edits what this returns:
+  // comments, key order, quoting and the yaml-language-server modeline all
+  // have to survive the round trip. install-daemon's staging holds the same
+  // line for the same reason (literal byte substitution, not a re-marshal).
+  bytes content = 1;
+}
+
+message SetConfigRequest {
+  // The complete replacement file. Not a patch: the caller round-trips
+  // GetConfig's bytes through an editor and sends back the whole result.
+  bytes content = 1;
+}
+
+message SetConfigResponse {}

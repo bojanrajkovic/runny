@@ -93,13 +93,25 @@ func TestInstallPlan(t *testing.T) {
 		}
 	}
 
-	// Home: 0700 + the dual inheriting ACL.
+	// Home: 0700, an inheriting service entry, and a home-dir-only operator entry.
 	if !exactCall(r.calls, "/bin/chmod", "0700", home.SystemHomeDir) {
 		t.Error("missing chmod 0700 on the home")
 	}
-	if !exactCall(r.calls, "/bin/chmod", "-R", "+a", opacl.OperatorACE(testOperator), home.SystemHomeDir) {
-		t.Error("missing operator ACE (recursive)")
+	// NOT recursive: the operator entry does not inherit, so stamping it down
+	// the tree would write standalone copies onto every existing artifact —
+	// copies a later revoke of the home dir could not reach.
+	if !exactCall(r.calls, "/bin/chmod", "+a", opacl.OperatorACE(testOperator), home.SystemHomeDir) {
+		t.Error("missing operator ACE (home dir only)")
 	}
+	for _, c := range r.calls {
+		if len(c) == 5 && c[0] == "/bin/chmod" && c[1] == "-R" && c[2] == "+a" && c[3] == opacl.OperatorACE(testOperator) {
+			t.Error("the operator ACE must not be stamped recursively")
+		}
+	}
+	// Recursive, and it must stay that way: chmod -R -N above strips every
+	// descendant's ACL, and darwin's chown is not recursive, so a reinstall over
+	// a populated home leaves operator-owned files (config.yaml, the App key)
+	// that the daemon reaches ONLY through this entry.
 	if !exactCall(r.calls, "/bin/chmod", "-R", "+a", serviceACE("_runny"), home.SystemHomeDir) {
 		t.Error("missing service ACE (recursive)")
 	}

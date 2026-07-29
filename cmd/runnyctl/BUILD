@@ -131,6 +131,7 @@ go_test(
     name = "runnyctl_test",
     srcs = [
         "dial_windows_test.go",
+        "editconfig_test.go",
         "follow_test.go",
         "image_test.go",
         "installdaemon_test.go",

@@ -9,8 +9,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/testconfig"
@@ -23,13 +27,46 @@ const configSkeleton = `# yaml-language-server: $schema=https://raw.githubuserco
 pools: []
 `
 
+// configBytes reads the resolved home's config.yaml. The daemon is asked
+// first and on a system home is the only thing that can answer: config.yaml is
+// 0600 and daemon-owned, and on darwin the operator's ACL entry stops at the
+// home directory, so the operator cannot open the file itself. A direct read is the fallback for a daemon that is down or predates
+// GetConfig — which is the ordinary path for a per-user home, whose owner is
+// the operator anyway.
+//
+// os.ErrNotExist means, and only means, "there is no config". Callers seed a
+// blank skeleton from it, so a read that FAILED must never arrive wearing that
+// error: applying a skeleton over a live fleet's config destroys it. When both
+// attempts fail, both reasons are reported — the daemon being down and the
+// file being unreadable have different fixes.
+func (c *ctl) configBytes(ctx context.Context, path string) ([]byte, error) {
+	rctx, cancel := context.WithTimeout(ctx, probeCallTimeout)
+	defer cancel()
+	resp, rpcErr := c.client.GetConfig(rctx, &runnyv1.GetConfigRequest{})
+	switch status.Code(rpcErr) {
+	case codes.OK:
+		return resp.Content, nil
+	case codes.NotFound:
+		return nil, fmt.Errorf("%s: %w", path, os.ErrNotExist)
+	}
+	b, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		return b, nil
+	case errors.Is(err, os.ErrNotExist):
+		return nil, err
+	}
+	return nil, fmt.Errorf("the daemon could not be asked for its config (%v) and reading %s directly failed: %w",
+		rpcErr, path, err)
+}
+
 // editConfig is `runnyctl edit-config` — visudo semantics for the resolved
 // home's config.yaml: edit a temp copy, validate it with `runnyd -test-config`
 // (reopening the editor on the operator's edits on failure, never discarding
-// them), atomically swap it in only once it validates, then reload the running
-// daemon (or report it applies on next start). Works for both the per-user and
-// system home — the operator reaches the system home via its inheriting ACL,
-// so no sudo is needed either way.
+// them), swap it in only once it validates, then reload the running daemon (or
+// report it applies on next start). Works for both the per-user and system
+// home, with no sudo either way: on a system home the daemon reads and writes
+// the file on the operator's behalf, so the operator needs no access to it.
 func (c *ctl) editConfig(ctx context.Context) error {
 	dir, err := home.ResolveClient()
 	if err != nil {
@@ -42,30 +79,29 @@ func (c *ctl) editConfig(ctx context.Context) error {
 		return err
 	}
 
-	seed, err := os.ReadFile(configPath)
+	seed, err := c.configBytes(ctx, configPath)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("reading %s: %w", configPath, err)
+			return err
 		}
 		seed = []byte(configSkeleton)
 	}
 
-	if err := os.MkdirAll(dir.String(), 0o700); err != nil {
-		return fmt.Errorf("preparing %s: %w", dir, err)
-	}
-	tmp, err := os.CreateTemp(dir.String(), ".config.yaml.*.tmp")
+	// The scratch copy lives in the operator's own temp dir, not the daemon's
+	// home: the edit round-trips through RPCs, so the editing itself needs no
+	// write access to the home at all.
+	tmpPath, err := stageConfigCopy(seed)
 	if err != nil {
-		return fmt.Errorf("creating a temp file in %s: %w", dir, err)
+		return err
 	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath) // no-op once renamed onto configPath below
-	if _, err := tmp.Write(seed); err != nil {
-		tmp.Close()
-		return fmt.Errorf("seeding the temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("seeding the temp file: %w", err)
-	}
+	// Removed unless the apply failed, in which case it is the only copy of
+	// what the operator wrote.
+	keep := false
+	defer func() {
+		if !keep {
+			os.Remove(tmpPath)
+		}
+	}()
 
 	var after []byte
 	for {
@@ -107,8 +143,14 @@ func (c *ctl) editConfig(ctx context.Context) error {
 		break
 	}
 
-	if err := os.Rename(tmpPath, configPath); err != nil {
-		return fmt.Errorf("applying the edited config: %w", err)
+	if err := c.applyConfig(ctx, configPath, after); err != nil {
+		// Keep the scratch file and say where it is. visudo semantics are the
+		// claim this command makes, and applyConfig can fail for reasons that
+		// have nothing to do with the edit -- a 2s RPC deadline, a revoke that
+		// landed mid-session -- so silently deleting the operator's work is the
+		// one outcome that is never right.
+		keep = true
+		return fmt.Errorf("%w (your edit is kept at %s)", err, tmpPath)
 	}
 	fmt.Fprintf(c.out, "config saved (sha256 %s)\n", shortHex(fmt.Sprintf("%x", sha256.Sum256(after))))
 
@@ -120,6 +162,64 @@ func (c *ctl) editConfig(ctx context.Context) error {
 		return nil
 	}
 	return c.reloadWait(ctx, "runnyctl edit-config", c.plainReload, defaultFollowOpts(90*time.Second, 0))
+}
+
+// applyConfig persists the edited bytes. The daemon writes them when it can,
+// which is what keeps config.yaml owned by the daemon rather than by whichever
+// operator edited last — an operator cannot chown a file to the service
+// account, so a rename from the client is a one-way door on ownership.
+//
+// The direct write is the fallback for a daemon that is down or predates
+// SetConfig. On a system home it will fail for anyone but the file's owner,
+// and that is the intended shape: recovery for a stopped system daemon is
+// `sudo runnyctl install-daemon --config`, not a hand-write into its home.
+func (c *ctl) applyConfig(ctx context.Context, configPath string, content []byte) error {
+	rctx, cancel := context.WithTimeout(ctx, probeCallTimeout)
+	defer cancel()
+	_, err := c.client.SetConfig(rctx, &runnyv1.SetConfigRequest{Content: content})
+	switch status.Code(err) {
+	case codes.OK:
+		return nil
+	case codes.Unavailable, codes.Unimplemented:
+	default:
+		// The daemon answered and refused. Writing behind its back would apply
+		// an edit it rejected.
+		return fmt.Errorf("applying the edited config: %w", err)
+	}
+	// The home may not exist yet: on a per-user host where the daemon has never
+	// run, this is the first thing to create it.
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		return fmt.Errorf("preparing %s: %w", filepath.Dir(configPath), err)
+	}
+	if err := home.AtomicWrite(configPath, content, 0o600); err != nil {
+		return fmt.Errorf("applying the edited config: %w", err)
+	}
+	return nil
+}
+
+// stageConfigCopy writes config bytes to a scratch file this process owns and
+// returns its path; the caller removes it. Both callers need the same thing —
+// a config on a path the operator can read, because the daemon's own copy is
+// not one they can open. Validation is not path-sensitive: home.ParseConfig
+// takes the path for error messages only, and private_key_path is read
+// verbatim rather than resolved against the config's directory, so a copy
+// anywhere validates identically to the original.
+func stageConfigCopy(content []byte) (string, error) {
+	tmp, err := os.CreateTemp("", "runny-config-*.yaml")
+	if err != nil {
+		return "", fmt.Errorf("creating a temp file: %w", err)
+	}
+	if _, werr := tmp.Write(content); werr != nil {
+		err = werr
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(tmp.Name())
+		return "", fmt.Errorf("staging a config copy: %w", err)
+	}
+	return tmp.Name(), nil
 }
 
 // openEditor runs $VISUAL, else $EDITOR, else vi on path, connected to the

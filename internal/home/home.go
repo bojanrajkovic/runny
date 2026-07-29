@@ -28,8 +28,8 @@ const socketName = "runnyd.sock"
 // exists and is OWNED by this process's uid — the system-daemon deployment, run
 // as the dedicated service account that owns the installer-created tree (a
 // home-less account never needs $HOME) — else the per-user ~/.runny. Ownership,
-// not writability, is the signal: the operator account holds an inheriting ACL
-// granting it dir-write (to land the App key and atomically edit config), so a
+// not writability, is the signal: the operator account holds an ACL entry
+// granting it dir-write (to land the App key and reach the socket), so a
 // writability test would ALSO pass for an operator who runs runnyd by hand,
 // letting a per-user daemon bind the system socket and stomp the real daemon's
 // home. Only the owning account is the system daemon; everyone else falls back
@@ -46,8 +46,8 @@ func resolveServer(systemDir string) (Dir, error) {
 // ResolveClient returns the home runnyctl and other clients read and dial:
 // SystemHomeDir when it EXISTS, else the per-user ~/.runny. Existence is the
 // client signal — neither ownership (the operator reaches a system daemon's home
-// through an inheriting ACL, never owning it) nor a connect probe: it selects
-// WHICH home; the dial/read then reports a dead or unreadable one.
+// through an ACL entry on the directory, never owning it) nor a connect probe:
+// it selects WHICH home; the dial/read then reports a dead or unreadable one.
 func ResolveClient() (Dir, error) { return resolveClient(SystemHomeDir) }
 
 func resolveClient(systemDir string) (Dir, error) {
@@ -84,6 +84,63 @@ func resolvePerUser() (Dir, error) {
 
 func (d Dir) String() string { return string(d) }
 
+// AtomicWrite writes data to path via a sibling temp file and a rename, so a
+// crash or a failed write can never leave a torn file where a whole one was —
+// a half-written config.yaml is a daemon that will not restart. The temp file
+// is created in the destination's own directory (a rename across filesystems
+// fails) with a random name (two writers must not collide on it), and is
+// removed whenever the rename does not consume it.
+//
+// It does not chown: a caller writes into its OWN home, so the file lands owned
+// by whoever is entitled to it. That is the point on a system home, where the
+// daemon performs the write precisely so the config stays daemon-owned no
+// matter which operator authored the edit. perm is explicit because the two
+// callers differ -- a config the operator never opens stays 0600, a cycle
+// artifact they do open is 0644 (see Ensure).
+func AtomicWrite(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating a temp file beside %s: %w", path, err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op once the rename below consumes it
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("writing %s: %w", tmpPath, err)
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return fmt.Errorf("setting the mode on %s: %w", tmpPath, err)
+	}
+	// Sync before the rename, or the promise above is only about THIS process
+	// dying: a rename can reach disk ahead of the bytes it points at, leaving a
+	// zero-length file where a whole one was.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("flushing %s: %w", tmpPath, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("writing %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("placing %s: %w", path, err)
+	}
+	// The fsync above makes the BYTES durable; the rename is a change to the
+	// parent DIRECTORY, and its entry can still be sitting in the page cache.
+	// Without this, power loss right after a successful return leaves the data
+	// safely on disk under the temp name and no config.yaml pointing at it.
+	//
+	// Best-effort: windows has no POSIX directory fsync, and a failure here is
+	// never a failed write -- the rename has already succeeded and the caller's
+	// data is in place. What is lost is durability across power loss, on a
+	// platform that does not offer it.
+	if d, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
+}
+
 func (d Dir) ConfigPath() string { return filepath.Join(string(d), "config.yaml") }
 func (d Dir) LockPath() string   { return filepath.Join(string(d), "runnyd.lock") }
 func (d Dir) LogsDir() string    { return filepath.Join(string(d), "logs") }
@@ -97,7 +154,9 @@ func (d Dir) CyclesDir() string  { return filepath.Join(string(d), "cycles") }
 // file. The system daemon runs as a service account whose home is /var/empty,
 // so the default ~/.docker/config.json is both absent and unwritable by the
 // operator; pointing DOCKER_CONFIG here puts the credential somewhere the
-// operator can author (the home's inheriting ACL) and the daemon can read.
+// operator can author (they create the directory under their home-directory
+// grant, and own what they create) and the daemon can read (its own entry
+// inherits).
 // Deliberately NOT a copy of the operator's own credential — a copy goes stale
 // on rotation with nothing to notice; the file here is the one source, re-read
 // on every pull attempt.
@@ -141,24 +200,47 @@ func (d Dir) VMDir(slot string) string { return filepath.Join(d.VMsDir(), slot) 
 // SlotCyclesDir holds the per-cycle artifact dirs for one slot.
 func (d Dir) SlotCyclesDir(slot string) string { return filepath.Join(d.CyclesDir(), slot) }
 
-// Ensure creates the directory skeleton owner-only throughout: the tree
-// holds credentials-adjacent material end to end — App key path in config,
-// the control socket, and post-mortem runner _diag logs that can contain
-// unmasked job secrets. Everything under it is read by the daemon's own
-// user only (RunnyBar and runnyctl run as the same user; virtiofs shares
-// are exported by the daemon process itself).
+// Ensure creates the directory skeleton. The HOME is owner-only and is the
+// boundary that matters: the tree holds credentials-adjacent material end to
+// end — App key path in config, the control socket, and post-mortem runner
+// _diag logs that can contain unmasked job secrets — and a 0700 home is what
+// keeps every one of them out of reach of anyone who is not the daemon or an
+// operator.
+//
+// Two directories below it are deliberately readable rather than owner-only,
+// which is not a relaxation of that: they sit INSIDE the 0700 home, so the same
+// principals reach them and no others. It is how an operator opens the logs and
+// cycle artifacts that `runnyctl why` and the docs point at, now that their ACL
+// entry stops at the home directory. On windows mode bits are inert and the
+// operator's inherited entry does this instead.
 func (d Dir) Ensure() error {
-	for _, p := range []string{
-		string(d), d.LogsDir(), d.ImagesDir(), d.VMsDir(), d.CyclesDir(), d.RunnerCacheDir(),
+	for _, e := range []struct {
+		path string
+		perm os.FileMode
+	}{
+		// The home at 0700 is the boundary. logs/ and cycles/ are readable
+		// below it so an operator -- who reaches the home through its ACL entry
+		// and no further -- can open what `runnyctl why` and the docs point
+		// them at; they are inside a 0700 directory, so the home is still what
+		// gates them. images/, vms/ and cache/ stay closed: nothing points an
+		// operator at a VM disk, and prune reports them over the RPC.
+		//
+		// Mode bits are inert on windows, where the operator's inherited ACL
+		// entry does this job instead (internal/sysdaemon's icaclsHomeArgs).
+		{string(d), 0o700},
+		{d.LogsDir(), 0o755},
+		{d.CyclesDir(), 0o755},
+		{d.ImagesDir(), 0o700},
+		{d.VMsDir(), 0o700},
+		{d.RunnerCacheDir(), 0o700},
 	} {
-		if err := os.MkdirAll(p, 0o700); err != nil {
-			return fmt.Errorf("creating %s: %w", p, err)
+		if err := os.MkdirAll(e.path, e.perm); err != nil {
+			return fmt.Errorf("creating %s: %w", e.path, err)
 		}
-		// Tighten dirs created by an older runny too (MkdirAll leaves
-		// existing modes alone). The root at 0o700 is the boundary that
-		// matters; the rest is defense in depth.
-		if err := os.Chmod(p, 0o700); err != nil {
-			return fmt.Errorf("tightening %s: %w", p, err)
+		// Re-assert on every start: MkdirAll leaves an existing directory's
+		// mode alone, including one an older runny created at 0700.
+		if err := os.Chmod(e.path, e.perm); err != nil {
+			return fmt.Errorf("setting the mode on %s: %w", e.path, err)
 		}
 	}
 	return nil

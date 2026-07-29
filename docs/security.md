@@ -185,7 +185,8 @@ equivalent is a per-user pipe whose name is derived from the resolved home (so
 two users' daemons never collide on, or squat, one pipe) and whose security
 descriptor grants connect to the owning user's SID alone. For the headless
 system daemon (below) it is owned by the `_runny` service account and reachable
-by the operator account through the home's inheriting ACL — intentional: that
+by the operator account through the home directory's ACL entry and a matching
+entry stamped on the socket itself at creation — intentional: that
 operator is the trusted administrator who landed the App key and edits the
 config, so it already holds that same transitive power. The audit trail is the
 accountability layer, not a second authorization tier.
@@ -209,11 +210,11 @@ attribution only, no new persisted audit trail.
 
 **The control socket may grant several operator accounts, on the system
 daemon.** An existing operator grants another via `runnyctl operator grant`:
-the daemon, which owns its home, adds an inheriting ACL entry for the new
-account to the home dir (future artifacts), and on darwin also to the live
-socket (no restart; the Windows control channel is a pipe with no file to
-stamp, so the home-dir ACE — which the gate reads — is the whole grant) —
-reaching the `GrantOperator`/`RevokeOperator` RPCs at all
+the daemon, which owns its home, adds an ACL entry for the new account to the
+home **directory** — one command against one object, on both platforms — and on
+darwin also to the live socket (no restart; the Windows control channel is a
+pipe with no file to stamp, so the home-dir ACE — which the gate reads — is the
+whole grant) — reaching the `GrantOperator`/`RevokeOperator` RPCs at all
 already means the caller is an operator, so granting another is transitive
 trust, not a new gate, the same posture ADR-0014 (debug-key injection) already established for
 debug-key injection. Grants are attributed in an `operator-grants.jsonl`
@@ -226,18 +227,31 @@ Windows reinstall does not reset it**: `icacls /inheritance:d` converts and
 keeps existing explicit entries, so a reinstall re-grants the named operator
 while preserving every other live grant
 ([ADR-0027](architecture-decisions/0027-windows-operator-identity.md)) —
-revocation, not reinstall, is the removal path there. Grant and revoke both
-target the home dir **and** `logs\`: the same `/inheritance:d` that makes
-reinstall non-resetting gave `logs\` its own explicit copy of the ACE rather
-than an inherited one, so a single-target grant would never reach the daemon's
-logs and a single-target revoke would leave access to them behind. On a fresh install those two are the
-only objects holding an explicit ACE, everything created later inheriting
-normally — but `install-daemon` re-run over a **populated** home applies its
-`/inheritance:d` and its grants recursively, stamping explicit ACEs onto
-existing descendants (`images\`, `vms\`, `cycles\`). On such a host a revoke
-reports success while leaving the operator's access on those descendants.
-Making the home dir the single ACL authority, and normalizing hosts already in
-that state, is outstanding. A root
+revocation, not reinstall, is the removal path there.
+
+**A revoke reaches every artifact, and the two platforms achieve that
+oppositely.** On **windows** the operator's entry inherits: windows keeps a
+non-protected child in sync with its parent's inheritable entries
+automatically, in both directions, so a single `/remove:g` against the home
+takes the entry off every descendant that inherited it. Nothing below the home
+is ever written to, and nothing below it is protected — which is what makes the
+home the single authority.
+
+On **darwin** inheritance is copy-at-create and cannot be undone that way: an
+inherited entry is a private copy that no later `chmod -a` against the home
+could reach, so a revoked operator would keep write on `images/`, `vms/` and
+`cycles/` forever. The operator entry there therefore does **not** inherit. It
+grants the home **directory** — the operator registry the revocation gate reads,
+plus the access needed to reach the control socket and land the App key — and
+artifacts are readable by mode instead (`logs/` and `cycles/` at `0755`, their
+files `0644`, inside a `0700` home).
+
+Reading and replacing `config.yaml` is a control-channel RPC on both, and the
+daemon performs the write: an operator cannot chown a file to the service
+account, so a client-side rename would be a one-way door on ownership
+([ADR-0020](architecture-decisions/0020-headless-system-daemon.md)). The service
+account's own entry inherits on both platforms — it is installed once, never
+revoked, and the daemon does need to reach what it writes. A root
 peer is refused as a grant target (root already bypasses the socket's
 `0600` mode and needs no ACE). Per-user deployments have a single owner and
 no ACL-managed set, so `operator grant`/`revoke` require the system daemon;
@@ -396,8 +410,8 @@ recognize such a config and report it.
 
 Config states that are *unusable rather than absent* are logged instead of
 silently downgrading the pull: a `config.json` that cannot be read (for the
-system daemon, usually the home's inheriting ACL not granting the service
-account read), one that cannot be parsed, and one holding the host's
+system daemon, usually the home's inherited service-account entry not reaching
+the file), one that cannot be parsed, and one holding the host's
 credential in a helper. Each still falls back to an anonymous pull, but a
 private pull that quietly goes anonymous otherwise resurfaces as a bare 401
 with no trace of the cause.
@@ -406,8 +420,9 @@ with no trace of the cause.
 service account whose home is `/var/empty`, so `~/.docker/config.json` is
 neither present for it nor writable by the operator. The **system daemon
 only** therefore defaults `DOCKER_CONFIG` to `<home>/docker` (an operator-set
-value still wins), which the home's inheriting ACL makes operator-writable and
-daemon-readable without `sudo`. A per-user agent is left on the standard
+value still wins). The operator creates that directory under their home-directory
+grant and owns what they create, so it is operator-writable; the daemon reads it
+through its own inherited entry, so no `sudo` is involved either way. A per-user agent is left on the standard
 `~/.docker` path: its home *is* the operator's, so redirecting it would hide
 the very credentials it is meant to use.
 
@@ -537,22 +552,24 @@ is auto-allowed Local Network access regardless of uid (Apple TN3179), so
 reaching guests needs neither a GUI prompt nor root.
 
 The daemon's entire state lives in `/Library/Application Support/runny`, owned by
-`_runny` at `0700`, nothing world- or group-accessible, with a **dual inheriting
-ACL** that is the access boundary:
+`_runny` at `0700`, nothing world- or group-accessible, with a **dual ACL** that
+is the access boundary:
 
-- the **operator** account gets directory write + read — edit `config.yaml`,
-  land the `private_key_path` App key, and read cycle artifacts without `sudo`,
-  and reach the control socket (above);
-- the **`_runny`** account gets read — so the daemon can read an operator-landed
-  `0600` config and key it does not own.
+- the **operator** account gets write on the home **directory** — land the
+  `private_key_path` App key, and reach the control socket (above). On darwin it
+  does **not** inherit (see above), so it reaches nothing beneath the directory;
+  config edits are RPCs and artifacts are reachable by mode
+  ([ADR-0020](architecture-decisions/0020-headless-system-daemon.md));
+- the **`_runny`** account gets read, and this one **does** inherit — so the
+  daemon can read an operator-landed `0600` config and key it does not own.
 
 The ACL overrides the `0700` POSIX mode for exactly those two principals (macOS
-evaluates an allow ACE ahead of the mode), and is inherited onto every file the
-daemon and operator create beneath the home; the socket stays `0600` plus that
-inherited ACL. The installer's account creation, home ownership, and the two
-ACEs are therefore load-bearing: a group-writable home or an over-broad ACE
-would widen who can drive the daemon, and a missing `_runny` read ACE would
-leave the daemon unable to read its own config and key.
+evaluates an allow ACE ahead of the mode); the socket stays `0600` plus an
+operator entry stamped from the operator set when the daemon creates it. The
+installer's account creation, home ownership, and the two ACEs are therefore
+load-bearing: a group-writable home or an over-broad ACE would widen who can
+drive the daemon, and a missing `_runny` read ACE would leave the daemon unable
+to read its own config and key.
 
 Two operator-trust assumptions underlie this, stated here so "true" and
 "stated" do not drift apart:
@@ -568,13 +585,16 @@ Two operator-trust assumptions underlie this, stated here so "true" and
   hardening, so a path that operator controls is not a new trust boundary.
 
 The operator's grant is **write** (connecting to the control socket requires
-write on the socket file, and that same inherited ACE covers every file under the
-home), so the operator can also modify or delete the daemon-written audit records
-(`operator-access.json`, cycle records). This is consistent with the model above
-— the operator already holds the App key and can disable hardening, so the audit
-trail is **visibility, not a tamper-proof tier** held against the operator; it
-records actions for later review, it does not defend against the operator who
-controls the daemon. Narrowing it is not possible without breaking the operator's
+write on the socket file). On darwin, where the entry stops at the home
+directory, the operator no longer holds write on the daemon-written audit
+records themselves (`operator-access.json`, cycle records) — though write on the
+*directory* still lets them displace its direct children, and they can read the
+records by mode. On windows the inherited entry still carries Modify onto them.
+Either way the conclusion is unchanged: the
+operator already holds the App key and can disable hardening, so the audit trail
+is **visibility, not a tamper-proof tier** held against the operator; it records
+actions for later review, it does not defend against the operator who controls
+the daemon. Narrowing it further is not possible without breaking the operator's
 own socket access.
 
 Uninstall **purges the home** (keeping only the `_runny` account), so no App key

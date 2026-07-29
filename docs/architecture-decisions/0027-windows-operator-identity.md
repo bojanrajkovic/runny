@@ -2,6 +2,16 @@
 
 **Status:** Accepted (2026-07-23)
 
+**Amended:** 2026-07-28 — the bootstrap's `(OI)(CI)M` below stands, but what it
+rests on is now stated: windows re-propagates a change to an inheritable entry
+to every NON-protected child, removals included, so the home is the only object
+grant and revoke ever write to. The install sequence therefore stops protecting
+children (see [ADR-0020](0020-headless-system-daemon.md)'s amendment of the same
+date, and `internal/sysdaemon`). The identity-string, impersonation
+peer-read, membership-rule and grant-target-exclusion halves are unchanged — the
+DACL is still where operator membership is read from, and `FILE_WRITE_DATA` is
+still the bit that defines it.
+
 **Amended:** 2026-07-23 — the peer-read half of this decision is reversed. The
 original plan kept the Windows peer read on the existing AF_UNIX socket via the
 `SIO_AF_UNIX_GETPEERPID` ioctl resolved through `OpenProcess` to the peer's

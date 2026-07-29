@@ -1,6 +1,6 @@
 // Package sysdaemon installs and removes runnyd as a non-root system
 // LaunchDaemon: a dedicated hidden service account, the system home with a dual
-// inheriting ACL, the launchd plist, and `launchctl bootstrap system` (#76). It
+// home ACL, the launchd plist, and `launchctl bootstrap system` (#76). It
 // is the privileged-once install that lets runnyd RUN unprivileged as a service
 // account — strictly better than a root LaunchDaemon. The pure pieces here
 // (plist, ACL specs, id allocation, path resolution) are testable without root;
@@ -48,7 +48,7 @@ const (
 // Everything else (Label, ServiceUser, ServiceGroup, the system home) is fixed
 // and lives in package consts, used directly rather than threaded through here.
 type Config struct {
-	Operator   string // the human operator account the inheriting ACL grants
+	Operator   string // the human operator account the home directory's ACL grants
 	RunnydPath string // absolute path the plist execs
 }
 

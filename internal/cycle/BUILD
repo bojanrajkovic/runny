@@ -5,6 +5,7 @@ go_library(
     srcs = ["cycle.go"],
     importpath = "github.com/bojanrajkovic/runny/internal/cycle",
     visibility = ["//:__subpackages__"],
+    deps = ["//internal/home"],
 )
 
 go_test(

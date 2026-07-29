@@ -6,6 +6,7 @@ import (
 
 	"github.com/bojanrajkovic/runny/internal/home"
 	"github.com/bojanrajkovic/runny/internal/launchd"
+	"github.com/bojanrajkovic/runny/internal/opacl"
 	"github.com/bojanrajkovic/runny/internal/socket"
 	"github.com/bojanrajkovic/runny/internal/sysdaemon"
 )
@@ -36,7 +37,7 @@ func competingRegistrationVerdict(systemHome, operatorResolved bool, guiTarget s
 	if !operatorResolved {
 		return socket.DoctorCheck{
 			Name: name, OK: false,
-			Detail: "couldn't determine the operator account (the owner of config.yaml) to probe for a competing per-user agent",
+			Detail: "couldn't determine the operator set (the home directory's ACL) to probe for a competing per-user agent",
 		}
 	}
 	switch reg {
@@ -63,18 +64,54 @@ func competingRegistrationVerdict(systemHome, operatorResolved bool, guiTarget s
 	}
 }
 
+// operatorIDs reads the operator set. It is the same registry the per-RPC
+// revocation gate and `runnyctl operator list` read -- the home directory's ACL
+// -- and it is a seam only so tests can drive the check without one. Overridden
+// in tests; production is opacl.ListIDs.
+var operatorIDs = opacl.ListIDs
+
 // checkCompetingRegistration gathers the facts and returns the verdict. Darwin-only
-// (launchctl); the caller gates on GOOS. The operator is the owner of config.yaml —
-// for a system-daemon home that file is operator-owned 0600, so its owner is the
-// account whose gui/ domain a leftover per-user agent would live in.
-func checkCompetingRegistration(ctx context.Context, dir home.Dir, configPath string) socket.DoctorCheck {
+// (launchctl); the caller gates on GOOS.
+//
+// It probes EVERY operator's gui/ domain, because a stale agent lives in exactly
+// one human's domain and nothing says which. The operator set comes from the
+// home's ACL: that is what "operator" means everywhere else in this daemon, and
+// it is the only source that stays correct as grants and revokes happen.
+//
+// It used to key on the OWNER of config.yaml instead, which was wrong in three
+// ways at once -- it saw one account where the question is about a set, so a
+// stale agent in a second operator's domain read as a confident green; the
+// owner need not be an operator at all, since ownership does not change when a
+// grant does; and once the daemon began writing config.yaml itself the owner
+// became the service account, which has no gui/ domain by construction and so
+// could only ever return "inconclusive". A check that cannot fail is worse than
+// no check.
+func checkCompetingRegistration(ctx context.Context, dir home.Dir) socket.DoctorCheck {
 	if dir.String() != home.SystemHomeDir {
 		return competingRegistrationVerdict(false, false, "", launchd.Indeterminate)
 	}
-	uid, err := fileOwnerUID(configPath)
-	if err != nil {
+	ids, err := operatorIDs(dir.String())
+	if err != nil || len(ids) == 0 {
 		return competingRegistrationVerdict(true, false, "", launchd.Indeterminate)
 	}
-	guiTarget := fmt.Sprintf("gui/%d/%s", uid, sysdaemon.Label)
-	return competingRegistrationVerdict(true, true, guiTarget, launchd.Probe(ctx, launchdRunner, guiTarget))
+	// A probe that could not answer is not a clean absence -- the agent could be
+	// in exactly the domain that refused -- so one inconclusive result outranks
+	// any number of clean ones. A registered agent outranks everything and stops
+	// the walk: it is already the answer, and the remediation names it.
+	inconclusive := ""
+	for _, id := range ids {
+		target := fmt.Sprintf("gui/%s/%s", id, sysdaemon.Label)
+		switch launchd.Probe(ctx, launchdRunner, target) {
+		case launchd.Registered:
+			return competingRegistrationVerdict(true, true, target, launchd.Registered)
+		case launchd.Indeterminate:
+			if inconclusive == "" {
+				inconclusive = target
+			}
+		}
+	}
+	if inconclusive != "" {
+		return competingRegistrationVerdict(true, true, inconclusive, launchd.Indeterminate)
+	}
+	return competingRegistrationVerdict(true, true, "", launchd.NotRegistered)
 }

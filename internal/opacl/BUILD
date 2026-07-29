@@ -69,6 +69,7 @@ go_test(
     name = "opacl_test",
     srcs = [
         "opacl_darwin_test.go",
+        "opacl_test.go",
         "opacl_windows_test.go",
     ],
     embed = [":opacl"],

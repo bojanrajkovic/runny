@@ -81,7 +81,7 @@ func TestCredentialsForMalformedConfigWarns(t *testing.T) {
 }
 
 // A config that is PRESENT but unreadable must warn, unlike an absent one.
-// In production this is the home's inheriting ACL failing to grant the service
+// In production this is the home's inherited service entry failing to reach the
 // account read: the pull silently downgrades to anonymous while the operator
 // sees a file they can read perfectly well themselves. Reproduced here with a
 // directory standing in for the file, which fails the read on every platform —

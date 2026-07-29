@@ -59,6 +59,7 @@ import "C"
 
 import (
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"slices"
 	"strconv"
@@ -100,12 +101,12 @@ func ListIDs(homeDir string) ([]string, error) {
 	return ids, nil
 }
 
-// Grant adds an inheriting operator ACE for username to homeDir (so every
-// subsequently created file and the NEXT socket inherit it) and directly to
-// sock (the current live socket, which already exists and so does not pick
-// up the dir's ACE by inheritance — inheritance is copy-at-create). Not
-// recursive: a grant only reaches artifacts from this point forward: see
-// docs/security.md's "no recursive re-stamp" sharp edge.
+// Grant adds the operator ACE for username to homeDir and to sock, the live
+// socket. Two targets, not because the ACE propagates — it does not inherit,
+// so it reaches nothing beneath the home — but because the socket is a
+// separate object the operator must be able to connect() to, and the daemon
+// re-derives its ACL from the operator set on every start (StampSocket). A
+// grant against a running daemon has to reach the socket that already exists.
 func Grant(ctx bounded.Context, homeDir, sock, username string) error {
 	return chmodBoth(ctx, "+a", homeDir, sock, username)
 }
@@ -113,6 +114,43 @@ func Grant(ctx bounded.Context, homeDir, sock, username string) error {
 // Revoke removes username's operator ACE from homeDir and sock.
 func Revoke(ctx bounded.Context, homeDir, sock, username string) error {
 	return chmodBoth(ctx, "-a", homeDir, sock, username)
+}
+
+// StampSocket gives every current operator write on sock. A freshly created
+// socket carries no operator entry of its own: the operator entry lives on the
+// home dir and does not inherit, and the socket is 0600 owned by the daemon
+// (internal/socket's listen). The daemon re-creates the socket on every start,
+// so without this a restart would lock every operator out of their own daemon.
+//
+// Windows needs no equivalent: its pipe has no filesystem node, and its
+// security descriptor is a coarse connect filter (the daemon's own SID plus a
+// restricted mask for Authenticated Users) rather than anything derived from
+// the operator set -- there, the per-RPC gate is the authorization tier. The
+// operator set is read from the home dir, which stays the single authority for
+// who an operator is.
+//
+// An operator whose identity no longer resolves to a name cannot be stamped --
+// chmod addresses a principal by name -- and is logged rather than dropped
+// quietly, because the consequence is that they are refused at connect().
+func StampSocket(ctx bounded.Context, homeDir, sock string) error {
+	ops, err := List(homeDir)
+	if err != nil {
+		return fmt.Errorf("reading %s's operator set: %w", homeDir, err)
+	}
+	for _, op := range ops {
+		if op.User == "" {
+			// chmod addresses a principal by name, so there is nothing to
+			// stamp -- but this operator is refused at connect() until the
+			// next restart, which is not an outcome to reach silently.
+			slog.Warn("operator identity does not resolve to a name; they will be refused on the control socket",
+				"operator_id", op.ID, "socket", sock)
+			continue
+		}
+		if err := chmod(ctx, "+a", OperatorACE(op.User), sock); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func chmodBoth(ctx bounded.Context, verb, homeDir, sock, username string) error {

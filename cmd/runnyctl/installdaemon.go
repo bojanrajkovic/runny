@@ -16,7 +16,7 @@ import (
 // installDaemon installs runnyd as a non-root system LaunchDaemon. It is a
 // privileged local command (run via `sudo runnyctl install-daemon`), never a
 // daemon RPC — the daemon does not exist yet. The plist points at the runnyd
-// sibling of this runnyctl, and the inheriting ACL grants the operator account
+// sibling of this runnyctl, and the home directory's ACL grants the operator account
 // (the --operator flag, else the human who ran sudo via SUDO_USER). Both
 // arguments arrive already parsed by kong (see InstallDaemonCmd).
 func installDaemon(operatorFlag, configFlag string) error {

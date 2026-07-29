@@ -187,7 +187,7 @@ type EditConfigCmd struct{}
 func (EditConfigCmd) Run(c *ctl, ctx context.Context) error { return c.editConfig(ctx) }
 
 type InstallDaemonCmd struct {
-	Operator string `help:"operator account the home's inheriting ACL grants (defaults to $SUDO_USER; required when run as root without sudo)"`
+	Operator string `help:"operator account the home directory's ACL grants (defaults to $SUDO_USER; required when run as root without sudo)"`
 	Config   string `help:"stage this config.yaml (and the keys its pools reference) into the home and validate before starting the daemon"`
 }
 

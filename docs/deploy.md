@@ -129,7 +129,9 @@ loopback registry, matching the convention container tooling already uses.
 **Where to put it.** A per-user agent uses the standard
 `~/.docker/config.json`. The system daemon's own home is `/var/empty`, so it
 defaults `DOCKER_CONFIG` to `<home>/docker`, which you can write without
-`sudo` via the home's inheriting ACL.
+`sudo`: your ACL entry on the home directory lets you create that directory,
+and you own what you create, so you can write inside it. The daemon reads it
+through its own inherited entry.
 
 `auth` is base64 of `username:password`:
 
@@ -383,22 +385,28 @@ filename get a disambiguating suffix.
 - Creates a hidden, home-less service account (`_runny`): no login, no shell, no
   home directory — its entire state lives in the system home.
 - Creates `/Library/Application Support/runny` owned by `_runny`, mode `0700`,
-  with a **dual inheriting ACL**: your operator account gets directory write
-  (edit config, land the key, read artifacts) and `_runny` gets read (so the
-  daemon can read your operator-owned `0600` config and key). The home holds
+  with a **dual ACL**: your operator account gets write on the home
+  **directory** — enough to land the App key and reach the control socket — and
+  deliberately nothing beneath it, so revoking an operator actually revokes
+  them; `_runny` gets read, inherited, so the daemon can read a `0600` config
+  and key you own. What you need to *read* below the home comes from the mode
+  instead: `logs/` and `cycles/` are `0755` with `0644` files, inside the `0700`
+  home. Config edits go through `runnyctl edit-config`, which reads and writes
+  the file through the daemon rather than touching it directly. The home holds
   everything — config, the App key, logs, images, VM clones, cycle artifacts,
   and the control socket.
 - Writes `/Library/LaunchDaemons/com.coderinserepeat.runnyd.plist`
   (`UserName=_runny`, `KeepAlive`) and, once validated, `launchctl bootstrap system`.
 
 **Without `--config`**, it registers the daemon before any config exists, and
-the daemon **crash-loops loudly** until you land one by hand:
+the daemon **crash-loops loudly** until you land one. Re-running with
+`--config` is the way to do that — staging is idempotent, and it copies the key
+and rewrites its path for you:
 
 ```sh
 sudo runnyctl install-daemon
-# your account has write access via the inheriting ACL, so no sudo for edits:
-$EDITOR "/Library/Application Support/runny/config.yaml"
-cp runner-app.pem "/Library/Application Support/runny/"
+# author config.yaml anywhere, naming your key where it sits now, then:
+sudo runnyctl install-daemon --config ./config.yaml
 ```
 
 (visible in `logs/launchd.err.log` under the home, or via `runnyctl doctor`);
@@ -509,7 +517,10 @@ darwin's dedicated `_runny` account — nothing to create or reuse, its SID
 derives deterministically from the service name. The home is
 `C:\ProgramData\runny`, with an ACL granting the service account and your
 operator account Modify (Windows ownership confers no implicit access, unlike
-POSIX owner bits) instead of darwin's inheriting ACL; logs land in
+POSIX owner bits). Both entries inherit here, and nothing below the home is
+protected — Windows keeps a non-protected child in sync with the home in both
+directions, so a revoke against the home reaches every artifact, and artifacts
+stay readable without the mode-based arrangement darwin needs; logs land in
 `C:\ProgramData\runny\logs\service.err.log`. A failed service is restarted by
 the SCM's recovery policy, the same role KeepAlive plays on darwin.
 `uninstall-daemon` stops the service, deletes it, and removes the home — unlike
@@ -585,11 +596,15 @@ proceeds straight through. Once validated it atomically replaces the on-disk
 file and, if the daemon is running, drives the same validated reload as
 `runnyctl reload` below (if it isn't running yet — e.g. a headless home just
 staged by `install-daemon --config`'s next config edit — it reports "applies on
-next start"). No `sudo` is needed for a system daemon's home either: the
-operator reaches it through the install-time inheriting ACL, not ownership.
+next start"). No `sudo` is needed for a system daemon's home either: the file is
+read and written **by the daemon**, on your behalf, so you need no access to it
+at all — and it stays daemon-owned no matter which operator edited it. With the
+daemon stopped, `edit-config` falls back to reading the file directly, which
+succeeds only if you own it; otherwise re-stage with `sudo runnyctl
+install-daemon --config`.
 
-Editing the file directly (any editor, not through `edit-config`) still works,
-followed by an explicit apply:
+Editing the file directly (any editor, not through `edit-config`) works on a
+per-user home, followed by an explicit apply:
 
 ```sh
 # edit config.yaml, then:

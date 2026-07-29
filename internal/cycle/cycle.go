@@ -14,6 +14,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/bojanrajkovic/runny/internal/home"
 )
 
 // Result classifies a finished cycle.
@@ -174,25 +176,18 @@ type Store struct {
 func (s Store) Dir(r *Record) (string, error) {
 	name := r.Started.UTC().Format("2006-01-02T15-04-05Z") + "-" + r.CycleID
 	dir := filepath.Join(s.SlotDir, name)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("creating cycle dir: %w", err)
 	}
+	// Re-assert the SLOT dir too. MkdirAll leaves an existing directory's mode
+	// alone, so a slot dir created by an older runny stays 0700 -- and a 0700
+	// parent blocks traversal to every cycle beneath it however open those are,
+	// which would make the artifacts unreachable on exactly the hosts that have
+	// history worth reading. Idempotent, so it self-heals on the next cycle.
+	if err := os.Chmod(s.SlotDir, 0o755); err != nil {
+		return "", fmt.Errorf("setting the mode on %s: %w", s.SlotDir, err)
+	}
 	return dir, nil
-}
-
-// atomicWrite writes data into dir/name via a tmp-file-then-rename, so a
-// crash mid-write can never leave a torn or half-placed file behind; the tmp
-// file is removed if the rename itself fails.
-func atomicWrite(dir, name string, data []byte) error {
-	tmp := filepath.Join(dir, "."+name+".tmp")
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("writing %s: %w", name, err)
-	}
-	if err := os.Rename(tmp, filepath.Join(dir, name)); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("placing %s: %w", name, err)
-	}
-	return nil
 }
 
 // Write persists cycle.json into the record's artifact dir, atomically: a
@@ -207,7 +202,7 @@ func (s Store) Write(r *Record) error {
 	if err != nil {
 		return fmt.Errorf("marshaling cycle record: %w", err)
 	}
-	if err := atomicWrite(dir, "cycle.json", data); err != nil {
+	if err := home.AtomicWrite(filepath.Join(dir, "cycle.json"), data, 0o644); err != nil {
 		return err
 	}
 	if abs, err := filepath.Abs(dir); err == nil {
@@ -227,7 +222,7 @@ func (s Store) WriteArtifact(r *Record, name string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := atomicWrite(dir, name, data); err != nil {
+	if err := home.AtomicWrite(filepath.Join(dir, name), data, 0o644); err != nil {
 		return err
 	}
 	if !slices.Contains(r.Artifacts, name) {

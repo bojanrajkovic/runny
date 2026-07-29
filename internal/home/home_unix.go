@@ -13,10 +13,14 @@ import (
 // (config, the App key, logs, images, vms, cycles, and the control socket) lives
 // here, deliberately outside any user home so the service account needs no home
 // directory of its own. The privileged installer creates it owned by the
-// dedicated service account with an inheriting ACL granting the operator account
-// directory write (to land the App key and atomically edit config), artifact
-// reads, and socket access; the socket stays 0600 + that inherited ACL and is
-// never world-accessible (opening it is full daemon control). No flag selects
+// dedicated service account, with an ACL entry granting the operator account
+// write on the DIRECTORY (to land the App key and reach the socket) and nothing
+// beneath it — config edits are RPCs, and artifacts below are readable by mode
+// (Dir.Ensure) rather than by an entry a revoke could not take back. The socket stays 0600
+// plus an operator entry the daemon stamps from the operator set when it
+// creates it; it is never world-accessible (opening it is full daemon control).
+// A second entry, for the service account, does inherit — that is what lets the
+// daemon read an operator-landed 0600 config or key. No flag selects
 // it — its presence (and ownership, for the daemon) does, over the per-user
 // ~/.runny.
 const SystemHomeDir = "/Library/Application Support/runny"

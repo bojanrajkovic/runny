@@ -147,11 +147,6 @@ func run(parent context.Context) error {
 	defer signal.Stop(hup)
 
 	// Logging: size-capped file sink + ring buffer, both structured.
-	logFile, err := openRotatingFile(dir.LogFile(), logFileCap)
-	if err != nil {
-		return fmt.Errorf("opening log file: %w", err)
-	}
-	defer logFile.Close()
 	ring := logring.NewRing(4096)
 	// Runner output gets its own ring: guest run.sh lines, the primary
 	// `runnyctl logs` stream, kept apart from the daemon's structured log.
@@ -163,7 +158,12 @@ func run(parent context.Context) error {
 	// stdout/stderr, an orphan has no terminal) and whether to raise the loud
 	// orphaned warning below.
 	launchCtx := launchContextNow()
-	logger := slog.New(logring.NewHandler(logSinkFor(launchCtx, logFile, os.Stderr), slog.LevelDebug, ring))
+	logSink, logCloser, err := openLogSink(*checkOnly, launchCtx, dir.LogFile(), os.Stderr)
+	if err != nil {
+		return fmt.Errorf("opening log file: %w", err)
+	}
+	defer logCloser.Close()
+	logger := slog.New(logring.NewHandler(logSink, slog.LevelDebug, ring))
 	slog.SetDefault(logger)
 	// config_sha256 chains the audit trail across restarts: a reload logs
 	// the hash it validated, and the respawn logs the hash it loaded — same
@@ -217,7 +217,7 @@ func run(parent context.Context) error {
 		return err
 	}
 
-	doctor := makeDoctor(dir, configPath, cfg, distinctClients)
+	doctor := makeDoctor(dir, configPath, cfg, distinctClients, diagnosingOtherHome)
 	if *checkOnly {
 		return runDoctor(doctor) // read-only: runs fine alongside a live daemon
 	}
@@ -914,7 +914,7 @@ func preflightReload(ctx context.Context, dir home.Dir, configPath string) (sha 
 		}
 		return sha, []socket.DoctorCheck{{Name: name, OK: false, Detail: err.Error()}}, nil
 	}
-	failed, warnings = splitPreflightChecks(makeDoctor(dir, configPath, newCfg, newClients)(ctx))
+	failed, warnings = splitPreflightChecks(makeDoctor(dir, configPath, newCfg, newClients, false)(ctx))
 	return sha, failed, warnings
 }
 
@@ -1004,15 +1004,39 @@ func checkMacOSGuestCap(cfg *home.Config) socket.DoctorCheck {
 	)}
 }
 
-func checkRunnerNamespace(dir home.Dir, cfg *home.Config) socket.DoctorCheck {
-	prefix, err := dir.InstancePrefix()
-	if err != nil {
-		return socket.DoctorCheck{Name: "runner-namespace", OK: false, Detail: err.Error()}
+// readOnlyHome selects the accessor: false is the daemon's own home, where
+// deriving the prefix PERSISTS it — deliberate, since that write is also the
+// proof instance-id is writable, a startup requirement a doctor pass must not
+// paper over. True is `-doctor -config <other home>`, where persisting it would
+// plant an instance-id owned by the invoker (root, under sudo) in a home whose
+// daemon runs as someone else, and InstancePrefix surfaces the resulting read
+// failure as an error instead of regenerating — so a read-only diagnostic would
+// leave the deployment failing this very check at every subsequent startup.
+// The read-only branch falls back to WorstCasePrefix exactly as the
+// config-compat gate does: it can over-refuse a borderline config, never
+// green-light one the deployment's real prefix would reject.
+func checkRunnerNamespace(dir home.Dir, cfg *home.Config, readOnlyHome bool) socket.DoctorCheck {
+	fail := func(detail string) socket.DoctorCheck {
+		return socket.DoctorCheck{Name: "runner-namespace", OK: false, Detail: detail}
+	}
+	var prefix, note string
+	if readOnlyHome {
+		persisted, ok := dir.ReadInstancePrefix()
+		prefix, note = persisted, ""
+		if !ok {
+			prefix = home.WorstCasePrefix()
+			note = " (no instance id persisted; validated against the worst-case prefix)"
+		}
+	} else {
+		var err error
+		if prefix, err = dir.InstancePrefix(); err != nil {
+			return fail(err.Error())
+		}
 	}
 	if err := home.ValidateRunnerNames(prefix, cfg.Pools); err != nil {
-		return socket.DoctorCheck{Name: "runner-namespace", OK: false, Detail: err.Error()}
+		return fail(err.Error() + note)
 	}
-	return socket.DoctorCheck{Name: "runner-namespace", OK: true, Detail: prefix}
+	return socket.DoctorCheck{Name: "runner-namespace", OK: true, Detail: prefix + note}
 }
 
 // localConfigChecks runs the local, deterministic checks the respawn HARD-FAILS
@@ -1087,7 +1111,10 @@ type ghKey struct {
 	target home.TargetConfig
 }
 
-func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*github.Client) func(context.Context) []socket.DoctorCheck {
+// readOnlyHome is threaded down to checkRunnerNamespace, the one check that
+// writes: see its doc comment. Every caller but `-doctor -config <other home>`
+// passes false.
+func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*github.Client, readOnlyHome bool) func(context.Context) []socket.DoctorCheck {
 	return func(ctx context.Context) []socket.DoctorCheck {
 		var checks []socket.DoctorCheck
 		add := func(name string, ok bool, detail string) {
@@ -1136,7 +1163,7 @@ func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*gi
 		// The Virtualization.framework concurrent-guest cap applies to macOS
 		// guests only; linux pools are bounded by memory, not licensing. Both
 		// are shared with the exit gate (pure-local, deterministic).
-		checks = append(checks, checkRunnerNamespace(dir, cfg), checkMacOSGuestCap(cfg))
+		checks = append(checks, checkRunnerNamespace(dir, cfg, readOnlyHome), checkMacOSGuestCap(cfg))
 
 		// Local Network (TCC): a self-daemonized / reparented runnyd (one launchd
 		// did not start) is silently denied vmnet access, so guest dials fail "no

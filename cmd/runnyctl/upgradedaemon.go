@@ -50,8 +50,8 @@ func (c *ctl) upgradeDaemon(ctx context.Context, force bool, opts followOpts) er
 		return err
 	}
 	// Validate a COPY, not the live file. `runnyd -test-config` runs as the
-	// operator, and on a system home the operator has no access to config.yaml
-	// — its ACL entry stops at the home directory — so the bytes come over the
+	// operator, and on a system home the operator cannot open config.yaml (0600
+	// and daemon-owned) — so the bytes come over the
 	// control channel and land somewhere this process can read. The gate must
 	// run the NEW binary, so it cannot be delegated to the running daemon.
 	content, err := c.configBytes(ctx, dir.ConfigPath())

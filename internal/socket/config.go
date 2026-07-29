@@ -14,10 +14,11 @@ import (
 
 // GetConfig returns the daemon's config.yaml verbatim.
 //
-// The operator's ACL entry stops at the home DIRECTORY and never reaches the
-// file, so on a system home this is the only way an operator reads its own
-// config — `edit-config` seeds an editor from it, `upgrade-daemon` validates
-// these bytes against the binary it is upgrading to. Bytes, not a parsed
+// On a system home the operator has no read access to the file -- config.yaml
+// is 0600 and daemon-owned, and darwin's operator entry stops at the home
+// directory -- so this is how an operator reads its own config: `edit-config`
+// seeds an editor from it, `upgrade-daemon` validates these bytes against the
+// binary it is upgrading to. Bytes, not a parsed
 // document: a human re-edits what this returns, so comments, key order,
 // quoting and the schema modeline all have to survive.
 //

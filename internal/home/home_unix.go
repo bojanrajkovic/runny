@@ -15,7 +15,8 @@ import (
 // directory of its own. The privileged installer creates it owned by the
 // dedicated service account, with an ACL entry granting the operator account
 // write on the DIRECTORY (to land the App key and reach the socket) and nothing
-// beneath it — config edits and artifact reads are RPCs. The socket stays 0600
+// beneath it — config edits are RPCs, and artifacts below are readable by mode
+// (Dir.Ensure) rather than by an entry a revoke could not take back. The socket stays 0600
 // plus an operator entry the daemon stamps from the operator set when it
 // creates it; it is never world-accessible (opening it is full daemon control).
 // A second entry, for the service account, does inherit — that is what lets the

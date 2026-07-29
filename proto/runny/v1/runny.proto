@@ -49,10 +49,9 @@ service RunnyService {
   rpc InjectDebugKey(InjectDebugKeyRequest) returns (InjectDebugKeyResponse);
   // Grant another account operator status on the control socket: an ACL
   // entry on the home DIRECTORY (and, on darwin, the live socket, which
-  // exists already and so inherits nothing). The entry does not inherit —
-  // it is the operator registry plus the directory access needed to reach
-  // the socket and land an App key, and nothing below the directory. No
-  // root, no restart — the daemon owns its home. Authorization is reaching
+  // exists already and so inherits nothing). Whether that entry inherits is
+  // per-platform and is what makes revoke total on each — see internal/opacl.
+  // No root, no restart — the daemon owns its home. Authorization is reaching
   // this RPC at all (an existing operator). System-daemon deployments only;
   // a per-user home has a single owner.
   rpc GrantOperator(GrantOperatorRequest) returns (OperatorMutation);

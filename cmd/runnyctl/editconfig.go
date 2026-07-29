@@ -28,9 +28,9 @@ pools: []
 `
 
 // configBytes reads the resolved home's config.yaml. The daemon is asked
-// first and on a system home is the only thing that can answer: the operator's
-// ACL entry stops at the home DIRECTORY, so the operator cannot open the file
-// itself. A direct read is the fallback for a daemon that is down or predates
+// first and on a system home is the only thing that can answer: config.yaml is
+// 0600 and daemon-owned, and on darwin the operator's ACL entry stops at the
+// home directory, so the operator cannot open the file itself. A direct read is the fallback for a daemon that is down or predates
 // GetConfig — which is the ordinary path for a per-user home, whose owner is
 // the operator anyway.
 //

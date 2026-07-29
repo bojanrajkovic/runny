@@ -386,13 +386,15 @@ filename get a disambiguating suffix.
   home directory — its entire state lives in the system home.
 - Creates `/Library/Application Support/runny` owned by `_runny`, mode `0700`,
   with a **dual ACL**: your operator account gets write on the home
-  **directory** — enough to land the App key and reach the control socket, and
-  deliberately nothing beneath it, so revoking an operator actually revokes them
-  — and `_runny` gets read, inherited, so the daemon can read a `0600` config
-  and key you own. Config edits go through `runnyctl edit-config`, which reads
-  and writes the file through the daemon rather than touching it directly. The
-  home holds everything — config, the App key, logs, images, VM clones, cycle
-  artifacts, and the control socket.
+  **directory** — enough to land the App key and reach the control socket — and
+  deliberately nothing beneath it, so revoking an operator actually revokes
+  them; `_runny` gets read, inherited, so the daemon can read a `0600` config
+  and key you own. What you need to *read* below the home comes from the mode
+  instead: `logs/` and `cycles/` are `0755` with `0644` files, inside the `0700`
+  home. Config edits go through `runnyctl edit-config`, which reads and writes
+  the file through the daemon rather than touching it directly. The home holds
+  everything — config, the App key, logs, images, VM clones, cycle artifacts,
+  and the control socket.
 - Writes `/Library/LaunchDaemons/com.coderinserepeat.runnyd.plist`
   (`UserName=_runny`, `KeepAlive`) and, once validated, `launchctl bootstrap system`.
 
@@ -515,8 +517,10 @@ darwin's dedicated `_runny` account — nothing to create or reuse, its SID
 derives deterministically from the service name. The home is
 `C:\ProgramData\runny`, with an ACL granting the service account and your
 operator account Modify (Windows ownership confers no implicit access, unlike
-POSIX owner bits) — the service account's entry inheriting, yours stopping at
-the directory, exactly as on darwin; logs land in
+POSIX owner bits). Both entries inherit here, and nothing below the home is
+protected — Windows keeps a non-protected child in sync with the home in both
+directions, so a revoke against the home reaches every artifact, and artifacts
+stay readable without the mode-based arrangement darwin needs; logs land in
 `C:\ProgramData\runny\logs\service.err.log`. A failed service is restarted by
 the SCM's recovery policy, the same role KeepAlive plays on darwin.
 `uninstall-daemon` stops the service, deletes it, and removes the home — unlike

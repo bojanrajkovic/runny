@@ -33,12 +33,14 @@ const ACLInherit = "file_inherit,directory_inherit"
 // renaming it over config.yaml, which POSIX charges to the DIRECTORY, not to
 // the file being replaced.
 //
-// Deliberately NOT inheriting. An inheriting entry is a copy of itself on every
-// artifact the daemon writes, and a copy cannot be reached from the home dir:
-// removing this entry cannot remove them, so a revoked operator would keep
-// write on images/, vms/ and cycles/. Everything an operator reads out of the
-// home goes through an RPC instead, so the copies bought nothing and cost the
-// revoke its meaning. The service account's own entry (internal/sysdaemon's
+// Deliberately NOT inheriting, which is a DARWIN judgement: inheritance here is
+// copy-at-create, so an inheriting entry leaves a copy on every artifact the
+// daemon writes and a copy cannot be reached from the home dir — removing this
+// entry could not remove them, and a revoked operator would keep write on
+// images/, vms/ and cycles/. Windows maintains inheritance in both directions
+// and so grants an inheriting entry there instead (opacl_windows.go). What an
+// operator needs to READ below the home is served by mode on this platform
+// (home.Dir.Ensure) and by that inherited entry on the other. The service account's own entry (internal/sysdaemon's
 // serviceACE) still inherits — it is installed once and never revoked, and the
 // daemon does need to reach what it writes.
 func OperatorACE(operator string) string {

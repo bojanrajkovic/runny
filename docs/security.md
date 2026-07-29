@@ -229,21 +229,29 @@ while preserving every other live grant
 ([ADR-0027](architecture-decisions/0027-windows-operator-identity.md)) —
 revocation, not reinstall, is the removal path there.
 
-**The operator's entry does not inherit, and that is what makes a revoke
-mean something.** An inherited entry is a private copy on every artifact the
-daemon writes, and a copy cannot be reached from the directory it came from —
-so removing the entry from the home would leave a revoked operator holding
-write on `images/`, `vms/` and `cycles/` forever. The entry therefore grants
-the home **directory** and nothing beneath it: it is the operator registry the
-revocation gate reads, plus the directory access needed to reach the control
-socket and land the App key. Everything else an operator reads or writes in the
-home travels over the control channel instead
-([ADR-0020](architecture-decisions/0020-headless-system-daemon.md)),
-including reading and replacing `config.yaml`. The daemon performs that write,
-which is also what keeps the file daemon-owned: an operator cannot chown a file
-to the service account, so a client-side rename would be a one-way door on
-ownership. The service account's own entry still inherits — it is installed
-once, never revoked, and the daemon does need to reach what it writes. A root
+**A revoke reaches every artifact, and the two platforms achieve that
+oppositely.** On **windows** the operator's entry inherits: windows keeps a
+non-protected child in sync with its parent's inheritable entries
+automatically, in both directions, so a single `/remove:g` against the home
+takes the entry off every descendant that inherited it. Nothing below the home
+is ever written to, and nothing below it is protected — which is what makes the
+home the single authority.
+
+On **darwin** inheritance is copy-at-create and cannot be undone that way: an
+inherited entry is a private copy that no later `chmod -a` against the home
+could reach, so a revoked operator would keep write on `images/`, `vms/` and
+`cycles/` forever. The operator entry there therefore does **not** inherit. It
+grants the home **directory** — the operator registry the revocation gate reads,
+plus the access needed to reach the control socket and land the App key — and
+artifacts are readable by mode instead (`logs/` and `cycles/` at `0755`, their
+files `0644`, inside a `0700` home).
+
+Reading and replacing `config.yaml` is a control-channel RPC on both, and the
+daemon performs the write: an operator cannot chown a file to the service
+account, so a client-side rename would be a one-way door on ownership
+([ADR-0020](architecture-decisions/0020-headless-system-daemon.md)). The service
+account's own entry inherits on both platforms — it is installed once, never
+revoked, and the daemon does need to reach what it writes. A root
 peer is refused as a grant target (root already bypasses the socket's
 `0600` mode and needs no ACE). Per-user deployments have a single owner and
 no ACL-managed set, so `operator grant`/`revoke` require the system daemon;
@@ -548,9 +556,9 @@ The daemon's entire state lives in `/Library/Application Support/runny`, owned b
 is the access boundary:
 
 - the **operator** account gets write on the home **directory** — land the
-  `private_key_path` App key, and reach the control socket (above). It does
-  **not** inherit, so it reaches nothing beneath the directory; config edits and
-  artifact reads are RPCs
+  `private_key_path` App key, and reach the control socket (above). On darwin it
+  does **not** inherit (see above), so it reaches nothing beneath the directory;
+  config edits are RPCs and artifacts are reachable by mode
   ([ADR-0020](architecture-decisions/0020-headless-system-daemon.md));
 - the **`_runny`** account gets read, and this one **does** inherit — so the
   daemon can read an operator-landed `0600` config and key it does not own.
@@ -577,11 +585,12 @@ Two operator-trust assumptions underlie this, stated here so "true" and
   hardening, so a path that operator controls is not a new trust boundary.
 
 The operator's grant is **write** (connecting to the control socket requires
-write on the socket file). Since the entry stops at the home directory, the
-operator no longer holds write on the daemon-written audit records themselves
-(`operator-access.json`, cycle records) — but write on the *directory* still
-lets them rename or replace its direct children, so the records can be
-displaced even where they cannot be edited. The conclusion is unchanged: the
+write on the socket file). On darwin, where the entry stops at the home
+directory, the operator no longer holds write on the daemon-written audit
+records themselves (`operator-access.json`, cycle records) — though write on the
+*directory* still lets them displace its direct children, and they can read the
+records by mode. On windows the inherited entry still carries Modify onto them.
+Either way the conclusion is unchanged: the
 operator already holds the App key and can disable hardening, so the audit trail
 is **visibility, not a tamper-proof tier** held against the operator; it records
 actions for later review, it does not defend against the operator who controls

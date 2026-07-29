@@ -2,21 +2,23 @@
 
 **Status:** Accepted (2026-06-19)
 
-**Amended:** 2026-07-28 — the **operator half of the dual ACL no longer
-inherits** (below: "A dual inheriting ACL on the home"). An inherited entry is a
-private copy on every artifact the daemon writes, and a copy cannot be reached
-from the directory it came from, so removing the entry from the home left a
-revoked operator holding write on everything created before the revoke. The
-entry now grants the home *directory* — the operator registry the revocation
-gate reads, plus the access needed to reach the socket and land the App key —
-and nothing beneath it; reading and replacing `config.yaml` are RPCs, with the
-daemon performing the write so the file stays daemon-owned whoever edited it.
-Grant and revoke are one command against one object on both platforms. A
-platform *group* as the ACL principal would be cleaner still, and is rejected on
-size: it moves operator identity into a directory service the per-RPC gate would
-then have to consult. The `_runny` half is unchanged and still inherits — it is
-installed once, never revoked, and the daemon does need to reach what it writes.
-The posture is stated in [security.md](../security.md).
+**Amended:** 2026-07-28 — the **operator half of the dual ACL is now
+per-platform** (below: "A dual inheriting ACL on the home"). The goal is that a
+revoke reaches every artifact, and the platforms reach it oppositely. Windows
+keeps a non-protected child in sync with its parent's inheritable entries
+automatically, in both directions — measured — so its operator entry inherits
+and one `/remove:g` against the home takes it back off every descendant. Darwin's
+inheritance is copy-at-create and cannot be undone that way, so its operator
+entry does *not* inherit: it grants the home *directory* and nothing beneath it,
+and artifacts are readable by mode inside the `0700` home instead. Grant and
+revoke are one command against one object on both. Reading and replacing
+`config.yaml` is an RPC on both, with the daemon performing the write so the
+file stays daemon-owned whoever edited it. A platform *group* as the ACL
+principal would be cleaner still, and is rejected on size: it moves operator
+identity into a directory service the per-RPC gate would then have to consult.
+The `_runny` half is unchanged and still inherits on both — installed once,
+never revoked, and the daemon does need to reach what it writes. The posture is
+stated in [security.md](../security.md).
 
 **Superseded in part by [ADR-0023](0023-app-non-privileged-boundary.md)
 (2026-06-26):** the **app path** for installing the system daemon (below: "The app

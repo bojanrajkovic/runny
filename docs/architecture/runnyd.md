@@ -381,8 +381,8 @@ the published image and watches for it to finish.
 
 ## Validated against real infrastructure
 
-Every path below has run live on ix (macOS and linux guests, real GitHub
-App, real images), not just under test fakes:
+Every path below has run live on a real host (macOS and linux guests, real
+GitHub App, real images), not just under test fakes:
 
 - The full cycle, cold boot to job: ENSURE_IMAGE through LISTENING, job
   pickup, success TEARDOWN, ephemeral self-removal, failure-counter reset.
@@ -407,4 +407,4 @@ App, real images), not just under test fakes:
   rotate/off pools coexist in one daemon with per-pool behavior intact. A
   transient PROVISION failure after a successful rotation recycles cleanly —
   the next cycle rotates fresh. (`ssh_hardening: scramble` is unit-tested
-  only; it hasn't run live on ix yet.)
+  only; it hasn't run live on a host yet.)

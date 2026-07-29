@@ -61,10 +61,10 @@ jobs:
 
   # Darwin-only targets (vz cgo) build/test here. Cached: test feedback
   # only. GitHub's macOS runners are themselves VMs (no nested
-  # virtualization), so CI never boots guests — that remains an ix job.
+  # virtualization), so CI never boots guests — that stays a real-host job.
   macos:
     name: build + test (macos)
-    # macos-26 matches the deployment host (ix) and guest image generation.
+    # macos-26 matches the darwin deployment hosts and guest image generation.
     runs-on: macos-26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

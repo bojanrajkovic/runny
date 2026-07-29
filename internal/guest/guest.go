@@ -248,7 +248,7 @@ func (d Dialer) Rotate(ctx bounded.Context, addr string, g statemachine.Guest, g
 // Residual: this exercises the "password" method only. A guest where only
 // KbdInteractiveAuthentication survived the flip would pass — acceptable
 // because both directives ride the same drop-in (they win or lose together);
-// the ix verification's manual mid-cycle ssh exercises the full client stack.
+// the on-host verification's manual mid-cycle ssh exercises the full client stack.
 func verifyPasswordAuthDead(ctx bounded.Context, addr string, cfg sshx.Config) error {
 	var lastErr error
 	for {

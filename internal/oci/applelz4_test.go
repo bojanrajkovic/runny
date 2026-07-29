@@ -7,7 +7,7 @@ import (
 )
 
 // TestAppleLZ4RealFixture decodes genuine Apple Compression-framework output
-// (macOS compression_tool -encode -a lz4 on ix, 2026-06-09). The fixture's
+// (macOS compression_tool -encode -a lz4 on a real host, 2026-06-09). The fixture's
 // matches reach across block boundaries, so it fails against any decoder that
 // treats bv41 blocks as independent — the exact bug the first real ghcr layer
 // pull exposed.

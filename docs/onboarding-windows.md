@@ -6,10 +6,11 @@ create the GitHub App, install runny, write a config, register the service, and
 running, [docs/deploy.md](deploy.md) is the reference for everything this skips
 — reload, upgrades, the Chocolatey upgrade hook, and troubleshooting.
 
-You need **Windows on amd64** (build 17763+) with **Hyper-V enabled**, and an
-**elevated prompt** for the install steps. `amd64` is the validated
-architecture; `windows/arm64` is accepted by the config loader on the same
-"real but currently unvalidated" footing as `linux/arm64`.
+You need **Windows on amd64** (build 17763+), **Pro or Enterprise** — Hyper-V is
+not available on Home, so Home cannot run runny at all — with **Hyper-V
+enabled**, and an **elevated prompt** for the install steps. `amd64` is the
+validated architecture; `windows/arm64` is accepted by the config loader on the
+same "real but currently unvalidated" footing as `linux/arm64`.
 
 **On a macOS host?** [docs/onboarding.md](onboarding.md) is that path — it
 covers the Homebrew tap, the `Runny.app` desktop shape, and the Local Network
@@ -31,7 +32,7 @@ ready:**
 
 | | **Linux guests** | **Windows guests** |
 |---|---|---|
-| Image | a published one works today (`ghcr.io/cirruslabs/ubuntu-runner-amd64`) | **you supply it** — see below |
+| Image | a published one works today (`ghcr.io/cirruslabs/ubuntu-runner-amd64`) | built from the image factory — see below |
 | `os:` in the config | `linux` | `windows` |
 | Default labels | `[self-hosted, Linux, X64]` | `[self-hosted, Windows, X64]` |
 | `guest_env` / `guest_setup` | supported | **rejected at config load** |
@@ -42,9 +43,14 @@ session that polls `C:\actions-runner\.jitconfig`, starts the Actions runner
 when it appears, redirects output to `C:\runny\runner.log`, and writes the
 runner's exit code to `C:\runny\runner-exit.txt`. runnyd delivers the JIT
 config and watches those two files; it never launches the runner itself.
-[docs/architecture/runnyd.md](architecture/runnyd.md)'s "Windows guests"
-section is the contract an image has to satisfy. If you are starting from
-Linux guests, you can skip that entirely — start there, and come back.
+
+Build one with **[runny-images](https://github.com/bojanrajkovic/runny-images)**
+— the image factory, which produces a curated Windows Server 2025 runner image
+packed as a tart-format OCI bundle, launcher included. Publish the result to
+any OCI registry you can reach and point `image:` at it.
+[docs/architecture/runnyd.md](architecture/runnyd.md)'s "Windows guests" section
+is the contract, if you would rather roll your own. If you are starting from
+Linux guests, skip all of it — start there, and come back.
 
 Both guest kinds boot as **bare Hyper-V compute systems** (ADR-0026), not
 classic Hyper-V VMs. The practical consequence is worth knowing before you go
@@ -127,7 +133,8 @@ pools:
       private_key_path: C:\Users\you\Downloads\runner-app.pem
 ```
 
-For Windows guests instead, `os: windows` and your own image reference — and
+For Windows guests instead, `os: windows` and the reference you published your
+[runny-images](https://github.com/bojanrajkovic/runny-images) build to — and
 note that `guest_env` and `guest_setup` are **refused at load** for a windows
 pool, because the runner launches through the image's own launcher rather than
 an injectable shell script. Bake what they would have set into the image.

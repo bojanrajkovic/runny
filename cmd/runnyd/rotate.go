@@ -28,6 +28,13 @@ func openRotatingFile(path string, capBytes int64) (*rotatingFile, error) {
 	if err != nil {
 		return nil, err
 	}
+	// O_CREATE's mode applies only when the file is CREATED, so a log written by
+	// an older runny keeps its 0600 forever. Re-assert it, or an operator can
+	// read every log except the one that has been running longest.
+	if err := f.Chmod(0o644); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
 	st, err := f.Stat()
 	if err != nil {
 		_ = f.Close()

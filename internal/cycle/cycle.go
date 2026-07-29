@@ -179,6 +179,14 @@ func (s Store) Dir(r *Record) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("creating cycle dir: %w", err)
 	}
+	// Re-assert the SLOT dir too. MkdirAll leaves an existing directory's mode
+	// alone, so a slot dir created by an older runny stays 0700 -- and a 0700
+	// parent blocks traversal to every cycle beneath it however open those are,
+	// which would make the artifacts unreachable on exactly the hosts that have
+	// history worth reading. Idempotent, so it self-heals on the next cycle.
+	if err := os.Chmod(s.SlotDir, 0o755); err != nil {
+		return "", fmt.Errorf("setting the mode on %s: %w", s.SlotDir, err)
+	}
 	return dir, nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -443,5 +444,37 @@ func TestEndingZeroValueTolerated(t *testing.T) {
 	}
 	if got.Ending != "" {
 		t.Errorf("Ending = %q, want empty (zero value)", got.Ending)
+	}
+}
+
+// A slot directory created by an older runny is 0700, and MkdirAll leaves an
+// existing directory's mode alone — so without a re-assert the operator-readable
+// modes below it are unreachable behind a closed parent, on exactly the hosts
+// that already have cycle history.
+func TestDirReopensAnExistingSlotDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits do not gate traversal on windows; the inherited ACL entry covers this there")
+	}
+	slot := filepath.Join(t.TempDir(), "mac-1")
+	if err := os.MkdirAll(slot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := Store{SlotDir: slot}
+
+	dir, err := s.Dir(&Record{CycleID: "abc123", Started: time.Now()})
+	if err != nil {
+		t.Fatalf("Dir: %v", err)
+	}
+	st, err := os.Stat(slot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Mode().Perm(); got != 0o755 {
+		t.Errorf("slot dir mode = %04o, want 0755 — a 0700 parent blocks traversal to everything below it", got)
+	}
+	if st, err := os.Stat(dir); err != nil {
+		t.Fatal(err)
+	} else if got := st.Mode().Perm(); got != 0o755 {
+		t.Errorf("cycle dir mode = %04o, want 0755", got)
 	}
 }

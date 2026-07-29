@@ -125,6 +125,19 @@ func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("placing %s: %w", path, err)
 	}
+	// The fsync above makes the BYTES durable; the rename is a change to the
+	// parent DIRECTORY, and its entry can still be sitting in the page cache.
+	// Without this, power loss right after a successful return leaves the data
+	// safely on disk under the temp name and no config.yaml pointing at it.
+	//
+	// Best-effort: windows has no POSIX directory fsync, and a failure here is
+	// never a failed write -- the rename has already succeeded and the caller's
+	// data is in place. What is lost is durability across power loss, on a
+	// platform that does not offer it.
+	if d, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
 	return nil
 }
 
@@ -187,12 +200,19 @@ func (d Dir) VMDir(slot string) string { return filepath.Join(d.VMsDir(), slot) 
 // SlotCyclesDir holds the per-cycle artifact dirs for one slot.
 func (d Dir) SlotCyclesDir(slot string) string { return filepath.Join(d.CyclesDir(), slot) }
 
-// Ensure creates the directory skeleton owner-only throughout: the tree
-// holds credentials-adjacent material end to end — App key path in config,
-// the control socket, and post-mortem runner _diag logs that can contain
-// unmasked job secrets. Everything under it is read by the daemon's own
-// user only (RunnyBar and runnyctl run as the same user; virtiofs shares
-// are exported by the daemon process itself).
+// Ensure creates the directory skeleton. The HOME is owner-only and is the
+// boundary that matters: the tree holds credentials-adjacent material end to
+// end — App key path in config, the control socket, and post-mortem runner
+// _diag logs that can contain unmasked job secrets — and a 0700 home is what
+// keeps every one of them out of reach of anyone who is not the daemon or an
+// operator.
+//
+// Two directories below it are deliberately readable rather than owner-only,
+// which is not a relaxation of that: they sit INSIDE the 0700 home, so the same
+// principals reach them and no others. It is how an operator opens the logs and
+// cycle artifacts that `runnyctl why` and the docs point at, now that their ACL
+// entry stops at the home directory. On windows mode bits are inert and the
+// operator's inherited entry does this instead.
 func (d Dir) Ensure() error {
 	for _, e := range []struct {
 		path string

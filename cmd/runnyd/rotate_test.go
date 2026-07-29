@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -44,5 +45,32 @@ func TestAcquireLockExcludesSecondInstance(t *testing.T) {
 	if second, err := acquireLock(path); err == nil {
 		_ = second.Close()
 		t.Fatal("second instance acquired the lock; it would sweep the first's live VMs")
+	}
+}
+
+// A log file created by an older runny is 0600, and O_CREATE's mode applies only
+// when the file is created — so an existing log stays unreadable to operators
+// unless the mode is re-asserted on open.
+func TestOpenRotatingFileReopensAnExistingLogsMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits do not gate reads on windows; the inherited ACL entry covers this there")
+	}
+	path := filepath.Join(t.TempDir(), "runnyd.log")
+	if err := os.WriteFile(path, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rf, err := openRotatingFile(path, 1<<20)
+	if err != nil {
+		t.Fatalf("openRotatingFile: %v", err)
+	}
+	t.Cleanup(func() { rf.Close() })
+
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Mode().Perm(); got != 0o644 {
+		t.Errorf("log mode = %04o, want 0644 — an existing log keeps its creation mode otherwise", got)
 	}
 }

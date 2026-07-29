@@ -1024,8 +1024,29 @@ func checkRunnerNamespace(dir home.Dir, cfg *home.Config, readOnlyHome bool) soc
 		persisted, ok := dir.ReadInstancePrefix()
 		prefix, note = persisted, ""
 		if !ok {
+			// ReadInstancePrefix answers "" for an ABSENT id and for an
+			// unreadable one alike, and those are opposite verdicts. Absent is
+			// a deployment that has not started yet — nothing wrong. Present
+			// but unreadable is the state this whole path exists to surface:
+			// the daemon's own startup fails hard on it, since InstancePrefix
+			// returns the read error rather than regenerating. Reporting OK
+			// would leave the operator holding a green diagnostic and a dead
+			// daemon, which is the failure mode this project exists to kill.
+			// The read is repeated rather than stat'd because stat SUCCEEDS on
+			// an unreadable file — it needs no permission on the file itself —
+			// so only the read carries the errno worth printing.
+			switch _, err := os.ReadFile(dir.InstanceIDPath()); {
+			case err == nil:
+				// Readable but empty or whitespace: the daemon regenerates
+				// this on its next start, so it is not a failure.
+				note = " (instance id is empty and will be regenerated; validated against the worst-case prefix)"
+			case os.IsNotExist(err):
+				note = " (no instance id persisted; validated against the worst-case prefix)"
+			default:
+				return fail(fmt.Sprintf("%s exists but cannot be read (%v) — the daemon will fail this same check at startup until it is readable by the account runnyd runs as",
+					dir.InstanceIDPath(), err))
+			}
 			prefix = home.WorstCasePrefix()
-			note = " (no instance id persisted; validated against the worst-case prefix)"
 		}
 	} else {
 		var err error
@@ -1155,11 +1176,12 @@ func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*gi
 			add("config-drift", true, "config.yaml matches the running config")
 		}
 
-		// Runner namespace: derives (and persists, first run) the instance
-		// prefix — which also proves instance-id is writable, a startup
-		// requirement a doctor pass must not paper over — and validates the
-		// assembled runner names against GitHub's length cap, which would
-		// otherwise surface as a permanent non-retryable 422 loop at MINT_JIT.
+		// Runner namespace: derives the instance prefix — persisting it on the
+		// daemon's own home, which is also the proof instance-id is writable,
+		// but never on a home being diagnosed read-only (see
+		// checkRunnerNamespace) — and validates the assembled runner names
+		// against GitHub's length cap, which would otherwise surface as a
+		// permanent non-retryable 422 loop at MINT_JIT.
 		// The Virtualization.framework concurrent-guest cap applies to macOS
 		// guests only; linux pools are bounded by memory, not licensing. Both
 		// are shared with the exit gate (pure-local, deterministic).

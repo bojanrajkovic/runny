@@ -129,5 +129,11 @@ func (d Dir) InstancePrefix() (string, error) {
 	if err := os.WriteFile(p, []byte(id+"\n"), 0o644); err != nil {
 		return "", fmt.Errorf("writing instance id: %w", err)
 	}
+	// WriteFile's mode is a REQUEST — the umask masks it — so a daemon started
+	// from a shell with a restrictive umask would land 0600 here and quietly
+	// reintroduce the unreadable-id failure above. Chmod is not masked.
+	if err := os.Chmod(p, 0o644); err != nil {
+		return "", fmt.Errorf("setting the mode on instance id: %w", err)
+	}
 	return id, nil
 }

@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -28,10 +29,12 @@ func seedDiagnosableHome(t *testing.T) (home.Dir, string) {
 	return dir, path
 }
 
-// snapshotTree records every path under root with its size and mode, so a
-// before/after comparison catches a created file, a rewritten one, and a
-// re-moded one alike. Content is deliberately not hashed: size+mode is enough
-// to catch every write these paths make, and keeps the failure message short.
+// snapshotTree records every path under root with its mode and, for regular
+// files, a content hash — so a before/after comparison catches a created file,
+// a re-moded one, and a SAME-LENGTH rewrite alike. The last of those is not
+// hypothetical: instance-id is a fixed width for a given hostname, so a check
+// that rewrote rather than created it would slip past a size comparison, and
+// it is the single path most likely to regress here.
 func snapshotTree(t *testing.T, root string) []string {
 	t.Helper()
 	var out []string
@@ -43,7 +46,15 @@ func snapshotTree(t *testing.T, root string) []string {
 		if err != nil {
 			return err
 		}
-		out = append(out, rel+" "+info.Mode().String()+" "+strconv.FormatInt(info.Size(), 10))
+		digest := "dir"
+		if info.Mode().IsRegular() {
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			digest = fmt.Sprintf("%x", sha256.Sum256(b))[:12]
+		}
+		out = append(out, rel+" "+info.Mode().String()+" "+digest)
 		return nil
 	})
 	if err != nil {
@@ -74,6 +85,36 @@ func TestCheckRunnerNamespaceReadOnlyPersistsNothing(t *testing.T) {
 	}
 	if !strings.Contains(c.Detail, home.WorstCasePrefix()) {
 		t.Errorf("detail = %q, want it to name the worst-case prefix it validated against", c.Detail)
+	}
+}
+
+// "Absent" and "unreadable" are NOT the same verdict. An id that exists but
+// cannot be read is precisely the state this whole path exists to surface:
+// the daemon's own startup fails hard on it, because InstancePrefix returns
+// the read error rather than regenerating. A diagnostic that reported OK here
+// would be silent about the exact failure the operator ran it to explain.
+func TestCheckRunnerNamespaceReadOnlyUnreadableIDFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("windows mode bits are inert: 0000 does not deny a read")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a 0000 file regardless of mode")
+	}
+	dir, _ := seedDiagnosableHome(t)
+	if err := os.WriteFile(dir.InstanceIDPath(), []byte("someone-elses-00112233\n"), 0o000); err != nil {
+		t.Fatalf("seeding an unreadable instance-id: %v", err)
+	}
+
+	c := checkRunnerNamespace(dir, &home.Config{}, true)
+
+	if c.OK {
+		t.Fatalf("an unreadable instance-id must FAIL the check, got OK (%s)", c.Detail)
+	}
+	if strings.Contains(c.Detail, "no instance id persisted") {
+		t.Errorf("detail = %q, but an id IS persisted — it just cannot be read", c.Detail)
+	}
+	if !strings.Contains(c.Detail, "instance-id") {
+		t.Errorf("detail = %q, want it to name the file it could not read", c.Detail)
 	}
 }
 

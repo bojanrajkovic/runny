@@ -1151,7 +1151,7 @@ func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*gi
 			// A per-user runnyd agent co-registered with this system daemon is the one
 			// cross-shape conflict the ownership model no longer auto-resolves — surface
 			// it loudly here so a headless operator can spot it in one command.
-			checks = append(checks, checkCompetingRegistration(ctx, dir, configPath))
+			checks = append(checks, checkCompetingRegistration(ctx, dir))
 		}
 
 		for _, gh := range clients {

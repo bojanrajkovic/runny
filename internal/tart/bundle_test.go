@@ -41,7 +41,7 @@ func TestGuestAgentPortNameSatisfiesContract(t *testing.T) {
 }
 
 // realConfig is the literal config.json shape observed on a live tart 2.32
-// bundle (runner-1 on ix, 2026-06-09), values intact.
+// bundle (runner-1 on a real host, 2026-06-09), values intact.
 const realConfig = `{
   "version" : 1,
   "hardwareModel" : "YnBsaXN0MDDTAQIDBAQFXxAZRGF0YVJlcHJlc2VudGF0aW9uVmVyc2lvbl8QD1BsYXRmb3JtVmVyc2lvbl8QEk1pbmltdW1TdXBwb3J0ZWRPUxACowYHBxANEAAIDys9UlRYWgAAAAAAAAEBAAAAAAAAAAgAAAAAAAAAAAAAAAAAAABc",

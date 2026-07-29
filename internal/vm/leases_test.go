@@ -2,7 +2,7 @@ package vm
 
 import "testing"
 
-// Shape lifted from a real /var/db/dhcpd_leases on ix.
+// Shape lifted from a real /var/db/dhcpd_leases on a macOS host.
 const leases = `{
 	name=runner-1
 	ip_address=192.168.64.4

@@ -92,8 +92,11 @@ type ImageEnsurer interface {
 // Cloner clones a bundle (tart.Clone's seam).
 type Cloner func(src tart.Bundle, dst string) error
 
-// FileCloner CoW-clones a single file (clonefile.Clone's seam): the per-cycle
+// FileCloner clones a single file (clonefile.Clone's seam): the per-cycle
 // runner-tarball clone from the shared store into the slot's own mount.
+// Copy-on-write on darwin (APFS clonefile); a full byte copy on windows,
+// which has no ubiquitous CoW primitive on NTFS — the seam only guarantees
+// an independent destination file, not that the clone is free.
 type FileCloner func(src, dst string) error
 
 // GitHub is the slice of internal/github the FSM needs. Every method takes

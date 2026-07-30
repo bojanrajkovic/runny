@@ -52,6 +52,12 @@ type cycleSpans struct {
 	ctx   context.Context
 	root  trace.Span
 	steps map[string]*stepSpans
+	// backends holds open spans adapted from a self-instrumenting
+	// dependency, keyed by the ID its adapter assigned. Separate from steps
+	// because their nesting is the dependency's, not ours: a backend span
+	// may parent to another backend span, and the depth is whatever the
+	// library does internally.
+	backends map[string]*spanHandle
 }
 
 // pullSpans is a shared image pull's span state — the pull-scope sibling of
@@ -169,6 +175,10 @@ func (a *traceAssembler) emit(e obs.Event) {
 		a.detail(e)
 	case obs.KindActionMilestone:
 		a.actionMilestone(e)
+	case obs.KindBackendStarted:
+		a.backendStarted(e)
+	case obs.KindBackendEnded:
+		a.backendEnded(e)
 	case obs.KindVMInfo:
 		a.vmInfo(e)
 	case obs.KindImageInfo:
@@ -205,6 +215,7 @@ func (a *traceAssembler) cycleStarted(e obs.Event) {
 	defer a.mu.Unlock()
 	a.cycles[cycleKey{e.Cycle.Slot, e.Cycle.CycleID}] = &cycleSpans{
 		ctx: ctx, root: span, steps: map[string]*stepSpans{},
+		backends: map[string]*spanHandle{},
 	}
 }
 
@@ -550,7 +561,76 @@ func (a *traceAssembler) cycleFinished(e obs.Event) {
 			cs.root.SetStatus(codes.Error, e.Finish.Error)
 		}
 	}
+	// A dependency's call can outlive the cycle that started it: Boot bounds
+	// its own wait around the vendored create/start, so a merely-slow host
+	// leaves a detached goroutine still running here. Close those spans
+	// against the cycle's own end rather than leaving them open forever --
+	// an unended span is never exported at all, so the trace of the cycle
+	// that failed on that very call would show no sign of it. The marker is
+	// load-bearing: without it the span reads as a call that returned
+	// promptly, when what actually happened is that nobody ever saw it
+	// return. Its real end time is not knowable from here and is not
+	// guessed; the later end event finds the cycle gone and no-ops.
+	for _, h := range cs.backends {
+		h.span.SetAttributes(attribute.Bool("runny.backend.unfinished", true))
+		h.span.End(trace.WithTimestamp(e.Time))
+	}
+	clear(cs.backends)
+
 	cs.root.End(trace.WithTimestamp(e.Time))
+}
+
+// backendStarted opens a span for one operation inside a self-instrumenting
+// dependency. Parent precedence matches an HTTP round trip's -- innermost
+// open action, else the step, else the cycle root -- except that an explicit
+// ParentID wins over all of them, which is what preserves the dependency's
+// own nesting (a syscall-level span under its wrapper) instead of flattening
+// both onto the step.
+func (a *traceAssembler) backendStarted(e obs.Event) {
+	if e.Backend == nil {
+		return
+	}
+	a.withCycle(e, func(cs *cycleSpans) {
+		parent := cs.ctx
+		if ss := cs.steps[e.Step]; ss != nil {
+			parent = ss.ctx
+			if ss.current != nil {
+				parent = ss.current.ctx
+			}
+		}
+		if e.Backend.ParentID != "" {
+			if h := cs.backends[e.Backend.ParentID]; h != nil {
+				parent = h.ctx
+			}
+		}
+		attrs := make([]attribute.KeyValue, 0, len(e.Backend.Attrs))
+		for _, kv := range e.Backend.Attrs {
+			attrs = append(attrs, attribute.String(kv.Key, kv.Value))
+		}
+		ctx, span := a.tracer.Start(parent, e.Backend.Name,
+			trace.WithTimestamp(e.Time), trace.WithAttributes(attrs...))
+		cs.backends[e.Backend.ID] = &spanHandle{ctx: ctx, span: span}
+	})
+}
+
+// backendEnded closes a span opened by backendStarted. A missing entry is
+// not an error: the cycle may have already finished and closed it (see
+// cycleFinished), which is the abandoned-call path.
+func (a *traceAssembler) backendEnded(e obs.Event) {
+	if e.Backend == nil {
+		return
+	}
+	a.withCycle(e, func(cs *cycleSpans) {
+		h := cs.backends[e.Backend.ID]
+		if h == nil {
+			return
+		}
+		if outcomeIsFailure(e.Backend.Outcome) {
+			h.span.SetStatus(codes.Error, e.Backend.Error)
+		}
+		h.span.End(trace.WithTimestamp(e.Time))
+		delete(cs.backends, e.Backend.ID)
+	})
 }
 
 // pullStarted opens the pull's root span. If e.Pull.ID is already tracked,

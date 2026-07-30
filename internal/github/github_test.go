@@ -258,7 +258,7 @@ func TestRunnerDownloadPerOS(t *testing.T) {
 }
 
 // RunnerDownload must resolve the guest's ACTUAL architecture, not always
-// arm64 — regression guard for issue #319, where a hardcoded arm64 match
+// arm64 — regression guard: a hardcoded arm64 match
 // silently fetched an unusable runner binary for an amd64 Linux guest
 // (windows/HCS backend).
 func TestRunnerDownloadPerArch(t *testing.T) {

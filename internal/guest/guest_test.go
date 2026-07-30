@@ -947,7 +947,7 @@ func TestParseHostKeysLoudFailures(t *testing.T) {
 }
 
 // StopRunner proves the listener dead: a clean exit succeeds, a nonzero exit
-// (kill unproven) is a loud error (issue #39).
+// (kill unproven) is a loud error.
 func TestStopRunner(t *testing.T) {
 	srv := newRotateServer(t)
 	d := testDialer()

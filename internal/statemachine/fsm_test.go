@@ -188,7 +188,7 @@ type fakeGuest struct {
 	pushedPath string            // the localPath PushRunnerTarball was handed
 	pushCalls  int
 
-	// Debug-key injection seam (issue #39).
+	// Debug-key injection seam.
 	hostKeys      []string
 	stopErr       error // StopRunner returns this (death unproven)
 	stopCalls     int
@@ -709,7 +709,7 @@ func (h *harness) eventsForCycle(cycleID string) []obs.Event {
 // StepEntered/StepLeft pair per rec.States entry, in the same order, with
 // the same (state, outcome, error) triple — the event stream and cycle.json
 // are built from the same code path and must never disagree about a
-// cycle's shape (ADR-0024).
+// cycle's shape.
 func assertStepEventsMatchRecord(t *testing.T, events []obs.Event, rec *cycle.Record) {
 	t.Helper()
 	type stepPair struct {
@@ -1320,7 +1320,7 @@ func teardownRecord(t *testing.T, r *cycle.Record) cycle.StateRecord {
 // GitHub deregistration and/or the clone deletion — must record TEARDOWN as a
 // warn naming the failure, never a bare ok: a cycle.json that swears teardown
 // was clean while an orphan registration or clone lingers is the silent-record
-// gap (#151). The warn is non-fatal — it must not escalate the slot's failure
+// gap. The warn is non-fatal — it must not escalate the slot's failure
 // streak, since the local destruction succeeded and the orphan self-heals on
 // the next cold-start sweep.
 // TestEndingSuccess pins that a clean cycle records Ending "success" — the
@@ -1525,8 +1525,8 @@ func TestPauseHoldsInBackoff(t *testing.T) {
 	cancel()
 }
 
-// A pause/resume carrying a command id publishes it as the acknowledgement
-// (issue #66), and an id-less daemon-internal re-issue must not clobber it.
+// A pause/resume carrying a command id publishes it as the acknowledgement,
+// and an id-less daemon-internal re-issue must not clobber it.
 func TestPauseResumeAcknowledgeCommandID(t *testing.T) {
 	h := newHarness(t, nil)
 	h.images.maxCalls = 0 // unlimited cycles; we drive it to paused BACKOFF
@@ -2304,7 +2304,7 @@ func TestSecureSSHDeadlineBounds(t *testing.T) {
 	}
 }
 
-// ---- debug-key injection (issue #39) ---------------------------------------
+// ---- debug-key injection ---------------------------------------
 
 // debugCmd issues a CmdDebugKey and returns the reply (with a timeout). It
 // fills CycleID/SeenState from the slot's current status so the consent pins
@@ -3432,7 +3432,7 @@ func TestJobNameFromMarker(t *testing.T) {
 	}
 }
 
-// ---- observability events (ADR-0024, issue #224) ---------------------------
+// ---- observability events ---------------------------
 
 // TestObsEventsCleanSuccessCycle pins the event shape of a cycle that runs a
 // job to completion: framed by CycleStarted/CycleFinished, one

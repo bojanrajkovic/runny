@@ -583,7 +583,7 @@ const debugRecorderScriptPathWindows = `C:\ProgramData\ssh\runny-record.ps1`
 // over a live SSH session (internal/guest/CLAUDE.md); this script is neither.
 //
 // Unlike POSIX, no single windows mechanism records both SSH usage shapes —
-// hardware-proven against a real Windows OpenSSH host (issue #344):
+// hardware-proven against a real Windows OpenSSH host:
 //
 //   - SSH_ORIGINAL_COMMAND set (a one-shot `ssh host "cmd"` exec): the
 //     command runs as a cmd.exe child, its combined output piped through

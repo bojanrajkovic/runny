@@ -1242,7 +1242,7 @@ func makeDoctor(dir home.Dir, configPath string, cfg *home.Config, clients []*gi
 				// `runnyd -doctor` (no -config) resolves the invoker's own
 				// home, not the daemon's, so the credentials here can still
 				// differ from the ones the daemon will pull with — pass
-				// -config to diagnose a specific deployment's own (#351).
+				// -config to diagnose a specific deployment's own.
 				add(name, true, fmt.Sprintf("%s → sha256:%s (%s uncompressed%s) [credentials: %s]",
 					ref, oci.ShortDigest(digest), oci.HumanBytes(diskBytes), cacheNote, oci.CredentialConfigPath()))
 				if !cached && diskBytes > maxImageBytes {

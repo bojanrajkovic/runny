@@ -83,7 +83,7 @@ func okFree(uint64) func(string) (uint64, error) {
 }
 
 // Concurrent subscribers to one dir share a single pull attempt and both
-// receive its outcome — the core of issue #125.
+// receive its outcome — the core guarantee.
 func TestPullerSharesOutcomeAcrossSubscribers(t *testing.T) {
 	dir := t.TempDir()
 	var calls atomic.Int32
@@ -378,7 +378,7 @@ func TestPullerEmitsStartedAndFinishedWithPullIdentity(t *testing.T) {
 }
 
 // Two concurrent subscribers to one shared pull produce exactly one
-// KindPullStarted/KindPullFinished pair — issue #125's core guarantee.
+// KindPullStarted/KindPullFinished pair — the core guarantee.
 // TestPullerSharesOutcomeAcrossSubscribers asserts the same sharing for the
 // digest/subscriber-facing result; this is the event-level equivalent.
 func TestPullerTwoSubscribersEmitExactlyOnePullFinished(t *testing.T) {

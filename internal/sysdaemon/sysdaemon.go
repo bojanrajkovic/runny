@@ -1,6 +1,6 @@
 // Package sysdaemon installs and removes runnyd as a non-root system
 // LaunchDaemon: a dedicated hidden service account, the system home with a dual
-// home ACL, the launchd plist, and `launchctl bootstrap system` (#76). It
+// home ACL, the launchd plist, and `launchctl bootstrap system`. It
 // is the privileged-once install that lets runnyd RUN unprivileged as a service
 // account — strictly better than a root LaunchDaemon. The pure pieces here
 // (plist, ACL specs, id allocation, path resolution) are testable without root;

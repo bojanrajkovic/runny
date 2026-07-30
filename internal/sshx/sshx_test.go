@@ -362,7 +362,7 @@ func TestOutputBoundedOnWedgedChannelOpen(t *testing.T) {
 		t.Fatal("want channel-open failure against a wedged guest")
 	}
 	// A session-open failure is exactly the "provably never sent" case that
-	// internal/guest maps to ErrGuestUnreachable (issue #39, decision 18).
+	// internal/guest maps to ErrGuestUnreachable.
 	if !errors.Is(err, ErrSessionOpen) {
 		t.Errorf("Output channel-open failure not marked ErrSessionOpen: %v", err)
 	}

@@ -14,7 +14,7 @@ import (
 // io.go's split for the same reason). As a rule Slot reaches c.mu only
 // through a cell method; finishCycle's joint failures+Status write is the one
 // carried-over exception (a raw lock, documented at its call site) — a later
-// refactor (the publish seam, issue #252) is the planned home for it.
+// refactor (the publish seam) is the planned home for it.
 type statusCell struct {
 	mu       sync.Mutex
 	status   Status

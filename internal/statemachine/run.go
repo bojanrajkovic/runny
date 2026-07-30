@@ -63,7 +63,7 @@ func setStatus(cell *statusCell, log *slog.Logger, name string, pool home.PoolCo
 		// lifetime. Clearing both here means DebugHoldExpires/DebugHoldArmed
 		// vanish the instant DEBUG or TEARDOWN (or any other state) is
 		// entered; the mut below re-sets DebugHoldExpires when this
-		// transition IS into DEBUG (issue #39).
+		// transition IS into DEBUG.
 		st.DebugHoldExpires = time.Time{}
 		st.DebugHoldArmed = false
 		if mut != nil {
@@ -192,8 +192,8 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 				case CmdResume:
 					c.cell.setPaused(false, cmd.ID)
 				case CmdDebugKey:
-					// Boot-path states have no usable hardened guest yet
-					// (issue #39): reply and do nothing.
+					// Boot-path states have no usable hardened guest yet:
+					// reply and do nothing.
 					if cmd.expired() {
 						cmd.reply(DebugKeyReply{Err: errCmdExpired})
 					} else {
@@ -220,8 +220,8 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 		// The report callback fires on the shared image puller's own goroutine
 		// (internal/images: every pull, shared or not, runs its own `go
 		// p.run()`), not this cycle's FSM goroutine — an exception to "events
-		// for one cycle are emitted from a single goroutine" (ADR-0024, and
-		// obs.Emitter's own doc comment). Safe regardless: obs's scope is
+		// for one cycle are emitted from a single goroutine" (obs.Emitter's
+		// own doc comment). Safe regardless: obs's scope is
 		// immutable after WithStep/WithCycle, so the puller's goroutine and
 		// this one need no synchronization to read it, and every installed
 		// consumer is documented to tolerate this exact exception — just not
@@ -475,7 +475,7 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 		} else if errors.Is(c.failErr, errDebugExpired) || errors.Is(c.failErr, errDebugRacedJob) {
 			// A DEBUG hold that ran out, or a job that raced the LISTENING
 			// freeze and died with the verified kill: operator-caused, not a
-			// health signal (issue #39, §5.6). Not its own Ending class — it
+			// health signal. Not its own Ending class — it
 			// still reads as "failure" (Result agrees); benign is what exempts
 			// it from backoff. Checked before shutdown: the pre-teardown
 			// snapshot already excludes a shutdown that lands during teardown,
@@ -560,7 +560,7 @@ func (c *run) enter(cctx context.Context, state State, d time.Duration, f func(b
 
 // listenAndRunJob handles LISTENING and JOB. Returns jobRan and, on failure,
 // the failing state + error (empty state = clean completion). A DEBUG hold
-// (issue #39) is reported as a benign failure carrying StateDebug.
+// is reported as a benign failure carrying StateDebug.
 func (c *run) listenAndRunJob(ctx context.Context) (bool, State, error) {
 	cfg := c.deps.Config
 	ctx, finishListening := c.beginStep(ctx, StateListening, func(st *Status) {
@@ -684,7 +684,7 @@ func jobNameFromMarker(markerLine string) string {
 }
 
 // runJob drives JOB and, at job end, either tears down or enters a post-job
-// DEBUG hold (issue #39). markerLine is the "Running job:" line. ctx is the
+// DEBUG hold. markerLine is the "Running job:" line. ctx is the
 // CYCLE context (cctx): the job budget bounds only watchJob's jctx, never the
 // operator's mid-job work (§3).
 func (c *run) runJob(ctx context.Context, markerLine string) (bool, State, error) {
@@ -817,7 +817,7 @@ func (c *run) watchJob(jctx, cctx context.Context) (bool, error) {
 	}
 }
 
-// ---- debug-key injection (issue #39) ---------------------------------------
+// ---- debug-key injection ---------------------------------------
 
 // rejectStale replies and reports true if cmd is stale: expired in queue, or
 // aimed at a cycle other than this one (the operator's stale-CycleID consent

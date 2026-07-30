@@ -270,7 +270,7 @@ func (c *Client) GenerateJITConfig(ctx bounded.Context, name string, labels []st
 }
 
 // apiArch translates Go's GOARCH spelling to the runner-downloads endpoint's
-// own architecture strings (verified against a live call, issue #319: GitHub
+// own architecture strings (verified against a live call: GitHub
 // spells amd64 "x64", not "amd64" — the same kind of translation apiOS
 // already does for goos "darwin" -> "osx").
 var apiArch = map[string]string{"amd64": "x64", "arm64": "arm64"}

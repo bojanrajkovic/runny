@@ -60,7 +60,7 @@ const (
 // benign for backoff accounting: an operator action is not a health signal.
 var errOperatorRecycle = errors.New("recycled by operator")
 
-// Debug-key injection sentinels (issue #39).
+// Debug-key injection sentinels.
 var (
 	// errDebugExpired: a DEBUG hold ran out — benign for backoff.
 	errDebugExpired = errors.New("debug hold expired")
@@ -151,7 +151,7 @@ type Guest interface {
 	PullDebugSession(ctx bounded.Context) ([]byte, error)
 	// StopRunner kills the runner listener tree and PROVES it dead (a pgrep
 	// read-back loop). Any nonzero exit or exec error = death unproven, and
-	// the caller refuses the freeze/hold (issue #39, decision 2).
+	// the caller refuses the freeze/hold.
 	StopRunner(ctx bounded.Context) error
 	// InstallAuthorizedKey appends one authorized_keys line and proves it
 	// landed (a grep read-back). A session-open failure is wrapped with
@@ -205,7 +205,7 @@ type Deps struct {
 	// must not block (sink into a logring.Ring, whose fan-out drops on slow
 	// subscribers).
 	OnRunnerLine func(slot, cycleID, line string)
-	// Events, when set, receives the observability event stream (ADR-0024)
+	// Events, when set, receives the observability event stream
 	// for every cycle this slot runs: the same record helpers that build
 	// cycle.Record emit these at the same instant, so the two can't
 	// disagree. nil = no-op — obs.WithCycle/Emit/Action degrade safely, so
@@ -229,7 +229,7 @@ type Command struct {
 	// JOB. Without it, a mid-job recycle disarms any debug hold and the job
 	// runs to its normal end.
 	CancelJob bool
-	// The fields below apply to CmdDebugKey only (issue #39).
+	// The fields below apply to CmdDebugKey only.
 	PubKey      string             // canonical authorized_keys line (re-marshaled, shell-safe)
 	Fingerprint string             // SHA256:… (computed server-side)
 	Comment     string             // submitted key's comment, audit only — never reaches the guest
@@ -262,7 +262,7 @@ const (
 )
 
 // DebugKeyReply is the synchronous answer to a CmdDebugKey, sent back over the
-// command's buffered Reply channel (issue #39).
+// command's buffered Reply channel.
 type DebugKeyReply struct {
 	Err       error
 	User      string
@@ -335,11 +335,11 @@ type Status struct {
 	// restart (cold start) reclaims the guest.
 	Wedged bool
 	// DebugHoldExpires is the auto-release deadline of a DEBUG hold; non-zero
-	// only in DEBUG, cleared the instant DEBUG is left (issue #39).
+	// only in DEBUG, cleared the instant DEBUG is left.
 	DebugHoldExpires time.Time
 	// DebugHoldArmed is true iff state == JOB with a debug hold currently
 	// armed: the slot will enter DEBUG (not teardown) at job end. Cleared the
-	// instant the hold is disarmed or DEBUG/TEARDOWN is entered (issue #39).
+	// instant the hold is disarmed or DEBUG/TEARDOWN is entered.
 	DebugHoldArmed bool
 	// ActiveCycleStates is the ordered list of states that have already
 	// completed in the current in-flight cycle. Populated on each state
@@ -489,7 +489,7 @@ func (s *Slot) backoffWait(ctx context.Context) error {
 	// runCycle watcher, canceling a healthy boot (the stale-recycle class,
 	// §0); discarding it makes "recycle a slot that no longer exists" the
 	// no-op handleIdleCommand already treats it as. A CmdDebugKey is replied
-	// "expired"; pause/resume are idempotent and applied (issue #39).
+	// "expired"; pause/resume are idempotent and applied.
 drain:
 	for {
 		select {
@@ -584,7 +584,7 @@ func (s *Slot) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 // finishCycle writes the record, updates failure accounting, and prunes.
 // Benign endings (operator recycle, daemon shutdown) leave the failure
 // streak untouched in both directions: they are not health signals, so they
-// neither escalate backoff nor launder a failing slot's history (issue #21).
+// neither escalate backoff nor launder a failing slot's history.
 func (s *Slot) finishCycle(rec *cycle.Record, benign bool) {
 	store := cycle.Store{SlotDir: s.deps.Home.SlotCyclesDir(s.name)}
 	if err := store.Write(rec); err != nil {
@@ -630,7 +630,7 @@ func heldListening(rec *cycle.Record) bool {
 }
 
 // debugHeldAfterJobOK resets backoff for a delivered-job-then-benign-hold
-// cycle (issue #39, §8): it requires BOTH a JOB StateRecord with Outcome ok
+// cycle: it requires BOTH a JOB StateRecord with Outcome ok
 // AND a DEBUG StateRecord. The DEBUG-record requirement keeps a failed DEBUG
 // entry (errDebugInjectFailed writes no DEBUG StateRecord) out of the reset
 // arm.

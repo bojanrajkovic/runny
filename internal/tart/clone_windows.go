@@ -12,14 +12,14 @@ import (
 )
 
 // CloneVHDX is windows' per-slot ephemeral-disk clone (Clone's Hyper-V
-// sibling, issue #308): config.json is small enough to copy plainly, but the
+// sibling): config.json is small enough to copy plainly, but the
 // disk is a VHDX differencing child of src's converted disk.vhdx
 // (internal/vhdx.CreateDifferencing) — near-instant regardless of parent
 // size, the same reason Clone uses APFS clonefile on darwin instead of a
 // full copy. nvram.bin is deliberately NOT copied: HCS's SecureBoot template
 // initializes UEFI variables at compute-system creation, and unlike VZ's
 // EFIVariableStore there is no schema field for restoring a persisted EFI
-// variable blob from a file — the hardware validation behind #308 booted
+// variable blob from a file — the hardware validation booted
 // clean with no nvram file ever referenced.
 func CloneVHDX(src, dst Bundle) (time.Duration, error) {
 	if err := src.Verify(); err != nil {

@@ -292,7 +292,7 @@ func (c *ctl) renderStatus(resp *runnyv1.GetStatusResponse) {
 			note = d // live annotation beats stale failure text
 		}
 		// A DEBUG hold shows its auto-release countdown; an armed JOB shows
-		// that the hold will catch the corpse at job end (issue #39).
+		// that the hold will catch the corpse at job end.
 		if s.GetState() == runnyv1.SlotState_SLOT_STATE_DEBUG && s.GetDebugHoldExpires() != nil {
 			note = "auto-releases in " + durString(time.Until(s.GetDebugHoldExpires().AsTime())) + "; recycle to release"
 		}
@@ -852,7 +852,7 @@ func durString(d time.Duration) string {
 // trunc clamps s to at most n display columns, appending a one-column ellipsis
 // when it shortens. It budgets by display width (not rune count) over whole
 // grapheme clusters, so a wide-rune job name can't over-run its cell and shift
-// the columns to its right (issue #51), and a multi-rune cluster (a VS16/ZWJ
+// the columns to its right, and a multi-rune cluster (a VS16/ZWJ
 // emoji, or a base plus combining mark) is never split mid-cluster.
 func trunc(s string, n int) string {
 	if cellWidth(s) <= n {
@@ -934,7 +934,7 @@ func shortHex(h string) string {
 
 // cellWidth is a cell's terminal display width. Rune count is wrong for the JOB
 // and NOTE columns, which carry GitHub-controlled job display names that can hold
-// double-width (CJK), zero-width, or emoji-presentation runes (issue #51): a
+// double-width (CJK), zero-width, or emoji-presentation runes: a
 // workflow `name:` reaches runny verbatim via the runner's "Running job:" line.
 // uniseg measures monospace width per grapheme cluster — wide CJK and VS16/ZWJ
 // emoji count as two columns, ambiguous-width runes (accented Latin, the

@@ -1,6 +1,6 @@
 // Command configschema generates the JSON Schema for ~/.runny/config.yaml from
-// the home.Config struct, so editors can autocomplete and validate the file
-// (issue #57). The schema is derived from the struct, never hand-maintained: a
+// the home.Config struct, so editors can autocomplete and validate the file.
+// The schema is derived from the struct, never hand-maintained: a
 // golden test regenerates and byte-compares the committed config.schema.json, so
 // the two cannot drift silently. Run `bazel run //tools/configschema -- -write`
 // after changing the config struct.

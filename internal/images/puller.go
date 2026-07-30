@@ -46,7 +46,7 @@ type ensureResult struct {
 // and broadcasts the terminal outcome to every current subscriber. One per
 // destDir, tracked in pullerRegistry. The byte-pull is still serialized inside
 // oci.PullTo (pullLocks) as defense in depth; the actor is what shares the
-// OUTCOME — concurrent slots no longer each re-run a doomed pull (issue #125).
+// OUTCOME — concurrent slots no longer each re-run a doomed pull.
 type imagePuller struct {
 	destDir string
 	ref     oci.Ref // pinned to the resolved digest

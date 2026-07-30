@@ -81,7 +81,7 @@ func TestOperatorGateUnknownUIDDenied(t *testing.T) {
 	}
 }
 
-// TestOperatorGateUnaryDeniesPostRevoke pins the headline fix for #221: a
+// TestOperatorGateUnaryDeniesPostRevoke pins the headline fix: a
 // unary RPC over an already-held connection is denied on the very next
 // call after the operator is revoked from the ACL — connect()-time state
 // is never consulted.

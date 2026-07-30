@@ -81,7 +81,7 @@ type Record struct {
 	// Artifacts are file names retained next to cycle.json (failure cycles).
 	Artifacts []string `json:"artifacts,omitempty"`
 	// InjectedKeys is the operator debug-key audit trail for this cycle: one
-	// entry per attempt (issue #39), including failed and refused ones.
+	// entry per attempt, including failed and refused ones.
 	InjectedKeys []InjectedKey `json:"injected_keys,omitempty"`
 	// CycleDir is the absolute path to this cycle's artifact directory. Not
 	// persisted to cycle.json (it is always derivable from the directory the
@@ -112,8 +112,8 @@ type JobInfo struct {
 	Name    string    `json:"name"`
 	Started time.Time `json:"started"`
 	// OperatorKeys are SHA256:… fingerprints of operator debug keys present
-	// in — or ambiguously attempted against — the guest while this job ran
-	// (issue #39). Reading the job record alone answers "did this job run
+	// in — or ambiguously attempted against — the guest while this job ran.
+	// Reading the job record alone answers "did this job run
 	// with an operator credential installed?".
 	OperatorKeys []string `json:"operator_keys,omitempty"`
 }
@@ -123,8 +123,8 @@ type Failure struct {
 	Error string `json:"error"`
 }
 
-// InjectedKey records one operator debug-key attempt against a cycle's guest
-// (issue #39). The disk shape mirrors runny.v1.InjectedKey.
+// InjectedKey records one operator debug-key attempt against a cycle's guest.
+// The disk shape mirrors runny.v1.InjectedKey.
 type InjectedKey struct {
 	Fingerprint string    `json:"fingerprint"`
 	Comment     string    `json:"comment,omitempty"`
@@ -151,8 +151,8 @@ type InjectedKey struct {
 	OperatorSID string `json:"operator_sid,omitempty"`
 }
 
-// OperatorAccessFile is the write-ahead audit sidecar's name in a cycle dir
-// (issue #39): it carries the InjectedKeys before cycle.json lands, so a
+// OperatorAccessFile is the write-ahead audit sidecar's name in a cycle dir:
+// it carries the InjectedKeys before cycle.json lands, so a
 // daemon crash mid-attempt does not erase the evidence that an operator
 // credential was about to enter (or did enter) a guest.
 const OperatorAccessFile = "operator-access.json"
@@ -214,7 +214,7 @@ func (s Store) Write(r *Record) error {
 
 // WriteArtifact atomically writes one named artifact into the record's cycle
 // dir (tmp-rename, like Write) and ensures it is listed in r.Artifacts. Used
-// WRITE-AHEAD for operator-access.json (issue #39): cycle.json lands only at
+// WRITE-AHEAD for operator-access.json: cycle.json lands only at
 // finishCycle, and a daemon crash must not erase even the INTENT that an
 // operator credential was about to enter a guest.
 func (s Store) WriteArtifact(r *Record, name string, data []byte) error {
@@ -233,7 +233,7 @@ func (s Store) WriteArtifact(r *Record, name string, data []byte) error {
 
 // Recent returns up to n most-recent records for the slot, newest first. A
 // cycle dir that holds an operator-access.json but no cycle.json (a daemon
-// crash mid-attempt or mid-hold, issue #39) is surfaced as a synthesized stub
+// crash mid-attempt or mid-hold) is surfaced as a synthesized stub
 // record so the orphaned credential evidence appears in `runnyctl why`
 // instead of only sitting on disk until retention deletes it unseen.
 // liveCycleID is the slot's currently-running cycle (empty if none): its
@@ -277,7 +277,7 @@ func (s Store) Recent(n int, liveCycleID string) ([]*Record, error) {
 }
 
 // synthesizeOrphan builds a stub Record from a cycle dir that has an
-// operator-access.json but no readable cycle.json (issue #39). It returns nil
+// operator-access.json but no readable cycle.json. It returns nil
 // when the sidecar is absent or unparseable: only credential evidence is worth
 // surfacing this way, and a corrupt sidecar is not actionable.
 func (s Store) synthesizeOrphan(dir string) *Record {

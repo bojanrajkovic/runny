@@ -111,7 +111,7 @@ func validSourceContent(t *testing.T) []byte {
 }
 
 // createDifferencing must grant VM group access to BOTH parent and child
-// after creating the diff VHD -- regression guard for issue #319, where a
+// after creating the diff VHD -- regression guard: a
 // bare compute system's Start failed with "The process has not been granted
 // access rights to the parent virtual hard disk for the differencing disk."
 // because nothing ever granted it. The parent gets read only (it's the
@@ -158,7 +158,7 @@ func TestCreateDifferencing_GrantParentFails(t *testing.T) {
 }
 
 // A grant failure on the child must surface loudly too -- it's the more
-// consequential of the two grants (issue #319's real failure was here, not
+// consequential of the two grants (the real failure was here, not
 // on the parent), so it needs its own explicit regression guard rather than
 // only being reachable as a side effect of the parent-fails test.
 func TestCreateDifferencing_GrantChildFails(t *testing.T) {
@@ -175,7 +175,7 @@ func TestCreateDifferencing_GrantChildFails(t *testing.T) {
 }
 
 // The temp path must keep dst's .vhdx extension -- regression guard for
-// issue #319: a temp path ending in ".converting" instead of ".vhdx" made
+// A temp path ending in ".converting" instead of ".vhdx" made
 // the real CreateVirtualDisk fail with "A virtual disk support provider for
 // the specified file was not found" (a real Windows error only the live
 // Win32 API surfaces, not fakeBackend).

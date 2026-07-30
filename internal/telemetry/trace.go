@@ -603,17 +603,13 @@ func (a *traceAssembler) backendStarted(e obs.Event) {
 				parent = h.ctx
 			}
 		}
-		attrs := make([]attribute.KeyValue, 0, len(e.Backend.Attrs))
-		for _, kv := range e.Backend.Attrs {
-			attrs = append(attrs, attribute.String(kv.Key, kv.Value))
-		}
-		ctx, span := a.tracer.Start(parent, e.Backend.Name,
-			trace.WithTimestamp(e.Time), trace.WithAttributes(attrs...))
+		ctx, span := a.tracer.Start(parent, e.Backend.Name, trace.WithTimestamp(e.Time))
 		cs.backends[e.Backend.ID] = &spanHandle{ctx: ctx, span: span}
 	})
 }
 
-// backendEnded closes a span opened by backendStarted. A missing entry is
+// backendEnded closes a span opened by backendStarted, stamping the
+// attributes the dependency set on it along the way. A missing entry is
 // not an error: the cycle may have already finished and closed it (see
 // cycleFinished), which is the abandoned-call path.
 func (a *traceAssembler) backendEnded(e obs.Event) {
@@ -624,6 +620,9 @@ func (a *traceAssembler) backendEnded(e obs.Event) {
 		h := cs.backends[e.Backend.ID]
 		if h == nil {
 			return
+		}
+		for _, kv := range e.Backend.Attrs {
+			h.span.SetAttributes(attribute.String(kv.Key, kv.Value))
 		}
 		if outcomeIsFailure(e.Backend.Outcome) {
 			h.span.SetStatus(codes.Error, e.Backend.Error)

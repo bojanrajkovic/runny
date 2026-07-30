@@ -885,9 +885,16 @@ func TestTraceConsumerBackendSpansNest(t *testing.T) {
 		Time: at(4), Cycle: testCycle, Step: "BOOT", Kind: obs.KindBackendEnded,
 		Backend: &obs.BackendEvent{ID: "s2", Outcome: obs.OutcomeOK},
 	})
+	// Attributes ride the closing half: the dependency sets them on its span
+	// after starting it, so they do not exist yet when the opening event
+	// fires. cid is the only per-slot identifier winhcs emits and is the
+	// whole reason these spans are worth keeping.
 	emit(obs.Event{
 		Time: at(5), Cycle: testCycle, Step: "BOOT", Kind: obs.KindBackendEnded,
-		Backend: &obs.BackendEvent{ID: "s1", Outcome: obs.OutcomeOK},
+		Backend: &obs.BackendEvent{
+			ID: "s1", Outcome: obs.OutcomeOK,
+			Attrs: []obs.Attr{{Key: "cid", Value: "host-abcd1234-pool-0"}},
+		},
 	})
 	emit(obs.Event{
 		Time: at(6), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepLeft,
@@ -923,6 +930,15 @@ func TestTraceConsumerBackendSpansNest(t *testing.T) {
 	}
 	if !outer.StartTime.Equal(at(2)) || !outer.EndTime.Equal(at(5)) {
 		t.Errorf("outer span window = %v..%v, want %v..%v", outer.StartTime, outer.EndTime, at(2), at(5))
+	}
+	var cid string
+	for _, kv := range outer.Attributes {
+		if string(kv.Key) == "cid" {
+			cid = kv.Value.Emit()
+		}
+	}
+	if cid != "host-abcd1234-pool-0" {
+		t.Errorf("cid = %q, want the compute system id -- without it the span cannot be tied to a slot", cid)
 	}
 }
 

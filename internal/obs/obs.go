@@ -179,8 +179,10 @@ type ActionEvent struct {
 
 // BackendEvent is one span from a self-instrumenting dependency, carried
 // across the obs seam so it lands inside the cycle rather than as its own
-// root. Both halves of the pair carry ID; only the start half carries Name,
-// ParentID and Attrs, and only the end half carries Outcome and Error.
+// root. Both halves of the pair carry ID; only the start half carries Name
+// and ParentID, and only the end half carries Attrs, Outcome and Error --
+// attributes ride the close because a library sets them on its span after
+// starting it, so they do not exist yet when the opening event fires.
 //
 // ID is unique per span and opaque here — the adapter that produces these
 // owns its shape. ParentID empty means "attach to whatever is innermost",

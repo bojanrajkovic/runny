@@ -28,7 +28,7 @@ go_library(
         "@io_opentelemetry_go_otel_trace//:trace",
     ] + select({
         "@rules_go//go/platform:windows": [
-            "@io_opentelemetry_go_otel_bridge_opencensus//:opencensus",
+            "@io_opencensus_go//trace",
         ],
         "//conditions:default": [],
     }),

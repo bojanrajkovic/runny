@@ -568,7 +568,7 @@ func (m *hcsMachine) Stop(ctx bounded.Context, grace time.Duration) error {
 // The neighbor scrub is skipped in that case for the same reason a failed
 // delete skips it — the entry belongs to an endpoint that still exists.
 func (m *hcsMachine) destroy(ctx bounded.Context) {
-	if err := m.system.Close(); err != nil {
+	if err := m.system.CloseCtx(ctx); err != nil {
 		slog.Error("teardown: closing compute system failed", "id", m.system.ID(), "err", err)
 	}
 	// Detached from ctx's deadline, the way run.go's own teardown detaches from

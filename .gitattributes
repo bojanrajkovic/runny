@@ -20,6 +20,6 @@ internal/winhcs/hcn/hcnerrors.go linguist-generated=false
 internal/winhcs/hcn/hcnglobals.go linguist-generated=false
 internal/winhcs/hcn/hcnnetwork.go linguist-generated=false
 internal/winhcs/hcs/system.go linguist-generated=false
+internal/winhcs/hcs/utils.go linguist-generated=false
 internal/winhcs/hcs/callback.go linguist-generated=false
 internal/winhcs/vmcompute/vmcompute.go linguist-generated=false
-internal/winhcs/jobobject/iocp.go linguist-generated=false

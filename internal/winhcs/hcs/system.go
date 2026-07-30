@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"syscall"
@@ -15,9 +14,7 @@ import (
 	"github.com/bojanrajkovic/runny/internal/winhcs/cow"
 	"github.com/bojanrajkovic/runny/internal/winhcs/hcs/schema1"
 	hcsschema "github.com/bojanrajkovic/runny/internal/winhcs/hcs/schema2"
-	"github.com/bojanrajkovic/runny/internal/winhcs/jobobject"
 	"github.com/bojanrajkovic/runny/internal/winhcs/log"
-	"github.com/bojanrajkovic/runny/internal/winhcs/logfields"
 	"github.com/bojanrajkovic/runny/internal/winhcs/oc"
 	"github.com/bojanrajkovic/runny/internal/winhcs/timeout"
 	"github.com/bojanrajkovic/runny/internal/winhcs/vmcompute"
@@ -48,11 +45,6 @@ func newSystem(id string) *System {
 		id:        id,
 		waitBlock: make(chan struct{}),
 	}
-}
-
-// Implementation detail for silo naming, this should NOT be relied upon very heavily.
-func siloNameFmt(containerID string) string {
-	return fmt.Sprintf(`\Container_%s`, containerID)
 }
 
 // CreateComputeSystem creates a new compute system with the given configuration but does not start it.
@@ -378,117 +370,6 @@ func (computeSystem *System) Properties(ctx context.Context, types ...schema1.Pr
 	return properties, nil
 }
 
-// queryInProc handles querying for container properties without reaching out to HCS. `props`
-// will be updated to contain any data returned from the queries present in `types`. If any properties
-// failed to be queried they will be tallied up and returned in as the first return value. Failures on
-// query are NOT considered errors; the only failure case for this method is if the containers job object
-// cannot be opened.
-func (computeSystem *System) queryInProc(
-	ctx context.Context,
-	props *hcsschema.Properties,
-	types []hcsschema.PropertyType,
-) ([]hcsschema.PropertyType, error) {
-	// In the future we can make use of some new functionality in the HCS that allows you
-	// to pass a job object for HCS to use for the container. Currently, the only way we'll
-	// be able to open the job/silo is if we're running as SYSTEM.
-	jobOptions := &jobobject.Options{
-		UseNTVariant: true,
-		Name:         siloNameFmt(computeSystem.id),
-	}
-	job, err := jobobject.Open(ctx, jobOptions)
-	if err != nil {
-		return nil, err
-	}
-	defer job.Close()
-
-	var fallbackQueryTypes []hcsschema.PropertyType
-	for _, propType := range types {
-		switch propType {
-		case hcsschema.PTStatistics:
-			// Handle a bad caller asking for the same type twice. No use in re-querying if this is
-			// filled in already.
-			if props.Statistics == nil {
-				props.Statistics, err = computeSystem.statisticsInProc(job)
-				if err != nil {
-					log.G(ctx).WithError(err).Warn("failed to get statistics in-proc")
-
-					fallbackQueryTypes = append(fallbackQueryTypes, propType)
-				}
-			}
-		default:
-			fallbackQueryTypes = append(fallbackQueryTypes, propType)
-		}
-	}
-
-	return fallbackQueryTypes, nil
-}
-
-// statisticsInProc emulates what HCS does to grab statistics for a given container with a small
-// change to make grabbing the private working set total much more efficient.
-func (computeSystem *System) statisticsInProc(job *jobobject.JobObject) (*hcsschema.Statistics, error) {
-	// Start timestamp for these stats before we grab them to match HCS
-	timestamp := time.Now()
-
-	memInfo, err := job.QueryMemoryStats()
-	if err != nil {
-		return nil, err
-	}
-
-	processorInfo, err := job.QueryProcessorStats()
-	if err != nil {
-		return nil, err
-	}
-
-	storageInfo, err := job.QueryStorageStats()
-	if err != nil {
-		return nil, err
-	}
-
-	// This calculates the private working set more efficiently than HCS does. HCS calls NtQuerySystemInformation
-	// with the class SystemProcessInformation which returns an array containing system information for *every*
-	// process running on the machine. They then grab the pids that are running in the container and filter down
-	// the entries in the array to only what's running in that silo and start tallying up the total. This doesn't
-	// work well as performance should get worse if more processess are running on the machine in general and not
-	// just in the container. All of the additional information besides the WorkingSetPrivateSize field is ignored
-	// as well which isn't great and is wasted work to fetch.
-	//
-	// HCS only let's you grab statistics in an all or nothing fashion, so we can't just grab the private
-	// working set ourselves and ask for everything else separately. The optimization we can make here is
-	// to open the silo ourselves and do the same queries for the rest of the info, as well as calculating
-	// the private working set in a more efficient manner by:
-	//
-	// 1. Find the pids running in the silo
-	// 2. Get a process handle for every process (only need PROCESS_QUERY_LIMITED_INFORMATION access)
-	// 3. Call NtQueryInformationProcess on each process with the class ProcessVmCounters
-	// 4. Tally up the total using the field PrivateWorkingSetSize in VM_COUNTERS_EX2.
-	privateWorkingSet, err := job.QueryPrivateWorkingSet()
-	if err != nil {
-		return nil, err
-	}
-
-	return &hcsschema.Statistics{
-		Timestamp:          timestamp,
-		ContainerStartTime: computeSystem.startTime,
-		Uptime100ns:        uint64(time.Since(computeSystem.startTime).Nanoseconds()) / 100,
-		Memory: &hcsschema.MemoryStats{
-			MemoryUsageCommitBytes:            memInfo.JobMemory,
-			MemoryUsageCommitPeakBytes:        memInfo.PeakJobMemoryUsed,
-			MemoryUsagePrivateWorkingSetBytes: privateWorkingSet,
-		},
-		Processor: &hcsschema.ProcessorStats{
-			RuntimeKernel100ns: uint64(processorInfo.TotalKernelTime),
-			RuntimeUser100ns:   uint64(processorInfo.TotalUserTime),
-			TotalRuntime100ns:  uint64(processorInfo.TotalKernelTime + processorInfo.TotalUserTime),
-		},
-		Storage: &hcsschema.StorageStats{
-			ReadCountNormalized:  uint64(storageInfo.ReadStats.IoCount),
-			ReadSizeBytes:        storageInfo.ReadStats.TotalSize,
-			WriteCountNormalized: uint64(storageInfo.WriteStats.IoCount),
-			WriteSizeBytes:       storageInfo.WriteStats.TotalSize,
-		},
-	}, nil
-}
-
 // hcsPropertiesV2Query is a helper to make a HcsGetComputeSystemProperties call using the V2 schema property types.
 func (computeSystem *System) hcsPropertiesV2Query(ctx context.Context, types []hcsschema.PropertyType) (*hcsschema.Properties, error) {
 	operation := "hcs::System::PropertiesV2"
@@ -520,57 +401,15 @@ func (computeSystem *System) hcsPropertiesV2Query(ctx context.Context, types []h
 }
 
 // PropertiesV2 returns the requested compute systems properties targeting a V2 schema compute system.
+// Upstream first tries to satisfy a container's Statistics query in-process out of the silo's job
+// object, falling back to HCS per property type it couldn't answer. That path was dropped along with
+// the jobobject/queue/winapi packages it needed: this backend only ever creates VirtualMachine
+// compute systems, which upstream routes straight to HCS anyway.
 func (computeSystem *System) PropertiesV2(ctx context.Context, types ...hcsschema.PropertyType) (_ *hcsschema.Properties, err error) {
 	computeSystem.handleLock.RLock()
 	defer computeSystem.handleLock.RUnlock()
 
-	// Let HCS tally up the total for VM based queries instead of querying ourselves.
-	if computeSystem.typ != "container" {
-		return computeSystem.hcsPropertiesV2Query(ctx, types)
-	}
-
-	// Define a starter Properties struct with the default fields returned from every
-	// query. Owner is only returned from Statistics but it's harmless to include.
-	properties := &hcsschema.Properties{
-		Id:            computeSystem.id,
-		SystemType:    computeSystem.typ,
-		RuntimeOsType: computeSystem.os,
-		Owner:         computeSystem.owner,
-	}
-
-	logEntry := log.G(ctx)
-	// First lets try and query ourselves without reaching to HCS. If any of the queries fail
-	// we'll take note and fallback to querying HCS for any of the failed types.
-	fallbackTypes, err := computeSystem.queryInProc(ctx, properties, types)
-	if err == nil && len(fallbackTypes) == 0 {
-		return properties, nil
-	} else if err != nil {
-		logEntry = logEntry.WithError(fmt.Errorf("failed to query compute system properties in-proc: %w", err))
-		fallbackTypes = types
-	}
-
-	logEntry.WithFields(log.Fields{
-		logfields.ContainerID: computeSystem.id,
-		"propertyTypes":       fallbackTypes,
-	}).Info("falling back to HCS for property type queries")
-
-	hcsProperties, err := computeSystem.hcsPropertiesV2Query(ctx, fallbackTypes)
-	if err != nil {
-		return nil, err
-	}
-
-	// Now add in anything that we might have successfully queried in process.
-	if properties.Statistics != nil {
-		hcsProperties.Statistics = properties.Statistics
-		hcsProperties.Owner = properties.Owner
-	}
-
-	// For future support for querying processlist in-proc as well.
-	if properties.ProcessList != nil {
-		hcsProperties.ProcessList = properties.ProcessList
-	}
-
-	return hcsProperties, nil
+	return computeSystem.hcsPropertiesV2Query(ctx, types)
 }
 
 // Pause pauses the execution of the computeSystem. This feature is not enabled in TP5.

@@ -47,13 +47,13 @@ jobs:
       # Windows hosts are a runner target (Hyper-V-backed guests): keep the
       # daemon and CLI cross-compiling for windows/amd64. This also covers the
       # in-graph proto package a plain `GOOS=windows go build` can't resolve.
-      # internal/winhcs is windows-only, and target_compatible_with prunes it
-      # from a linux-platform //... build regardless of who imports it -- the
-      # VM backend (internal/vm) already does, but only this cross-build step
-      # ever compiles it under a windows toolchain. internal/winhcs/... is
-      # listed explicitly because cmd/runnyd's own transitive closure only
-      # reaches the subset internal/vm calls today, not every vendored
-      # package in the tree. The two go_test targets are excluded:
+      # Every file under internal/winhcs is //go:build windows, so on any other
+      # platform its targets build to empty packages -- the linux //... step
+      # above compiles none of it, whoever imports it. This step is the only
+      # place it is type-checked at all. internal/winhcs/... is named
+      # explicitly rather than left to cmd/runnyd's transitive closure, so a
+      # vendored package nothing imports yet is still compiled instead of
+      # silently rotting. The two go_test targets are excluded:
       # cross-compiling a windows go_test needs a windows test-execution
       # toolchain this runner doesn't have, even just to build the binary.
       - name: cross-build (windows/amd64)

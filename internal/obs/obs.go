@@ -46,6 +46,18 @@ const (
 	// multi-stage action (see Milestone) can show which stage was reached
 	// and when, not just its final outcome.
 	KindActionMilestone Kind = "action_milestone"
+	// KindBackendStarted/KindBackendEnded carry one span from a dependency
+	// that instruments itself in-process. runny's traces are assembled here
+	// from the event stream rather than from spans held in a caller's
+	// context, so such a library has no parent to attach to and would emit
+	// its own disconnected roots; adapting it into these events is what puts
+	// its work inside the cycle that caused it (see BackendEvent).
+	//
+	// Paired rather than a single completion event like KindHTTP, because
+	// these nest: spans end innermost-first, so a lone end event would
+	// describe a child before its parent existed.
+	KindBackendStarted Kind = "backend_started"
+	KindBackendEnded   Kind = "backend_ended"
 )
 
 // Action names are a closed set: each becomes a span name on the trace side
@@ -165,6 +177,25 @@ type ActionEvent struct {
 	Duration time.Duration
 }
 
+// BackendEvent is one span from a self-instrumenting dependency, carried
+// across the obs seam so it lands inside the cycle rather than as its own
+// root. Both halves of the pair carry ID; only the start half carries Name,
+// ParentID and Attrs, and only the end half carries Outcome and Error.
+//
+// ID is unique per span and opaque here — the adapter that produces these
+// owns its shape. ParentID empty means "attach to whatever is innermost",
+// the same precedence an HTTP round trip gets: the open action, else the
+// step, else the cycle root. A non-empty ParentID names an earlier
+// BackendEvent's ID and is what preserves the dependency's own nesting.
+type BackendEvent struct {
+	ID       string
+	ParentID string
+	Name     string
+	Attrs    []Attr
+	Outcome  Outcome
+	Error    string
+}
+
 // DetailEvent carries a live annotation ("2.1 GiB at 41 MiB/s") or, under
 // KindActionMilestone, a milestone name (see Milestone) — the shape is the
 // same single string either way; Kind decides how a consumer renders it.
@@ -263,6 +294,7 @@ type Event struct {
 
 	StepInfo *StepEvent
 	Action   *ActionEvent
+	Backend  *BackendEvent
 	HTTP     *HTTPEvent
 	Detail   *DetailEvent
 	VM       *VMEvent

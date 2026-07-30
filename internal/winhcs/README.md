@@ -31,8 +31,8 @@ the `internal/winhcs` tree) from importing `hcs`/`hcs/schema2`/`vmcompute` at
 all, since only code rooted at the parent of an `internal/` segment may
 import through it. Collapsing the second `internal/` is a pure path change --
 zero logic divergence -- but it must be repeated on every re-vendor, the same
-as the import-path rewrite itself. `hcn`, `computestorage`, and `osversion`
-were never nested this way upstream, so they're unaffected.
+as the import-path rewrite itself. `hcn` and `osversion` were never nested
+this way upstream, so they're unaffected.
 
 **The flatten has a Bazel-only half, easy to miss.** gazelle regenerates each
 package's `importpath` on the Go path alone, but does not widen an existing
@@ -44,10 +44,10 @@ enforce Bazel visibility at all, so this passed silently until
 `internal/vm/hcs_windows.go` tried to depend on `hcs`/`hcs/schema2` through
 Bazel and hit "target ... is not visible from target //internal/vm:vm". Widen
 the specific package's `visibility` to `["//:__subpackages__"]` (matching
-`hcn`/`computestorage`/`osversion`, which were never nested and so never had
-this problem) the moment something outside `internal/winhcs` needs to depend
-on it -- gazelle preserves a manually-widened `visibility` on later runs, it
-just never widens one itself.
+`hcn`/`osversion`, which were never nested and so never had this problem) the
+moment something outside `internal/winhcs` needs to depend on it -- gazelle
+preserves a manually-widened `visibility` on later runs, it just never widens
+one itself.
 
 ## Vendored packages
 
@@ -72,7 +72,7 @@ them).
    `protobuf` subtree those pull in.
 2. **`internal/oc/exporter.go`** -- deleted. It's a logrus-flavored
    `trace.Exporter`; span export goes through the OpenCensus->OTel bridge
-   instead (registered in #308, at runnyd init on windows).
+   instead, registered at runnyd init on windows (see "Module deps" below).
 3. **`internal/log`** -- rewritten onto stdlib `log/slog`, keeping the
    exported surface identical (`L`, `G(ctx)`, `Fields = map[string]any`,
    `Entry.WithField`/`WithFields`/`WithError` + the level methods the
@@ -112,30 +112,68 @@ them).
    methods, `hcnendpoint.go`), the only callers of the namespace functions
    defined there.
 6. All logrus imports across the remaining files (`internal/hcs/system.go`,
-   `internal/hcs/callback.go`, `internal/vmcompute/vmcompute.go`,
-   `internal/jobobject/iocp.go`, and the five `hcn/*.go` files above) were
-   swapped for the `internal/log` shim: import-identifier rename only, per
-   modification 3's exported-surface guarantee.
+   `internal/hcs/callback.go`, `internal/vmcompute/vmcompute.go`, and the five
+   `hcn/*.go` files above) were swapped for the `internal/log` shim:
+   import-identifier rename only, per modification 3's exported-surface
+   guarantee.
+7. **`computestorage`, `memory`, `jobobject`, `queue`, and `winapi` --
+   deleted**, along with the two `hcs` entry points that were their only route
+   into this tree. Both entry points serve *containers*; this backend creates
+   only `VirtualMachine` compute systems, so neither was reachable.
+   - `hcs.CreateNTFSVHD` (`internal/hcs/utils.go`) -- the whole reason
+     `computestorage` was here, and `computestorage/helpers.go` in turn the
+     only reason `memory` was. Nothing calls it: this backend's disks come
+     from `internal/vhdx`, which drives `go-winio/vhd` directly. Dropping the
+     function left `makeOpenFiles` as the file's only remaining content
+     (`hcs/system.go` and `hcs/process.go` both use it, so the file stays).
+   - `System.queryInProc` / `System.statisticsInProc` (`internal/hcs/system.go`)
+     -- the whole reason `jobobject` was here, and `jobobject` in turn the only
+     reason `queue` and `winapi` were. They implement upstream's optimization
+     for `PropertiesV2(PTStatistics)` on a container: open the container's silo
+     job object and tally memory/processor/storage stats in-process instead of
+     paying HCS's whole-machine `NtQuerySystemInformation` sweep, falling back
+     to HCS per property type that failed. Upstream's own
+     `if computeSystem.typ != "container"` guard routes a VM straight to
+     `hcsPropertiesV2Query`, so `PropertiesV2` now *is* that call; on the only
+     compute-system type this backend creates, behavior is unchanged.
+     `siloNameFmt` went with them (its only caller was `queryInProc`).
+     `PropertiesV2` itself is kept -- `hcs/system.go` asserts
+     `cow.Container = &System{}`, and that interface declares it.
+
+   `winapi` was the bulk of it -- half of the ~4,700 lines this removed, split
+   evenly between hand-written NT syscall declarations and the generated
+   `zsyscall_windows.go` for them, covering bindflt, cimfs, console,
+   offlinereg, devices, and logon: container filesystem and session plumbing
+   with no VM boot-path role at all. Kept, deliberately: the
+   `hcsschema.Statistics`/`MemoryStats`/`ProcessorStats`/`StorageStats` types
+   and `PTStatistics` in `hcs/schema2`, which are inert JSON DTOs on the wire
+   contract that HCS still returns; and `security`, which `computestorage`
+   used but `internal/vhdx` also depends on directly.
 
 After these modifications, `sirupsen/logrus`, `containerd/errdefs`,
 `containerd/typeurl`, `google.golang.org/grpc`, `google.golang.org/protobuf`,
 and `google.golang.org/genproto` do not appear anywhere in
 `bazel query 'deps(//internal/winhcs/...)'` for any platform.
 
-## Module deps this PR adds
+## Module deps
 
-See `go.mod` for what this PR actually added -- it's the authority here, not
-this doc. (`github.com/Microsoft/go-winio` was already a runny dependency
-before this PR; its `vhd` subpackage is used by the differencing-disk clone
-work, issue #306.)
+`go.mod` is the authority for what this tree pulls in, not this doc. Two
+entries are worth calling out because their relationship to this tree reads
+backwards:
 
-**Deliberately not added here:** `go.opentelemetry.io/otel/bridge/opencensus`.
-Nothing in this PR imports it -- the bridge is registered at runnyd init on
-windows in #308, which is the PR that will add the real `go.mod` entry via
-the normal `go mod tidy` workflow. Pre-adding an unimported module dependency
-doesn't work well with this repo's tooling: `go mod tidy` prunes unused
-`require` entries on every run (including Renovate's), so a dangling pin
-would just get fought over for no benefit.
+- `github.com/Microsoft/go-winio` is not this tree's dependency to own. It
+  predates the vendoring and is used well outside it -- `internal/vhdx` drives
+  its `vhd` subpackage directly. Deleting `internal/winhcs` would not drop it.
+- `go.opentelemetry.io/otel/bridge/opencensus` is what makes this tree's spans
+  observable, yet nothing under `internal/winhcs/` imports it. The vendored
+  code emits `go.opencensus.io/trace` spans via `internal/winhcs/oc`;
+  `internal/telemetry/opencensus_bridge_windows.go` registers the bridge that
+  forwards them to the OTel tracer provider. That separation is why
+  modification 2 could delete `oc/exporter.go` outright rather than port it.
+
+Don't pre-add a module `require` for something this tree will import later:
+`go mod tidy` prunes unused entries on every run (Renovate's included), so a
+dangling pin just gets fought over.
 
 ## Bazel
 

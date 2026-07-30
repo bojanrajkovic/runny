@@ -38,9 +38,9 @@ what keeps that list short enough to be true.
   fails only at the moment something outside `internal/winhcs` first depends
   on the package — as `//internal/vm` did on `hcs`/`hcs/schema2`, with
   `target ... is not visible from target //internal/vm:vm`. Widen that
-  package to `["//:__subpackages__"]` (matching `hcn`, `computestorage` and
-  `osversion`, never nested and so never affected); gazelle preserves a
-  manual widening on later runs.
+  package to `["//:__subpackages__"]` (matching `hcn` and `osversion`, never
+  nested and so never affected); gazelle preserves a manual widening on later
+  runs.
 - **`bazel run //tools/format` deliberately skips this tree, so a hand-edited
   file stays unformatted and nogo still judges it.** `.gitattributes` marks
   `internal/winhcs/**` `linguist-generated=true` — the point is that an

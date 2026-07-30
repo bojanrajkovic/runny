@@ -16,12 +16,10 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = select({
         "@rules_go//go/platform:windows": [
-            "//internal/winhcs/computestorage",
             "//internal/winhcs/cow",
             "//internal/winhcs/hcs/schema1",
             "//internal/winhcs/hcs/schema2",
             "//internal/winhcs/interop",
-            "//internal/winhcs/jobobject",
             "//internal/winhcs/log",
             "//internal/winhcs/logfields",
             "//internal/winhcs/oc",
@@ -29,8 +27,6 @@ go_library(
             "//internal/winhcs/timeout",
             "//internal/winhcs/vmcompute",
             "@com_github_microsoft_go_winio//:go-winio",
-            "@com_github_microsoft_go_winio//vhd",
-            "@com_github_pkg_errors//:errors",
             "@io_opencensus_go//trace",
             "@org_golang_x_sys//windows",
         ],

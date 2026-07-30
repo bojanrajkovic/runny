@@ -54,13 +54,19 @@ edges only.
   `rotateScriptWindowsTemplate` (the cycle key) and
   `installDebugKeyScriptWindows` (the operator's debug key) embed this same
   fragment; don't fork a second copy of the ACL logic into either.
-- **`PasswordAuthentication no` is PREPENDED to `sshd_config`, never
-  appended.** sshd_config is first-match-wins, and the stock Windows
-  `sshd_config` ends with a `Match Group administrators` block; appending
-  after it lands inside that block (or loses to whatever precedes it)
-  instead of applying globally. `rotateScriptWindowsTemplate` builds the new
-  content as `directive + existing`, not `existing + directive` — keep it
-  that way.
+- **`PasswordAuthentication no` and `KbdInteractiveAuthentication no` are both
+  PREPENDED to `sshd_config`, never appended.** sshd_config is first-match-
+  wins, and the stock Windows `sshd_config` ends with a `Match Group
+  administrators` block; appending after it lands inside that block (or
+  loses to whatever precedes it) instead of applying globally.
+  `rotateScriptWindowsTemplate` builds the new content as
+  `directives + existing`, not `existing + directives` — keep it that way.
+  Both directives go in because `verifyPasswordAuthDead` only ever proves the
+  `password` method dead, so nothing downstream would notice if
+  keyboard-interactive still accepted the image's well-known credential. Whether
+  Win32-OpenSSH's keyboard-interactive can authenticate a local user at all is
+  unverified here — the POSIX drop-in disables both for the same reason, and
+  matching it costs one line, which is cheaper than establishing the answer.
 - **The sshd service restart runs INLINE, not detached.** A detached
   `Start-Process` (sleep, then `Restart-Service sshd`) was tried first, on
   the theory that an inline restart would kill the session issuing it —

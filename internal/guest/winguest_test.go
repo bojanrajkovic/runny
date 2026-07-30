@@ -51,6 +51,18 @@ func TestRotateScriptWindowsPinsACLPrependAndInlineRestart(t *testing.T) {
 	if !strings.Contains(script, `+ $existing)`) {
 		t.Errorf("windows rotate script must prepend the directive before $existing:\n%s", script)
 	}
+	// KbdInteractiveAuthentication no must be prepended alongside
+	// PasswordAuthentication no: Win32-OpenSSH's keyboard-interactive method is
+	// a second local-auth path independent of "password", and
+	// verifyPasswordAuthDead only ever exercises the latter — leaving
+	// keyboard-interactive enabled would leave the well-known credential
+	// reachable through a door nothing checks.
+	if !strings.Contains(script, "KbdInteractiveAuthentication no") {
+		t.Fatalf("windows rotate script missing the KbdInteractiveAuthentication directive:\n%s", script)
+	}
+	if !strings.Contains(script, `"PasswordAuthentication no`+"`r`n"+`KbdInteractiveAuthentication no`+"`r`n"+`" + $existing)`) {
+		t.Errorf("windows rotate script must prepend both directives together, before $existing:\n%s", script)
+	}
 	if !strings.Contains(script, "\nRestart-Service sshd -ErrorAction Stop") {
 		t.Errorf("windows rotate script must restart sshd directly, inline, aborting loudly on failure:\n%s", script)
 	}

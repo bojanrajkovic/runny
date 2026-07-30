@@ -130,12 +130,18 @@ const captureHostKeysWindowsScript = `Get-ChildItem 'C:\ProgramData\ssh\ssh_host
 // sshd refuses to trust a file any other principal can write, and doesn't
 // say why the key never worked.
 //
-// PasswordAuthentication no is PREPENDED, not appended: sshd_config is
-// first-match-wins, and the stock Windows sshd_config ends with a
-// `+"`Match Group administrators`"+` block — appending after it would land
-// inside that block and lose to whatever precedes it, or worse, silently
-// apply only to a subset of matches. Prepending guarantees the directive is
-// the first one sshd reads, for every connection.
+// PasswordAuthentication no and KbdInteractiveAuthentication no are both
+// PREPENDED, not appended: sshd_config is first-match-wins, and the stock
+// Windows sshd_config ends with a `+"`Match Group administrators`"+` block —
+// appending after it would land inside that block and lose to whatever
+// precedes it, or worse, silently apply only to a subset of matches.
+// Prepending guarantees both directives are the first ones sshd reads, for
+// every connection. Both directives are required, not just the first: Win32-
+// OpenSSH's keyboard-interactive method is a second, independent local-auth
+// path, and verifyPasswordAuthDead only ever proves the "password" method
+// dead — an image whose keyboard-interactive method still accepts the
+// well-known credential would rotate "successfully" while leaving that door
+// open, unnoticed.
 //
 // The restart runs INLINE, directly — not detached. A detached Start-Process
 // was tried first on the theory that restarting sshd from inside the
@@ -152,7 +158,7 @@ const captureHostKeysWindowsScript = `Get-ChildItem 'C:\ProgramData\ssh\ssh_host
 var rotateScriptWindowsTemplate = `$pub = '%s'
 ` + psAppendAuthorizedKeyLine("$pub") + `$cfgPath = 'C:\ProgramData\ssh\sshd_config'
 $existing = Get-Content -Path $cfgPath -Raw
-Set-Content -Path $cfgPath -Value ("PasswordAuthentication no` + "`r`n" + `" + $existing) -NoNewline
+Set-Content -Path $cfgPath -Value ("PasswordAuthentication no` + "`r`n" + `KbdInteractiveAuthentication no` + "`r`n" + `" + $existing) -NoNewline
 %sRestart-Service sshd -ErrorAction Stop
 `
 

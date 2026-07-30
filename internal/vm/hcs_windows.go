@@ -487,7 +487,7 @@ func (m *hcsMachine) waitIPLinux(ctx bounded.Context) (string, error) {
 				continue // still within grace; let the guest self-configure
 			}
 			if m.sshUser == "" || m.sshPassword == "" {
-				return "", fmt.Errorf("no IP after %s and no SSHUser/SSHPassword configured to attempt the network fixup (issue #319)", waitIPGracePeriod)
+				return "", fmt.Errorf("no IP after %s and no SSHUser/SSHPassword configured to attempt the network fixup", waitIPGracePeriod)
 			}
 			// Wrapped in its own named action (not folded silently into
 			// AWAIT_IP's step span) so a trace/metric can distinguish "this

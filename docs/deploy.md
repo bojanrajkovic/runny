@@ -588,7 +588,8 @@ runnyctl edit-config
 ```
 
 It opens the resolved home's `config.yaml` (system home if one exists, else
-`~/.runny`) in `$VISUAL`/`$EDITOR` (falling back to `vi`), seeding a fresh
+`~/.runny`) in `$VISUAL`/`$EDITOR` (falling back to `vi` on macOS/Linux,
+`notepad.exe` on Windows), seeding a fresh
 skeleton if none exists yet. On save it runs `runnyd -test-config` against your
 edit: an **error** reopens the editor with your changes intact (nothing is ever
 discarded over a typo); a **warning** asks to confirm before applying; **ok**

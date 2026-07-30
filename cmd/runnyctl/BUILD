@@ -11,6 +11,8 @@ go_library(
         "dial_unix.go",
         "dial_windows.go",
         "editconfig.go",
+        "editconfig_unix.go",
+        "editconfig_windows.go",
         "execssh_unix.go",
         "execssh_windows.go",
         "follow.go",
@@ -132,6 +134,8 @@ go_test(
     srcs = [
         "dial_windows_test.go",
         "editconfig_test.go",
+        "editconfig_unix_test.go",
+        "editconfig_windows_test.go",
         "follow_test.go",
         "image_test.go",
         "installdaemon_test.go",

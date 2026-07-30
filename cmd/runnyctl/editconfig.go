@@ -222,11 +222,12 @@ func stageConfigCopy(content []byte) (string, error) {
 	return tmp.Name(), nil
 }
 
-// openEditor runs $VISUAL, else $EDITOR, else vi on path, connected to the
-// current terminal. The convention (VISUAL taking precedence for full-screen
-// editors) is the traditional Unix one; the editor string is split on
-// whitespace — covers "vim"/"nano" and "code --wait", not an editor whose own
-// path contains a space (rare enough not to special-case: ponytail).
+// openEditor runs $VISUAL, else $EDITOR, else the platform default (see
+// defaultEditor) on path, connected to the current terminal. The convention
+// (VISUAL taking precedence for full-screen editors) is the traditional Unix
+// one; the editor string is split on whitespace — covers "vim"/"nano" and
+// "code --wait", not an editor whose own path contains a space (rare enough
+// not to special-case: ponytail).
 func openEditor(path string) error {
 	editor := strings.TrimSpace(os.Getenv("VISUAL"))
 	if editor == "" {
@@ -234,7 +235,7 @@ func openEditor(path string) error {
 	}
 	argv := strings.Fields(editor)
 	if len(argv) == 0 {
-		argv = []string{"vi"}
+		argv = []string{defaultEditor()}
 	}
 	cmd := exec.Command(argv[0], append(argv[1:], path)...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr

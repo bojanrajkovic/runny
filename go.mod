@@ -19,7 +19,6 @@ require (
 	github.com/rivo/uniseg v0.4.7
 	go.opencensus.io v0.24.0
 	go.opentelemetry.io/otel v1.44.0
-	go.opentelemetry.io/otel/bridge/opencensus v1.44.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.44.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.44.0
 	go.opentelemetry.io/otel/metric v1.44.0

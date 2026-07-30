@@ -857,3 +857,162 @@ func TestTraceConsumerIgnoresTarballDone(t *testing.T) {
 		t.Fatalf("KindTarballDone produced %d spans, want 0", len(spans))
 	}
 }
+
+// TestTraceConsumerBackendSpansNest covers the vendored-library span path:
+// a self-instrumenting dependency (the winhcs tree) reports through obs
+// rather than emitting its own root spans, and its internal nesting has to
+// survive the trip. The inner span ends BEFORE the outer one -- spans end
+// LIFO -- which is why these are paired start/end events rather than the
+// single completion event KindHTTP uses.
+func TestTraceConsumerBackendSpansNest(t *testing.T) {
+	emit, exp := newTestAssembler(t)
+
+	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
+	emit(obs.Event{
+		Time: at(1), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepEntered,
+		StepInfo: &obs.StepEvent{},
+	})
+	// Outer wrapper span, then its syscall-level child.
+	emit(obs.Event{
+		Time: at(2), Cycle: testCycle, Step: "BOOT", Kind: obs.KindBackendStarted,
+		Backend: &obs.BackendEvent{ID: "s1", Name: "hcs::CreateComputeSystem"},
+	})
+	emit(obs.Event{
+		Time: at(3), Cycle: testCycle, Step: "BOOT", Kind: obs.KindBackendStarted,
+		Backend: &obs.BackendEvent{ID: "s2", ParentID: "s1", Name: "HcsCreateComputeSystem"},
+	})
+	emit(obs.Event{
+		Time: at(4), Cycle: testCycle, Step: "BOOT", Kind: obs.KindBackendEnded,
+		Backend: &obs.BackendEvent{ID: "s2", Outcome: obs.OutcomeOK},
+	})
+	// Attributes ride the closing half: the dependency sets them on its span
+	// after starting it, so they do not exist yet when the opening event
+	// fires. cid is the only per-slot identifier winhcs emits and is the
+	// whole reason these spans are worth keeping.
+	emit(obs.Event{
+		Time: at(5), Cycle: testCycle, Step: "BOOT", Kind: obs.KindBackendEnded,
+		Backend: &obs.BackendEvent{
+			ID: "s1", Outcome: obs.OutcomeOK,
+			Attrs: []obs.Attr{{Key: "cid", Value: "host-abcd1234-pool-0"}},
+		},
+	})
+	emit(obs.Event{
+		Time: at(6), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepLeft,
+		StepInfo: &obs.StepEvent{Outcome: obs.OutcomeOK},
+	})
+	emit(obs.Event{
+		Time: at(7), Cycle: testCycle, Kind: obs.KindCycleFinished,
+		Finish: &obs.FinishEvent{Result: "ok", Ending: "ok"},
+	})
+
+	byName := map[string]tracetest.SpanStub{}
+	for _, s := range exp.GetSpans() {
+		byName[s.Name] = s
+	}
+	step, ok := byName["cycle.step BOOT"]
+	if !ok {
+		t.Fatal("no BOOT step span")
+	}
+	outer, ok := byName["hcs::CreateComputeSystem"]
+	if !ok {
+		t.Fatalf("no outer backend span; got %v", names(exp.GetSpans()))
+	}
+	inner, ok := byName["HcsCreateComputeSystem"]
+	if !ok {
+		t.Fatalf("no inner backend span; got %v", names(exp.GetSpans()))
+	}
+	if outer.Parent.SpanID() != step.SpanContext.SpanID() {
+		t.Errorf("outer backend span parent = %v, want the BOOT step", outer.Parent.SpanID())
+	}
+	if inner.Parent.SpanID() != outer.SpanContext.SpanID() {
+		t.Errorf("inner backend span parent = %v, want the outer backend span %v",
+			inner.Parent.SpanID(), outer.SpanContext.SpanID())
+	}
+	if !outer.StartTime.Equal(at(2)) || !outer.EndTime.Equal(at(5)) {
+		t.Errorf("outer span window = %v..%v, want %v..%v", outer.StartTime, outer.EndTime, at(2), at(5))
+	}
+	var cid string
+	for _, kv := range outer.Attributes {
+		if string(kv.Key) == "cid" {
+			cid = kv.Value.Emit()
+		}
+	}
+	if cid != "host-abcd1234-pool-0" {
+		t.Errorf("cid = %q, want the compute system id -- without it the span cannot be tied to a slot", cid)
+	}
+}
+
+// TestTraceConsumerUnfinishedBackendSpanClosesAtCycleEnd pins the
+// abandoned-boot path. Boot wraps the vendored create/start in its own
+// bounded wait, so a merely-slow host leaves a detached goroutine still
+// running after the step -- and the cycle -- is gone. That is precisely the
+// case the wait exists for, so the cycle's trace must show the call that was
+// still outstanding rather than nothing at all. The span closes at cycle
+// finish, keeps its real parent, and says outright that it had not returned;
+// its true end time is unknowable from inside the cycle and is not guessed.
+func TestTraceConsumerUnfinishedBackendSpanClosesAtCycleEnd(t *testing.T) {
+	emit, exp := newTestAssembler(t)
+
+	emit(obs.Event{Time: at(0), Cycle: testCycle, Kind: obs.KindCycleStarted})
+	emit(obs.Event{
+		Time: at(1), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepEntered,
+		StepInfo: &obs.StepEvent{},
+	})
+	emit(obs.Event{
+		Time: at(2), Cycle: testCycle, Step: "BOOT", Kind: obs.KindBackendStarted,
+		Backend: &obs.BackendEvent{ID: "slow", Name: "hcs::CreateComputeSystem"},
+	})
+	// The FSM gives up on the BOOT deadline and the cycle finishes while the
+	// vendored call is still outstanding.
+	emit(obs.Event{
+		Time: at(3), Cycle: testCycle, Step: "BOOT", Kind: obs.KindStepLeft,
+		StepInfo: &obs.StepEvent{Outcome: obs.OutcomeError, Error: "boot deadline"},
+	})
+	emit(obs.Event{
+		Time: at(4), Cycle: testCycle, Kind: obs.KindCycleFinished,
+		Finish: &obs.FinishEvent{Result: "failure", Ending: "failure"},
+	})
+	// Minutes later the detached goroutine's call finally returns. Its span
+	// is already closed; this must not panic, double-end, or resurrect the
+	// cycle.
+	emit(obs.Event{
+		Time: at(300), Cycle: testCycle, Step: "BOOT", Kind: obs.KindBackendEnded,
+		Backend: &obs.BackendEvent{ID: "slow", Outcome: obs.OutcomeOK},
+	})
+
+	byName := map[string]tracetest.SpanStub{}
+	for _, s := range exp.GetSpans() {
+		byName[s.Name] = s
+	}
+	late, ok := byName["hcs::CreateComputeSystem"]
+	if !ok {
+		t.Fatalf("the outstanding call left no span on the cycle that abandoned it; got %v", names(exp.GetSpans()))
+	}
+	step, ok := byName["cycle.step BOOT"]
+	if !ok {
+		t.Fatal("no BOOT step span")
+	}
+	if late.Parent.SpanID() != step.SpanContext.SpanID() {
+		t.Errorf("unfinished backend span parent = %v, want the BOOT step", late.Parent.SpanID())
+	}
+	if !late.EndTime.Equal(at(4)) {
+		t.Errorf("unfinished backend span ended %v, want the cycle-finish time %v", late.EndTime, at(4))
+	}
+	var unfinished bool
+	for _, kv := range late.Attributes {
+		if string(kv.Key) == "runny.backend.unfinished" {
+			unfinished = kv.Value.AsBool()
+		}
+	}
+	if !unfinished {
+		t.Error("span closed at cycle end is not marked unfinished, so it reads as a call that returned in 2s when it had not returned at all")
+	}
+}
+
+func names(spans tracetest.SpanStubs) []string {
+	out := make([]string, 0, len(spans))
+	for _, s := range spans {
+		out = append(out, s.Name)
+	}
+	return out
+}

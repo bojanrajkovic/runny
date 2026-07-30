@@ -119,7 +119,7 @@ func Setup(ctx context.Context, cfg home.OTLPConfig, version, instanceID, backen
 
 	otel.SetTracerProvider(tp)
 	otel.SetMeterProvider(mp)
-	installOpenCensusBridge(tp)
+	installOpenCensusAdapter()
 
 	return func(ctx context.Context) error {
 		return errors.Join(tp.Shutdown(ctx), mp.Shutdown(ctx))

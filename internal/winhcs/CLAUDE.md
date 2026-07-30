@@ -8,10 +8,17 @@ authority: it names the upstream tag and commit, every modification and why,
 and what the re-vendor procedure has to repeat. Read it before changing
 anything here, and update it in the same commit as any change to the tree.
 
-`internal/vm/hcs_windows.go` is the only consumer — it drives compute-system
-create/start/shutdown/terminate and HNS endpoint attach. Everything under this
-directory is windows-only (`//go:build windows` or a `_windows.go` suffix), so
-a green `bazel test //...` on macOS has not compiled a line of it.
+Four files import this tree, not one: `internal/vm/hcs_windows.go` (compute-system
+create/start/shutdown/terminate and HNS endpoint attach) and `reap_windows.go`,
+`cmd/runnyd/platform_windows.go`, and `internal/vhdx/vhdx.go` — the last through
+`security`, which is why `security` survived a trim that took every other package
+`computestorage` had pulled in. Enumerate consumers with
+`bazel query 'rdeps(//..., //internal/winhcs/<pkg>)'` rather than trusting a list
+here; the count has already been wrong once.
+
+Everything under this directory is windows-only (`//go:build windows` or a
+`_windows.go` suffix), so a green `bazel test //...` on macOS has not compiled a
+line of it — on any other platform these targets build to empty packages.
 
 A bug in behavior shared with upstream is fixed by re-vendoring a newer
 upstream, not by patching here — a local patch has to be re-applied, by hand,

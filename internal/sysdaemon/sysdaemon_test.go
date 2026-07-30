@@ -218,7 +218,7 @@ func TestUninstallRemovesHomeKeepsAccount(t *testing.T) {
 	}
 }
 
-// P2#2: a bootout that leaves the KeepAlive job loaded must NOT be reported as a
+// A bootout that leaves the KeepAlive job loaded must NOT be reported as a
 // successful uninstall over a still-running daemon.
 func TestUninstallRefusesWhenJobStillLoaded(t *testing.T) {
 	r := &recordedRun{printLoaded: true} // bootout didn't actually unload it

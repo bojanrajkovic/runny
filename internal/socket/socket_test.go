@@ -71,7 +71,7 @@ func TestStatusToProtoCarriesWedgedAndDetail(t *testing.T) {
 	}
 }
 
-// The pause/resume command acknowledgement (issue #66) must reach the wire,
+// The pause/resume command acknowledgement must reach the wire,
 // preserving order and multiplicity so the client's membership check holds.
 func TestStatusToProtoCarriesRecentAppliedCommandIDs(t *testing.T) {
 	pb := statusToProto(statemachine.Status{
@@ -247,7 +247,7 @@ func TestLatestGrantMatchesAcrossShapes(t *testing.T) {
 }
 
 // TestRecordToProtoCarriesEnding pins that the ending classification
-// (issue #229) survives the disk→wire conversion `runnyctl why` reads.
+// survives the disk→wire conversion `runnyctl why` reads.
 func TestRecordToProtoCarriesEnding(t *testing.T) {
 	r := &cycle.Record{CycleID: "abcd1234", Slot: "mac-1", Ending: cycle.EndingRecycle}
 	pb := recordToProto(r)
@@ -888,7 +888,7 @@ func TestSnapshotCarriesDraining(t *testing.T) {
 }
 
 // The daemon must advertise the wire protocol version so a client can decide
-// whether to rely on pause/resume command acknowledgement (issue #66).
+// whether to rely on pause/resume command acknowledgement.
 func TestSnapshotCarriesProtocolVersion(t *testing.T) {
 	srv := newTestServer(testSlots("mac-1"), nil, nil, nil)
 	if got := srv.snapshot().GetProtocolVersion(); got != versioncore.WireProtocolVersion {
@@ -1050,7 +1050,7 @@ func TestStreamLogsRejectsBadRequests(t *testing.T) {
 }
 
 // Resume's drain guard reads draining() before enqueuing CmdResume, and
-// re-reads after (issue #53). Simulate drainer.Start racing in between:
+// re-reads after. Simulate drainer.Start racing in between:
 // the first draining() call returns "", the second returns a reason. The
 // handler must return FailedPrecondition and not silently leave the slot
 // running against an active drain.

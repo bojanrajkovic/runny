@@ -303,7 +303,7 @@ func TestWatcherScriptWindowsContract(t *testing.T) {
 }
 
 // The windows debug recorder needs two different mechanisms, one per SSH
-// usage shape (issue #344): Tee-Object for a one-shot SSH_ORIGINAL_COMMAND
+// usage shape: Tee-Object for a one-shot SSH_ORIGINAL_COMMAND
 // exec (proven to capture a piped child process's output where
 // Start-Transcript does not), and an unpiped, nested Start-Transcript session
 // for an interactive shell (proven to capture the prompt and typed input,

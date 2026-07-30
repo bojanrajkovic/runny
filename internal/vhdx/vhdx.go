@@ -97,7 +97,7 @@ func (winioBackend) createDifferencing(child, parent string) error {
 // HCS compute system never gets for free. Without it, Start fails with "The
 // chain of virtual hard disks is inaccessible. The process has not been
 // granted access rights to the parent virtual hard disk for the
-// differencing disk." — confirmed against real hardware, issue #319.
+// differencing disk." — confirmed against real hardware.
 //
 // readWrite distinguishes the parent from the child of a differencing pair:
 // read-only is correct for the parent (the shared, immutable base a child
@@ -189,7 +189,7 @@ func Convert(src, dst string) error {
 // before the extension, not after: CreateVirtualDisk selects its provider by
 // file extension, and a path ending in ".converting" instead of ".vhdx"
 // fails with "A virtual disk support provider for the specified file was not
-// found" — confirmed against real hardware, issue #319. fakeBackend never
+// found" — confirmed against real hardware. fakeBackend never
 // calls the real Win32 API, so this was untestable until then.
 func convertingTempPath(dst string) string {
 	ext := filepath.Ext(dst)

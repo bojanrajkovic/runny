@@ -11,8 +11,8 @@ import (
 )
 
 // WaitIP's host-side read: HNS pre-commits a guest's MAC->IP binding into the
-// host IP neighbor table at endpoint attach (validated on real hardware,
-// issue #307/#308) -- state Permanent, present within seconds of Start, gone
+// host IP neighbor table at endpoint attach (validated on real hardware)
+// -- state Permanent, present within seconds of Start, gone
 // only once the HNS endpoint backing it is deleted. x/sys/windows has no
 // binding for this corner of iphlpapi, so this file is a small hand-written
 // one, laid out directly from the authoritative struct docs (cited per

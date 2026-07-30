@@ -62,7 +62,7 @@ func (d Dialer) WaitFor(ctx bounded.Context, addr, goos string) (statemachine.Gu
 
 // Guest is one authenticated session into a booted runner VM. It retains the
 // addr and sshx.Config that built its current client so it can Redial after a
-// transport death (a guest reboot mid-DEBUG, issue #39) and so HostKeys can
+// transport death (a guest reboot mid-DEBUG) and so HostKeys can
 // surface the pins.
 type Guest struct {
 	c        *sshx.Client
@@ -138,7 +138,7 @@ func (g *Guest) runStepOutput(ctx bounded.Context, what, cmd string, input io.Re
 // never touches disk and dies with this process.
 //
 // When d.Hardening is "scramble", the same pre-flip exec also randomizes the
-// guest account's password (issue #210), so the image's well-known default
+// guest account's password, so the image's well-known default
 // is never reachable again for the rest of the cycle through any channel,
 // not just SSH password auth. verifyPasswordAuthDead below is re-pointed at
 // that fresh password in this case — it must prove the guest's CURRENT
@@ -234,7 +234,7 @@ func (d Dialer) Rotate(ctx bounded.Context, addr string, g statemachine.Guest, g
 
 	// All proven; the password session has done its one job per cycle. The new
 	// Guest retains the keyed config (Signer + pinned HostKeys) so Redial and
-	// HostKeys work against the hardened session (issue #39).
+	// HostKeys work against the hardened session.
 	_ = pg.c.Close()
 	return &Guest{c: c, addr: addr, cfg: cfg, interval: d.interval(), goos: goos}, nil
 }
@@ -421,7 +421,7 @@ func (g *Guest) PullDebugSession(ctx bounded.Context) ([]byte, error) {
 	return out, nil
 }
 
-// StopRunner kills the runner listener tree and PROVES it dead (issue #39).
+// StopRunner kills the runner listener tree and PROVES it dead.
 // Any nonzero exit or exec error = death unproven; the caller refuses the
 // freeze/hold and fails into teardown.
 func (g *Guest) StopRunner(ctx bounded.Context) error {
@@ -432,8 +432,8 @@ func (g *Guest) StopRunner(ctx bounded.Context) error {
 	return g.runStep(ctx, "stopping runner: kill unproven", script, nil)
 }
 
-// InstallAuthorizedKey appends one authorized_keys line and proves it landed
-// (issue #39). line must be a server-canonicalized "type base64" form. A
+// InstallAuthorizedKey appends one authorized_keys line and proves it landed.
+// line must be a server-canonicalized "type base64" form. A
 // session-open failure (the command provably never reached the guest) is
 // translated to statemachine.ErrGuestUnreachable; everything past session-open
 // stays ambiguous.
@@ -487,8 +487,8 @@ func (g *Guest) InstallAuthorizedKey(ctx bounded.Context, line string) error {
 	return nil
 }
 
-// HostKeys returns the guest's pinned host keys in known_hosts form (issue
-// #39): "<addr-host> <type> <base64>". Empty when the guest is unhardened
+// HostKeys returns the guest's pinned host keys in known_hosts form:
+// "<addr-host> <type> <base64>". Empty when the guest is unhardened
 // (ssh_hardening: off, no pins captured).
 func (g *Guest) HostKeys() []string {
 	if len(g.cfg.HostKeys) == 0 {
@@ -507,7 +507,7 @@ func (g *Guest) HostKeys() []string {
 }
 
 // Redial re-establishes the session after a transport death (a guest reboot
-// mid-DEBUG, issue #39), reusing the retained config (Signer + pinned host
+// mid-DEBUG), reusing the retained config (Signer + pinned host
 // keys). NEVER called during JOB (decision 18). The old client is best-effort
 // closed; on success the client is swapped.
 func (g *Guest) Redial(ctx bounded.Context) error {

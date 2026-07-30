@@ -40,14 +40,14 @@ const consoleReadPoll = 500 * time.Millisecond
 
 // consoleSeenCap bounds accumulated console output kept for marker matching.
 // A wedged or endlessly chatty console that never produces the expected
-// marker must not grow this without bound for the life of ctx (ADR-0011's
+// marker must not grow this without bound for the life of ctx (the
 // no-unbounded-operations invariant); every marker checked here ("login:",
 // "Password", "incorrect", "inet ") is short, so only the most recent bytes
 // can ever matter -- older output is dropped.
 const consoleSeenCap = 4096
 
 // fixupNetwork corrects a real image/Hyper-V incompatibility, confirmed
-// against real hardware (issue #319): ghcr.io/cirruslabs/ubuntu-runner-amd64's
+// against real hardware: ghcr.io/cirruslabs/ubuntu-runner-amd64's
 // baked-in netplan matches interface names "en*" -- correct for QEMU/VZ's
 // PCI-enumerated virtio-net (darwin's own guests never hit this, which is
 // why this fixup is windows-only), but wrong for Hyper-V's hv_netvsc, which
@@ -285,7 +285,7 @@ func consoleDrain(ctx bounded.Context, conn net.Conn, window time.Duration, matc
 }
 
 // boundedDeadline is the earlier of ctx's own deadline and now+window: every
-// console read/write must stay inside ctx's real bound (ADR-0011), not just
+// console read/write must stay inside ctx's real bound, not just
 // window's fixed duration -- window is only the caller's local ceiling.
 func boundedDeadline(ctx bounded.Context, window time.Duration) time.Time {
 	deadline := time.Now().Add(window)

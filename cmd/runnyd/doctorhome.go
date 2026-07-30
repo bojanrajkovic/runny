@@ -14,7 +14,7 @@ import (
 // (registry credentials, image-cache annotation, disk headroom) kept
 // describing ResolveServer's pick even when an operator pointed -doctor
 // straight at another deployment's config — most often SystemHomeDir's, to
-// diagnose the system daemon (#351).
+// diagnose the system daemon.
 //
 // Only doctor mode is affected: the real daemon's own dir resolution must
 // never change — there, -config only selects which config.yaml to load,

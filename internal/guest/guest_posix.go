@@ -52,8 +52,8 @@ const rotateScriptDarwin = rotateScriptBase
 const scramblePasswordPlaceholder = "__RUNNY_SCRAMBLE_PASSWORD__"
 
 // scrambleLineLinux / scrambleLineDarwin set a fresh, never-disclosed
-// password for the just-authenticated account (ssh_hardening: scramble,
-// issue #210), appended to the rotate script so it lands in the same exec as
+// password for the just-authenticated account (ssh_hardening: scramble),
+// appended to the rotate script so it lands in the same exec as
 // the key install — one round-trip, one set -e failure path. A scramble
 // failure aborts after PasswordAuthentication is already off, so it degrades
 // to plain "rotate" behavior rather than a worse state.

@@ -170,7 +170,7 @@ func TestTruncDisplayWidth(t *testing.T) {
 
 // cellWidth and trunc must measure terminal DISPLAY columns, not rune count:
 // the JOB/NOTE columns carry GitHub-controlled job display names, which can hold
-// double-width CJK runes (issue #51) — a job named in the workflow's `name:`
+// double-width CJK runes — a job named in the workflow's `name:`
 // field reaches runny verbatim via the runner's "Running job:" line. A rune-count
 // budget under-counts a wide cell and shifts every column to its right.
 func TestCellWidthCountsDisplayColumns(t *testing.T) {
@@ -216,7 +216,7 @@ func TestTruncClampsByDisplayWidth(t *testing.T) {
 	}
 }
 
-// The real #51 scenario end to end: a slot running a CJK-named job must not
+// The real-world scenario end to end: a slot running a CJK-named job must not
 // shift the NOTE column relative to an ASCII-named one. The JOB cell is padded
 // to a fixed DISPLAY width, so the wide runes can't push everything right.
 func TestRenderStatusWideJobAligns(t *testing.T) {
@@ -436,7 +436,7 @@ func TestRenderCycleShowsImageRef(t *testing.T) {
 	}
 }
 
-// TestRenderCycleShowsEnding pins issue #229's `why` requirement: a recycled
+// TestRenderCycleShowsEnding pins the `why` requirement: a recycled
 // or shutdown-interrupted cycle must read as such at a glance, not as a
 // failure with a suspicious error string, even though Result is "failure"
 // for both (the timeline stays truthful). The reason the operator typed
@@ -570,7 +570,7 @@ func TestCLIHasReloadCommand(t *testing.T) {
 	}
 }
 
-// Issue #47: the global --json must be honored AFTER the subcommand, not only
+// The global --json must be honored AFTER the subcommand, not only
 // before it — `runnyctl status --json` must match `runnyctl --json status`.
 // kong resolves the root flag in either position, so this is now inherent.
 func TestDispatchTrailingJSONMatchesLeading(t *testing.T) {
@@ -655,7 +655,7 @@ func (fakeLogsClient) StreamLogs(_ context.Context, _ *runnyv1.StreamLogsRequest
 	return fakeLogStream{}, nil
 }
 
-// Issue #47, flag-first ordering: a flag before the slot AND a trailing --json
+// Flag-first ordering: a flag before the slot AND a trailing --json
 // after it must both parse, not be rejected as a second positional. kong
 // interleaves flags and positionals natively.
 func TestRecycleFlagInterleaving(t *testing.T) {
@@ -677,7 +677,7 @@ func TestRecycleFlagInterleaving(t *testing.T) {
 
 // logs' optional SLOT and its flags — the documented
 // `logs [SLOT] [--daemon] [--replay N] [--no-follow]` form — must parse in any
-// order (issue #47).
+// order.
 func TestDispatchLogsAcceptsFlagAfterSlot(t *testing.T) {
 	for _, args := range [][]string{
 		{"logs", "mac-1", "--replay", "10"},           // slot then flag
@@ -924,7 +924,7 @@ func TestPausePrintsNote(t *testing.T) {
 }
 
 // A DEBUG slot shows its auto-release countdown; an armed JOB slot shows the
-// hold is armed (issue #39).
+// hold is armed.
 func TestRenderStatusDebugAndArmed(t *testing.T) {
 	var buf bytes.Buffer
 	c := &ctl{out: &buf}

@@ -72,7 +72,7 @@ func TestConsoleWriteAndDrain(t *testing.T) {
 
 // TestConsoleDrainEarlyExit is the regression test for the review finding
 // that consoleDrain always blocked for its full window even once the
-// expected marker had already arrived (issue #319 review).
+// expected marker had already arrived.
 func TestConsoleDrainEarlyExit(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()

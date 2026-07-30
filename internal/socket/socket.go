@@ -352,7 +352,7 @@ func (s *Server) snapshot() *runnyv1.GetStatusResponse {
 		resp.LocalNetworkGrant = s.LocalNetworkGrantFn()
 	}
 	// The config-derived InjectDebugKey wait, so `runnyctl debug` can size its
-	// client deadline to outlast the daemon (else a timeout lies — see #0).
+	// client deadline to outlast the daemon (else a timeout lies).
 	if s.Config != nil {
 		_, handlerWait := s.injectBounds()
 		resp.InjectHandlerWait = durationpb.New(handlerWait)
@@ -717,7 +717,7 @@ func (s *Server) Doctor(ctx context.Context, _ *runnyv1.DoctorRequest) (*runnyv1
 // usernameLookupBound caps how long InjectDebugKey waits on lookupUsername:
 // os/user.LookupId has no context-aware variant and can stall on a
 // directory-service-backed NSS (LDAP/AD-joined hosts), which must never
-// delay an operator's actual "shell in now" access (ADR-0014) for the sake
+// delay an operator's actual "shell in now" access for the sake
 // of a cosmetic display field.
 const usernameLookupBound = 2 * time.Second
 

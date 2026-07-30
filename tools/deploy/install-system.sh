@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install runnyd as a NON-ROOT system LaunchDaemon (#76) — the headless path, for
+# Install runnyd as a NON-ROOT system LaunchDaemon — the headless path, for
 # from-checkout / CI / config-management hosts.
 #
 # Homebrew users can instead run `sudo runnyctl install-daemon` directly: its

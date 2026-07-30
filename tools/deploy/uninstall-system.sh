@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Remove the non-root system LaunchDaemon (#76). Delegates to
+# Remove the non-root system LaunchDaemon. Delegates to
 # `runnyctl uninstall-daemon`, which verifies the job is unloaded, then removes
 # the plist AND the home /Library/Application Support/runny — config, the App
 # key, and artifacts go with it. BACK UP config.yaml first if you want to keep

@@ -350,7 +350,7 @@ func TestDrainerProgressAndStateOnHoldFlip(t *testing.T) {
 }
 
 // A Resume that races with the exit gate can un-stable a slot while the
-// gate's file I/O is in flight (issue #53). tryExit's second stability
+// gate's file I/O is in flight. tryExit's second stability
 // pass must catch this and defer the exit until the slot re-converges.
 func TestTryExitSecondPassBlocksEarlyExit(t *testing.T) {
 	slot := &stubSlot{st: stableSt}

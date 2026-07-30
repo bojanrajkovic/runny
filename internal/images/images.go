@@ -128,7 +128,7 @@ func (e *Ensurer) Ensure(ctx context.Context, report func(string), onDigestResol
 	// pool enter ENSURE_IMAGE together, and this lets them share one in-flight
 	// pull AND its outcome — including a bounded, shared wait when the pull is
 	// deterministically doomed (disk headroom), instead of each slot re-running
-	// the doomed pull and churning its own backoff (issue #125). Resolve and the
+	// the doomed pull and churning its own backoff. Resolve and the
 	// cache check stay per-slot above; the puller is keyed by the content-
 	// addressed dir, so every subscriber necessarily wants this exact digest.
 	pinned := e.Ref

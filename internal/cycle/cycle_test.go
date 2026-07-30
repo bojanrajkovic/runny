@@ -192,8 +192,8 @@ func TestInjectedKeyOperatorSIDRoundTrip(t *testing.T) {
 }
 
 func TestOldCycleJSONLoads(t *testing.T) {
-	// A cycle.json written before issue #39 (no injected_keys/operator_keys)
-	// must unmarshal unchanged.
+	// A cycle.json written before debug-key injection existed (no
+	// injected_keys/operator_keys) must unmarshal unchanged.
 	s := Store{SlotDir: filepath.Join(t.TempDir(), "runner-1")}
 	dir, err := s.Dir(record("runner-1", "old00001", time.Date(2026, 6, 9, 22, 0, 0, 0, time.UTC), ResultSuccess))
 	if err != nil {

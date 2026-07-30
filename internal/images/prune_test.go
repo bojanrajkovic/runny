@@ -153,7 +153,7 @@ func TestPlanImageBundlePruneProtectRefDir(t *testing.T) {
 // TestPlanImageBundlePruneReferencedIsExcluded: a bundle a live guest disk's
 // differencing parent still points to must not appear in items, even though
 // it isn't in keepPaths -- and its exclusion must be visible in the second
-// return value ("no silent skips" -- issue #306 Part 3's locked decision).
+// return value ("no silent skips").
 func TestPlanImageBundlePruneReferencedIsExcluded(t *testing.T) {
 	imagesDir := t.TempDir()
 	ref := "ghcr.io_foo_bar"

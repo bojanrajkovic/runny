@@ -6,7 +6,7 @@ import (
 	"github.com/bojanrajkovic/runny/internal/home"
 )
 
-// The known #351 bug: an operator's own ~/.runny doesn't own SystemHomeDir,
+// The bug this guards: an operator's own ~/.runny doesn't own SystemHomeDir,
 // so ResolveServer resolves them to their per-user home. Pointing -doctor
 // straight at the system config must still diagnose the system home — not
 // the invoker's own — since config.yaml always lives at <home>/config.yaml.

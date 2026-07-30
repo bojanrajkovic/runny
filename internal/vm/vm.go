@@ -1,6 +1,6 @@
 // Package vm boots tart-format bundles as guest VMs, in-process — via
 // Virtualization.framework on darwin (vz_darwin.go) or bare Hyper-V compute
-// systems on windows (hcs_windows.go, ADR-0026). The Manager/Machine seam
+// systems on windows (hcs_windows.go). The Manager/Machine seam
 // exists so the state machine tests against fakes on any OS; the real
 // implementations are platform-specific.
 package vm
@@ -115,7 +115,7 @@ type Manager interface {
 // Virtualization.framework cross-emulates architectures, so "can THIS host
 // boot THIS arch" can only be answered here). Shared by vz_darwin.go and
 // hcs_windows.go so the two platforms can't independently drift on this
-// check the way they already did once (see ADR-0026).
+// check the way they already did once.
 func checkHostArch(cfg *tart.Config) error {
 	if cfg.Arch != runtime.GOARCH {
 		return fmt.Errorf("%w: this host is %s, bundle is %s/%s", tart.ErrUnsupportedGuest, runtime.GOARCH, cfg.OS, cfg.Arch)

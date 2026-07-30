@@ -12,7 +12,7 @@ import (
 )
 
 // prepareBundleDisk gets a freshly-pulled bundle's disk into disk.vhdx, the
-// form the Hyper-V backend's differencing clone needs (issue #308), then
+// form the Hyper-V backend's differencing clone needs, then
 // removes disk.img — Bundle.Verify accepts either, so this doesn't cost a
 // re-pull on the next Ensure. Skipped (past a best-effort disk.img cleanup)
 // if disk.vhdx already exists — a retried/resumed pull of an

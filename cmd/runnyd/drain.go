@@ -233,7 +233,7 @@ func (d *drainer) recheck() {
 // exit gate, and either stops the daemon or holds with the gate's detail.
 // Two stability passes bracket the exit gate: the first avoids running
 // slow file I/O unnecessarily, the second guards against a Resume that
-// landed during the gate's I/O and un-stabled a slot (issue #53). Between
+// landed during the gate's I/O and un-stabled a slot. Between
 // pass two and d.stop(), the window is a lock acquisition — not zero, but
 // brief enough that any junk cycle from that residual cannot start a job
 // before the daemon exits.

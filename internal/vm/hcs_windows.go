@@ -22,7 +22,7 @@ import (
 const (
 	// secureBootTemplateID is the Microsoft UEFI Certificate Authority
 	// template GUID -- the Linux-shim trust anchor. Validated at schema 2.1
-	// on real hardware (issue #308); do not change without re-validating.
+	// on real hardware; do not change without re-validating.
 	secureBootTemplateID = "272e7447-90a4-4563-a4b9-8e4ab00526ce"
 	// windowsSecureBootTemplateID is the Windows Secure Boot template GUID --
 	// the only change a Windows guest needs versus the Linux boot recipe
@@ -48,7 +48,7 @@ const (
 
 // HCSManager is the real Manager on windows: Hyper-V compute systems via the
 // vendored winhcs binding. Mirrors vz_darwin.go's shape and boot recipe —
-// this is its Hyper-V sibling, issue #308.
+// this is its Hyper-V sibling.
 type HCSManager struct{}
 
 var _ Manager = HCSManager{}
@@ -62,9 +62,8 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 	if err != nil {
 		return nil, err
 	}
-	// Hyper-V's HCS path here is Linux and Windows only (issue #308 never
-	// describes booting a darwin guest on Hyper-V, which has no macOS boot
-	// support at all); checkHostArch (shared with vz_darwin.go) covers the
+	// Hyper-V's HCS path here is Linux and Windows only (Hyper-V has no macOS
+	// boot support at all); checkHostArch (shared with vz_darwin.go) covers the
 	// arch half.
 	if cfg.OS != "linux" && cfg.OS != "windows" {
 		return nil, fmt.Errorf("%w: this backend only boots linux or windows guests, bundle is %s/%s", tart.ErrUnsupportedGuest, cfg.OS, cfg.Arch)
@@ -72,7 +71,7 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 	if err := checkHostArch(cfg); err != nil {
 		return nil, err
 	}
-	// Schema 2.1 is the validated recipe (issue #308); RS5/LTSC2019 is
+	// Schema 2.1 is the validated recipe; RS5/LTSC2019 is
 	// roughly its floor. A build below that gets a clear, upfront error
 	// instead of a confusing HCS document-validation failure.
 	if osversion.Build() < osversion.RS5 {
@@ -177,7 +176,7 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 					// auto-discovers the ESP on the SCSI-attached disk. The
 					// documented ScsiDrive/File DeviceType values are
 					// unexercised even in Microsoft's own code and do not
-					// work (validated the hard way, issue #308). Do not
+					// work (validated the hard way). Do not
 					// "fix" this.
 				},
 			},
@@ -187,7 +186,7 @@ func (m HCSManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOptio
 			},
 			Devices: &hcsschema.Devices{
 				// Populated, not nil: an empty Devices fails with the
-				// generic "The data is invalid" (validated, issue #308).
+				// generic "The data is invalid" (validated).
 				HvSocket: &hcsschema.HvSocket2{HvSocketConfig: &hcsschema.HvSocketSystemConfig{}},
 				Scsi: map[string]hcsschema.Scsi{
 					"0": {Attachments: map[string]hcsschema.Attachment{
@@ -333,7 +332,7 @@ func scrubNeighborEntry(mac string) {
 // ep once Boot returns an error (the caller never got a Machine), so Boot
 // must tear them down itself here or they leak — the same class of orphan
 // this backend's own hardware spike found accumulating from earlier manual
-// runs (issue #308). The endpoint is already wired into the compute-system
+// runs. The endpoint is already wired into the compute-system
 // document, and CreateComputeSystem already succeeded, before Start is ever
 // called — so a Start that fails can still leak the same stale
 // neighbor-table entry a confirmed-stopped Machine's destroy() scrubs;
@@ -383,7 +382,7 @@ func (m *hcsMachine) Spec() Spec { return m.spec }
 // NeedsRunnerPush is always true here, for two different reasons per guest
 // OS. Linux: schema 2.1's only Linux-guest-capable share device is Plan9,
 // and hot-adding a Plan9 share to a bare (non-LCOW) compute system is
-// rejected by HCS outright -- confirmed against real hardware (issue #319):
+// rejected by HCS outright -- confirmed against real hardware:
 // a generic Modify (a benign memory-size update) succeeds fine on the same
 // bare compute system, so Modify itself isn't the problem -- Plan9
 // specifically is paired with LCOW's own guest-side GCS bridge control
@@ -397,7 +396,7 @@ func (m *hcsMachine) NeedsRunnerPush() bool { return true }
 
 // waitIPGracePeriod is how long WaitIP trusts the guest to self-configure
 // networking before it assumes the hv_netvsc/netplan mismatch fixupNetwork
-// exists for (issue #319, confirmed on the currently-validated image) and
+// exists for (confirmed on the currently-validated image) and
 // falls back to it. Sized off HNS's own binding behavior -- the neighbor-
 // table entry it programs appears "within seconds of Start" for a guest
 // that completes DHCP on its own -- times a generous margin; a future image
@@ -460,7 +459,7 @@ func (m *hcsMachine) waitIPWindows(ctx bounded.Context) (string, error) {
 // The currently-validated guest image (ghcr.io/cirruslabs/ubuntu-runner-amd64)
 // does NOT self-configure: its baked netplan matches interface names "en*",
 // which hv_netvsc's always-"eth0" naming never satisfies, so eth0 sits down and
-// DHCP never starts without fixupNetwork's console-applied drop-in (issue #319).
+// DHCP never starts without fixupNetwork's console-applied drop-in.
 // On this host HNS surfaces no learned row at all (every row is Permanent), so
 // grace always elapses to the fixup. Once the fixup has logged in, the address
 // eth0 actually holds is read straight off the console and returned as
@@ -488,7 +487,7 @@ func (m *hcsMachine) waitIPLinux(ctx bounded.Context) (string, error) {
 				continue // still within grace; let the guest self-configure
 			}
 			if m.sshUser == "" || m.sshPassword == "" {
-				return "", fmt.Errorf("no IP after %s and no SSHUser/SSHPassword configured to attempt the network fixup (issue #319)", waitIPGracePeriod)
+				return "", fmt.Errorf("no IP after %s and no SSHUser/SSHPassword configured to attempt the network fixup", waitIPGracePeriod)
 			}
 			// Wrapped in its own named action (not folded silently into
 			// AWAIT_IP's step span) so a trace/metric can distinguish "this
@@ -530,7 +529,7 @@ func (m *hcsMachine) waitIPLinux(ctx bounded.Context) (string, error) {
 }
 
 // Stop runs the bounded stop sequence every platform shares (stop.go):
-// Shutdown is graceful but the guest often ignores it (issue #308), so
+// Shutdown is graceful but the guest often ignores it, so
 // force is the floor, same as darwin's RequestStop. Unlike vzMachine, this
 // is also the only teardown hook the Machine interface gives HCS resources
 // — a *vz.VirtualMachine releases on GC, but an HCS compute system's handle
@@ -557,7 +556,7 @@ func (m *hcsMachine) Stop(ctx bounded.Context, grace time.Duration) error {
 // later manual sweep, never a wedge (mirrors run.go's own "steps 4/5 are
 // best-effort cleanups" teardown reasoning). The neighbor-table entry HNS
 // programmed for this endpoint does NOT clear on its own when the endpoint
-// is deleted (validated empirically, issue #308's hardware spike — it
+// is deleted (validated empirically on a hardware spike — it
 // outlived Terminate, endpoint Delete, and 30s of polling after both), so
 // scrubNeighborEntry (shared with abandonComputeSystem) scrubs it
 // explicitly once the endpoint is confirmed gone.

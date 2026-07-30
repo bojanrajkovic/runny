@@ -222,20 +222,32 @@ func stageConfigCopy(content []byte) (string, error) {
 	return tmp.Name(), nil
 }
 
-// openEditor runs $VISUAL, else $EDITOR, else vi on path, connected to the
-// current terminal. The convention (VISUAL taking precedence for full-screen
-// editors) is the traditional Unix one; the editor string is split on
-// whitespace — covers "vim"/"nano" and "code --wait", not an editor whose own
-// path contains a space (rare enough not to special-case: ponytail).
-func openEditor(path string) error {
+// editorArgv resolves which editor to run: $VISUAL, else $EDITOR, else the
+// platform default (see defaultEditor). The convention (VISUAL taking
+// precedence for full-screen editors) is the traditional Unix one; the editor
+// string is split on whitespace — covers "vim"/"nano" and "code --wait", not
+// an editor whose own path contains a space (rare enough not to special-case:
+// ponytail).
+//
+// Split out from openEditor so the precedence and the fallback are assertable
+// without executing an editor: the platform default is the whole reason this
+// resolution exists, and nothing else would catch it being wired back to a
+// hardcoded editor that does not exist on one of the two host platforms.
+func editorArgv() []string {
 	editor := strings.TrimSpace(os.Getenv("VISUAL"))
 	if editor == "" {
 		editor = strings.TrimSpace(os.Getenv("EDITOR"))
 	}
-	argv := strings.Fields(editor)
-	if len(argv) == 0 {
-		argv = []string{"vi"}
+	if argv := strings.Fields(editor); len(argv) > 0 {
+		return argv
 	}
+	return []string{defaultEditor()}
+}
+
+// openEditor runs the resolved editor on path, connected to the current
+// terminal.
+func openEditor(path string) error {
+	argv := editorArgv()
 	cmd := exec.Command(argv[0], append(argv[1:], path)...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {

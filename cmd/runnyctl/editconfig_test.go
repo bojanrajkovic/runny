@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -157,5 +158,35 @@ func TestApplyConfigDoesNotWriteBehindARefusingDaemon(t *testing.T) {
 	}
 	if _, err := os.Stat(configPath); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("config was written despite the daemon refusing (stat err %v)", err)
+	}
+}
+
+// The precedence chain, the whitespace-only cases, and that the fallback path
+// is reached at all — none of which the per-platform defaultEditor tests cover.
+//
+// What it deliberately does NOT prove, on a unix host: that the fallback goes
+// through defaultEditor rather than a hardcoded "vi". Those two agree here, so
+// the assertion cannot tell them apart. It is the windows-2022 lane running
+// this same table that catches a regression to a unix literal — the platform
+// whose default differs is the only one where the distinction is observable.
+func TestEditorArgvPrefersVisualThenEditorThenPlatformDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		visual, editor string
+		want           []string
+	}{
+		{"visual wins over editor", "code --wait", "vim", []string{"code", "--wait"}},
+		{"editor when visual is unset", "", "nano", []string{"nano"}},
+		{"whitespace is not a choice", "   ", "\t", []string{defaultEditor()}},
+		{"platform default when neither is set", "", "", []string{defaultEditor()}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("VISUAL", tc.visual)
+			t.Setenv("EDITOR", tc.editor)
+			got := editorArgv()
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("editorArgv() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

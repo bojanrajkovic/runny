@@ -10,24 +10,25 @@ guests in-process — via Virtualization.framework on darwin or bare HCS compute
 on Windows (`internal/vm`, ADR-0026) — provisions
 them over deadline-bounded SSH (`internal/sshx` → `internal/guest`),
 registers them with GitHub via JIT config (`internal/github`), and serves the
-`runny.v1` control surface over a unix socket (`internal/socket`) to
-`runnyctl` and the `Runny` app as equal clients. The layout decision is
+`runny.v1` control surface (`internal/socket`) — a unix socket on darwin, a
+named pipe on windows — to `runnyctl` and, on darwin, the `Runny` app, as
+equal clients. The layout decision is
 [ADR-0006](../architecture-decisions/0006-monorepo-layout-protobuf-contract.md);
 this diagram is the living copy and tracks the code.
 
 ```mermaid
 flowchart LR
-    subgraph host["macOS host"]
-        runnyd["runnyd (Go)<br/>state machines + vz"]
-        sock[("unix socket<br/>~/.runny/runnyd.sock")]
-        vm1["macOS guest slot 1"]
-        vm2["macOS guest slot 2"]
-        runnyd -- "Virtualization.framework (in-process)" --> vm1
+    subgraph host["darwin or windows host"]
+        runnyd["runnyd (Go)<br/>state machines + vm backend"]
+        sock[("control socket<br/>unix socket (darwin) /<br/>named pipe (windows)")]
+        vm1["guest slot 1"]
+        vm2["guest slot 2"]
+        runnyd -- "in-process boot: vz (darwin) / HCS (windows)" --> vm1
         runnyd --> vm2
         runnyd --- sock
     end
     ctl["runnyctl (Go CLI)"] -- "protobuf (runny.v1)" --> sock
-    app["Runny (SwiftUI)"] -- "protobuf (runny.v1)" --> sock
+    app["Runny (SwiftUI, darwin only)"] -- "protobuf (runny.v1)" --> sock
     runnyd --> gh["GitHub API"]
     runnyd --> ghcr["ghcr.io images"]
 ```
@@ -48,9 +49,9 @@ stateDiagram-v2
     [*] --> BACKOFF: startup sweep done
     BACKOFF --> ENSURE_IMAGE: backoff elapsed
     ENSURE_IMAGE --> CLONE: image cached (digest)
-    CLONE --> BOOT: clonefile × 3 + runner tarball
-    BOOT --> AWAIT_IP: vz state Running
-    AWAIT_IP --> AWAIT_SSH: dhcpd lease for our MAC
+    CLONE --> BOOT: bundle clone + runner tarball
+    BOOT --> AWAIT_IP: guest boot confirmed
+    AWAIT_IP --> AWAIT_SSH: guest IP resolved
     AWAIT_SSH --> SECURE_SSH: authed session (ssh_hardening rotate/scramble)
     AWAIT_SSH --> MINT_JIT: authed session (ssh_hardening off)
     SECURE_SSH --> MINT_JIT: per-cycle key live, host key pinned
@@ -63,6 +64,22 @@ stateDiagram-v2
     JOB --> DEBUG: armed hold (job end; listener killed + verified)
     DEBUG --> TEARDOWN: recycle / hold expiry / daemon shutdown
     TEARDOWN --> BACKOFF: cycle.json written
+
+    note right of CLONE
+        darwin: clonefile x3 (config, disk, nvram).
+        windows: config copy + VHDX differencing
+        clone; nvram not cloned (HCS reinitializes it).
+    end note
+
+    note right of BOOT
+        darwin: vz state Running.
+        windows: HCS compute system Running.
+    end note
+
+    note right of AWAIT_IP
+        darwin: dhcpd lease for our MAC.
+        windows: host neighbor-table entry for our MAC.
+    end note
 
     note right of TEARDOWN
         Universal sink: every non-terminal state
@@ -241,10 +258,15 @@ write-ahead audit sidecar, written before any byte reaches the guest and
 surfaced in `runnyctl why` even after a daemon crash that left no cycle.json
 (ADR-0014, debug-key injection).
 
-The whole tree must live on a single APFS volume: cloning is `clonefile(2)`,
-which fails `EXDEV` across volumes, and both the bundle clone (`images/` →
-`vms/`) and the runner-tarball clone (`cache/` → `vms/`) depend on it. Relocating
-one subdirectory onto another disk breaks the clone, not just the disk math.
+On darwin, the whole tree must live on a single APFS volume: cloning is
+`clonefile(2)`, which fails `EXDEV` across volumes, and both the bundle clone
+(`images/` → `vms/`) and the runner-tarball clone (`cache/` → `vms/`) depend on
+it. Relocating one subdirectory onto another disk breaks the clone, not just
+the disk math. Windows carries no such constraint: the VHDX differencing
+clone (`internal/vhdx.CreateDifferencing`) references its parent by path
+rather than depending on same-volume CoW, and the plain-copy fallback in
+`internal/clonefile` (`config.json`, the runner tarball) works across volumes
+by construction.
 
 ## Commands during a cycle
 

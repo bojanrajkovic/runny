@@ -45,6 +45,7 @@ go_test(
     name = "vm_test",
     srcs = [
         "await_test.go",
+        "hcs_windows_test.go",
         "leases_test.go",
         "neighbortable_test.go",
         "netfixup_test.go",
@@ -57,5 +58,10 @@ go_test(
     deps = [
         "//internal/bounded",
         "//internal/tart",
-    ],
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "//internal/obs",
+        ],
+        "//conditions:default": [],
+    }),
 )

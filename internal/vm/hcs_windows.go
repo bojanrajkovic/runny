@@ -42,7 +42,7 @@ const (
 	abandonedStopTimeout = 30 * time.Second
 
 	// forceStopTimeout bounds hcsStopOps.forceStop's own Terminate call — see
-	// its doc comment for why this can't reuse the Stop call's outer ctx.
+	// its doc comment for why this can't reuse the Stop call's outer deadline.
 	forceStopTimeout = 30 * time.Second
 )
 
@@ -599,16 +599,27 @@ func (o hcsStopOps) requestStop() (bool, error) {
 	return err == nil, err
 }
 
-// forceStop deliberately does NOT reuse o.ctx: stopMachine calls forceStop
-// as the floor even when o.ctx already hit its deadline during the grace
-// wait (that's the whole point of runAsync there), so forceStop needs its
-// own fresh window — reusing an already-expired ctx here would make
-// Terminate report failure on ctx.Err() alone, even on a request that
-// actually reached HCS, breaking "force is the floor" for exactly the
-// caller-timeout case it exists to cover. vzMachine's forceStop sidesteps
-// this the same way by taking no context at all.
+// forceStop drops o.ctx's deadline but keeps its values. stopMachine calls
+// forceStop as the floor even when o.ctx already hit its deadline during
+// the grace wait (that's the whole point of runAsync there), so inheriting
+// that deadline would make Terminate report failure on ctx.Err() alone,
+// even on a request that actually reached HCS — breaking "force is the
+// floor" for exactly the caller-timeout case it exists to cover.
+// vzMachine's forceStop sidesteps the same problem by taking no context at
+// all.
 func (o hcsStopOps) forceStop() error {
-	ctx, cancel := bounded.WithTimeout(context.Background(), forceStopTimeout)
+	ctx, cancel := o.forceStopCtx()
 	defer cancel()
 	return o.system.Terminate(ctx)
+}
+
+// forceStopCtx builds that window. WithoutCancel rather than Background
+// because the values carry the observability scope: a force-stop is the
+// teardown a trace most needs to show, and starting from a bare Background
+// leaves every span under it parentless, surfacing as disconnected roots
+// instead of inside the cycle that forced the stop. Split from forceStop so
+// the pairing — deadline dropped, values kept — is assertable without a
+// live compute system.
+func (o hcsStopOps) forceStopCtx() (bounded.Context, context.CancelFunc) {
+	return bounded.WithTimeout(context.WithoutCancel(o.ctx), forceStopTimeout)
 }

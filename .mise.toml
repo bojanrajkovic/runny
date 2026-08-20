@@ -1,6 +1,6 @@
 [tools]
 bazel = "9.2.0"
-go = "1.26.5"
+go = "1.26.6"
 node = "24"
 lefthook = "2"
 git-lfs = "3"

@@ -7,7 +7,7 @@ The human-developer workflow. Agent-facing guidance and the project-wide index l
 - **Toolchain:** mise-managed (`mise install`): Bazel, Go, Node (commitlint only), lefthook — `.mise.toml` is the single home for every tool version, including Bazel's.
 - `npm install` once for the commitlint dev dependency, then `lefthook install` to wire the git hooks.
 - **macOS hosts:** Command Line Tools suffice for the daemon (cgo + Virtualization.framework, verified); full Xcode is required to build the Runny app (`apps/Runny`) — rules_apple needs the SDK, though Xcode is never opened (ADR-0007). The pre-push hook excludes the app on every host, so a CLT-only Mac is a fine daemon-development machine; building the app there needs `bazel build -- //... -//apps/... -//proto/runny/v1:runnyv1_swift_proto` to stay out of its way.
-- **Windows hosts:** `mise install` covers the toolchain here too — bazel included, via mise's aqua backend, which supports windows/amd64 for the pinned version. Clone with `git config --global core.autocrlf false` set **first** (see "Cross-host dev loops"), and with git-lfs available: `internal/vhdx/testdata`'s binary VHDX fixtures are LFS-tracked. Nothing about the Runny app builds here.
+- **Windows hosts:** `mise install` covers the toolchain here too — bazel included, via mise's aqua backend, which supports windows/amd64 for the pinned version. Clone with `git config --global core.autocrlf false` set **first** (see "Cross-host dev loops"). Nothing about the Runny app builds here.
 
 ## Commands
 

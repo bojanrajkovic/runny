@@ -3,7 +3,6 @@ bazel = "9.2.0"
 go = "1.26.6"
 node = "24"
 lefthook = "2"
-git-lfs = "3"
 # Exact pin: 3.4.1 shipped without GitHub artifact attestations, which fails
 # mise's verification. Re-loosen to "3" once a verifiable release lands.
 svu = "3.4.0"

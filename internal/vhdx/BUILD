@@ -1,10 +1,10 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
-# fixed-min.vhdx is also used by internal/images' own windows-only test
-# (a real, valid, minimal VHDX to sniff), rather than duplicating the
-# git-lfs-tracked binary fixture in a second package.
+# fixed-min.vhdx.gz is also used by internal/images' own windows-only test
+# (a real, valid, minimal VHDX to sniff), rather than duplicating the binary
+# fixture in a second package.
 exports_files(
-    ["testdata/fixed-min.vhdx"],
+    ["testdata/fixed-min.vhdx.gz"],
     visibility = ["//internal/images:__pkg__"],
 )
 

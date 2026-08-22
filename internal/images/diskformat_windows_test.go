@@ -4,6 +4,8 @@ package images
 
 import (
 	"bytes"
+	"compress/gzip"
+	"io"
 	"os"
 	"testing"
 
@@ -15,7 +17,19 @@ import (
 // pack): prepareBundleDisk must rename it to disk.vhdx unchanged rather than
 // handing it to vhdx.Convert, which can't ingest a VHDX source at all.
 func TestPrepareBundleDiskPassesThroughAnAlreadyVHDXDisk(t *testing.T) {
-	src, err := os.ReadFile("../vhdx/testdata/fixed-min.vhdx")
+	// internal/vhdx's fixture is reused rather than duplicated here, and is
+	// committed gzip'd (see that package's readFixture) -- decompress it to
+	// get the real VHDX bytes prepareBundleDisk has to sniff.
+	gz, err := os.Open("../vhdx/testdata/fixed-min.vhdx.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gz.Close()
+	zr, err := gzip.NewReader(gz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := io.ReadAll(zr)
 	if err != nil {
 		t.Fatal(err)
 	}

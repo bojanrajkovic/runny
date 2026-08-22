@@ -38,7 +38,7 @@ go_test(
         "puller_test.go",
         "tarball_test.go",
     ],
-    data = ["//internal/vhdx:testdata/fixed-min.vhdx"],
+    data = ["//internal/vhdx:testdata/fixed-min.vhdx.gz"],
     embed = [":images"],
     deps = [
         "//internal/bounded",

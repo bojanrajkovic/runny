@@ -1,39 +1,63 @@
 package vhdx
 
 import (
+	"bytes"
+	"compress/gzip"
+	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
-// TestRead_RealFixture parses testdata/fixed-min.vhdx -- a real fixed VHDX
+// readFixture decompresses testdata/<name>.gz. Both VHDX fixtures are almost
+// entirely zero bytes -- a minimal header/region/metadata skeleton -- so they
+// gzip ~900x, and are committed compressed as ordinary git blobs (14 KB for
+// the pair, against 11.5 MB raw). That keeps them out of git-lfs, whose
+// bandwidth on a public repo bills the repo owner for every clone.
+func readFixture(t *testing.T, name string) []byte {
+	t.Helper()
+	f, err := os.Open(filepath.Join("testdata", name+".gz"))
+	if err != nil {
+		t.Fatalf("opening fixture: %v", err)
+	}
+	defer f.Close()
+
+	zr, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatalf("gunzip %s.gz: %v", name, err)
+	}
+	defer zr.Close()
+
+	raw, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("decompressing %s.gz: %v", name, err)
+	}
+	return raw
+}
+
+// writeFixture materializes testdata/<name>.gz into dir under its
+// uncompressed name, for the APIs that take a path rather than an
+// io.ReaderAt. Returns the written path.
+func writeFixture(t *testing.T, dir, name string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, readFixture(t, name), 0o600); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+	return path
+}
+
+// TestRead_RealFixture parses testdata/fixed-min.vhdx.gz -- a real fixed VHDX
 // produced by CreateVirtualDisk+FullPhysicalAllocation on real Windows
 // hardware (see internal/vhdx/CLAUDE.md for how to regenerate it), not a
 // synthetic in-code fixture. It's the smallest fixed VHDX the API will
 // produce: MaximumSize below 3 MiB fails with ERROR_INVALID_PARAMETER
 // regardless of block size, an undocumented floor also recorded there.
 func TestRead_RealFixture(t *testing.T) {
-	const path = "testdata/fixed-min.vhdx"
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading %s: %v", path, err)
-	}
-	// A git-lfs checkout without `git lfs pull` (or without git-lfs
-	// installed) leaves a small pointer-file stub in place of the real
-	// binary -- skip with a clear pointer rather than fail confusingly on
-	// what looks like corrupt VHDX bytes.
-	if strings.HasPrefix(string(raw), "version https://git-lfs") {
-		t.Skip("testdata/fixed-min.vhdx is an unresolved git-lfs pointer -- run `git lfs pull` (git-lfs is mise-managed in this repo)")
-	}
+	const name = "fixed-min.vhdx"
+	r := bytes.NewReader(readFixture(t, name))
 
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatalf("opening %s: %v", path, err)
-	}
-	defer f.Close()
-
-	info, err := Read(f)
+	info, err := Read(r)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -49,10 +73,10 @@ func TestRead_RealFixture(t *testing.T) {
 		MetadataRegionLength: 1024 * 1024,
 	}
 	if info != want {
-		t.Errorf("Read(%s) = %+v, want %+v", path, info, want)
+		t.Errorf("Read(%s) = %+v, want %+v", name, info, want)
 	}
 
-	entries, err := ReadBAT(f, info)
+	entries, err := ReadBAT(r, info)
 	if err != nil {
 		t.Fatalf("ReadBAT: %v", err)
 	}
@@ -66,27 +90,29 @@ func TestRead_RealFixture(t *testing.T) {
 	}
 }
 
-// TestParentLocator_RealFixture resolves testdata/differencing-min.vhdx's
+// TestParentLocator_RealFixture resolves testdata/differencing-min.vhdx.gz's
 // parent -- a real differencing VHDX produced by New-VHD -Differencing on
-// real Windows hardware, parented to testdata/fixed-min.vhdx itself (see
-// internal/vhdx/CLAUDE.md for how to regenerate it). Exercises the real
-// byte layout Hyper-V writes, not just the synthetic fixtures in
+// real Windows hardware, parented to fixed-min.vhdx itself (see
+// internal/vhdx/CLAUDE.md for how to regenerate it). Exercises the real byte
+// layout Hyper-V writes, not just the synthetic fixtures in
 // parentlocator_test.go.
+//
+// Both fixtures are materialized side by side because ParentLocator returns
+// the first candidate os.Stat confirms exists: the parent has to be on disk
+// next to the child under exactly the name relative_path records
+// (".\fixed-min.vhdx"). The other two candidates the fixture carries -- a
+// C:\ absolute path and a \\?\Volume{...} GUID path -- only resolve on the
+// Windows host that generated it.
 func TestParentLocator_RealFixture(t *testing.T) {
-	const path = "testdata/differencing-min.vhdx"
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading %s: %v", path, err)
-	}
-	if strings.HasPrefix(string(raw), "version https://git-lfs") {
-		t.Skip("testdata/differencing-min.vhdx is an unresolved git-lfs pointer -- run `git lfs pull` (git-lfs is mise-managed in this repo)")
-	}
+	dir := t.TempDir()
+	child := writeFixture(t, dir, "differencing-min.vhdx")
+	parent := writeFixture(t, dir, "fixed-min.vhdx")
 
-	got, err := ParentLocator(path)
+	got, err := ParentLocator(child)
 	if err != nil {
-		t.Fatalf("ParentLocator(%s): %v", path, err)
+		t.Fatalf("ParentLocator(%s): %v", child, err)
 	}
-	if want := filepath.Join("testdata", "fixed-min.vhdx"); got != want {
-		t.Errorf("ParentLocator(%s) = %q, want %q", path, got, want)
+	if got != parent {
+		t.Errorf("ParentLocator(%s) = %q, want %q", child, got, parent)
 	}
 }

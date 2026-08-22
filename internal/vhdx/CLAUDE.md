@@ -14,9 +14,9 @@ Converts a raw disk image into a FIXED (fully-allocated) VHDX via Windows' nativ
 - **`parent_linkage2` is present-but-zero-GUID in real output, not omitted.** Hyper-V always writes all five well-known parent-locator keys, even when only `parent_linkage` (required) and one path key are meaningful. `ParentLocator` doesn't special-case this — an all-zero GUID never matches a real `DataWriteGuid` anyway.
 - **A differencing child is confirmed NOT NTFS-sparse** (`fsutil sparse queryflag`), matching `CreateDifferencing`'s doc comment — verified for both `New-VHD -Differencing` and `vhd.CreateDiffVhd` directly, on real hardware.
 
-## Regenerating `testdata/fixed-min.vhdx`
+## Regenerating `testdata/fixed-min.vhdx.gz`
 
-The smallest fixed VHDX `CreateVirtualDisk` will produce — 7,340,032 bytes (7 MiB): 1 MiB header section + 1 MiB log region + 1 MiB metadata region + 1 MiB BAT region + 3 payload blocks (1 MiB each, the spec minimum block size), every payload BAT entry `PAYLOAD_BLOCK_FULLY_PRESENT`. Tracked via git-lfs (`internal/vhdx/testdata/*.vhdx` in `.gitattributes`) — regenerating a binary fixture adds a full new copy to git history, so these aren't committed as plain blobs.
+The smallest fixed VHDX `CreateVirtualDisk` will produce — 7,340,032 bytes (7 MiB): 1 MiB header section + 1 MiB log region + 1 MiB metadata region + 1 MiB BAT region + 3 payload blocks (1 MiB each, the spec minimum block size), every payload BAT entry `PAYLOAD_BLOCK_FULLY_PRESENT`. Committed gzip'd: the file is almost entirely zero bytes, so it compresses ~900x (7 MiB to 8 KB) and fits in git as a plain blob. `readFixture` in `testdata_test.go` decompresses it with stdlib `compress/gzip`; the raw `.vhdx` is never committed.
 
 To regenerate on a real Windows host, with `github.com/Microsoft/go-winio/vhd` on the build path: create a 3 MiB all-zero source file, then run exactly what `Convert` does, with the smallest legal parameters:
 
@@ -39,17 +39,28 @@ err = vhd.DetachVirtualDisk(handle)
 err = syscall.CloseHandle(handle)
 ```
 
-Copy the result to `internal/vhdx/testdata/fixed-min.vhdx` and `git add` it — the LFS clean filter (mise-managed `git-lfs`, repo-scoped hooks via `git lfs install --local`) handles the rest.
+Compress the result into the checkout and `git add` it:
 
-## Regenerating `testdata/differencing-min.vhdx`
+```sh
+gzip -9 -n -c fixed-min.vhdx > internal/vhdx/testdata/fixed-min.vhdx.gz
+```
 
-A differencing child of `fixed-min.vhdx` itself — 4,194,304 bytes (4 MiB): no payload blocks (a fresh differencing child has none), so it's almost entirely header+region+metadata. Parented deliberately to the checked-in `fixed-min.vhdx` rather than a second fixture, to avoid a second binary blob in git-lfs for no added coverage.
+`-n` drops the source filename and mtime from the gzip header, so a fixture whose bytes didn't change recompresses to an identical blob instead of a spurious diff.
 
-**The parent file on the Windows host MUST be named `fixed-min.vhdx`**, sitting next to the child — `New-VHD -Differencing` bakes the parent's filename into the child's `relative_path` parent-locator entry (`.\fixed-min.vhdx`), and `TestParentLocator_RealFixture` resolves against that exact relative path. A parent named anything else produces a fixture that fails the test.
+## Regenerating `testdata/differencing-min.vhdx.gz`
+
+A differencing child of `fixed-min.vhdx` itself — 4,194,304 bytes (4 MiB): no payload blocks (a fresh differencing child has none), so it's almost entirely header+region+metadata. Parented deliberately to `fixed-min.vhdx` rather than a second fixture, to avoid a second binary blob for no added coverage.
+
+**The parent file on the Windows host MUST be named `fixed-min.vhdx`**, sitting next to the child — `New-VHD -Differencing` bakes the parent's filename into the child's `relative_path` parent-locator entry (`.\fixed-min.vhdx`), and `TestParentLocator_RealFixture` materializes both fixtures side by side in a temp dir and resolves against that exact relative path. A parent named anything else produces a fixture that fails the test.
+
+Decompress the checked-in parent onto the Windows host under that name, then:
 
 ```powershell
-Copy-Item <path-to-checked-in-fixed-min.vhdx> C:\some-dir\fixed-min.vhdx
 New-VHD -Path C:\some-dir\differencing-min.vhdx -Differencing -ParentPath C:\some-dir\fixed-min.vhdx
 ```
 
-Copy the result to `internal/vhdx/testdata/differencing-min.vhdx` and `git add` it.
+Compress the result into the checkout and `git add` it:
+
+```sh
+gzip -9 -n -c differencing-min.vhdx > internal/vhdx/testdata/differencing-min.vhdx.gz
+```

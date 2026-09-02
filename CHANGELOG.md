@@ -1,5 +1,80 @@
 # Changelog
 
+## [1.2.0](https://github.com/bojanrajkovic/runny/compare/v1.1.0...v1.2.0) (2026-09-02)
+
+
+### Features
+
+* cross-compile the daemon and CLI for windows/amd64 ([#301](https://github.com/bojanrajkovic/runny/issues/301)) ([79c236b](https://github.com/bojanrajkovic/runny/commit/79c236b8064fb289bf86bbb1a51f6b18ed58f956))
+* **diskfree:** add Windows implementation ([#299](https://github.com/bojanrajkovic/runny/issues/299)) ([10d0504](https://github.com/bojanrajkovic/runny/commit/10d0504ed0e619217f04d955600e029b46d13bf6))
+* **guest:** pull runner diag logs whole instead of a 32KiB tail ([#377](https://github.com/bojanrajkovic/runny/issues/377)) ([4b225b5](https://github.com/bojanrajkovic/runny/commit/4b225b56afc6b3b2de938d9351deb9b00d5c6481))
+* **guest:** record windows debug sessions via a forced-command recorder ([#355](https://github.com/bojanrajkovic/runny/issues/355)) ([42fdb7f](https://github.com/bojanrajkovic/runny/commit/42fdb7f012366fe4ee48161f11b78d245a8f5888))
+* **obs:** publish the guest's resolved shape on vm_info ([#367](https://github.com/bojanrajkovic/runny/issues/367)) ([6c9267d](https://github.com/bojanrajkovic/runny/commit/6c9267d50aec2ccc9edb6877ed995ee2bff6efc6))
+* **oci:** add runnyctl image pack, a tart-format OCI Image Layout writer ([#340](https://github.com/bojanrajkovic/runny/issues/340)) ([493f9bd](https://github.com/bojanrajkovic/runny/commit/493f9bdf5cba1eede8b1a95b801db19edd332ce5))
+* **oci:** support credentialed registry pulls ([#349](https://github.com/bojanrajkovic/runny/issues/349)) ([38610e5](https://github.com/bojanrajkovic/runny/commit/38610e5d5e1d017ae859c6a233a425f5a32820ee)), closes [#350](https://github.com/bojanrajkovic/runny/issues/350)
+* **opacl,socket:** windows live operator grant/revoke with platform-native SID identity ([#330](https://github.com/bojanrajkovic/runny/issues/330)) ([bf553b2](https://github.com/bojanrajkovic/runny/commit/bf553b2584d5e306f89eeb03c0d10dd2597ed86b))
+* **release:** publish windows runnyctl/runnyd release artifacts ([#356](https://github.com/bojanrajkovic/runny/issues/356)) ([8380a10](https://github.com/bojanrajkovic/runny/commit/8380a10f1fe160f63c30a826ae70a5d71daffc3c)), closes [#342](https://github.com/bojanrajkovic/runny/issues/342)
+* **release:** ship a self-hosted Chocolatey feed, drop winget ([#358](https://github.com/bojanrajkovic/runny/issues/358)) ([0ee5201](https://github.com/bojanrajkovic/runny/commit/0ee520122c07cc3dfaa0d2c50854ae9897751d42))
+* run Windows guests through the full runner cycle ([#346](https://github.com/bojanrajkovic/runny/issues/346)) ([a521a18](https://github.com/bojanrajkovic/runny/commit/a521a189f6c7fd0be73cb808f580d661538c6e69))
+* **runnyctl:** verify the control-pipe server's owner before trusting it ([#336](https://github.com/bojanrajkovic/runny/issues/336)) ([2c10e38](https://github.com/bojanrajkovic/runny/commit/2c10e38479cd784ff792d287efa0a6956fbff637))
+* **runnyd:** run under the Windows Service Control Manager ([#310](https://github.com/bojanrajkovic/runny/issues/310)) ([db45f04](https://github.com/bojanrajkovic/runny/commit/db45f04a38709b3d860ef6fe1956032704f30d76)), closes [#303](https://github.com/bojanrajkovic/runny/issues/303)
+* **socket:** arm the windows operator-revocation gate over a named pipe ([#333](https://github.com/bojanrajkovic/runny/issues/333)) ([f5497c1](https://github.com/bojanrajkovic/runny/commit/f5497c136e1d695d15c4c305363c06d210fbf53c))
+* **sysdaemon:** add the Windows SCM installer ([#311](https://github.com/bojanrajkovic/runny/issues/311)) ([35989e3](https://github.com/bojanrajkovic/runny/commit/35989e3d3c3892926b7918d5d09597812d6755cf)), closes [#302](https://github.com/bojanrajkovic/runny/issues/302)
+* **vhdx:** add in-process raw-to-fixed-VHDX converter ([#313](https://github.com/bojanrajkovic/runny/issues/313)) ([01accd4](https://github.com/bojanrajkovic/runny/commit/01accd4c0ee3fcb2c617c687062014fa4dbeb0a3))
+* **vhdx:** differencing-disk clone, parent-locator reader, prune parent-reference check ([#315](https://github.com/bojanrajkovic/runny/issues/315)) ([7e8e977](https://github.com/bojanrajkovic/runny/commit/7e8e9779f10fb76f6c82006ebef7481f9cfc710c))
+* **vm:** add Hyper-V VM backend for windows (HCS compute systems) ([#318](https://github.com/bojanrajkovic/runny/issues/318)) ([54189d1](https://github.com/bojanrajkovic/runny/commit/54189d17a2abbe19e47a7e49e8412c43a6f725e4)), closes [#308](https://github.com/bojanrajkovic/runny/issues/308)
+* **vm:** add RunnerShareDir support for the Hyper-V backend ([#324](https://github.com/bojanrajkovic/runny/issues/324)) ([8325c26](https://github.com/bojanrajkovic/runny/commit/8325c268f697421cc685ba65b216f238e17402e1)), closes [#319](https://github.com/bojanrajkovic/runny/issues/319) [#323](https://github.com/bojanrajkovic/runny/issues/323)
+* **vm:** support Windows guests in the Hyper-V/HCS boot path ([#339](https://github.com/bojanrajkovic/runny/issues/339)) ([7581c63](https://github.com/bojanrajkovic/runny/commit/7581c632c68ffe91e0ae78aed894c9835827ed23))
+* **windows:** make daemon upgrades work end to end ([#361](https://github.com/bojanrajkovic/runny/issues/361)) ([e050062](https://github.com/bojanrajkovic/runny/commit/e0500626fa1285ec25aa79b301d8c73c4cb49041))
+* **winhcs:** vendor the HCS binding (trimmed, slog, OTel-bridge-ready) ([#314](https://github.com/bojanrajkovic/runny/issues/314)) ([56a78a2](https://github.com/bojanrajkovic/runny/commit/56a78a247e1b5f51718a3e3162d91112d5091e19))
+
+
+### Bug Fixes
+
+* **acl:** make a revoke reach every artifact, the way each platform allows ([#380](https://github.com/bojanrajkovic/runny/issues/380)) ([dada56c](https://github.com/bojanrajkovic/runny/commit/dada56c562930f85e728be223c72339a2af60b7e))
+* **deps:** update module github.com/alecthomas/kong to v1.16.0 ([#321](https://github.com/bojanrajkovic/runny/issues/321)) ([dbc8fd7](https://github.com/bojanrajkovic/runny/commit/dbc8fd72a0f5128a8ac6839ebb0145248c29848c))
+* **deps:** update module github.com/alecthomas/kong to v1.16.1 ([#402](https://github.com/bojanrajkovic/runny/issues/402)) ([abbb5d5](https://github.com/bojanrajkovic/runny/commit/abbb5d5032ea9e1bdfedbe9b8695b4448dd61eec))
+* **deps:** update module github.com/pierrec/lz4/v4 to v4.1.28 ([#400](https://github.com/bojanrajkovic/runny/issues/400)) ([ff69944](https://github.com/bojanrajkovic/runny/commit/ff69944189f4e9140e2ce2e65fb83501793a2d16))
+* **deps:** update module github.com/pierrec/lz4/v4 to v4.1.29 ([#409](https://github.com/bojanrajkovic/runny/issues/409)) ([d4494ec](https://github.com/bojanrajkovic/runny/commit/d4494ec2b8f2410899f12dee0ba5d3b4f29a3f70))
+* **deps:** update module golang.org/x/crypto to v0.54.0 ([#297](https://github.com/bojanrajkovic/runny/issues/297)) ([2365ef7](https://github.com/bojanrajkovic/runny/commit/2365ef76d9e53482fbc3ff736d54874344c116fa))
+* **deps:** update module golang.org/x/term to v0.45.0 ([#296](https://github.com/bojanrajkovic/runny/issues/296)) ([7054c01](https://github.com/bojanrajkovic/runny/commit/7054c016e29d4a9ed08ca467b4e7d00ba299682b))
+* **deps:** update module google.golang.org/grpc to v1.82.1 [security] ([#317](https://github.com/bojanrajkovic/runny/issues/317)) ([43e485a](https://github.com/bojanrajkovic/runny/commit/43e485a3af5ebdf940c02fee12ce85dc669dc0b1))
+* **deps:** update module google.golang.org/grpc to v1.83.0 ([#395](https://github.com/bojanrajkovic/runny/issues/395)) ([c3ad755](https://github.com/bojanrajkovic/runny/commit/c3ad75586baac00c55a7136fac046020387b290e))
+* **deps:** update module google.golang.org/grpc to v1.83.1 ([#410](https://github.com/bojanrajkovic/runny/issues/410)) ([e4445dd](https://github.com/bojanrajkovic/runny/commit/e4445dda6489512c14079c0427d0f695ef641641))
+* **deps:** update module google.golang.org/grpc to v1.83.2 ([#414](https://github.com/bojanrajkovic/runny/issues/414)) ([678f3c5](https://github.com/bojanrajkovic/runny/commit/678f3c5c6206a89530376bc472c6db03c9c9aff0))
+* **deps:** update module google.golang.org/protobuf to v1.36.12 ([#403](https://github.com/bojanrajkovic/runny/issues/403)) ([783f4f4](https://github.com/bojanrajkovic/runny/commit/783f4f410221bd3d2ba7936988d2395557e76a5f))
+* **deps:** update opentelemetry-go monorepo to v1.45.0 ([#399](https://github.com/bojanrajkovic/runny/issues/399)) ([b4e0c53](https://github.com/bojanrajkovic/runny/commit/b4e0c53c8a70e44f454f8aae286a2b7c9d47ed2e))
+* **deps:** update opentelemetry-go monorepo to v1.46.0 ([#415](https://github.com/bojanrajkovic/runny/issues/415)) ([7b63333](https://github.com/bojanrajkovic/runny/commit/7b63333b0fee66c0b81609b57e3c9439256a4636))
+* **guest:** disable keyboard-interactive auth on windows rotate, not just password ([#384](https://github.com/bojanrajkovic/runny/issues/384)) ([0ca8c39](https://github.com/bojanrajkovic/runny/commit/0ca8c391be8201765e8fc779f375dfee2447e44b))
+* **guest:** read windows diag logs the runner still has open ([#375](https://github.com/bojanrajkovic/runny/issues/375)) ([e12fa34](https://github.com/bojanrajkovic/runny/commit/e12fa34219da7b51988d08d2af13d3c08dc2b9ae))
+* **guest:** stop generating windows scramble passwords rand.Text can't pass ([#357](https://github.com/bojanrajkovic/runny/issues/357)) ([92ec165](https://github.com/bojanrajkovic/runny/commit/92ec16500ac1d0a76eca4d7f0d5149a7dab22651))
+* **oci:** scope cached registry tokens to the repository they were minted for ([#368](https://github.com/bojanrajkovic/runny/issues/368)) ([0cc3a74](https://github.com/bojanrajkovic/runny/commit/0cc3a747bb4511054786a26237e83830292ff181))
+* **release:** keep the nuspec template well-formed, and test that it is ([#364](https://github.com/bojanrajkovic/runny/issues/364)) ([69d743d](https://github.com/bojanrajkovic/runny/commit/69d743dd548abfde3cf6543dc2877be5bf3e65bb))
+* **release:** make pre-release versions sort ([#366](https://github.com/bojanrajkovic/runny/issues/366)) ([42ff2e6](https://github.com/bojanrajkovic/runny/commit/42ff2e66a101cd61a72c68371ca3cfc5faad2c77))
+* **runnyctl:** fall back to notepad.exe for edit-config on Windows ([#386](https://github.com/bojanrajkovic/runny/issues/386)) ([3c375c4](https://github.com/bojanrajkovic/runny/commit/3c375c41dd60d6825177fb19ced37979cbdd325b))
+* **runnyd:** make -doctor's read-only contract true, not just documented ([#382](https://github.com/bojanrajkovic/runny/issues/382)) ([0c1aa04](https://github.com/bojanrajkovic/runny/commit/0c1aa04f215f9c74cf7ab10efab888c886e534c2))
+* **runnyd:** resolve -doctor's home from an explicit -config, not the invoker's ([6be40e2](https://github.com/bojanrajkovic/runny/commit/6be40e285593a2cc2c2a47feaa465b3ab0895518)), closes [#351](https://github.com/bojanrajkovic/runny/issues/351)
+* **socket:** stop any authenticated user adding an instance to the control pipe ([#370](https://github.com/bojanrajkovic/runny/issues/370)) ([92b0513](https://github.com/bojanrajkovic/runny/commit/92b051367c5b273629e8e1a4c9209fb389a4d055))
+* **telemetry:** adapt vendored HCS spans into obs instead of bridging them ([#390](https://github.com/bojanrajkovic/runny/issues/390)) ([9f0916d](https://github.com/bojanrajkovic/runny/commit/9f0916d4cc28df624a860dac559b80f080545e9a))
+* **vm,guest,sysdaemon:** close 4 review findings from PR [#324](https://github.com/bojanrajkovic/runny/issues/324) ([#325](https://github.com/bojanrajkovic/runny/issues/325)) ([258c0ed](https://github.com/bojanrajkovic/runny/commit/258c0edbda599e9e4c5a321c213f876fe622dcb7))
+* **vm:** authenticate the guest console pipe and make its name unguessable ([#359](https://github.com/bojanrajkovic/runny/issues/359)) ([c4b515f](https://github.com/bojanrajkovic/runny/commit/c4b515f234384e59ce095d000c9c1e84961c057e))
+* **vm:** bound the HNS calls that had no deadline at all ([#378](https://github.com/bojanrajkovic/runny/issues/378)) ([728e712](https://github.com/bojanrajkovic/runny/commit/728e71291dae0e979e182c03f1a58f28c6e09cfd))
+* **vm:** keep the observability scope when force-stopping a guest ([#393](https://github.com/bojanrajkovic/runny/issues/393)) ([661c922](https://github.com/bojanrajkovic/runny/commit/661c922b474bd1cdc8054026a2be67b893e8cc22))
+* **vm:** reap orphaned compute systems, identify VM backend in telemetry ([#326](https://github.com/bojanrajkovic/runny/issues/326)) ([85af183](https://github.com/bojanrajkovic/runny/commit/85af183759c4bb9150510937e4de6b9dda67c6ec))
+* **vm:** return the guest's real lease IP from WaitIP, not the HNS pre-commit ([#334](https://github.com/bojanrajkovic/runny/issues/334)) ([e7b5a01](https://github.com/bojanrajkovic/runny/commit/e7b5a017c6c9200453fd4c2e18dff5278a22f977))
+* **vm:** scope a slot's HCS system ID to the install, not just the slot name ([#372](https://github.com/bojanrajkovic/runny/issues/372)) ([c5a0454](https://github.com/bojanrajkovic/runny/commit/c5a04544d2c17818e7b344ff20f039cc7b7fb061))
+* **vm:** stop attempting to detach the guest console ([#365](https://github.com/bojanrajkovic/runny/issues/365)) ([70910fa](https://github.com/bojanrajkovic/runny/commit/70910fa7538721b702292bbd35aff38119dff47b))
+* **vm:** stop leaving a guest console pipe bound for the guest's lifetime ([#360](https://github.com/bojanrajkovic/runny/issues/360)) ([7c9b43e](https://github.com/bojanrajkovic/runny/commit/7c9b43ed53a98f4f0df9ca525b1b8d269c3ac748))
+* **windows:** arm the guards that were shaped for unix and never fired ([#379](https://github.com/bojanrajkovic/runny/issues/379)) ([2ab9e1f](https://github.com/bojanrajkovic/runny/commit/2ab9e1f29363b408954517d1082d7e052693cb67))
+* **winhcs:** flatten the double internal/ vendor nesting ([#316](https://github.com/bojanrajkovic/runny/issues/316)) ([996b1ca](https://github.com/bojanrajkovic/runny/commit/996b1caff03743c9e68ef9957e04a3e8f09f9e80))
+
+
+### Refactoring
+
+* **guest:** collapse exit-check boilerplate into a runStep helper ([#352](https://github.com/bojanrajkovic/runny/issues/352)) ([c50a57b](https://github.com/bojanrajkovic/runny/commit/c50a57b04ad0b12435e6d52304d310e03891c45d)), closes [#347](https://github.com/bojanrajkovic/runny/issues/347)
+* **guest:** drop StartRunner's redundant goos parameter ([021ac30](https://github.com/bojanrajkovic/runny/commit/021ac30d88db0c541bbfaa27c9bf6d26228704fd)), closes [#345](https://github.com/bojanrajkovic/runny/issues/345)
+* **winhcs:** drop the vendored packages two uncalled entry points kept alive ([#387](https://github.com/bojanrajkovic/runny/issues/387)) ([34fe4a7](https://github.com/bojanrajkovic/runny/commit/34fe4a75a0275bf706b4dd5a9a73f2c6d7cbf53a))
+
 ## [1.1.0](https://github.com/bojanrajkovic/runny/compare/v1.0.2...v1.1.0) (2026-07-10)
 
 

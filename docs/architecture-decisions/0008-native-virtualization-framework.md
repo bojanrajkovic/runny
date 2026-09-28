@@ -2,6 +2,20 @@
 
 **Status:** Accepted (2026-06-09)
 
+**Amended: 2026-09-28** — `diskFormat: asif` base disks are accepted.
+Virtualization.framework on macOS 26+ attaches an ASIF file through the same
+`VZDiskImageStorageDeviceAttachment` raw uses, and tart publishes an ASIF base
+disk as ordinary `disk.v2` layers, so the puller already reconstructs it
+byte-identically. The gates are host-relative: `VZManager.Boot` refuses ASIF
+below macOS 26, because an older host's behavior (clean attach failure or a
+guest hung until the boot deadline) is unknown. Hyper-V can't attach ASIF at
+all, so the Windows refusal runs before the disk download (`internal/oci`
+pull) and again for cached bundles (`internal/images` `prepareBundleDisk`).
+Rejected: converting ASIF to raw at pull time, which rewrites 80GB+ and adds a
+`diskutil` dependency for no gain. Still unsupported: tart's stacked ASIF
+overlay layers (`application/vnd.cirruslabs.tart.disk.asif.overlay.v1`),
+refused at pull like any other non-`disk.v2` disk layer.
+
 ## Context
 
 runnyd manages ephemeral macOS guest VMs distributed as
@@ -56,8 +70,8 @@ parsing (octets are zero-stripped — normalize); OCI pull = own client
 - cgo + Virtualization.framework: runnyd must be codesigned with the
   `com.apple.security.virtualization` entitlement (ad-hoc OK locally); daemon
   builds are macOS-only.
-- We own format-tracking if tart's bundle/OCI format churns. `diskFormat:
-  asif` (macOS 26 tart option) is rejected with a clear error until verified.
+- We own format-tracking if tart's bundle/OCI format churns — `diskFormat:
+  asif` support was the first instance of this (see the amendment above).
 
 ## Rejected alternatives
 

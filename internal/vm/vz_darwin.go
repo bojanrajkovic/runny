@@ -45,6 +45,11 @@ func (m VZManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOption
 	if err := checkHostArch(cfg); err != nil {
 		return nil, err
 	}
+	if cfg.IsASIF() {
+		if err := requireASIFHost(); err != nil {
+			return nil, err
+		}
+	}
 	switch cfg.OS {
 	case "linux":
 		return m.bootLinux(ctx, bundle, cfg, opts)
@@ -64,6 +69,18 @@ func (m VZManager) Boot(ctx bounded.Context, bundle tart.Bundle, opts BootOption
 	default:
 		return m.bootDarwin(ctx, bundle, cfg, opts)
 	}
+}
+
+// requireASIFHost rejects an ASIF bundle before finishBoot ever attaches its
+// disk, on any host below asifMinMajor (macosversion.go's checkASIFHost). A
+// failed sysctl read fails loudly rather than assuming the host is new
+// enough.
+func requireASIFHost() error {
+	v, err := hostMacOSVersion()
+	if err != nil {
+		return fmt.Errorf("checking host macOS version for ASIF support: %w", err)
+	}
+	return checkASIFHost(v)
 }
 
 func (VZManager) bootDarwin(ctx context.Context, bundle tart.Bundle, cfg *tart.Config, opts BootOptions) (Machine, error) {

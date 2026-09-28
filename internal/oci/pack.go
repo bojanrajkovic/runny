@@ -58,10 +58,10 @@ type PackedImage struct {
 // no shared read-ahead state to reason about. *os.File and bytes.Reader
 // (what every caller here actually hands in) both already implement it.
 //
-// cfg.DiskFormat is forced to "raw" regardless of what the caller set:
-// tart.Bundle.LoadConfig rejects every other value (see bundle.go), and for
-// a VHDX-carrying image the field means only "not ASIF" -- the real disk
-// framing lives in the bytes, not this label.
+// An ASIF-framed disk is refused, so cfg.DiskFormat can always be forced to
+// "raw": the remaining inputs are raw or VHDX bytes, and for a VHDX-carrying
+// image the field means only "not ASIF" -- the real disk framing lives in the
+// bytes, not this label.
 //
 // nvram must be non-empty: tart.Bundle.Verify rejects an empty nvram.bin,
 // even for a windows guest whose HCS boot path never reads NVRAMPath at all.
@@ -76,6 +76,13 @@ type PackedImage struct {
 func WriteImage(dir string, cfg tart.Config, disk io.ReaderAt, diskSize int64, nvram []byte) (PackedImage, error) {
 	if len(nvram) == 0 {
 		return PackedImage{}, errors.New("packing image: nvram must be non-empty (tart.Bundle.Verify requires it)")
+	}
+	isASIF, err := tart.IsASIFDisk(disk)
+	if err != nil {
+		return PackedImage{}, fmt.Errorf("packing image: sniffing disk for ASIF magic: %w", err)
+	}
+	if isASIF {
+		return PackedImage{}, fmt.Errorf("packing image: %w", tart.ErrASIFPackUnsupported)
 	}
 	cfg.DiskFormat = "raw"
 	configBytes, err := json.Marshal(cfg)

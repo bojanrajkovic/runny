@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -164,6 +165,17 @@ func TestWriteImageRejectsEmptyNVRAM(t *testing.T) {
 	_, err := WriteImage(t.TempDir(), cfg, bytes.NewReader(disk), int64(len(disk)), nil)
 	if err == nil {
 		t.Fatal("want an error for empty nvram, got nil")
+	}
+}
+
+// TestWriteImageRejectsASIFDisk: forcing DiskFormat "raw" over ASIF bytes
+// would ship an image no backend boots correctly.
+func TestWriteImageRejectsASIFDisk(t *testing.T) {
+	cfg := tart.Config{OS: "windows", Arch: "amd64", CPUCount: 1, MemorySize: 1 << 30}
+	disk := append([]byte("shdw"), bytes.Repeat([]byte{0}, 60)...)
+	_, err := WriteImage(t.TempDir(), cfg, bytes.NewReader(disk), int64(len(disk)), []byte{0})
+	if !errors.Is(err, tart.ErrASIFPackUnsupported) {
+		t.Fatalf("WriteImage: want errors.Is tart.ErrASIFPackUnsupported, got %v", err)
 	}
 }
 

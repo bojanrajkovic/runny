@@ -1,7 +1,9 @@
 package tart
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,12 +118,43 @@ func TestLoadConfigWindowsGuest(t *testing.T) {
 	}
 }
 
-func TestLoadConfigRejectsASIF(t *testing.T) {
-	b := writeBundle(t, `{"version":1,"os":"darwin","arch":"arm64","cpuCount":2,"memorySize":1,
-		"hardwareModel":"eA==","ecid":"eA==","diskFormat":"asif"}`)
-	_, err := b.LoadConfig()
-	if !errors.Is(err, ErrUnsupportedDiskFormat) {
-		t.Errorf("want ErrUnsupportedDiskFormat, got %v", err)
+// TestLoadConfigDiskFormat covers every diskFormat value LoadConfig sees in
+// practice: "" and "raw" (an uncompressed disk image, including bundles old
+// enough to omit the field), "asif" (tart's macOS-26 sparse format, accepted
+// as a shape — whether THIS host can attach one is vz_darwin.go's job, not
+// this portable check's), and an unrecognized value.
+func TestLoadConfigDiskFormat(t *testing.T) {
+	base := `{"version":1,"os":"darwin","arch":"arm64","cpuCount":2,"memorySize":1,
+		"hardwareModel":"eA==","ecid":"eA=="%s}`
+	tests := []struct {
+		name       string
+		diskFormat string
+		wantErr    error
+		wantASIF   bool
+	}{
+		{name: "empty", diskFormat: "", wantErr: nil},
+		{name: "raw", diskFormat: "raw", wantErr: nil},
+		{name: "asif", diskFormat: "asif", wantErr: nil, wantASIF: true},
+		{name: "unsupported", diskFormat: "qcow2", wantErr: ErrUnsupportedDiskFormat},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			suffix := ""
+			if tt.diskFormat != "" {
+				suffix = `,"diskFormat":"` + tt.diskFormat + `"`
+			}
+			cfg := fmt.Sprintf(base, suffix)
+			c, err := writeBundle(t, cfg).LoadConfig()
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("LoadConfig: got err %v, want %v", err, tt.wantErr)
+			}
+			if tt.wantErr != nil {
+				return
+			}
+			if c.IsASIF() != tt.wantASIF {
+				t.Errorf("IsASIF() = %v, want %v", c.IsASIF(), tt.wantASIF)
+			}
+		})
 	}
 }
 
@@ -207,5 +240,40 @@ func TestVerifyAcceptsVHDXInPlaceOfDiskImg(t *testing.T) {
 	}
 	if err := b.Verify(); err != nil {
 		t.Errorf("Verify should accept disk.vhdx in place of disk.img: %v", err)
+	}
+}
+
+func TestIsASIFDisk(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+		want bool
+	}{
+		{name: "asif magic", data: []byte("shdw" + strings.Repeat("\x00", 60)), want: true},
+		{name: "raw zeros", data: make([]byte, 64), want: false},
+		{name: "short file", data: []byte("sh"), want: false},
+		{name: "empty file", data: nil, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := IsASIFDisk(bytes.NewReader(tt.data))
+			if err != nil {
+				t.Fatalf("IsASIFDisk: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("IsASIFDisk(%q) = %v, want %v", tt.data, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRefuseASIFOnHyperV(t *testing.T) {
+	if err := (&Config{DiskFormat: DiskFormatASIF}).RefuseASIFOnHyperV(); !errors.Is(err, ErrASIFUnsupportedOnHost) {
+		t.Errorf("asif config: want ErrASIFUnsupportedOnHost, got %v", err)
+	}
+	for _, format := range []string{"", DiskFormatRaw} {
+		if err := (&Config{DiskFormat: format}).RefuseASIFOnHyperV(); err != nil {
+			t.Errorf("diskFormat %q: want nil, got %v", format, err)
+		}
 	}
 }

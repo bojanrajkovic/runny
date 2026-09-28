@@ -294,11 +294,19 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 		return "", err
 	}
 
-	// Small layers: straight blob writes.
-	for name, l := range map[string]*descriptor{"config.json": configLayer, "nvram.bin": nvramLayer} {
-		if err := c.pullBlobToFile(ctx, ref, *l, filepath.Join(destDir, name)); err != nil {
-			return "", err
-		}
+	// config.json first, alone: checkHostDiskFormat (windows-only; a no-op
+	// elsewhere) must see it before nvram.bin or any disk layer is pulled, so
+	// an ASIF-labeled image is refused before the (potentially 80GB+) disk.v2
+	// download rather than after it lands.
+	configPath := filepath.Join(destDir, "config.json")
+	if err := c.pullBlobToFile(ctx, ref, *configLayer, configPath); err != nil {
+		return "", err
+	}
+	if err := checkHostDiskFormat(configPath); err != nil {
+		return "", err
+	}
+	if err := c.pullBlobToFile(ctx, ref, *nvramLayer, filepath.Join(destDir, "nvram.bin")); err != nil {
+		return "", err
 	}
 
 	// disk.img: reserve the full uncompressed size, then decompress each

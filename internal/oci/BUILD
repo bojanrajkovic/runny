@@ -5,6 +5,8 @@ go_library(
     srcs = [
         "applelz4.go",
         "credentials.go",
+        "diskformat_other.go",
+        "diskformat_windows.go",
         "headroom_other.go",
         "headroom_windows.go",
         "oci.go",

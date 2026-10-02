@@ -98,6 +98,17 @@ type Config struct {
 // themselves.
 func (c *Config) IsASIF() bool { return c.DiskFormat == DiskFormatASIF }
 
+// CheckDiskFormat returns ErrUnsupportedDiskFormat unless DiskFormat is empty,
+// raw, or asif. The puller runs it before the disk download, so an image in
+// a format this package can't boot costs only its config blob.
+func (c *Config) CheckDiskFormat() error {
+	switch c.DiskFormat {
+	case "", DiskFormatRaw, DiskFormatASIF:
+		return nil
+	}
+	return fmt.Errorf("%w: %q", ErrUnsupportedDiskFormat, c.DiskFormat)
+}
+
 // RefuseASIFOnHyperV rejects c if its disk is labeled ASIF: Hyper-V has no
 // attach path for ASIF on any host version.
 func (c *Config) RefuseASIFOnHyperV() error {
@@ -190,8 +201,8 @@ func (b Bundle) LoadConfig() (*Config, error) {
 	default:
 		return nil, fmt.Errorf("%w: %s/%s", ErrUnsupportedGuest, c.OS, c.Arch)
 	}
-	if c.DiskFormat != "" && c.DiskFormat != DiskFormatRaw && c.DiskFormat != DiskFormatASIF {
-		return nil, fmt.Errorf("%w: %q", ErrUnsupportedDiskFormat, c.DiskFormat)
+	if err := c.CheckDiskFormat(); err != nil {
+		return nil, err
 	}
 	if c.OS == "darwin" && (c.HardwareModelB64 == "" || c.ECIDB64 == "") {
 		return nil, errors.New("darwin bundle config missing hardwareModel or ecid")

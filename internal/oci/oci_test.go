@@ -118,6 +118,15 @@ type fakeRegistry struct {
 	blobs    map[string][]byte // digest -> content
 	manifest []byte
 	digest   string
+
+	mu        sync.Mutex
+	requested []string // blob digests served, in request order
+}
+
+func (f *fakeRegistry) requestedBlobs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.requested)
 }
 
 func newFakeRegistry(t *testing.T, config, nvram, disk []byte) *fakeRegistry {
@@ -185,6 +194,9 @@ func (f *fakeRegistry) start() (*httptest.Server, Ref) {
 		if !requireAuth(w, r, srvURL) {
 			return
 		}
+		f.mu.Lock()
+		f.requested = append(f.requested, r.PathValue("digest"))
+		f.mu.Unlock()
 		b, ok := f.blobs[r.PathValue("digest")]
 		if !ok {
 			http.Error(w, "no such blob", http.StatusNotFound)
@@ -242,6 +254,29 @@ func TestPullToAssemblesBundle(t *testing.T) {
 	digest2, err := c.PullTo(testCtx(t), ref, dest)
 	if err != nil || digest2 != digest {
 		t.Errorf("idempotent PullTo: %s, %v", digest2, err)
+	}
+}
+
+// TestPullRejectsUnknownDiskFormatBeforeDiskDownload: a format runny can't boot
+// must cost only the config blob, never the disk download.
+func TestPullRejectsUnknownDiskFormatBeforeDiskDownload(t *testing.T) {
+	f := newFakeRegistry(t, []byte(`{"os":"darwin","diskFormat":"riff"}`), randomBytes(2048), randomBytes(64*1024))
+	_, ref := f.start()
+
+	_, err := NewClient().PullTo(testCtx(t), ref, filepath.Join(t.TempDir(), "bundle"))
+	if !errors.Is(err, tart.ErrUnsupportedDiskFormat) {
+		t.Fatalf("PullTo: want errors.Is tart.ErrUnsupportedDiskFormat, got %v", err)
+	}
+
+	var m manifest
+	if err := json.Unmarshal(f.manifest, &m); err != nil {
+		t.Fatal(err)
+	}
+	requested := f.requestedBlobs()
+	for _, l := range m.Layers {
+		if l.MediaType == mediaTypeDiskV2 && slices.Contains(requested, l.Digest) {
+			t.Errorf("disk layer %s was requested; want the pull refused before any disk download", l.Digest)
+		}
 	}
 }
 

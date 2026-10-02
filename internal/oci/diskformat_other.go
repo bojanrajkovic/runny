@@ -2,7 +2,8 @@
 
 package oci
 
-// checkHostDiskFormat is a no-op off windows: Hyper-V is the only backend
-// with no attach path for ASIF at all (see headroom_windows.go for the
-// analogous windows-only split).
-func checkHostDiskFormat(string) error { return nil }
+import "github.com/bojanrajkovic/runny/internal/tart"
+
+// refuseHostDiskFormat accepts every known format off windows: macOS's ASIF
+// floor depends on the host version, which internal/vm checks at boot.
+func refuseHostDiskFormat(*tart.Config) error { return nil }

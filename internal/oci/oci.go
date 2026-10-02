@@ -294,15 +294,13 @@ func (c *Client) pull(ctx context.Context, ref Ref, destDir string) (string, err
 		return "", err
 	}
 
-	// config.json first, alone: checkHostDiskFormat (windows-only; a no-op
-	// elsewhere) must see it before nvram.bin or any disk layer is pulled, so
-	// an ASIF-labeled image is refused before the (potentially 80GB+) disk.v2
-	// download rather than after it lands.
+	// config.json first, alone, so checkConfigDiskFormat can refuse an image
+	// before nvram.bin or the disk layers download.
 	configPath := filepath.Join(destDir, "config.json")
 	if err := c.pullBlobToFile(ctx, ref, *configLayer, configPath); err != nil {
 		return "", err
 	}
-	if err := checkHostDiskFormat(configPath); err != nil {
+	if err := checkConfigDiskFormat(configPath); err != nil {
 		return "", err
 	}
 	if err := c.pullBlobToFile(ctx, ref, *nvramLayer, filepath.Join(destDir, "nvram.bin")); err != nil {

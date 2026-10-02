@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -27,13 +28,32 @@ const CompatVersion = "2.32.1"
 // macOS guests are unusable.
 const GuestAgentPortName = "tart-version-" + CompatVersion
 
+// DiskFormat values recognized in config.json's diskFormat field. An empty
+// string is treated the same as DiskFormatRaw (older tart bundles omit the
+// field entirely).
+const (
+	DiskFormatRaw  = "raw"
+	DiskFormatASIF = "asif"
+)
+
 var (
-	// ErrUnsupportedDiskFormat: ASIF (macOS 26 tart) is rejected until vz
-	// attachment support is verified — a clear error beats a hung boot.
-	ErrUnsupportedDiskFormat = errors.New("unsupported disk format (only raw is supported)")
+	// ErrUnsupportedDiskFormat rejects any diskFormat value this package
+	// doesn't know how to boot. "raw" (or an empty field, from older
+	// bundles) is a plain disk image; "asif" is tart's macOS-26 sparse image
+	// format, accepted here as a shape only — whether THIS host can actually
+	// attach one is a separate, host-relative check (see LoadConfig's own
+	// doc comment for why that split exists).
+	ErrUnsupportedDiskFormat = errors.New("unsupported disk format (only raw and asif are supported)")
 	// ErrUnsupportedGuest rejects any (OS, Arch) shape outside darwin/arm64,
 	// linux/{arm64,amd64}, or windows/{arm64,amd64} — see LoadConfig.
 	ErrUnsupportedGuest = errors.New("bundle is not a darwin/arm64, linux/arm64, linux/amd64, windows/arm64, or windows/amd64 guest")
+	// ErrASIFUnsupportedOnHost is wrapped by every host-capability refusal of
+	// an ASIF disk: the darwin version gate (internal/vm) and Hyper-V's
+	// outright refusal (internal/oci, internal/images).
+	ErrASIFUnsupportedOnHost = errors.New("this host cannot boot ASIF disks")
+	// ErrASIFPackUnsupported: runnyctl image pack only emits raw or VHDX
+	// disks, and relabeling ASIF bytes as raw would ship an unbootable image.
+	ErrASIFPackUnsupported = errors.New("image pack does not support ASIF disks; convert the disk to raw first")
 )
 
 // Bundle is a tart-format VM bundle directory.
@@ -71,6 +91,54 @@ type Config struct {
 		Width  int `json:"width"`
 		Height int `json:"height"`
 	} `json:"display"`
+}
+
+// IsASIF reports whether the bundle's disk is tart's ASIF format rather than
+// a plain raw image, so callers don't need to string-compare DiskFormat
+// themselves.
+func (c *Config) IsASIF() bool { return c.DiskFormat == DiskFormatASIF }
+
+// CheckDiskFormat returns ErrUnsupportedDiskFormat unless DiskFormat is empty,
+// raw, or asif. The puller runs it before the disk download, so an image in
+// a format this package can't boot costs only its config blob.
+func (c *Config) CheckDiskFormat() error {
+	switch c.DiskFormat {
+	case "", DiskFormatRaw, DiskFormatASIF:
+		return nil
+	}
+	return fmt.Errorf("%w: %q", ErrUnsupportedDiskFormat, c.DiskFormat)
+}
+
+// RefuseASIFOnHyperV rejects c if its disk is labeled ASIF: Hyper-V has no
+// attach path for ASIF on any host version.
+func (c *Config) RefuseASIFOnHyperV() error {
+	if c.IsASIF() {
+		return fmt.Errorf("%w: Hyper-V has no ASIF support; use an image with a raw disk", ErrASIFUnsupportedOnHost)
+	}
+	return nil
+}
+
+// asifMagic is the 4-byte signature at the start of an Apple Sparse Image
+// Format file ("shdw"), confirmed against `diskutil image create blank
+// --format ASIF` output on a macOS 26+ host.
+var asifMagic = [4]byte{'s', 'h', 'd', 'w'}
+
+// IsASIFDisk sniffs r's first 4 bytes for the ASIF magic, rather than
+// trusting a bundle's diskFormat label — which can be wrong (see
+// internal/images' prepareBundleDisk, which checks both the label and the
+// bytes). A file shorter than 4 bytes simply isn't ASIF (false, nil), not an
+// error — there's nothing to identify, and a truncated disk is a Verify
+// concern, not this function's.
+func IsASIFDisk(r io.ReaderAt) (bool, error) {
+	var buf [4]byte
+	n, err := r.ReadAt(buf[:], 0)
+	if n < len(buf) {
+		if err != nil && err != io.EOF {
+			return false, fmt.Errorf("reading disk magic: %w", err)
+		}
+		return false, nil
+	}
+	return buf == asifMagic, nil
 }
 
 // HardwareModel decodes the VZMacHardwareModel data representation. Empty
@@ -133,8 +201,8 @@ func (b Bundle) LoadConfig() (*Config, error) {
 	default:
 		return nil, fmt.Errorf("%w: %s/%s", ErrUnsupportedGuest, c.OS, c.Arch)
 	}
-	if c.DiskFormat != "" && c.DiskFormat != "raw" {
-		return nil, fmt.Errorf("%w: %q", ErrUnsupportedDiskFormat, c.DiskFormat)
+	if err := c.CheckDiskFormat(); err != nil {
+		return nil, err
 	}
 	if c.OS == "darwin" && (c.HardwareModelB64 == "" || c.ECIDB64 == "") {
 		return nil, errors.New("darwin bundle config missing hardwareModel or ecid")

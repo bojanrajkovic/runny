@@ -6,6 +6,8 @@ go_library(
         "await.go",
         "hcs_windows.go",
         "leases.go",
+        "macosversion.go",
+        "macosversion_darwin.go",
         "neighbortable.go",
         "neighbortable_windows.go",
         "netfixup.go",
@@ -24,9 +26,11 @@ go_library(
     ] + select({
         "@rules_go//go/platform:darwin": [
             "@com_github_code_hex_vz_v3//:vz",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:ios": [
             "@com_github_code_hex_vz_v3//:vz",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:windows": [
             "//internal/obs",
@@ -47,6 +51,7 @@ go_test(
         "await_test.go",
         "hcs_windows_test.go",
         "leases_test.go",
+        "macosversion_test.go",
         "neighbortable_test.go",
         "netfixup_test.go",
         "netfixup_windows_test.go",

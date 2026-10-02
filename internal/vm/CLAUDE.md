@@ -120,6 +120,23 @@ ADR-0026 for the Hyper-V backend's decisions and why; this doc is sharp edges on
   guest; it never lets VZ boot an amd64 kernel). `Bundle.LoadConfig` itself stays a
   portable shape check with no host-arch opinion, so it parses identically on any
   CI runner regardless of that runner's own `GOARCH`.
+- **ASIF disks split their refusal across three packages, not one.**
+  `tart.Bundle.LoadConfig` accepts `diskFormat: asif` unconditionally — it's a
+  portable shape check with no host opinion, same as the arch bullet above.
+  Whether THIS host can actually boot one is decided per backend: darwin's
+  `VZManager.Boot` (`vz_darwin.go`'s `requireASIFHost`, backed by
+  `macosversion.go`'s untagged `checkASIFHost`) refuses below a macOS 26
+  host, because whether Virtualization.framework's attach fails cleanly or
+  hangs the guest until the BOOT deadline on an older host is unconfirmed
+  either way. Hyper-V has no attach path for ASIF at all, so its refusal
+  lives upstream of `HCSManager.Boot` entirely — `internal/oci`'s pull
+  refuses an ASIF-labeled image right after config.json lands (before
+  nvram.bin or the, potentially 80GB+, disk.v2 layers download), and
+  `internal/images`' `prepareBundleDisk` refuses it again for a bundle
+  already cached before that pull-time check existed, ahead of CLONE. `Boot`
+  itself carries no ASIF check on windows — don't add one back "for
+  symmetry" with darwin; it would just be a third, redundant copy of a
+  refusal two earlier stages already guarantee ran.
 - **`hcsMachine.Boot` never attaches a share device for `RunnerShareDir` — it's
   silently a no-op.** Schema 2.1's only Linux-guest-capable share device,
   `Plan9`, is hardware-validated to be rejected outright on a bare (non-LCOW)

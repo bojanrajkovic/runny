@@ -349,6 +349,34 @@ func TestDrainerProgressAndStateOnHoldFlip(t *testing.T) {
 	}
 }
 
+// A recheck that lands while tryExit is still running the exit gate must
+// not be dropped: the running tryExit replays it on the way out, so a
+// config fixed mid-gate exits now rather than on the next retry tick.
+func TestTryExitReplaysRecheckDuringGate(t *testing.T) {
+	var gateOK atomic.Bool
+	gateEntered := make(chan struct{})
+	gateRelease := make(chan struct{})
+	d, _, stopped := newTestDrainer(&stubSlot{st: stableSt})
+	d.exitGate = func(string) (bool, string) {
+		if gateOK.Load() {
+			return true, ""
+		}
+		close(gateEntered)
+		<-gateRelease
+		return false, "config.yaml no longer parses"
+	}
+	d.Start("config reload (rpc): test", "sha")
+	select {
+	case <-gateEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("exit gate never ran")
+	}
+	gateOK.Store(true)
+	d.tryExit() // the first tryExit is parked in the gate, so this one finds exitRunning set
+	close(gateRelease)
+	waitStopped(t, stopped)
+}
+
 // A Resume that races with the exit gate can un-stable a slot while the
 // gate's file I/O is in flight. tryExit's second stability
 // pass must catch this and defer the exit until the slot re-converges.

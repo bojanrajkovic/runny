@@ -65,6 +65,7 @@ type drainer struct {
 	acceptedSHA string     // config sha256 recorded at Start (reload only)
 	exited      bool
 	exitRunning bool   // one tryExit at a time
+	exitPending bool   // a tryExit arrived while one was running; replay it
 	retryStop   func() // stops the exit-gate retry ticker
 }
 
@@ -238,16 +239,19 @@ func (d *drainer) recheck() {
 // brief enough that any junk cycle from that residual cannot start a job
 // before the daemon exits.
 //
-// needRecheck is set when the second stability pass forces a back-out. The
-// defer clears exitRunning and then calls d.recheck() so the drain does
-// not get stuck: if the slot stabilised between the return and the defer,
-// its observe fired a new tryExit that returned immediately (exitRunning
-// was still true); after the defer clears exitRunning the drain needs an
-// explicit recheck to restart tryExit, because no further status change
-// is guaranteed.
+// A tryExit that arrives while another is running (a status change, an RPC
+// recheck after the config was fixed) cannot run concurrently, so it sets
+// exitPending and returns. The running tryExit's defer clears exitRunning
+// and replays it with d.recheck(); otherwise the request would wait for the
+// next retry tick or status change, neither of which is guaranteed soon.
+// needRecheck covers the same replay when the second stability pass backs
+// out.
 func (d *drainer) tryExit() {
 	d.mu.Lock()
 	if d.exited || d.exitRunning {
+		if !d.exited {
+			d.exitPending = true // exitRunning: the running tryExit replays this
+		}
 		d.mu.Unlock()
 		return
 	}
@@ -258,8 +262,10 @@ func (d *drainer) tryExit() {
 	defer func() {
 		d.mu.Lock()
 		d.exitRunning = false
+		pending := d.exitPending
+		d.exitPending = false
 		d.mu.Unlock()
-		if needRecheck {
+		if needRecheck || pending {
 			d.recheck()
 		}
 	}()

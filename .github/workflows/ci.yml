@@ -99,7 +99,7 @@ jobs:
   # cannot build off darwin.
   windows:
     name: build + test (windows)
-    runs-on: windows-2022
+    runs-on: windows-2025
     steps:
       # Must run before checkout: mangled line endings in checked-out fixtures
       # are a one-way trip, not something to fix up after.

@@ -10,7 +10,7 @@ require (
 
 require (
 	github.com/Code-Hex/vz/v3 v3.8.0
-	github.com/Microsoft/go-winio v0.6.3
+	github.com/Microsoft/go-winio v0.6.4
 	github.com/alecthomas/kong v1.16.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/invopop/jsonschema v0.14.0

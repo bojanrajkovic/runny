@@ -259,7 +259,7 @@ struct PipelineRow: View {
 /// the benign non-success endings. A wedge, an unknown ending, and a record
 /// from an older daemon (no ending at all) all stay plain failures.
 enum CycleVerdict {
-    case success, recycle, shutdown, failure
+    case success, recycle, maxIdle, shutdown, failure
 
     init(_ cycle: Runny_V1_CycleRecord) {
         if cycle.result == "success" {
@@ -267,6 +267,7 @@ enum CycleVerdict {
         } else {
             switch cycle.ending {
             case "recycle": self = .recycle
+            case "max_idle": self = .maxIdle
             case "shutdown": self = .shutdown
             default: self = .failure
             }
@@ -277,7 +278,7 @@ enum CycleVerdict {
     var mark: String {
         switch self {
         case .success: "✓"
-        case .recycle: "↻"
+        case .recycle, .maxIdle: "↻"
         case .shutdown: "⏻"
         case .failure: "✗"
         }
@@ -290,6 +291,7 @@ enum CycleVerdict {
         switch self {
         case .success: "success"
         case .recycle: "recycled by operator"
+        case .maxIdle: "recycled after max idle"
         case .shutdown: "interrupted by daemon shutdown"
         case .failure: "failed"
         }
@@ -298,7 +300,7 @@ enum CycleVerdict {
     var icon: String {
         switch self {
         case .success: "checkmark.circle.fill"
-        case .recycle: "arrow.clockwise.circle.fill"
+        case .recycle, .maxIdle: "arrow.clockwise.circle.fill"
         case .shutdown: "power.circle.fill"
         case .failure: "xmark.circle.fill"
         }
@@ -309,7 +311,7 @@ enum CycleVerdict {
     var tint: Color {
         switch self {
         case .success: .green
-        case .recycle, .shutdown: .secondary
+        case .recycle, .maxIdle, .shutdown: .secondary
         case .failure: .red
         }
     }

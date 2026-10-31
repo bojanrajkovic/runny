@@ -36,6 +36,7 @@ const (
 	EndingSuccess  Ending = "success"
 	EndingFailure  Ending = "failure"
 	EndingRecycle  Ending = "recycle"  // operator-initiated (runnyctl recycle)
+	EndingMaxIdle  Ending = "max_idle" // LISTENING reached limits.max_idle; routine recycle
 	EndingShutdown Ending = "shutdown" // daemon exit (ctx cancelled)
 	EndingWedge    Ending = "wedge"    // teardown could not kill the guest
 )

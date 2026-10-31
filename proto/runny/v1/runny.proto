@@ -431,6 +431,7 @@ message CycleRecord {
   // records have a Started that does not match the directory name.
   string cycle_dir = 16;
   // Why the cycle ended: "success" | "failure" | "recycle" (operator) |
+  // "max_idle" (LISTENING reached limits.max_idle; routine recycle) |
   // "shutdown" (daemon exit) | "wedge" (teardown could not kill the guest).
   // Distinct from result: a recycled or shutdown cycle has result "failure"
   // (the timeline stays truthful) but ending names the benign cause instead

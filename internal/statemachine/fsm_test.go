@@ -1170,6 +1170,36 @@ func TestOperatorRecycle(t *testing.T) {
 	}
 }
 
+// TestEndingMaxIdle pins that the routine max_idle recycle is its own benign
+// ending. The short MaxIdle stays under heldListening's 10-minute reset, so
+// the benign classification is what holds the streak at zero here.
+func TestEndingMaxIdle(t *testing.T) {
+	h := newHarness(t, func(c *home.Config) {
+		c.Limits.MaxIdle = home.Duration(50 * time.Millisecond)
+	})
+	cancel := h.start(t)
+	defer cancel()
+
+	h.waitState(t, StateProvision)
+	h.proc.say(markerListening)
+	h.waitState(t, StateListening)
+	st := h.waitState(t, StateBackoff)
+	if st.ConsecutiveFailures != 0 {
+		t.Errorf("failures = %d after max_idle recycle; a routine recycle is not a health signal", st.ConsecutiveFailures)
+	}
+
+	rec := h.records(t)[0]
+	if rec.Ending != cycle.EndingMaxIdle {
+		t.Errorf("Ending = %q, want %q", rec.Ending, cycle.EndingMaxIdle)
+	}
+	if rec.Result != cycle.ResultFailure {
+		t.Errorf("Result = %q, want %q", rec.Result, cycle.ResultFailure)
+	}
+	if rec.Failure == nil || !strings.Contains(rec.Failure.Error, "max idle reached") {
+		t.Errorf("Failure = %+v, want the max idle reason", rec.Failure)
+	}
+}
+
 // TestEndingShutdown pins that a cycle interrupted by daemon shutdown (the
 // outer ctx cancelled, not an operator recycle) records Ending "shutdown" —
 // distinct from "recycle" even though both are benign for backoff.

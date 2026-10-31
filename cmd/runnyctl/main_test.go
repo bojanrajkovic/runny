@@ -455,6 +455,7 @@ func TestRenderCycleShowsEnding(t *testing.T) {
 	}{
 		{"recycle", string(cycle.EndingRecycle), []string{"recycled by operator", "image bump"}, "✗"},
 		{"shutdown", string(cycle.EndingShutdown), []string{"daemon shutdown", "image bump"}, "✗"},
+		{"max idle", string(cycle.EndingMaxIdle), []string{"↻ recycled after max idle", "image bump"}, "✗"},
 		{"wedge still reads as a failure", string(cycle.EndingWedge), []string{"✗"}, ""},
 	}
 	for _, tc := range cases {

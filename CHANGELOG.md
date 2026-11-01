@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.1](https://github.com/bojanrajkovic/runny/compare/v1.2.0...v1.2.1) (2026-11-01)
+
+
+### Bug Fixes
+
+* **ci:** stop restoring the Bazel cache across Ubuntu releases ([#458](https://github.com/bojanrajkovic/runny/issues/458)) ([b205122](https://github.com/bojanrajkovic/runny/commit/b2051220e2e9c3f820908db91e99dbf0aae586b1))
+* **statemachine:** record the max_idle recycle as ending max_idle ([#456](https://github.com/bojanrajkovic/runny/issues/456)) ([e58d661](https://github.com/bojanrajkovic/runny/commit/e58d661087f46d121566704931cc444cba9c11ca))
+
 ## [1.2.0](https://github.com/bojanrajkovic/runny/compare/v1.1.0...v1.2.0) (2026-10-25)
 
 

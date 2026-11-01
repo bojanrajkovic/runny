@@ -152,7 +152,8 @@ func (c *run) emitRunnerLine(line string) {
 // runCycle executes states 1..9, always handing off to TEARDOWN, and returns
 // the cycle record (teardown fills the tail), whether teardown wedged
 // (force-stop failed with the guest still running), and whether the cycle
-// ended benignly (operator recycle, daemon shutdown) rather than by failure.
+// ended benignly (operator recycle, max idle, daemon shutdown) rather than by
+// failure.
 func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	cfg := c.deps.Config
 
@@ -456,10 +457,11 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 	shutdown := ctx.Err() != nil
 	wedged := c.teardown(cctx)
 
-	// A cycle ended by operator recycle or daemon shutdown is recorded as a
-	// failure (the timeline is truthful) but is benign for backoff: neither
-	// says anything about the slot's health. A wedge is never benign. ending
-	// names which of those two (or a plain failure) it was, for cycle.json.
+	// A cycle ended by operator recycle, max idle, or daemon shutdown is
+	// recorded as a failure (the timeline is truthful) but is benign for
+	// backoff: none says anything about the slot's health. A wedge is never
+	// benign. ending names which of those (or a plain failure) it was, for
+	// cycle.json.
 	benign := false
 	ending := cycle.EndingFailure
 	if !ok {
@@ -472,6 +474,11 @@ func (c *run) runCycle(ctx context.Context) (*cycle.Record, bool, bool) {
 		} else if errors.Is(c.failErr, errOperatorRecycle) {
 			benign = true
 			ending = cycle.EndingRecycle
+		} else if errors.Is(c.failErr, errMaxIdle) {
+			// Checked before shutdown for the same reason as the DEBUG
+			// sentinels below: if the timer won the select, it's the truth.
+			benign = true
+			ending = cycle.EndingMaxIdle
 		} else if errors.Is(c.failErr, errDebugExpired) || errors.Is(c.failErr, errDebugRacedJob) {
 			// A DEBUG hold that ran out, or a job that raced the LISTENING
 			// freeze and died with the verified kill: operator-caused, not a
@@ -624,7 +631,7 @@ func (c *run) listenAndRunJob(ctx context.Context) (bool, State, error) {
 		case <-maxIdle.C:
 			// Not a failure: recycle to absorb image updates.
 			finishListening(cycle.OutcomeOK, "")
-			return false, StateListening, fmt.Errorf("max idle (%v) reached", cfg.Limits.MaxIdle.D())
+			return false, StateListening, fmt.Errorf("%w (%v)", errMaxIdle, cfg.Limits.MaxIdle.D())
 
 		case <-reconcile.C:
 			// The interval doubles as the budget: a registration check

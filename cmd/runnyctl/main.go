@@ -581,6 +581,8 @@ func (c *ctl) renderCycle(rec *runnyv1.CycleRecord) {
 		switch rec.GetEnding() {
 		case string(cycle.EndingRecycle):
 			verdict = fmt.Sprintf("↻ recycled by operator in %s: %s", rec.GetFailureState(), rec.GetFailureError())
+		case string(cycle.EndingMaxIdle):
+			verdict = fmt.Sprintf("↻ recycled after max idle in %s: %s", rec.GetFailureState(), rec.GetFailureError())
 		case string(cycle.EndingShutdown):
 			verdict = fmt.Sprintf("⏻ interrupted by daemon shutdown in %s: %s", rec.GetFailureState(), rec.GetFailureError())
 		}

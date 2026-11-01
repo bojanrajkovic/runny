@@ -249,7 +249,7 @@ sum by (pool) (runny_slot_state{state="JOB"})
 sum by (pool) (rate(runny_job_count_total[15m]))
 histogram_quantile(0.95, sum by (pool) (rate(runny_job_duration_seconds[1h])))
 
-# Cycle failure ratio. `shutdown` and `recycle` are benign truncations;
+# Cycle failure ratio. `shutdown`, `recycle`, and `max_idle` are benign truncations;
 # `failure` and `wedge` read as health signals — with one caveat: a debug
 # hold that expires also ends its cycle as `failure` by design, so heavy
 # runnyctl debug use shows up here even though backoff treats it as benign.
@@ -259,7 +259,7 @@ sum by (pool) (rate(runny_cycle_count_total{ending=~"failure|wedge"}[1h]))
 # Real failure durations, excluding benign truncations — the duration
 # histogram carries `ending` for exactly this filter.
 histogram_quantile(0.95, sum by (pool) (
-  rate(runny_cycle_duration_seconds{result="failure",ending!~"shutdown|recycle"}[6h])))
+  rate(runny_cycle_duration_seconds{result="failure",ending!~"shutdown|recycle|max_idle"}[6h])))
 
 # Time in current state — alert when a slot sits anywhere too long
 # (a stuck slot is exactly the silent failure runny exists to kill).

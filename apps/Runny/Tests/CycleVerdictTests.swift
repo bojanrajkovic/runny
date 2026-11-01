@@ -19,6 +19,7 @@ final class CycleVerdictTests: XCTestCase {
     func testEndingPicksTheVerdict() {
         XCTAssertEqual(CycleVerdict(record(result: "success", ending: "success")), .success)
         XCTAssertEqual(CycleVerdict(record(result: "failure", ending: "recycle")), .recycle)
+        XCTAssertEqual(CycleVerdict(record(result: "failure", ending: "max_idle")), .maxIdle)
         XCTAssertEqual(CycleVerdict(record(result: "failure", ending: "shutdown")), .shutdown)
         XCTAssertEqual(CycleVerdict(record(result: "failure", ending: "failure")), .failure)
         // A wedge is a real failure — the guest survived force-stop — never
@@ -40,10 +41,12 @@ final class CycleVerdictTests: XCTestCase {
     func testMarksAndVerbsMirrorRunnyctl() {
         XCTAssertEqual(CycleVerdict.success.mark, "✓")
         XCTAssertEqual(CycleVerdict.recycle.mark, "↻")
+        XCTAssertEqual(CycleVerdict.maxIdle.mark, "↻")
         XCTAssertEqual(CycleVerdict.shutdown.mark, "⏻")
         XCTAssertEqual(CycleVerdict.failure.mark, "✗")
 
         XCTAssertEqual(CycleVerdict.recycle.verb, "recycled by operator")
+        XCTAssertEqual(CycleVerdict.maxIdle.verb, "recycled after max idle")
         XCTAssertEqual(CycleVerdict.shutdown.verb, "interrupted by daemon shutdown")
         XCTAssertEqual(CycleVerdict.failure.verb, "failed")
     }

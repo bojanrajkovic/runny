@@ -74,7 +74,7 @@ action spans start and end on `StepEntered`/`StepLeft` and
 `ActionStarted`/`ActionEnded`, stamped with the event's own timestamp so
 span times match `cycle.json` exactly; a failed step or action carries
 `Status=Error` with the recorded error, and the root mirrors `result` while
-a benign ending (operator recycle, daemon shutdown) leaves the root
+a benign ending (operator recycle, max idle, daemon shutdown) leaves the root
 `Status=Unset` with the `ending` attribute carrying the story. Audit events
 land as span events on the root, not as spans of their own — operator
 access is visible in the trace with no key material attached.

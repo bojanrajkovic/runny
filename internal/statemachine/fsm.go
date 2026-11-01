@@ -60,6 +60,11 @@ const (
 // benign for backoff accounting: an operator action is not a health signal.
 var errOperatorRecycle = errors.New("recycled by operator")
 
+// errMaxIdle marks a LISTENING runner recycled at limits.max_idle to absorb
+// image updates. Recorded and classified like an operator recycle: result
+// failure, benign for backoff, with its own ending.
+var errMaxIdle = errors.New("max idle reached")
+
 // Debug-key injection sentinels.
 var (
 	// errDebugExpired: a DEBUG hold ran out — benign for backoff.

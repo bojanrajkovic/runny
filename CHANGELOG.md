@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.2](https://github.com/bojanrajkovic/runny/compare/v1.2.1...v1.2.2) (2026-11-06)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/alecthomas/kong to v1.17.0 ([#463](https://github.com/bojanrajkovic/runny/issues/463)) ([0f7b83b](https://github.com/bojanrajkovic/runny/commit/0f7b83b9191e91304e04a0ab06095dfd36829b42))
+* **deps:** update module google.golang.org/grpc to v1.85.0 ([#460](https://github.com/bojanrajkovic/runny/issues/460)) ([7a740bc](https://github.com/bojanrajkovic/runny/commit/7a740bc2529e5f4372b632b2830ddc6fdc5d7447))
+
 ## [1.2.1](https://github.com/bojanrajkovic/runny/compare/v1.2.0...v1.2.1) (2026-11-01)
 
 

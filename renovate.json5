@@ -19,11 +19,6 @@
   // Dependabot alerts are enabled on the repo; OSV adds a second source.
   vulnerabilityAlerts: { labels: ['security'] },
   osvVulnerabilityAlerts: true,
-  // Branches opened by the Mend-hosted Renovate app carry its commits. This
-  // list replaces the self-hosted global one rather than merging with it, so
-  // it repeats that bot; without it, Renovate treats those branches as
-  // human-edited and stops rebasing them.
-  gitIgnoredAuthors: ['29139614+renovate[bot]@users.noreply.github.com'],
   // gomodTidyE, not gomodTidy: plain `go mod tidy` aborts mid-attribution on
   // the in-graph proto import and mangles every dep to `// indirect` — the
   // `-e` is load-bearing (CONTRIBUTING.md "Known wrinkle").

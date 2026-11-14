@@ -5,7 +5,7 @@ module(name = "runny")
 bazel_dep(name = "bazel_skylib", version = "1.9.2")
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "aspect_rules_lint", version = "2.9.1")
-bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.4")
+bazel_dep(name = "buildifier_prebuilt", version = "10.1.0")
 
 # sh_test for apps/Runny's signed-bundle contents check. Already the graph-
 # selected transitive version, so promoting it to a direct dep changes no
@@ -21,12 +21,12 @@ use_repo(format_tools, "swiftformat", "swiftformat_mac")
 # Swift / Apple (Runny app; daemon entitlement signing)
 # Toolchains resolve only on macOS hosts; Linux builds of Go targets are unaffected.
 bazel_dep(name = "apple_support", version = "2.12.0")
-bazel_dep(name = "rules_swift", version = "3.6.1")
-bazel_dep(name = "rules_apple", version = "4.5.3")
+bazel_dep(name = "rules_swift", version = "4.2.2")
+bazel_dep(name = "rules_apple", version = "5.4.0")
 
 #########################
 # Protobuf (runny.v1 contract, generated in-graph)
-bazel_dep(name = "protobuf", version = "35.1")
+bazel_dep(name = "protobuf", version = "36.2")
 
 #########################
 # Go

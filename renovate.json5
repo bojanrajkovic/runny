@@ -5,12 +5,9 @@
   // + security:minimumReleaseAgeNpm + :maintainLockFilesWeekly
   extends: ['config:best-practices'],
   semanticCommits: 'enabled',
-  // No schedule: the supply-chain delay is minimumReleaseAge (deterministic),
-  // not a weekly batch (a random 0-7 day lag); automerge absorbs the noise.
-  // Observed malware-takedown windows in the 2025 npm attacks were
-  // hours-to-days; 7 days clears them with margin. Vulnerability PRs
-  // bypass the cooldown.
-  minimumReleaseAge: '7 days',
+  // No schedule: the supply-chain delay is the release age in the global
+  // Renovate config (deterministic), not a weekly batch (a random 0-7 day
+  // lag); automerge absorbs the noise. Vulnerability PRs bypass it.
   // Renovate merges after CI is green rather than via GitHub auto-merge:
   // Renovate is a bypass actor on the Protect Main ruleset, so platform
   // auto-merge is not guaranteed to wait on the required checks.
@@ -86,11 +83,6 @@
       description: 'Pin conversions change no resolved version; automerge unconditionally.',
       matchUpdateTypes: ['pin', 'pinDigest'],
       automerge: true,
-    },
-    {
-      description: 'The 7-day cooldown applies to npm too, overriding the preset 3-day npm rule (last match wins).',
-      matchDatasources: ['npm'],
-      minimumReleaseAge: '7 days',
     },
   ],
 }

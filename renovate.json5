@@ -19,15 +19,50 @@
   // Dependabot alerts are enabled on the repo; OSV adds a second source.
   vulnerabilityAlerts: { labels: ['security'] },
   osvVulnerabilityAlerts: true,
-  // The renovate-lockfile workflow pushes MODULE.bazel.lock commits onto
-  // Renovate's branches as this author; without this, Renovate treats those
-  // branches as human-edited and stops rebasing them.
-  gitIgnoredAuthors: ['noreply@coderinserepeat.com'],
+  // Branches opened by the Mend-hosted Renovate app carry its commits. This
+  // list replaces the self-hosted global one rather than merging with it, so
+  // it repeats that bot; without it, Renovate treats those branches as
+  // human-edited and stops rebasing them.
+  gitIgnoredAuthors: ['29139614+renovate[bot]@users.noreply.github.com'],
   // gomodTidyE, not gomodTidy: plain `go mod tidy` aborts mid-attribution on
   // the in-graph proto import and mangles every dep to `// indirect` — the
   // `-e` is load-bearing (CONTRIBUTING.md "Known wrinkle").
   postUpdateOptions: ['gomodTidyE'],
+  // Renovate's gomod artifact step runs `go get -t <goGetDirs>` before
+  // `go mod tidy -e`. The default `./...` loads every package and fails on
+  // the in-graph-only proto import (ADR-0006). `./proto/...` holds no Go
+  // files, so `go get` matches no packages and succeeds, and `go mod tidy -e`
+  // then updates go.sum.
+  goGetDirs: ['./proto/...'],
   packageRules: [
+    {
+      description: 'Go bumps can add or drop packages: rerun gazelle and bazel mod tidy (CONTRIBUTING.md "Dependency workflow").',
+      matchManagers: ['gomod'],
+      postUpgradeTasks: {
+        commands: ['scripts/renovate/go-sum.sh'],
+        fileFilters: ['go.mod', 'go.sum', 'MODULE.bazel', 'MODULE.bazel.lock', '**/BUILD', '**/BUILD.bazel'],
+        executionMode: 'branch',
+      },
+    },
+    {
+      description: 'MODULE.bazel and bazel version bumps need a fresh MODULE.bazel.lock; CI runs --lockfile_mode=error.',
+      matchManagers: ['bazel-module'],
+      postUpgradeTasks: {
+        commands: ['scripts/renovate/bazel-lockfile.sh'],
+        fileFilters: ['MODULE.bazel.lock'],
+        executionMode: 'branch',
+      },
+    },
+    {
+      description: 'A new bazel version resolves different implicit deps; same lockfile regeneration.',
+      matchManagers: ['mise'],
+      matchDepNames: ['bazel'],
+      postUpgradeTasks: {
+        commands: ['scripts/renovate/bazel-lockfile.sh'],
+        fileFilters: ['MODULE.bazel.lock'],
+        executionMode: 'branch',
+      },
+    },
     {
       description: 'Bazel rules move together; group them.',
       matchManagers: ['bazel-module'],

@@ -67,7 +67,7 @@ jobs:
       # the one non-Bazel, non-mise tool this job needs.
       - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
-          dotnet-version: "10.0.x"
+          dotnet-version: "11.0.x"
 
       # Import the Developer ID cert into a short-lived keychain. Skipped
       # (and the keychain cleanup step no-ops) when the secret is absent.
@@ -302,7 +302,7 @@ jobs:
     steps:
       - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
-          dotnet-version: "10.0.x"
+          dotnet-version: "11.0.x"
       - name: mint feed token
         id: feed-token
         # Absent until the App is configured, which makes the whole feed

@@ -1,6 +1,6 @@
 [tools]
 bazel = "9.3.2"
-go = "1.27.3"
+go = "1.27.4"
 node = "26"
 lefthook = "2"
 # Exact pin: 3.4.1 shipped without GitHub artifact attestations, which fails

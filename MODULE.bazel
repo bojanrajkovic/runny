@@ -10,7 +10,7 @@ bazel_dep(name = "buildifier_prebuilt", version = "10.1.0")
 # sh_test for apps/Runny's signed-bundle contents check. Already the graph-
 # selected transitive version, so promoting it to a direct dep changes no
 # resolved versions.
-bazel_dep(name = "rules_shell", version = "0.8.0")
+bazel_dep(name = "rules_shell", version = "0.10.0")
 
 # Prebuilt SwiftFormat (nicklockwood) binaries for //tools/format.
 format_tools = use_extension("@aspect_rules_lint//format:extensions.bzl", "tools")

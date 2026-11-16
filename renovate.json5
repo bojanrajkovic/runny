@@ -1,21 +1,11 @@
 {
   $schema: 'https://docs.renovatebot.com/renovate-schema.json',
-  // best-practices = recommended + docker:pinDigests + helpers:pinGitHubActionDigests
-  // + :configMigration + :pinDevDependencies + abandonments:recommended
-  // + security:minimumReleaseAgeNpm + :maintainLockFilesWeekly
-  extends: ['config:best-practices'],
-  semanticCommits: 'enabled',
-  // No schedule: the supply-chain delay is the release age in the global
-  // Renovate config (deterministic), not a weekly batch (a random 0-7 day
-  // lag); automerge absorbs the noise. Vulnerability PRs bypass it.
+  extends: ['github>bojanrajkovic/renovate-config'],
   // Renovate merges after CI is green rather than via GitHub auto-merge:
   // Renovate is a bypass actor on the Protect Main ruleset, so platform
   // auto-merge is not guaranteed to wait on the required checks.
   platformAutomerge: false,
   automergeStrategy: 'squash',
-  // Dependabot alerts are enabled on the repo; OSV adds a second source.
-  vulnerabilityAlerts: { labels: ['security'] },
-  osvVulnerabilityAlerts: true,
   // gomodTidyE, not gomodTidy: plain `go mod tidy` aborts mid-attribution on
   // the in-graph proto import and mangles every dep to `// indirect` — the
   // `-e` is load-bearing (CONTRIBUTING.md "Known wrinkle").
@@ -61,28 +51,10 @@
       groupName: 'bazel module deps',
     },
     {
-      description: 'Automerge non-major library updates once CI is green; 0.x stays manual (no compat contract).',
-      matchManagers: ['gomod', 'npm', 'bazel-module'],
-      matchUpdateTypes: ['minor', 'patch'],
-      matchCurrentVersion: '!/^v?0\\./',
-      automerge: true,
-    },
-    {
-      description: 'Actions are SHA-pinned; automerge digest/pin motion and non-major tag bumps.',
-      matchManagers: ['github-actions'],
-      matchUpdateTypes: ['minor', 'patch', 'digest', 'pin'],
-      automerge: true,
-    },
-    {
       description: 'Toolchains (bazel/go/node) change what builds the release binary; automerge patches only.',
       matchManagers: ['mise'],
-      matchUpdateTypes: ['patch'],
-      automerge: true,
-    },
-    {
-      description: 'Pin conversions change no resolved version; automerge unconditionally.',
-      matchUpdateTypes: ['pin', 'pinDigest'],
-      automerge: true,
+      matchUpdateTypes: ['minor'],
+      automerge: false,
     },
   ],
 }

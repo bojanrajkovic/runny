@@ -1,7 +1,7 @@
 [tools]
 bazel = "9.3.2"
 go = "1.27.4"
-node = "26"
+node = "26.13.1"
 lefthook = "2.2.2"
 # Exact pin: 3.4.1 shipped without GitHub artifact attestations, which fails
 # mise's verification. Re-loosen to "3" once a verifiable release lands.

@@ -1,17 +1,12 @@
 module github.com/bojanrajkovic/runny
 
-go 1.26.4
-
-require (
-	github.com/goccy/go-yaml v1.19.2
-	golang.org/x/crypto v0.59.0
-	golang.org/x/sys v0.50.0
-)
+go 1.27.4
 
 require (
 	github.com/Code-Hex/vz/v3 v3.8.0
 	github.com/Microsoft/go-winio v0.6.4
 	github.com/alecthomas/kong v1.17.0
+	github.com/goccy/go-yaml v1.19.2
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/invopop/jsonschema v0.14.0
 	github.com/pierrec/lz4/v4 v4.1.33
@@ -25,7 +20,9 @@ require (
 	go.opentelemetry.io/otel/sdk v1.47.0
 	go.opentelemetry.io/otel/sdk/metric v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
+	golang.org/x/crypto v0.59.0
 	golang.org/x/sync v0.25.0
+	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.48.0
 	google.golang.org/grpc v1.85.0
 	google.golang.org/protobuf v1.36.12

@@ -59,7 +59,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0 # tools/version.sh needs tags
-      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+      - uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
         with:
           cache: false
       # dotnet pack (below) takes a bare .nuspec directly as of .NET 10 — no

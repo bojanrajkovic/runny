@@ -79,8 +79,10 @@ jobs:
         env:
           BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
           P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
+          # The keychain lives only for this job, so its password is generated here.
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
           KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
           echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o "$RUNNER_TEMP/certificate.p12"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"

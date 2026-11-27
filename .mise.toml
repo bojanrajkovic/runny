@@ -2,7 +2,7 @@
 bazel = "9.3.3"
 go = "1.27.4"
 node = "26.13.1"
-lefthook = "2.2.2"
+lefthook = "2.2.3"
 # Exact pin: 3.4.1 shipped without GitHub artifact attestations, which fails
 # mise's verification. Re-loosen to "3" once a verifiable release lands.
 svu = "3.4.4"

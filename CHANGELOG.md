@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.2.2](https://github.com/bojanrajkovic/runny/compare/v1.2.1...v1.2.2) (2026-11-28)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/alecthomas/kong to v1.17.0 ([#463](https://github.com/bojanrajkovic/runny/issues/463)) ([0f7b83b](https://github.com/bojanrajkovic/runny/commit/0f7b83b9191e91304e04a0ab06095dfd36829b42))
+* **deps:** update module github.com/pierrec/lz4/v4 to v4.1.34 ([#497](https://github.com/bojanrajkovic/runny/issues/497)) ([7b91984](https://github.com/bojanrajkovic/runny/commit/7b919841c29a34759f51544eed3064ddc9162e1a))
+* **deps:** update module golang.org/x/crypto to v0.59.0 [security] ([#470](https://github.com/bojanrajkovic/runny/issues/470)) ([c6af997](https://github.com/bojanrajkovic/runny/commit/c6af997d8986f7401468eedc0b21ef2e7764d2c4))
+* **deps:** update module golang.org/x/sync to v0.25.0 ([#466](https://github.com/bojanrajkovic/runny/issues/466)) ([df5d710](https://github.com/bojanrajkovic/runny/commit/df5d710ede24a0a51ef6ead78be3353546e7b75a))
+* **deps:** update module google.golang.org/grpc to v1.85.0 ([#460](https://github.com/bojanrajkovic/runny/issues/460)) ([7a740bc](https://github.com/bojanrajkovic/runny/commit/7a740bc2529e5f4372b632b2830ddc6fdc5d7447))
+
 ## [1.2.1](https://github.com/bojanrajkovic/runny/compare/v1.2.0...v1.2.1) (2026-11-01)
 
 
